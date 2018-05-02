@@ -1,7 +1,7 @@
-From 9ba5dd4e9a611d2651a0d4dfe07f5815dcc96ac9 Mon Sep 17 00:00:00 2001
+From 2ef512046402feef08d31335641a16aa3bfb5904 Mon Sep 17 00:00:00 2001
 From: Sagar Arun Kamble <sagar.a.kamble@intel.com>
 Date: Tue, 10 Oct 2017 22:30:05 +0100
-Subject: [PATCH 522/904] UPSTREAM: drm/i915: Move rps.hw_lock to dev_priv and
+Subject: [PATCH 522/906] UPSTREAM: drm/i915: Move rps.hw_lock to dev_priv and
  s/hw_lock/pcu_lock
 
 In order to separate GT PM related functionality into new structure
@@ -26,12 +26,12 @@ Change-Id: If81ea6d6b713bf05811abd1f97949d35a3048ac2
  drivers/gpu/drm/i915/i915_drv.h         | 16 +++---
  drivers/gpu/drm/i915/i915_irq.c         |  4 +-
  drivers/gpu/drm/i915/i915_sysfs.c       | 20 ++++----
- drivers/gpu/drm/i915/intel_cdclk.c      | 40 +++++++--------
+ drivers/gpu/drm/i915/intel_cdclk.c      | 62 ++++++++++-------------
  drivers/gpu/drm/i915/intel_display.c    | 12 ++---
  drivers/gpu/drm/i915/intel_pm.c         | 66 ++++++++++++-------------
  drivers/gpu/drm/i915/intel_runtime_pm.c | 16 +++---
  drivers/gpu/drm/i915/intel_sideband.c   |  6 +--
- 9 files changed, 102 insertions(+), 102 deletions(-)
+ 9 files changed, 107 insertions(+), 119 deletions(-)
 
 diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
 index a8cbda842c2e..12565babd0e6 100644
@@ -140,7 +140,7 @@ index a8cbda842c2e..12565babd0e6 100644
  	return 0;
  }
 diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
-index e8aac0924820..649547c67349 100644
+index ba3a171d9b8f..6b93dde89e59 100644
 --- a/drivers/gpu/drm/i915/i915_drv.h
 +++ b/drivers/gpu/drm/i915/i915_drv.h
 @@ -1326,14 +1326,6 @@ struct intel_gen6_power_mgmt {
@@ -282,7 +282,7 @@ index d61c8727f756..79fbab49d1d0 100644
  	intel_runtime_pm_put(dev_priv);
  
 diff --git a/drivers/gpu/drm/i915/intel_cdclk.c b/drivers/gpu/drm/i915/intel_cdclk.c
-index 26a8dcd2c549..67bf84987dd9 100644
+index 47ad24229c78..67bf84987dd9 100644
 --- a/drivers/gpu/drm/i915/intel_cdclk.c
 +++ b/drivers/gpu/drm/i915/intel_cdclk.c
 @@ -506,7 +506,7 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
@@ -373,33 +373,51 @@ index 26a8dcd2c549..67bf84987dd9 100644
  
  	intel_update_cdclk(dev_priv);
  }
-@@ -1290,10 +1290,10 @@ static void bxt_set_cdclk(struct drm_i915_private *dev_priv,
+@@ -1289,16 +1289,11 @@ static void bxt_set_cdclk(struct drm_i915_private *dev_priv,
+ 		break;
  	}
  
- 	/* Inform power controller of upcoming frequency change */
 -	mutex_lock(&dev_priv->rps.hw_lock);
-+	mutex_lock(&dev_priv->pcu_lock);
- 	ret = sandybridge_pcode_write(dev_priv, HSW_PCODE_DE_WRITE_FREQ_REQ,
- 				      0x80000000);
+-	/*
+-	 * Inform power controller of upcoming frequency change. BSpec
+-	 * requires us to wait up to 150usec, but that leads to timeouts;
+-	 * the 2ms used here is based on experiment.
+-	 */
+-	ret = sandybridge_pcode_write_timeout(dev_priv,
+-					      HSW_PCODE_DE_WRITE_FREQ_REQ,
+-					      0x80000000, 2000);
 -	mutex_unlock(&dev_priv->rps.hw_lock);
++	/* Inform power controller of upcoming frequency change */
++	mutex_lock(&dev_priv->pcu_lock);
++	ret = sandybridge_pcode_write(dev_priv, HSW_PCODE_DE_WRITE_FREQ_REQ,
++				      0x80000000);
 +	mutex_unlock(&dev_priv->pcu_lock);
  
  	if (ret) {
  		DRM_ERROR("PCode CDCLK freq change notify failed (err %d, freq %d)\n",
-@@ -1322,10 +1322,10 @@ static void bxt_set_cdclk(struct drm_i915_private *dev_priv,
+@@ -1327,17 +1322,10 @@ static void bxt_set_cdclk(struct drm_i915_private *dev_priv,
  		val |= BXT_CDCLK_SSA_PRECHARGE_ENABLE;
  	I915_WRITE(CDCLK_CTL, val);
  
 -	mutex_lock(&dev_priv->rps.hw_lock);
-+	mutex_lock(&dev_priv->pcu_lock);
- 	ret = sandybridge_pcode_write(dev_priv, HSW_PCODE_DE_WRITE_FREQ_REQ,
- 				      DIV_ROUND_UP(cdclk, 25000));
+-	/*
+-	 * The timeout isn't specified, the 2ms used here is based on
+-	 * experiment.
+-	 * FIXME: Waiting for the request completion could be delayed until
+-	 * the next PCODE request based on BSpec.
+-	 */
+-	ret = sandybridge_pcode_write_timeout(dev_priv,
+-					      HSW_PCODE_DE_WRITE_FREQ_REQ,
+-					      DIV_ROUND_UP(cdclk, 25000), 2000);
 -	mutex_unlock(&dev_priv->rps.hw_lock);
++	mutex_lock(&dev_priv->pcu_lock);
++	ret = sandybridge_pcode_write(dev_priv, HSW_PCODE_DE_WRITE_FREQ_REQ,
++				      DIV_ROUND_UP(cdclk, 25000));
 +	mutex_unlock(&dev_priv->pcu_lock);
  
  	if (ret) {
  		DRM_ERROR("PCode CDCLK freq set failed, (err %d, freq %d)\n",
-@@ -1540,12 +1540,12 @@ static void cnl_set_cdclk(struct drm_i915_private *dev_priv,
+@@ -1552,12 +1540,12 @@ static void cnl_set_cdclk(struct drm_i915_private *dev_priv,
  	u32 val, divider, pcu_ack;
  	int ret;
  
@@ -414,7 +432,7 @@ index 26a8dcd2c549..67bf84987dd9 100644
  	if (ret) {
  		DRM_ERROR("Failed to inform PCU about cdclk change (%d)\n",
  			  ret);
-@@ -1597,9 +1597,9 @@ static void cnl_set_cdclk(struct drm_i915_private *dev_priv,
+@@ -1609,9 +1597,9 @@ static void cnl_set_cdclk(struct drm_i915_private *dev_priv,
  	I915_WRITE(CDCLK_CTL, val);
  
  	/* inform PCU of the change */
@@ -469,7 +487,7 @@ index a8a77a29b641..7b3534bd8e4c 100644
  		I915_WRITE(D_COMP_BDW, val);
  		POSTING_READ(D_COMP_BDW);
 diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
-index 4fd77a5a7cd4..121c373df722 100644
+index 126e57d0cc05..ea4cb3c0e552 100644
 --- a/drivers/gpu/drm/i915/intel_pm.c
 +++ b/drivers/gpu/drm/i915/intel_pm.c
 @@ -321,7 +321,7 @@ static void chv_set_memory_dvfs(struct drm_i915_private *dev_priv, bool enable)
@@ -730,7 +748,7 @@ index 4fd77a5a7cd4..121c373df722 100644
  
  	/* GEN6_PCODE_* are outside of the forcewake domain, we can
  	 * use te fw I915_READ variants to reduce the amount of work
-@@ -8990,7 +8990,7 @@ int sandybridge_pcode_write(struct drm_i915_private *dev_priv,
+@@ -8990,7 +8990,7 @@ int sandybridge_pcode_write_timeout(struct drm_i915_private *dev_priv,
  {
  	int status;
  
@@ -758,10 +776,10 @@ index 4fd77a5a7cd4..121c373df722 100644
  	INIT_DELAYED_WORK(&dev_priv->rps.autoenable_work,
  			  __intel_autoenable_gt_powersave);
 diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
-index bcccacba1ec6..99dc06837f51 100644
+index bcfc1c235966..ecc89470946a 100644
 --- a/drivers/gpu/drm/i915/intel_runtime_pm.c
 +++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
-@@ -795,7 +795,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
+@@ -794,7 +794,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
  	state = enable ? PUNIT_PWRGT_PWR_ON(power_well_id) :
  			 PUNIT_PWRGT_PWR_GATE(power_well_id);
  
@@ -770,7 +788,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  #define COND \
  	((vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_STATUS) & mask) == state)
-@@ -816,7 +816,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
+@@ -815,7 +815,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
  #undef COND
  
  out:
@@ -779,7 +797,7 @@ index bcccacba1ec6..99dc06837f51 100644
  }
  
  static void vlv_power_well_enable(struct drm_i915_private *dev_priv,
-@@ -843,7 +843,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
+@@ -842,7 +842,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
  	mask = PUNIT_PWRGT_MASK(power_well_id);
  	ctrl = PUNIT_PWRGT_PWR_ON(power_well_id);
  
@@ -788,7 +806,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  	state = vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_STATUS) & mask;
  	/*
-@@ -862,7 +862,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
+@@ -861,7 +861,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
  	ctrl = vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_CTRL) & mask;
  	WARN_ON(ctrl != state);
  
@@ -797,7 +815,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  	return enabled;
  }
-@@ -1374,7 +1374,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
+@@ -1373,7 +1373,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
  	bool enabled;
  	u32 state, ctrl;
  
@@ -806,7 +824,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  	state = vlv_punit_read(dev_priv, PUNIT_REG_DSPFREQ) & DP_SSS_MASK(pipe);
  	/*
-@@ -1391,7 +1391,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
+@@ -1390,7 +1390,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
  	ctrl = vlv_punit_read(dev_priv, PUNIT_REG_DSPFREQ) & DP_SSC_MASK(pipe);
  	WARN_ON(ctrl << 16 != state);
  
@@ -815,7 +833,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  	return enabled;
  }
-@@ -1406,7 +1406,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
+@@ -1405,7 +1405,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
  
  	state = enable ? DP_SSS_PWR_ON(pipe) : DP_SSS_PWR_GATE(pipe);
  
@@ -824,7 +842,7 @@ index bcccacba1ec6..99dc06837f51 100644
  
  #define COND \
  	((vlv_punit_read(dev_priv, PUNIT_REG_DSPFREQ) & DP_SSS_MASK(pipe)) == state)
-@@ -1427,7 +1427,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
+@@ -1426,7 +1426,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
  #undef COND
  
  out:
