@@ -1,7 +1,7 @@
-From a8ab7527fb13a90748ec50780cf8f26778d922c5 Mon Sep 17 00:00:00 2001
+From a59f540f71aeaca1454b48b709e9ae85af787530 Mon Sep 17 00:00:00 2001
 From: Tomas Winkler <tomas.winkler@intel.com>
 Date: Thu, 16 Jul 2015 12:29:50 +0300
-Subject: [PATCH 095/938] char: rpmb: provide a user space interface
+Subject: [PATCH 095/991] char: rpmb: provide a user space interface
 
 The user space API is achieved via two synchronous IOCTLs.
 Simplified one, RPMB_IOC_REQ_CMD, were read result cycles is performed
@@ -31,18 +31,18 @@ Tested-by: Avri Altman <avri.altman@sandisk.com>
  MAINTAINERS                          |   1 +
  drivers/char/rpmb/Kconfig            |   7 +
  drivers/char/rpmb/Makefile           |   1 +
- drivers/char/rpmb/cdev.c             | 330 +++++++++++++++++++++++++++++++++++
+ drivers/char/rpmb/cdev.c             | 330 +++++++++++++++++++++++++++
  drivers/char/rpmb/core.c             |   9 +-
- drivers/char/rpmb/rpmb-cdev.h        |  25 +++
- include/linux/rpmb.h                 |  81 +--------
- include/uapi/linux/rpmb.h            | 153 ++++++++++++++++
+ drivers/char/rpmb/rpmb-cdev.h        |  25 ++
+ include/linux/rpmb.h                 |  81 +------
+ include/uapi/linux/rpmb.h            | 153 +++++++++++++
  9 files changed, 534 insertions(+), 74 deletions(-)
  create mode 100644 drivers/char/rpmb/cdev.c
  create mode 100644 drivers/char/rpmb/rpmb-cdev.h
  create mode 100644 include/uapi/linux/rpmb.h
 
 diff --git a/Documentation/ioctl/ioctl-number.txt b/Documentation/ioctl/ioctl-number.txt
-index 3e3fdae..c195b51 100644
+index 3e3fdae5f3ed..c195b51d9ab0 100644
 --- a/Documentation/ioctl/ioctl-number.txt
 +++ b/Documentation/ioctl/ioctl-number.txt
 @@ -324,6 +324,7 @@ Code  Seq#(hex)	Include File		Comments
@@ -54,7 +54,7 @@ index 3e3fdae..c195b51 100644
  0xCA	00-0F	uapi/misc/cxl.h
  0xCA	80-BF	uapi/scsi/cxlflash_ioctl.h
 diff --git a/MAINTAINERS b/MAINTAINERS
-index d52f9d4..0dd5575 100644
+index d52f9d41bbfd..0dd55756f0b6 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
 @@ -11569,6 +11569,7 @@ M:	Tomas Winkler <tomas.winkler@intel.com>
@@ -66,7 +66,7 @@ index d52f9d4..0dd5575 100644
  F:	Documentation/ABI/testing/sysfs-class-rpmb
  
 diff --git a/drivers/char/rpmb/Kconfig b/drivers/char/rpmb/Kconfig
-index c5e6e90..6794be9 100644
+index c5e6e909efce..6794be9fcc5e 100644
 --- a/drivers/char/rpmb/Kconfig
 +++ b/drivers/char/rpmb/Kconfig
 @@ -6,3 +6,10 @@ config RPMB
@@ -81,7 +81,7 @@ index c5e6e90..6794be9 100644
 +	  Say yes here if you want to access RPMB from user space
 +	  via character device interface /dev/rpmb%d
 diff --git a/drivers/char/rpmb/Makefile b/drivers/char/rpmb/Makefile
-index 812b3ed..b5dc087 100644
+index 812b3ed264c0..b5dc087b1299 100644
 --- a/drivers/char/rpmb/Makefile
 +++ b/drivers/char/rpmb/Makefile
 @@ -1,4 +1,5 @@
@@ -92,7 +92,7 @@ index 812b3ed..b5dc087 100644
  ccflags-y += -D__CHECK_ENDIAN__
 diff --git a/drivers/char/rpmb/cdev.c b/drivers/char/rpmb/cdev.c
 new file mode 100644
-index 0000000..6874172
+index 000000000000..6874172315cf
 --- /dev/null
 +++ b/drivers/char/rpmb/cdev.c
 @@ -0,0 +1,330 @@
@@ -427,7 +427,7 @@ index 0000000..6874172
 +	unregister_chrdev_region(rpmb_devt, RPMB_MAX_DEVS);
 +}
 diff --git a/drivers/char/rpmb/core.c b/drivers/char/rpmb/core.c
-index 7c0ceed..1667139 100644
+index 7c0ceed7b597..16671396fec8 100644
 --- a/drivers/char/rpmb/core.c
 +++ b/drivers/char/rpmb/core.c
 @@ -20,6 +20,7 @@
@@ -477,7 +477,7 @@ index 7c0ceed..1667139 100644
  }
 diff --git a/drivers/char/rpmb/rpmb-cdev.h b/drivers/char/rpmb/rpmb-cdev.h
 new file mode 100644
-index 0000000..5fb41e586
+index 000000000000..5fb41e586ba9
 --- /dev/null
 +++ b/drivers/char/rpmb/rpmb-cdev.h
 @@ -0,0 +1,25 @@
@@ -507,10 +507,10 @@ index 0000000..5fb41e586
 +static inline void rpmb_cdev_del(struct rpmb_dev *rdev) {}
 +#endif /* CONFIG_RPMB_INTF_DEV */
 diff --git a/include/linux/rpmb.h b/include/linux/rpmb.h
-index 8acc0c0..8f2c290 100644
+index 8acc0c005eb7..8f2c2901882b 100644
 --- a/include/linux/rpmb.h
 +++ b/include/linux/rpmb.h
-@@ -15,79 +15,11 @@
+@@ -15,78 +15,10 @@
  
  #include <linux/types.h>
  #include <linux/device.h>
@@ -518,7 +518,7 @@ index 8acc0c0..8f2c290 100644
 +#include <uapi/linux/rpmb.h>
  #include <linux/kref.h>
  
- /**
+-/**
 - * struct rpmb_frame - rpmb frame as defined by specs
 - *
 - * @stuff        : stuff bytes
@@ -588,10 +588,9 @@ index 8acc0c0..8f2c290 100644
 -	RPMB_ERR_COUNTER_EXPIRED = 0x0080
 -};
 -
--/**
+ /**
   * enum rpmb_type - type of underlaying storage technology
   *
-  * @RPMB_TYPE_ANY   : any type used for search only
 @@ -106,9 +38,6 @@ enum rpmb_type {
  
  extern struct class rpmb_class;
@@ -623,7 +622,7 @@ index 8acc0c0..8f2c290 100644
  
 diff --git a/include/uapi/linux/rpmb.h b/include/uapi/linux/rpmb.h
 new file mode 100644
-index 0000000..6fbdbc9
+index 000000000000..6fbdbc97faf8
 --- /dev/null
 +++ b/include/uapi/linux/rpmb.h
 @@ -0,0 +1,153 @@
@@ -781,5 +780,5 @@ index 0000000..6fbdbc9
 +
 +#endif /* _UAPI_LINUX_RPMB_H_ */
 -- 
-2.7.4
+2.17.0
 
