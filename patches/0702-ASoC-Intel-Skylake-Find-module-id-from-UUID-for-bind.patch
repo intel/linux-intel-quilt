@@ -1,0 +1,156 @@
+From c167a98073d944f3d2ecd87b85b423464b418a7b Mon Sep 17 00:00:00 2001
+From: Sriram Periyasamy <sriramx.periyasamy@intel.com>
+Date: Wed, 29 Nov 2017 15:05:56 +0530
+Subject: [PATCH 0702/1029] ASoC: Intel: Skylake: Find module id from UUID for
+ bind params
+
+Module id is a property of firmware manifest and can vary across
+platforms. So use the uuid to find module id dynamically for bind
+params like kpb post bind params.
+
+Change-Id: I8552b46e1c5f3b5ebd82f0f25c5919b0df5b32d9
+Signed-off-by: Sriram Periyasamy <sriramx.periyasamy@intel.com>
+Reviewed-by: Kale, Sanyog R <sanyog.r.kale@intel.com>
+Tested-by: Sm, Bhadur A <bhadur.a.sm@intel.com>
+---
+ sound/soc/intel/skylake/skl-pcm.c      |  2 +
+ sound/soc/intel/skylake/skl-topology.c | 71 +++++++++++++++++++++++++-
+ sound/soc/intel/skylake/skl-topology.h | 13 ++++-
+ 3 files changed, 84 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 420c69e1473e..4e3842eda4ba 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -2047,6 +2047,8 @@ static int skl_populate_modules(struct skl *skl)
+ 					"query module info failed\n");
+ 				return ret;
+ 			}
++
++			skl_tplg_add_moduleid_in_bind_params(skl, w);
+ 		}
+ 	}
+ 
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index 15a1e32aa0ab..8c44847953f1 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -1381,7 +1381,7 @@ static int skl_fill_sink_instance_id(struct skl_sst *ctx, u32 *params,
+ 	if (mcfg->m_type == SKL_MODULE_TYPE_KPB) {
+ 		struct skl_kpb_params *kpb_params =
+ 				(struct skl_kpb_params *)params;
+-		struct skl_mod_inst_map *inst = kpb_params->map;
++		struct skl_mod_inst_map *inst = kpb_params->u.map;
+ 
+ 		for (i = 0; i < kpb_params->num_modules; i++) {
+ 			pvt_id = skl_get_pvt_instance_id_map(ctx, inst->mod_id,
+@@ -1467,6 +1467,75 @@ static int skl_tplg_set_module_bind_params(struct snd_soc_dapm_widget *w,
+ 	return 0;
+ }
+ 
++static int skl_tplg_find_moduleid_from_uuid(struct skl *skl,
++					const struct snd_kcontrol_new *k)
++{
++	struct soc_bytes_ext *sb = (void *) k->private_value;
++	struct skl_algo_data *bc = (struct skl_algo_data *)sb->dobj.private;
++	struct skl_kpb_params *uuid_params, *params;
++	struct hdac_bus *bus = ebus_to_hbus(skl_to_ebus(skl));
++	int i, size, module_id;
++
++	if (bc->set_params == SKL_PARAM_BIND && bc->max) {
++		uuid_params = (struct skl_kpb_params *)bc->params;
++		size = uuid_params->num_modules *
++			sizeof(struct skl_mod_inst_map) +
++			sizeof(uuid_params->num_modules);
++
++		params = devm_kzalloc(bus->dev, size, GFP_KERNEL);
++		if (!params)
++			return -ENOMEM;
++
++		params->num_modules = uuid_params->num_modules;
++
++		for (i = 0; i < uuid_params->num_modules; i++) {
++			module_id = skl_get_module_id(skl->skl_sst,
++				&uuid_params->u.map_uuid[i].mod_uuid);
++			if (module_id < 0) {
++				devm_kfree(bus->dev, params);
++				return -EINVAL;
++			}
++
++			params->u.map[i].mod_id = module_id;
++			params->u.map[i].inst_id =
++				uuid_params->u.map_uuid[i].inst_id;
++		}
++
++		devm_kfree(bus->dev, bc->params);
++		bc->params = (char *)params;
++		bc->max = size;
++	}
++
++	return 0;
++}
++
++/*
++ * Retrieve the module id from UUID mentioned in the
++ * post bind params
++ */
++void skl_tplg_add_moduleid_in_bind_params(struct skl *skl,
++				struct snd_soc_dapm_widget *w)
++{
++	struct skl_module_cfg *mconfig = w->priv;
++	int i;
++
++	/*
++	 * Post bind params are used for only for KPB
++	 * to set copier instances to drain the data
++	 * in fast mode
++	 */
++	if (mconfig->m_type != SKL_MODULE_TYPE_KPB)
++		return;
++
++	for (i = 0; i < w->num_kcontrols; i++)
++		if ((w->kcontrol_news[i].access &
++			SNDRV_CTL_ELEM_ACCESS_TLV_CALLBACK) &&
++			(skl_tplg_find_moduleid_from_uuid(skl,
++			&w->kcontrol_news[i]) < 0))
++			dev_err(skl->skl_sst->dev,
++				"%s: invalid kpb post bind params\n",
++				__func__);
++}
+ 
+ static int skl_tplg_module_add_deferred_bind(struct skl *skl,
+ 	struct skl_module_cfg *src, struct skl_module_cfg *dst)
+diff --git a/sound/soc/intel/skylake/skl-topology.h b/sound/soc/intel/skylake/skl-topology.h
+index f530e8d8d63f..9a13fdbdbdba 100644
+--- a/sound/soc/intel/skylake/skl-topology.h
++++ b/sound/soc/intel/skylake/skl-topology.h
+@@ -246,9 +246,18 @@ struct skl_mod_inst_map {
+ 	u16 inst_id;
+ };
+ 
++struct skl_uuid_inst_map {
++	u16 inst_id;
++	u16 reserved;
++	uuid_le mod_uuid;
++} __packed;
++
+ struct skl_kpb_params {
+ 	u32 num_modules;
+-	struct skl_mod_inst_map map[0];
++	union {
++		struct skl_mod_inst_map map[0];
++		struct skl_uuid_inst_map map_uuid[0];
++	} u;
+ };
+ 
+ struct skl_gain_module_config {
+@@ -623,4 +632,6 @@ void skl_delete_notify_kctl_list(struct skl_sst *skl_sst);
+ struct snd_kcontrol *skl_get_notify_kcontrol(struct skl_sst *skl,
+ 				struct snd_card *card, u32 notify_id);
+ 
++void skl_tplg_add_moduleid_in_bind_params(struct skl *skl,
++				struct snd_soc_dapm_widget *w);
+ #endif
+-- 
+2.17.0
+

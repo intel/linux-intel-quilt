@@ -1,0 +1,48 @@
+From 867cdb6f7ca460f6c1e3d6744cf8c07d77e8ed48 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Fri, 30 Mar 2018 09:33:18 +0800
+Subject: [PATCH 0695/1029] drm/i915/gvt: Use real time to do timer check
+
+intel_gvt_schedule check timer through a counter and is supposed
+to wake up to increase the counter every ms.
+In a system with heavy workload, gvt_service_thread can not get
+a chance to run right after wake up, it can be delayed several
+milliseconds. As a result, one hundred counter increase means
+several hundred milliseconds in real time.
+
+This patch use real time instead of counter to do timer check.
+
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/sched_policy.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/sched_policy.c b/drivers/gpu/drm/i915/gvt/sched_policy.c
+index f312da51cceb..609a460d19c7 100644
+--- a/drivers/gpu/drm/i915/gvt/sched_policy.c
++++ b/drivers/gpu/drm/i915/gvt/sched_policy.c
+@@ -228,7 +228,7 @@ static void tbs_sched_func(struct gvt_sched_data *sched_data, enum intel_engine_
+ void intel_gvt_schedule(struct intel_gvt *gvt)
+ {
+ 	struct gvt_sched_data *sched_data = gvt->scheduler.sched_data;
+-	static uint64_t timer_check;
++	static ktime_t check_time;
+ 	enum intel_engine_id i;
+ 	struct intel_engine_cs *engine;
+ 
+@@ -236,7 +236,11 @@ void intel_gvt_schedule(struct intel_gvt *gvt)
+ 
+ 	if (test_and_clear_bit(INTEL_GVT_REQUEST_SCHED,
+ 				(void *)&gvt->service_request)) {
+-		if (!(timer_check++ % GVT_TS_BALANCE_PERIOD_MS)) {
++		ktime_t cur_time = ktime_get();
++
++		if (ktime_sub(cur_time, check_time) >=
++				GVT_TS_BALANCE_PERIOD_MS * NSEC_PER_MSEC) {
++			check_time = cur_time;
+ 			for_each_engine(engine, gvt->dev_priv, i)
+ 				gvt_balance_timeslice(sched_data, i);
+ 		}
+-- 
+2.17.0
+

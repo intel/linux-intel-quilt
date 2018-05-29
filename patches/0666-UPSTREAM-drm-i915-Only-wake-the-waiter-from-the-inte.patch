@@ -1,0 +1,58 @@
+From ee89f313785c6f0527b8bc3b42a638334259a358 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 18 Sep 2017 17:27:33 +0100
+Subject: [PATCH 0666/1029] [UPSTREAM] drm/i915: Only wake the waiter from the
+ interrupt if passed
+
+As we now check if the seqno is complete in order to signal the fence,
+we can also decide not to wake up the first_waiter until it is ready
+(since it is waiting on the same seqno). The only caveat is that if we
+need the engine->irq_seqno_barrier to enforce some coherency between an
+interrupt and the seqno read, we have to always wake the waiter in order
+to perform that heavyweight barrier.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170918162734.21294-1-chris@chris-wilson.co.uk
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+---
+ drivers/gpu/drm/i915/i915_irq.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index adf07da3506e..6ba10f2777fa 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1009,6 +1009,8 @@ static void notify_ring(struct intel_engine_cs *engine)
+ 	spin_lock(&engine->breadcrumbs.irq_lock);
+ 	wait = engine->breadcrumbs.irq_wait;
+ 	if (wait) {
++		bool wakeup = engine->irq_seqno_barrier;
++
+ 		/* We use a callback from the dma-fence to submit
+ 		 * requests after waiting on our own requests. To
+ 		 * ensure minimum delay in queuing the next request to
+@@ -1021,12 +1023,15 @@ static void notify_ring(struct intel_engine_cs *engine)
+ 		 * and many waiters.
+ 		 */
+ 		if (i915_seqno_passed(intel_engine_get_seqno(engine),
+-				      wait->seqno) &&
+-		    !test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,
+-			      &wait->request->fence.flags))
+-			rq = i915_gem_request_get(wait->request);
++				      wait->seqno)) {
++			wakeup = true;
++			if (!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,
++				      &wait->request->fence.flags))
++				rq = i915_gem_request_get(wait->request);
++		}
+ 
+-		wake_up_process(wait->tsk);
++		if (wakeup)
++			wake_up_process(wait->tsk);
+ 	} else {
+ 		__intel_engine_disarm_breadcrumbs(engine);
+ 	}
+-- 
+2.17.0
+

@@ -1,0 +1,67 @@
+From 34b734e1de0e283eb9df366b27a1f895744a3a27 Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Thu, 22 Mar 2018 17:01:07 +0800
+Subject: [PATCH 0681/1029] [INTERNAL] drm/i915/gvt: Add the support of
+ HUC_STATUS2 reg emulation for Guest VGPU
+
+The HUC_STATUS2 reg is used to indicate whether the Huc FW is loaded. Only
+when it is loaded successfully, the user-space driver on guest can use the
+Huc to do the expected operation. This provides the support of HUC_STATUS2
+trap for guest VGPU.
+
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/handlers.c | 4 ++++
+ drivers/gpu/drm/i915/gvt/mmio.c     | 7 +++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index ece3bb7e790d..7897a9e76392 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -3019,6 +3019,8 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(0x4ab8, D_KBL);
+ 	MMIO_D(0x2248, D_SKL_PLUS | D_KBL);
+ 
++	MMIO_D(HUC_STATUS2, D_GEN9PLUS);
++
+ 	return 0;
+ }
+ 
+@@ -3244,6 +3246,8 @@ static int init_bxt_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(0xB100, D_SKL_PLUS);
+ 	MMIO_D(0xD00, D_SKL_PLUS);
+ 
++	MMIO_D(HUC_STATUS2, D_GEN9PLUS);
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/mmio.c b/drivers/gpu/drm/i915/gvt/mmio.c
+index 6f4a97da5144..6726df75ffc8 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio.c
++++ b/drivers/gpu/drm/i915/gvt/mmio.c
+@@ -310,6 +310,7 @@ void intel_vgpu_reset_mmio(struct intel_vgpu *vgpu, bool dmlr)
+ 	struct intel_gvt *gvt = vgpu->gvt;
+ 	const struct intel_gvt_device_info *info = &gvt->device_info;
+ 	void  *mmio = gvt->firmware.mmio;
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
+ 
+ 	if (dmlr) {
+ 		memcpy(vgpu->mmio.vreg, mmio, info->mmio_size);
+@@ -341,6 +342,12 @@ void intel_vgpu_reset_mmio(struct intel_vgpu *vgpu, bool dmlr)
+ 	vgpu_vreg(vgpu, 0xe6c04) = 3;
+ 	vgpu_vreg(vgpu, 0xe6e1c) = 0x2f << 16;
+ 
++	if (HAS_HUC_UCODE(dev_priv)) {
++		mmio_hw_access_pre(dev_priv);
++		vgpu_vreg(vgpu, HUC_STATUS2) = I915_READ(HUC_STATUS2);
++		mmio_hw_access_post(dev_priv);
++	}
++
+ 	/* Non-context MMIOs need entire check again if mmio/vgpu reset */
+ 	vgpu->entire_nonctxmmio_checked = false;
+ }
+-- 
+2.17.0
+

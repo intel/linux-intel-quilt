@@ -1,0 +1,152 @@
+From 0100c9c70eb973c925a34b9eaee30dbaaf6474ba Mon Sep 17 00:00:00 2001
+From: Pankaj Bharadiya <pankaj.laxminarayan.bharadiya@intel.com>
+Date: Wed, 4 Apr 2018 14:07:12 +0530
+Subject: [PATCH 0697/1029] Revert "Revert "ASoC: Intel: Skylake: Parse vendor
+ tokens to build A-State table""
+
+This reverts commit 7b4becdf3d92d3b7d7c654a0491dd0fb811ea5b2.
+
+Change-Id: Ia0dc38cc45c30405cccc41ddfdcdad147b0869ab
+---
+ include/uapi/sound/snd_sst_tokens.h    | 15 +++++++++
+ sound/soc/intel/skylake/skl-topology.c | 44 +++++++++++++++++++++++++-
+ sound/soc/intel/skylake/skl.h          | 12 +++++++
+ 3 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/include/uapi/sound/snd_sst_tokens.h b/include/uapi/sound/snd_sst_tokens.h
+index 78313300feff..f160462b6c41 100644
+--- a/include/uapi/sound/snd_sst_tokens.h
++++ b/include/uapi/sound/snd_sst_tokens.h
+@@ -222,6 +222,17 @@
+  * %SKL_TKN_MM_U32_NUM_IN_FMT:  Number of input formats
+  * %SKL_TKN_MM_U32_NUM_OUT_FMT: Number of output formats
+  *
++ * %SKL_TKN_U32_ASTATE_IDX:     Table Index for the A-State entry to be filled
++ *                              with kcps and clock source
++ *
++ * %SKL_TKN_U32_ASTATE_COUNT:   Number of valid entries in A-State table
++ *
++ * %SKL_TKN_U32_ASTATE_KCPS:    Specifies the core load threshold (in kilo
++ *                              cycles per second) below which DSP is clocked
++ *                              from source specified by clock source.
++ *
++ * %SKL_TKN_U32_ASTATE_CLK_SRC: Clock source for A-State entry
++ *
+  * %SKL_TKN_U32_AGG_NUM_MASTERS:
+  *                              Number of aggregated masters
+  *
+@@ -339,6 +350,10 @@ enum SKL_TKNS {
+ 	SKL_TKN_MM_U32_NUM_IN_FMT,
+ 	SKL_TKN_MM_U32_NUM_OUT_FMT,
+ 
++	SKL_TKN_U32_ASTATE_IDX,
++	SKL_TKN_U32_ASTATE_COUNT,
++	SKL_TKN_U32_ASTATE_KCPS,
++	SKL_TKN_U32_ASTATE_CLK_SRC,
+ 	SKL_TKN_U32_AGG_NUM_MASTERS,
+ 	SKL_TKN_U32_AGG_LINK_ID,
+ 	SKL_TKN_U32_AGG_CH_MASK,
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index 601eae7560ad..8d5c20440bf5 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -4444,12 +4444,14 @@ static int skl_tplg_get_int_tkn(struct device *dev,
+ 		struct snd_soc_tplg_vendor_value_elem *tkn_elem,
+ 		struct skl *skl)
+ {
+-	int tkn_count = 0, ret;
++	int tkn_count = 0, ret, size;
+ 	static int mod_idx, res_val_idx, intf_val_idx, dir, pin_idx;
+ 	static int dma_cfg_idx;
+ 	struct skl_module_res *res = NULL;
+ 	struct skl_module_iface *fmt = NULL;
+ 	struct skl_module *mod = NULL;
++	static struct skl_astate_config *astate_table;
++	static int astate_cfg_idx, count;
+ 	int i;
+ 
+ 	if (skl->modules) {
+@@ -4482,6 +4484,46 @@ static int skl_tplg_get_int_tkn(struct device *dev,
+ 		mod_idx = tkn_elem->value;
+ 		break;
+ 
++	case SKL_TKN_U32_ASTATE_COUNT:
++		if (astate_table != NULL) {
++			dev_err(dev, "More than one entry for A-State count");
++			return -EINVAL;
++		}
++
++		if (tkn_elem->value > SKL_MAX_ASTATE_CFG) {
++			dev_err(dev, "Invalid A-State count %d\n",
++				tkn_elem->value);
++			return -EINVAL;
++		}
++
++		size = tkn_elem->value * sizeof(struct skl_astate_config) +
++				sizeof(count);
++		skl->cfg.astate_cfg = devm_kzalloc(dev, size, GFP_KERNEL);
++		if (!skl->cfg.astate_cfg)
++			return -ENOMEM;
++
++		astate_table = skl->cfg.astate_cfg->astate_table;
++		count = skl->cfg.astate_cfg->count = tkn_elem->value;
++		break;
++
++	case SKL_TKN_U32_ASTATE_IDX:
++		if (tkn_elem->value >= count) {
++			dev_err(dev, "Invalid A-State index %d\n",
++				tkn_elem->value);
++			return -EINVAL;
++		}
++
++		astate_cfg_idx = tkn_elem->value;
++		break;
++
++	case SKL_TKN_U32_ASTATE_KCPS:
++		astate_table[astate_cfg_idx].kcps = tkn_elem->value;
++		break;
++
++	case SKL_TKN_U32_ASTATE_CLK_SRC:
++		astate_table[astate_cfg_idx].clk_src = tkn_elem->value;
++		break;
++
+ 	case SKL_TKN_U32_DMA_TYPE:
+ 		skl->cfg.dmacfg.type = tkn_elem->value;
+ 		break;
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index 87afcc78dae7..4278b347942a 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -28,6 +28,8 @@
+ 
+ #define SKL_SUSPEND_DELAY 2000
+ 
++#define SKL_MAX_ASTATE_CFG		3
++
+ #define AZX_PCIREG_PGCTL		0x44
+ #define AZX_PGCTL_LSRMD_MASK		(1 << 4)
+ #define AZX_PCIREG_CGCTL		0x48
+@@ -81,10 +83,20 @@ struct skl_dmactrl_config {
+ 	struct skl_dmctrl_hdr hdr[SKL_MAX_DMACTRL_CFG];
+ } __packed;
+ 
++struct skl_astate_config {
++	u32 kcps;
++	u32 clk_src;
++};
++
++struct skl_astate_cfg {
++	u32 count;
++	struct skl_astate_config astate_table[0];
++};
+ 
+ struct skl_fw_cfg_info {
+ 	struct skl_dma_buff_cfg dmacfg;
+ 	struct skl_dmactrl_config dmactrl_cfg;
++	struct skl_astate_cfg *astate_cfg;
+ } __packed;
+ 
+ struct ep_group_cnt {
+-- 
+2.17.0
+

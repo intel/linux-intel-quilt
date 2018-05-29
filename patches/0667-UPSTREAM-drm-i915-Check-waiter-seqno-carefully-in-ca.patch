@@ -1,0 +1,47 @@
+From b09f35c6d591cd0429df55beabfdb7edcc337b59 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 18 Sep 2017 17:27:34 +0100
+Subject: [PATCH 0667/1029] [UPSTREAM] drm/i915: Check waiter->seqno carefully
+ in case of preemption
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+If preemption occurs at precisely the right moment, we may decide that
+the wait is complete even though the wait's request is no longer
+executing (having been preempted). We handle this situation by double
+checking that request following deciding whether the wait is complete.
+
+Reported-by: Michał Winiarski <michal.winiarski@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170918162734.21294-2-chris@chris-wilson.co.uk
+Reviewed-by: Michał Winiarski <michal.winiarski@intel.com>
+---
+ drivers/gpu/drm/i915/i915_irq.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 6ba10f2777fa..849c120397a8 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1024,10 +1024,13 @@ static void notify_ring(struct intel_engine_cs *engine)
+ 		 */
+ 		if (i915_seqno_passed(intel_engine_get_seqno(engine),
+ 				      wait->seqno)) {
++			struct drm_i915_gem_request *waiter = wait->request;
++
+ 			wakeup = true;
+ 			if (!test_bit(DMA_FENCE_FLAG_SIGNALED_BIT,
+-				      &wait->request->fence.flags))
+-				rq = i915_gem_request_get(wait->request);
++				      &waiter->fence.flags) &&
++			    intel_wait_check_request(wait, waiter))
++				rq = i915_gem_request_get(waiter);
+ 		}
+ 
+ 		if (wakeup)
+-- 
+2.17.0
+

@@ -1,0 +1,84 @@
+From 76d019ad8c6a17d0ad577e515814db7ee33c613f Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 15 Mar 2018 16:41:41 +0800
+Subject: [PATCH 0669/1029] [INTERNAL] drm/i915/gvt: Support vgpu workload
+ priority config
+
+Add support to configure vgpu workload priority, make the param
+writable to facilitate performance issue debug.
+
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+Signed-off-by: Min He <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/scheduler.c | 11 +++++++++++
+ drivers/gpu/drm/i915/i915_params.c   |  6 ++++++
+ drivers/gpu/drm/i915/i915_params.h   |  3 ++-
+ 3 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 7d85e0f9abc3..7932e55b7f25 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -439,6 +439,15 @@ static void gen8_shadow_pid_cid(struct intel_vgpu_workload *workload)
+ 	intel_ring_advance(workload->req, cs);
+ }
+ 
++static int sanitize_priority(int priority)
++{
++	if (priority > I915_CONTEXT_MAX_USER_PRIORITY)
++		return I915_CONTEXT_MAX_USER_PRIORITY;
++	else if (priority < I915_CONTEXT_MIN_USER_PRIORITY)
++		return I915_CONTEXT_MIN_USER_PRIORITY;
++	return priority;
++}
++
+ static int dispatch_workload(struct intel_vgpu_workload *workload)
+ {
+ 	int ring_id = workload->ring_id;
+@@ -497,6 +506,8 @@ static int dispatch_workload(struct intel_vgpu_workload *workload)
+ 	if (!IS_ERR_OR_NULL(workload->req)) {
+ 		gvt_dbg_sched("ring id %d submit workload to i915 %p\n",
+ 				ring_id, workload->req);
++		shadow_ctx->priority = i915_modparams.gvt_workload_priority =
++			sanitize_priority(i915_modparams.gvt_workload_priority);
+ 		i915_add_request(workload->req);
+ 		workload->dispatched = true;
+ 	}
+diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
+index 63751a1de74a..892c49b8befa 100644
+--- a/drivers/gpu/drm/i915/i915_params.c
++++ b/drivers/gpu/drm/i915/i915_params.c
+@@ -76,6 +76,7 @@ struct i915_params i915_modparams __read_mostly = {
+ 	.enable_gvt_oos = 1,
+ 	.enable_conformance_check = true,
+ 	.disable_gvt_fw_loading = true,
++	.gvt_workload_priority = 0,
+ };
+ 
+ i915_param_named(modeset, int, 0400,
+@@ -247,3 +248,8 @@ MODULE_PARM_DESC(enable_conformance_check, "To toggle the GVT guest conformance
+ 
+ module_param_named(disable_gvt_fw_loading, i915_modparams.disable_gvt_fw_loading, bool, 0400);
+ MODULE_PARM_DESC(disable_gvt_fw_loading, "Disable GVT-g fw loading.");
++
++module_param_named(gvt_workload_priority, i915_modparams.gvt_workload_priority, int, 0600);
++MODULE_PARM_DESC(gvt_workload_priority,
++	"Set GVT-g workload priority, (range: (-1023, 1023), default: 0, "
++	"more positive value means higher priority).");
+diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
+index e8c2ba4cb1e6..6e0a2d14d397 100644
+--- a/drivers/gpu/drm/i915/i915_params.h
++++ b/drivers/gpu/drm/i915/i915_params.h
+@@ -72,7 +72,8 @@
+ 	func(bool, enable_pvmmio); \
+ 	func(bool, enable_gvt_oos); \
+ 	func(bool, enable_conformance_check); \
+-	func(bool, disable_gvt_fw_loading);
++	func(bool, disable_gvt_fw_loading); \
++	func(int, gvt_workload_priority);
+ 
+ #define MEMBER(T, member) T member
+ struct i915_params {
+-- 
+2.17.0
+

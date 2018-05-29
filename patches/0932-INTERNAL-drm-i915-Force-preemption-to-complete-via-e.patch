@@ -1,0 +1,230 @@
+From 9ab79f52dbfa23d8841dd709156e336f0b04b4e6 Mon Sep 17 00:00:00 2001
+From: Jeff McGee <jeff.mcgee@intel.com>
+Date: Mon, 5 Feb 2018 12:17:23 -0800
+Subject: [PATCH 0932/1029] [INTERNAL] drm/i915: Force preemption to complete
+ via engine reset
+
+The hardware can complete the requested preemption at only certain points
+in execution. Thus an uncooperative request that avoids those points can
+block a preemption indefinitely. Our only option to bound the preemption
+latency is to trigger reset and recovery just as we would if a request had
+hung the hardware. This is so-called forced preemption. This change adds
+that capability as an option for systems with extremely strict scheduling
+latency requirements for its high priority requests. This option must be
+used with great care. The force-preempted requests will be discarded at
+the point of reset, resulting in various degrees of disruption to the
+owning application up to and including crash.
+
+The option is enabled by specifying a non-zero value for new i915 module
+parameter fpreempt_timeout. This value becomes the time in milliseconds
+after initiation of preemption at which the reset is triggered if the
+preemption has not completed normally.
+
+GuC mode is not supported. The fpreempt_timeout parameter is simply
+ignored.
+
+Conflicts:
+drivers/gpu/drm/i915/i915_params.c
+drivers/gpu/drm/i915/i915_params.h
+Some of the per-plane additions conflicted with the preempt
+additions. I ensured both params are present.
+
+Change-Id: I90a448d7f06f33c9f24020e5ae2ce01105466b02
+Signed-off-by: Jeff McGee <jeff.mcgee@intel.com>
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+---
+ drivers/gpu/drm/i915/i915_gem.c         | 27 +++++++++++++++--
+ drivers/gpu/drm/i915/i915_params.c      |  3 ++
+ drivers/gpu/drm/i915/i915_params.h      |  1 +
+ drivers/gpu/drm/i915/intel_engine_cs.c  | 40 +++++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_lrc.c        |  9 ++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.h |  4 +++
+ 6 files changed, 82 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 6d4c9bcb521e..cd00f25b0213 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2770,9 +2770,25 @@ i915_gem_find_active_request(struct intel_engine_cs *engine)
+ 	return active;
+ }
+ 
+-static bool engine_stalled(struct intel_engine_cs *engine)
++static bool engine_stalled(struct intel_engine_cs *engine,
++			   struct drm_i915_gem_request *request)
+ {
+ 	if (!intel_vgpu_active(engine->i915)) {
++		if (engine->fpreempt_stalled) {
++			/* Pardon the request if it managed to yield the
++			 * engine by completing just prior to the reset. We
++			 * could be even more sophisticated here and pardon
++			 * the request if it preempted out (mid-batch) prior
++			 * to the reset, but that's not so straight-forward
++			 * to detect. Perhaps not worth splitting hairs when
++			 * the request had clearly behaved badly to get here.
++			 */
++			if (i915_gem_request_completed(request))
++				return false;
++
++			return true;
++		}
++
+ 		if (!engine->hangcheck.stalled)
+ 			return false;
+ 
+@@ -2903,7 +2919,7 @@ i915_gem_reset_request(struct intel_engine_cs *engine,
+ 	 * subsequent hangs.
+ 	 */
+ 
+-	if (engine_stalled(engine)) {
++	if (engine_stalled(engine, request)) {
+ 		i915_gem_context_mark_guilty(request->ctx);
+ 		skip_request(request);
+ 
+@@ -2911,6 +2927,13 @@ i915_gem_reset_request(struct intel_engine_cs *engine,
+ 		if (i915_gem_context_is_banned(request->ctx))
+ 			engine_skip_context(request);
+ 	} else {
++		/* If the request that we just pardoned was the target of a
++		 * force preemption there is no possibility of the next
++		 * request in line having started.
++		 */
++		if (engine->fpreempt_stalled)
++			return NULL;
++
+ 		/*
+ 		 * Since this is not the hung engine, it may have advanced
+ 		 * since the hang declaration. Double check by refinding
+diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
+index 5c582c14d471..12f995e5961e 100644
+--- a/drivers/gpu/drm/i915/i915_params.c
++++ b/drivers/gpu/drm/i915/i915_params.c
+@@ -346,3 +346,6 @@ module_param_named_unsafe(domain_scaler_owner,
+ MODULE_PARM_DESC(domain_scaler_owner, "scaler owners for each domain and for\n"
+ 	"each pipe ids can be from 0-F, eg domain_scaler_owners = 0x00030210\n"
+ 	"scaler owner: 1C:3 2B:0 1B:2 2A:1 1A:0 (0x0 - default value)\n");
++
++i915_param_named(fpreempt_timeout, uint, 0600,
++	"Wait time in msecs before forcing a preemption with reset (0:never force [default])");
+diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
+index 73b5e6231b8a..acec44a03be3 100644
+--- a/drivers/gpu/drm/i915/i915_params.h
++++ b/drivers/gpu/drm/i915/i915_params.h
+@@ -58,6 +58,7 @@
+ 	func(unsigned int, avail_planes_per_pipe); \
+ 	func(unsigned long long, domain_plane_owners); \
+ 	func(unsigned int, bg_color); \
++	func(unsigned int, fpreempt_timeout); \
+ 	/* leave bools at the end to not create holes */ \
+ 	func(bool, alpha_support); \
+ 	func(bool, enable_cmd_parser); \
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index f81119bd0637..52166ff74b19 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -411,6 +411,45 @@ static void intel_engine_init_execlist(struct intel_engine_cs *engine)
+ 	execlists->first = NULL;
+ }
+ 
++static enum hrtimer_restart
++intel_engine_fpreempt_timer(struct hrtimer *hrtimer)
++{
++	struct intel_engine_cs *engine =
++		container_of(hrtimer, struct intel_engine_cs,
++			     fpreempt_timer);
++
++	if (execlists_is_active(&engine->execlists, EXECLISTS_ACTIVE_PREEMPT))
++		queue_work(system_highpri_wq, &engine->fpreempt_work);
++
++	return HRTIMER_NORESTART;
++}
++
++static void intel_engine_fpreempt_work(struct work_struct *work)
++{
++	struct intel_engine_cs *engine =
++		container_of(work, struct intel_engine_cs,
++			     fpreempt_work);
++
++	tasklet_kill(&engine->execlists.irq_tasklet);
++	tasklet_disable(&engine->execlists.irq_tasklet);
++
++	if (execlists_is_active(&engine->execlists, EXECLISTS_ACTIVE_PREEMPT)) {
++		engine->fpreempt_stalled = true;
++		i915_handle_error(engine->i915, intel_engine_flag(engine),
++				  0, "force preemption");
++	}
++
++	tasklet_enable(&engine->execlists.irq_tasklet);
++}
++
++static void intel_engine_init_fpreempt(struct intel_engine_cs *engine)
++{
++	hrtimer_init(&engine->fpreempt_timer,
++		     CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	engine->fpreempt_timer.function = intel_engine_fpreempt_timer;
++	INIT_WORK(&engine->fpreempt_work, intel_engine_fpreempt_work);
++}
++
+ /**
+  * intel_engines_setup_common - setup engine state not requiring hw access
+  * @engine: Engine to setup.
+@@ -426,6 +465,7 @@ void intel_engine_setup_common(struct intel_engine_cs *engine)
+ 
+ 	intel_engine_init_timeline(engine);
+ 	intel_engine_init_hangcheck(engine);
++	intel_engine_init_fpreempt(engine);
+ 	i915_gem_batch_pool_init(engine, &engine->batch_pool);
+ 
+ 	intel_engine_init_cmd_parser(engine);
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 330f39d14870..b051e6e637cf 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -545,6 +545,11 @@ static void inject_preempt_context(struct intel_engine_cs *engine)
+ 		elsp_write(0, elsp);
+ 
+ 	elsp_write(ce->lrc_desc, elsp);
++
++	if (i915_modparams.fpreempt_timeout)
++		hrtimer_start(&engine->fpreempt_timer,
++			      ms_to_ktime(i915_modparams.fpreempt_timeout),
++			      HRTIMER_MODE_REL);
+ }
+ 
+ static bool can_preempt(struct intel_engine_cs *engine)
+@@ -890,6 +895,7 @@ static void process_csb(struct intel_engine_cs *engine)
+ 							EXECLISTS_ACTIVE_PREEMPT));
+ 			execlists_clear_active(execlists,
+ 					       EXECLISTS_ACTIVE_PREEMPT);
++			hrtimer_try_to_cancel(&engine->fpreempt_timer);
+ 			continue;
+ 		}
+ 
+@@ -1728,6 +1734,9 @@ static void execlists_reset(struct intel_engine_cs *engine,
+ 
+ static void execlists_reset_finish(struct intel_engine_cs *engine)
+ {
++	/* Mark any force preemption as resolved */
++	engine->fpreempt_stalled = false;
++
+ 	/* Get things going again if we have queued requests. Needed
+ 	 * if the reset was executed or aborted.
+ 	 */
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index ca3c500a71fc..d2db454e5351 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -513,6 +513,10 @@ struct intel_engine_cs {
+ 
+ 	struct intel_engine_hangcheck hangcheck;
+ 
++	struct hrtimer fpreempt_timer;
++	struct work_struct fpreempt_work;
++	bool fpreempt_stalled;
++
+ 	bool needs_cmd_parser;
+ 
+ 	/*
+-- 
+2.17.0
+

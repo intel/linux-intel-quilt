@@ -1,0 +1,70 @@
+From ac2bd0826945df74981b781d95a389f9d6a4ea8d Mon Sep 17 00:00:00 2001
+From: Ramalingam C <ramalingam.c@intel.com>
+Date: Mon, 5 Feb 2018 23:02:02 +0530
+Subject: [PATCH 0685/1029] UPSTREAM: drm/i915: Retry HDCP bksv read
+
+HDCP specification says that when bksv is identified as invalid
+(not with 20 1s), bksv should be re-read and verified.
+
+This patch adds the above mentioned re-read for bksv.
+
+v2:
+  Rephrased the commit msg [Seanpaul]
+
+v3:
+  do-while to for-loop [Seanpaul]
+
+v4:
+  retry only if bksv is invalid and no error msg on each attempt
+  [Seanpaul]
+
+v5:
+  Correcting the return value [Seanpaul].
+
+Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+Signed-off-by: Sean Paul <seanpaul@chromium.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/1517851922-30547-1-git-send-email-ramalingam.c@intel.com
+---
+ drivers/gpu/drm/i915/intel_hdcp.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index cfd13ee8c534..d7ddd6b28cd7 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -397,7 +397,7 @@ static int intel_hdcp_auth(struct intel_digital_port *intel_dig_port,
+ 	struct drm_i915_private *dev_priv;
+ 	enum port port;
+ 	unsigned long r0_prime_gen_start;
+-	int ret, i;
++	int ret, i, tries = 2;
+ 	union {
+ 		u32 reg[2];
+ 		u8 shim[DRM_HDCP_AN_LEN];
+@@ -438,11 +438,19 @@ static int intel_hdcp_auth(struct intel_digital_port *intel_dig_port,
+ 	r0_prime_gen_start = jiffies;
+ 
+ 	memset(&bksv, 0, sizeof(bksv));
+-	ret = shim->read_bksv(intel_dig_port, bksv.shim);
+-	if (ret)
+-		return ret;
+-	else if (!intel_hdcp_is_ksv_valid(bksv.shim))
++
++	/* HDCP spec states that we must retry the bksv if it is invalid */
++	for (i = 0; i < tries; i++) {
++		ret = shim->read_bksv(intel_dig_port, bksv.shim);
++		if (ret)
++			return ret;
++		if (intel_hdcp_is_ksv_valid(bksv.shim))
++			break;
++	}
++	if (i == tries) {
++		DRM_ERROR("HDCP failed, Bksv is invalid\n");
+ 		return -ENODEV;
++	}
+ 
+ 	I915_WRITE(PORT_HDCP_BKSVLO(port), bksv.reg[0]);
+ 	I915_WRITE(PORT_HDCP_BKSVHI(port), bksv.reg[1]);
+-- 
+2.17.0
+

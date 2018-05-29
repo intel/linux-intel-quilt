@@ -1,0 +1,71 @@
+From d88e2b5f7c47b3d31e9a1302b891834fa741c557 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Mon, 12 Mar 2018 09:29:26 +0800
+Subject: [PATCH 0665/1029] [INTERNAL] drm/i915/gvt: remove switch_mmio call in
+ ctx_status_change
+
+On IVI platform, we don't need to save/restore MMIO during ctx switch,
+so we removed switch_mmio call to improve the performance.
+
+This patch fixes the issue introduced by backporting commit
+'c26bb1523c41 ("UPSTREAM: drm/i915/execlists: Distinguish the incomplete
+context notifies")'
+
+Signed-off-by: Min He <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/scheduler.c | 25 +------------------------
+ 1 file changed, 1 insertion(+), 24 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 8a84314b0928..7d85e0f9abc3 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -234,19 +234,8 @@ static int shadow_context_status_change(struct notifier_block *nb,
+ 	enum intel_engine_id ring_id = req->engine->id;
+ 	struct intel_vgpu_workload *workload;
+ 
+-	if (!is_gvt_request(req)) {
+-		spin_lock_bh(&scheduler->mmio_context_lock);
+-		if (action == INTEL_CONTEXT_SCHEDULE_IN &&
+-		    scheduler->engine_owner[ring_id]) {
+-			/* Switch ring from vGPU to host. */
+-			intel_gvt_switch_mmio(scheduler->engine_owner[ring_id],
+-					      NULL, ring_id);
+-			scheduler->engine_owner[ring_id] = NULL;
+-		}
+-		spin_unlock_bh(&scheduler->mmio_context_lock);
+-
++	if (!is_gvt_request(req))
+ 		return NOTIFY_OK;
+-	}
+ 
+ 	workload = scheduler->current_workload[ring_id];
+ 	if (unlikely(!workload))
+@@ -254,24 +243,12 @@ static int shadow_context_status_change(struct notifier_block *nb,
+ 
+ 	switch (action) {
+ 	case INTEL_CONTEXT_SCHEDULE_IN:
+-		spin_lock_bh(&scheduler->mmio_context_lock);
+-		if (workload->vgpu != scheduler->engine_owner[ring_id]) {
+-			/* Switch ring from host to vGPU or vGPU to vGPU. */
+-			intel_gvt_switch_mmio(scheduler->engine_owner[ring_id],
+-					      workload->vgpu, ring_id);
+-			scheduler->engine_owner[ring_id] = workload->vgpu;
+-		} else
+-			gvt_dbg_sched("skip ring %d mmio switch for vgpu%d\n",
+-				      ring_id, workload->vgpu->id);
+-		spin_unlock_bh(&scheduler->mmio_context_lock);
+ 		atomic_set(&workload->shadow_ctx_active, 1);
+ 		break;
+ 	case INTEL_CONTEXT_SCHEDULE_OUT:
+-	case INTEL_CONTEXT_SCHEDULE_PREEMPTED:
+ 		atomic_set(&workload->shadow_ctx_active, 0);
+ 		break;
+ 	default:
+-		WARN_ON(1);
+ 		return NOTIFY_OK;
+ 	}
+ 	wake_up(&workload->shadow_ctx_status_wq);
+-- 
+2.17.0
+

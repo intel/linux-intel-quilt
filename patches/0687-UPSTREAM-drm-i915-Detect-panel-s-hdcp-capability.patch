@@ -1,0 +1,155 @@
+From 68e8182d133a3dd94a7a624e26939fcc6ea377e0 Mon Sep 17 00:00:00 2001
+From: Ramalingam C <ramalingam.c@intel.com>
+Date: Sat, 3 Feb 2018 03:39:08 +0530
+Subject: [PATCH 0687/1029] UPSTREAM: drm/i915: Detect panel's hdcp capability
+
+DP HDCP1.4 spec mandates that An can be written to panel only after
+detecting the panel's hdcp capability.
+
+For DP 0th Bit of Bcaps register indicates the panel's hdcp capability
+For HDMI valid BKSV indicates the panel's hdcp capability.
+
+For HDMI it is optional to detect the panel's hdcp capability before
+An Write.
+
+v2:
+  Added comments explaining the need for action [Seanpaul].
+  Made panel's hdcp capability detection optional for hdmi [Seanpaul].
+  Defined a func for reading bcaps for DP [Seanpaul].
+
+v3:
+  Removed the NULL initialization [Seanpaul].
+
+Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+Reviewed-by: Sean Paul <seanpaul@chromium.org>
+Signed-off-by: Sean Paul <seanpaul@chromium.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/1517609350-10698-7-git-send-email-ramalingam.c@intel.com
+---
+ drivers/gpu/drm/i915/intel_dp.c   | 39 +++++++++++++++++++++++++++----
+ drivers/gpu/drm/i915/intel_drv.h  |  4 ++++
+ drivers/gpu/drm/i915/intel_hdcp.c | 18 +++++++++++++-
+ 3 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 3b4d4df8f7c2..fbaecc026d2d 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -5088,17 +5088,32 @@ static int intel_dp_hdcp_read_bstatus(struct intel_digital_port *intel_dig_port,
+ }
+ 
+ static
+-int intel_dp_hdcp_repeater_present(struct intel_digital_port *intel_dig_port,
+-				   bool *repeater_present)
++int intel_dp_hdcp_read_bcaps(struct intel_digital_port *intel_dig_port,
++			     u8 *bcaps)
+ {
+ 	ssize_t ret;
+-	u8 bcaps;
++
+ 	ret = drm_dp_dpcd_read(&intel_dig_port->dp.aux, DP_AUX_HDCP_BCAPS,
+-			       &bcaps, 1);
++			       bcaps, 1);
+ 	if (ret != 1) {
+ 		DRM_ERROR("Read bcaps from DP/AUX failed (%zd)\n", ret);
+ 		return ret >= 0 ? -EIO : ret;
+ 	}
++
++	return 0;
++}
++
++static
++int intel_dp_hdcp_repeater_present(struct intel_digital_port *intel_dig_port,
++				   bool *repeater_present)
++{
++	ssize_t ret;
++	u8 bcaps;
++
++	ret = intel_dp_hdcp_read_bcaps(intel_dig_port, &bcaps);
++	if (ret)
++		return ret;
++
+ 	*repeater_present = bcaps & DP_BCAPS_REPEATER_PRESENT;
+ 	return 0;
+ }
+@@ -5197,6 +5212,21 @@ bool intel_dp_hdcp_check_link(struct intel_digital_port *intel_dig_port)
+ 	return !(bstatus & (DP_BSTATUS_LINK_FAILURE | DP_BSTATUS_REAUTH_REQ));
+ }
+ 
++static
++int intel_dp_hdcp_capable(struct intel_digital_port *intel_dig_port,
++			  bool *hdcp_capable)
++{
++	ssize_t ret;
++	u8 bcaps;
++
++	ret = intel_dp_hdcp_read_bcaps(intel_dig_port, &bcaps);
++	if (ret)
++		return ret;
++
++	*hdcp_capable = bcaps & DP_BCAPS_HDCP_CAPABLE;
++	return 0;
++}
++
+ static const struct intel_hdcp_shim intel_dp_hdcp_shim = {
+ 	.write_an_aksv = intel_dp_hdcp_write_an_aksv,
+ 	.read_bksv = intel_dp_hdcp_read_bksv,
+@@ -5208,6 +5238,7 @@ static const struct intel_hdcp_shim intel_dp_hdcp_shim = {
+ 	.read_v_prime_part = intel_dp_hdcp_read_v_prime_part,
+ 	.toggle_signalling = intel_dp_hdcp_toggle_signalling,
+ 	.check_link = intel_dp_hdcp_check_link,
++	.hdcp_capable = intel_dp_hdcp_capable,
+ };
+ 
+ static void intel_edp_panel_vdd_sanitize(struct intel_dp *intel_dp)
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index fa800918f67d..d3b01bab5f79 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -366,6 +366,10 @@ struct intel_hdcp_shim {
+ 
+ 	/* Ensures the link is still protected */
+ 	bool (*check_link)(struct intel_digital_port *intel_dig_port);
++
++	/* Detects panel's hdcp capability. This is optional for HDMI. */
++	int (*hdcp_capable)(struct intel_digital_port *intel_dig_port,
++			    bool *hdcp_capable);
+ };
+ 
+ struct intel_connector {
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index 5c8e6d1829ef..d8c0202cf0c0 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -414,12 +414,28 @@ static int intel_hdcp_auth(struct intel_digital_port *intel_dig_port,
+ 		u32 reg;
+ 		u8 shim[DRM_HDCP_RI_LEN];
+ 	} ri;
+-	bool repeater_present;
++	bool repeater_present, hdcp_capable;
+ 
+ 	dev_priv = intel_dig_port->base.base.dev->dev_private;
+ 
+ 	port = intel_dig_port->base.port;
+ 
++	/*
++	 * Detects whether the display is HDCP capable. Although we check for
++	 * valid Bksv below, the HDCP over DP spec requires that we check
++	 * whether the display supports HDCP before we write An. For HDMI
++	 * displays, this is not necessary.
++	 */
++	if (shim->hdcp_capable) {
++		ret = shim->hdcp_capable(intel_dig_port, &hdcp_capable);
++		if (ret)
++			return ret;
++		if (!hdcp_capable) {
++			DRM_ERROR("Panel is not HDCP capable\n");
++			return -EINVAL;
++		}
++	}
++
+ 	/* Initialize An with 2 random values and acquire it */
+ 	for (i = 0; i < 2; i++)
+ 		I915_WRITE(PORT_HDCP_ANINIT(port), get_random_u32());
+-- 
+2.17.0
+
