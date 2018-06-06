@@ -1,0 +1,120 @@
+From dd1b0b4a2a585f3d6827a8e1c2b3ffae35e86fbc Mon Sep 17 00:00:00 2001
+From: Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
+Date: Tue, 26 Sep 2017 00:40:42 +0000
+Subject: [PATCH 0824/1040] ASoC: add null_snd_soc_ops and reduce NULL ops
+ check
+
+Double NULL pointer check for ops and ops->func is difficult to read
+and might be forget to check it if new func was add.
+This patch adds new null_snd_soc_ops and use it if rtd->dai_link didn't
+have it to avoid NULL ops, and reduces ops NULL check.
+
+Signed-off-by: Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ sound/soc/soc-core.c |  5 +++++
+ sound/soc/soc-pcm.c  | 16 ++++++++--------
+ 2 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/sound/soc/soc-core.c b/sound/soc/soc-core.c
+index c5dec39200b0..7115eeb25730 100644
+--- a/sound/soc/soc-core.c
++++ b/sound/soc/soc-core.c
+@@ -614,6 +614,8 @@ struct snd_pcm_substream *snd_soc_get_dai_substream(struct snd_soc_card *card,
+ }
+ EXPORT_SYMBOL_GPL(snd_soc_get_dai_substream);
+ 
++static const struct snd_soc_ops null_snd_soc_ops;
++
+ static struct snd_soc_pcm_runtime *soc_new_pcm_runtime(
+ 	struct snd_soc_card *card, struct snd_soc_dai_link *dai_link)
+ {
+@@ -626,6 +628,9 @@ static struct snd_soc_pcm_runtime *soc_new_pcm_runtime(
+ 	INIT_LIST_HEAD(&rtd->component_list);
+ 	rtd->card = card;
+ 	rtd->dai_link = dai_link;
++	if (!rtd->dai_link->ops)
++		rtd->dai_link->ops = &null_snd_soc_ops;
++
+ 	rtd->codec_dais = kzalloc(sizeof(struct snd_soc_dai *) *
+ 					dai_link->num_codecs,
+ 					GFP_KERNEL);
+diff --git a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+index 975965defe36..09fed7014ed8 100644
+--- a/sound/soc/soc-pcm.c
++++ b/sound/soc/soc-pcm.c
+@@ -511,7 +511,7 @@ static int soc_pcm_open(struct snd_pcm_substream *substream)
+ 			codec_dai->rx_mask = 0;
+ 	}
+ 
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->startup) {
++	if (rtd->dai_link->ops->startup) {
+ 		ret = rtd->dai_link->ops->startup(substream);
+ 		if (ret < 0) {
+ 			pr_err("ASoC: %s startup failed: %d\n",
+@@ -585,7 +585,7 @@ static int soc_pcm_open(struct snd_pcm_substream *substream)
+ 	return 0;
+ 
+ config_err:
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->shutdown)
++	if (rtd->dai_link->ops->shutdown)
+ 		rtd->dai_link->ops->shutdown(substream);
+ 
+ machine_err:
+@@ -692,7 +692,7 @@ static int soc_pcm_close(struct snd_pcm_substream *substream)
+ 			codec_dai->driver->ops->shutdown(substream, codec_dai);
+ 	}
+ 
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->shutdown)
++	if (rtd->dai_link->ops->shutdown)
+ 		rtd->dai_link->ops->shutdown(substream);
+ 
+ 	if (platform->driver->ops && platform->driver->ops->close)
+@@ -751,7 +751,7 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
+ 
+ 	mutex_lock_nested(&rtd->pcm_mutex, rtd->pcm_subclass);
+ 
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->prepare) {
++	if (rtd->dai_link->ops->prepare) {
+ 		ret = rtd->dai_link->ops->prepare(substream);
+ 		if (ret < 0) {
+ 			dev_err(rtd->card->dev, "ASoC: machine prepare error:"
+@@ -855,7 +855,7 @@ static int soc_pcm_hw_params(struct snd_pcm_substream *substream,
+ 	int i, ret = 0;
+ 
+ 	mutex_lock_nested(&rtd->pcm_mutex, rtd->pcm_subclass);
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->hw_params) {
++	if (rtd->dai_link->ops->hw_params) {
+ 		ret = rtd->dai_link->ops->hw_params(substream, params);
+ 		if (ret < 0) {
+ 			dev_err(rtd->card->dev, "ASoC: machine hw_params"
+@@ -948,7 +948,7 @@ static int soc_pcm_hw_params(struct snd_pcm_substream *substream,
+ 		codec_dai->rate = 0;
+ 	}
+ 
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->hw_free)
++	if (rtd->dai_link->ops->hw_free)
+ 		rtd->dai_link->ops->hw_free(substream);
+ 
+ 	mutex_unlock(&rtd->pcm_mutex);
+@@ -994,7 +994,7 @@ static int soc_pcm_hw_free(struct snd_pcm_substream *substream)
+ 	}
+ 
+ 	/* free any machine hw params */
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->hw_free)
++	if (rtd->dai_link->ops->hw_free)
+ 		rtd->dai_link->ops->hw_free(substream);
+ 
+ 	/* free any DMA resources */
+@@ -1045,7 +1045,7 @@ static int soc_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 			return ret;
+ 	}
+ 
+-	if (rtd->dai_link->ops && rtd->dai_link->ops->trigger) {
++	if (rtd->dai_link->ops->trigger) {
+ 		ret = rtd->dai_link->ops->trigger(substream, cmd);
+ 		if (ret < 0)
+ 			return ret;
+-- 
+2.17.1
+

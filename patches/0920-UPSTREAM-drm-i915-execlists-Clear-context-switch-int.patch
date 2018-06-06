@@ -1,0 +1,82 @@
+From b9f6aae6f3c888e7811c0c58cf9d732e2b30a623 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 2 Jan 2018 15:12:32 +0000
+Subject: [PATCH 0920/1040] [UPSTREAM] drm/i915/execlists: Clear context-switch
+ interrupt earlier in the reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move the clearing of the CS-interrupt into the engine reset phase,
+before the current init-hw phase. This helps clarify that we clear the
+pending interrupts prior to any restarting of the execlists.
+
+Change-Id: I6719cd0edf74a40f42706d1aef8caff5472b7624
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Michał Winiarski <michal.winiarski@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20180102151235.3949-16-chris@chris-wilson.co.uk
+Signed-off-by: Jeff McGee <jeff.mcgee@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c | 32 ++++++++++++++++++++------------
+ 1 file changed, 20 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 59e95f6d16bc..ec5a1d70d659 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -1501,18 +1501,6 @@ static int gen8_init_common_ring(struct intel_engine_cs *engine)
+ 
+ 	GEM_BUG_ON(engine->id >= ARRAY_SIZE(gtiir));
+ 
+-	/*
+-	 * Clear any pending interrupt state.
+-	 *
+-	 * We do it twice out of paranoia that some of the IIR are double
+-	 * buffered, and if we only reset it once there may still be
+-	 * an interrupt pending.
+-	 */
+-	I915_WRITE(GEN8_GT_IIR(gtiir[engine->id]),
+-		   GT_CONTEXT_SWITCH_INTERRUPT << engine->irq_shift);
+-	I915_WRITE(GEN8_GT_IIR(gtiir[engine->id]),
+-		   GT_CONTEXT_SWITCH_INTERRUPT << engine->irq_shift);
+-	clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
+ 	execlists->csb_head = -1;
+ 	execlists->active = 0;
+ 
+@@ -1556,6 +1544,24 @@ static int gen9_init_render_ring(struct intel_engine_cs *engine)
+ 	return init_workarounds_ring(engine);
+ }
+ 
++static void reset_irq(struct intel_engine_cs *engine)
++{
++	struct drm_i915_private *dev_priv = engine->i915;
++
++	/*
++	 * Clear any pending interrupt state.
++	 *
++	 * We do it twice out of paranoia that some of the IIR are double
++	 * buffered, and if we only reset it once there may still be
++	 * an interrupt pending.
++	 */
++	I915_WRITE(GEN8_GT_IIR(gtiir[engine->id]),
++		   GT_CONTEXT_SWITCH_INTERRUPT << engine->irq_shift);
++	I915_WRITE(GEN8_GT_IIR(gtiir[engine->id]),
++		   GT_CONTEXT_SWITCH_INTERRUPT << engine->irq_shift);
++	clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
++}
++
+ static void reset_common_ring(struct intel_engine_cs *engine,
+ 			      struct drm_i915_gem_request *request)
+ {
+@@ -1563,6 +1569,8 @@ static void reset_common_ring(struct intel_engine_cs *engine,
+ 	struct intel_context *ce;
+ 	unsigned long flags;
+ 
++	reset_irq(engine);
++
+ 	spin_lock_irqsave(&engine->timeline->lock, flags);
+ 
+ 	/*
+-- 
+2.17.1
+

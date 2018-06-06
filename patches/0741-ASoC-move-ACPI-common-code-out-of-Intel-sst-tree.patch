@@ -1,0 +1,1021 @@
+From 4ee8d7c20f068f47b14308c30f02e9e25026b855 Mon Sep 17 00:00:00 2001
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Date: Thu, 12 Oct 2017 18:49:38 -0500
+Subject: [PATCH 0741/1040] ASoC: move ACPI common code out of Intel/sst tree
+
+ACPI support is not specific to the Intel/SST driver. Move the enumeration
+and matching code which is not hardware-dependent to sound/soc and rename
+relevant sst_acpi_ structures and functions with snd_soc_acpi_ prefix
+
+soc-acpi.h is protected by a #ifndef __LINUX_SND_SOC_ACPI_H for
+consistency with all other SoC .h files:
+
+grep -L __LINUX include/sound/soc* | wc -l
+0
+grep __LINUX include/sound/soc* | wc -l
+14
+
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Acked-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+(cherry picked from commit 7feb2f786a46d34cac760d5e246dfbdafafa0e96)
+---
+ include/sound/soc-acpi.h                      | 100 ++++++++++++++++++
+ sound/soc/Kconfig                             |   3 +
+ sound/soc/Makefile                            |   6 ++
+ sound/soc/intel/Kconfig                       |   1 +
+ sound/soc/intel/atom/sst/sst_acpi.c           |  24 ++---
+ sound/soc/intel/boards/bytcht_da7213.c        |   6 +-
+ sound/soc/intel/boards/bytcht_es8316.c        |   2 +-
+ sound/soc/intel/boards/bytcr_rt5640.c         |  11 +-
+ sound/soc/intel/boards/bytcr_rt5651.c         |   6 +-
+ sound/soc/intel/boards/cht_bsw_rt5645.c       |  11 +-
+ sound/soc/intel/boards/cht_bsw_rt5672.c       |   7 +-
+ sound/soc/intel/common/Makefile               |   2 -
+ sound/soc/intel/common/sst-acpi.c             |  18 ++--
+ sound/soc/intel/common/sst-acpi.h             |  82 --------------
+ sound/soc/intel/skylake/skl.c                 |  40 +++----
+ .../common/sst-match-acpi.c => soc-acpi.c}    |  56 +++++-----
+ 16 files changed, 203 insertions(+), 172 deletions(-)
+ create mode 100644 include/sound/soc-acpi.h
+ delete mode 100644 sound/soc/intel/common/sst-acpi.h
+ rename sound/soc/{intel/common/sst-match-acpi.c => soc-acpi.c} (63%)
+
+diff --git a/include/sound/soc-acpi.h b/include/sound/soc-acpi.h
+new file mode 100644
+index 000000000000..918d78e8c8d6
+--- /dev/null
++++ b/include/sound/soc-acpi.h
+@@ -0,0 +1,100 @@
++/*
++ * Copyright (C) 2013-15, Intel Corporation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License version
++ * 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef __LINUX_SND_SOC_ACPI_H
++#define __LINUX_SND_SOC_ACPI_H
++
++#include <linux/stddef.h>
++#include <linux/acpi.h>
++
++struct snd_soc_acpi_package_context {
++	char *name;           /* package name */
++	int length;           /* number of elements */
++	struct acpi_buffer *format;
++	struct acpi_buffer *state;
++	bool data_valid;
++};
++
++#if IS_ENABLED(CONFIG_ACPI)
++/* translation fron HID to I2C name, needed for DAI codec_name */
++const char *snd_soc_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN]);
++bool snd_soc_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
++				    struct snd_soc_acpi_package_context *ctx);
++#else
++static inline const char *
++snd_soc_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
++{
++	return NULL;
++}
++static inline bool
++snd_soc_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
++				   struct snd_soc_acpi_package_context *ctx)
++{
++	return false;
++}
++#endif
++
++/* acpi match */
++struct snd_soc_acpi_mach *
++snd_soc_acpi_find_machine(struct snd_soc_acpi_mach *machines);
++
++/* acpi check hid */
++bool snd_soc_acpi_check_hid(const u8 hid[ACPI_ID_LEN]);
++
++/**
++ * snd_soc_acpi_mach: ACPI-based machine descriptor. Most of the fields are
++ * related to the hardware, except for the firmware and topology file names.
++ *
++ * @id: ACPI ID (usually the codec's) used to find a matching machine driver.
++ * @drv_name: machine driver name
++ * @fw_filename: firmware file name.
++ * @board: board name
++ * @machine_quirk: pointer to quirk, usually based on DMI information when
++ * ACPI ID alone is not sufficient, wrong or misleading
++ * @quirk_data: data used to uniquely identify a machine, usually a list of
++ * audio codecs whose presence if checked with ACPI
++ * @pdata: intended for platform data or machine specific-ops. This structure
++ *  is not constant since this field may be updated at run-time
++ */
++/* Descriptor for SST ASoC machine driver */
++struct snd_soc_acpi_mach {
++	const u8 id[ACPI_ID_LEN];
++	const char *drv_name;
++	const char *fw_filename;
++	const char *board;
++	struct snd_soc_acpi_mach * (*machine_quirk)(void *arg);
++	const void *quirk_data;
++	void *pdata;
++};
++
++#define SND_SOC_ACPI_MAX_CODECS 3
++
++/**
++ * struct snd_soc_acpi_codecs: Structure to hold secondary codec information
++ * apart from the matched one, this data will be passed to the quirk function
++ * to match with the ACPI detected devices
++ *
++ * @num_codecs: number of secondary codecs used in the platform
++ * @codecs: holds the codec IDs
++ *
++ */
++struct snd_soc_acpi_codecs {
++	int num_codecs;
++	u8 codecs[SND_SOC_ACPI_MAX_CODECS][ACPI_ID_LEN];
++};
++
++/* check all codecs */
++struct snd_soc_acpi_mach *snd_soc_acpi_codec_list(void *arg);
++
++#endif
+diff --git a/sound/soc/Kconfig b/sound/soc/Kconfig
+index c0abad2067e1..d22758165496 100644
+--- a/sound/soc/Kconfig
++++ b/sound/soc/Kconfig
+@@ -36,6 +36,9 @@ config SND_SOC_COMPRESS
+ config SND_SOC_TOPOLOGY
+ 	bool
+ 
++config SND_SOC_ACPI
++	tristate
++
+ # All the supported SoCs
+ source "sound/soc/adi/Kconfig"
+ source "sound/soc/amd/Kconfig"
+diff --git a/sound/soc/Makefile b/sound/soc/Makefile
+index bf8c1e2ce0bf..5327f4d6c668 100644
+--- a/sound/soc/Makefile
++++ b/sound/soc/Makefile
+@@ -15,6 +15,12 @@ ifneq ($(CONFIG_SND_SOC_AC97_BUS),)
+ snd-soc-core-objs += soc-ac97.o
+ endif
+ 
++ifneq ($(CONFIG_SND_SOC_ACPI),)
++snd-soc-acpi-objs := soc-acpi.o
++endif
++
++obj-$(CONFIG_SND_SOC_ACPI) += snd-soc-acpi.o
++
+ obj-$(CONFIG_SND_SOC)	+= snd-soc-core.o
+ obj-$(CONFIG_SND_SOC)	+= codecs/
+ obj-$(CONFIG_SND_SOC)	+= generic/
+diff --git a/sound/soc/intel/Kconfig b/sound/soc/intel/Kconfig
+index e89b5f248e6c..18dfabcfea9f 100644
+--- a/sound/soc/intel/Kconfig
++++ b/sound/soc/intel/Kconfig
+@@ -41,6 +41,7 @@ config SND_SOC_INTEL_SST_ACPI
+ 
+ config SND_SOC_INTEL_SST_MATCH
+ 	tristate
++	select SND_SOC_ACPI if ACPI
+ 
+ config SND_SOC_INTEL_HASWELL
+ 	tristate
+diff --git a/sound/soc/intel/atom/sst/sst_acpi.c b/sound/soc/intel/atom/sst/sst_acpi.c
+index 4d85ead243f1..8d82bc8dc4ac 100644
+--- a/sound/soc/intel/atom/sst/sst_acpi.c
++++ b/sound/soc/intel/atom/sst/sst_acpi.c
+@@ -40,9 +40,9 @@
+ #include <acpi/acpi_bus.h>
+ #include <asm/cpu_device_id.h>
+ #include <asm/iosf_mbi.h>
++#include <sound/soc-acpi.h>
+ #include "../sst-mfld-platform.h"
+ #include "../../common/sst-dsp.h"
+-#include "../../common/sst-acpi.h"
+ #include "sst.h"
+ 
+ /* LPE viewpoint addresses */
+@@ -284,7 +284,7 @@ static int sst_acpi_probe(struct platform_device *pdev)
+ 	int ret = 0;
+ 	struct intel_sst_drv *ctx;
+ 	const struct acpi_device_id *id;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	struct platform_device *mdev;
+ 	struct platform_device *plat_dev;
+ 	struct sst_platform_info *pdata;
+@@ -296,8 +296,8 @@ static int sst_acpi_probe(struct platform_device *pdev)
+ 		return -ENODEV;
+ 	dev_dbg(dev, "for %s\n", id->id);
+ 
+-	mach = (struct sst_acpi_mach *)id->driver_data;
+-	mach = sst_acpi_find_machine(mach);
++	mach = (struct snd_soc_acpi_mach *)id->driver_data;
++	mach = snd_soc_acpi_find_machine(mach);
+ 	if (mach == NULL) {
+ 		dev_err(dev, "No matching machine driver found\n");
+ 		return -ENODEV;
+@@ -435,7 +435,7 @@ static const struct dmi_system_id cht_table[] = {
+ };
+ 
+ 
+-static struct sst_acpi_mach cht_surface_mach = {
++static struct snd_soc_acpi_mach cht_surface_mach = {
+ 	.id = "10EC5640",
+ 	.drv_name = "cht-bsw-rt5645",
+ 	.fw_filename = "intel/fw_sst_22a8.bin",
+@@ -443,7 +443,7 @@ static struct sst_acpi_mach cht_surface_mach = {
+ 	.pdata = &chv_platform_data,
+ };
+ 
+-static struct sst_acpi_mach byt_thinkpad_10 = {
++static struct snd_soc_acpi_mach byt_thinkpad_10 = {
+ 	.id = "10EC5640",
+ 	.drv_name = "cht-bsw-rt5672",
+ 	.fw_filename = "intel/fw_sst_0f28.bin",
+@@ -451,9 +451,9 @@ static struct sst_acpi_mach byt_thinkpad_10 = {
+ 	.pdata = &byt_rvp_platform_data,
+ };
+ 
+-static struct sst_acpi_mach *cht_quirk(void *arg)
++static struct snd_soc_acpi_mach *cht_quirk(void *arg)
+ {
+-	struct sst_acpi_mach *mach = arg;
++	struct snd_soc_acpi_mach *mach = arg;
+ 
+ 	dmi_check_system(cht_table);
+ 
+@@ -463,9 +463,9 @@ static struct sst_acpi_mach *cht_quirk(void *arg)
+ 		return mach;
+ }
+ 
+-static struct sst_acpi_mach *byt_quirk(void *arg)
++static struct snd_soc_acpi_mach *byt_quirk(void *arg)
+ {
+-	struct sst_acpi_mach *mach = arg;
++	struct snd_soc_acpi_mach *mach = arg;
+ 
+ 	dmi_check_system(byt_table);
+ 
+@@ -476,7 +476,7 @@ static struct sst_acpi_mach *byt_quirk(void *arg)
+ }
+ 
+ 
+-static struct sst_acpi_mach sst_acpi_bytcr[] = {
++static struct snd_soc_acpi_mach sst_acpi_bytcr[] = {
+ 	{
+ 		.id = "10EC5640",
+ 		.drv_name = "bytcr_rt5640",
+@@ -560,7 +560,7 @@ static struct sst_acpi_mach sst_acpi_bytcr[] = {
+ };
+ 
+ /* Cherryview-based platforms: CherryTrail and Braswell */
+-static struct sst_acpi_mach sst_acpi_chv[] = {
++static struct snd_soc_acpi_mach sst_acpi_chv[] = {
+ 	{
+ 		.id = "10EC5670",
+ 		.drv_name = "cht-bsw-rt5672",
+diff --git a/sound/soc/intel/boards/bytcht_da7213.c b/sound/soc/intel/boards/bytcht_da7213.c
+index 296b50640f46..c4d82ad41bd7 100644
+--- a/sound/soc/intel/boards/bytcht_da7213.c
++++ b/sound/soc/intel/boards/bytcht_da7213.c
+@@ -27,9 +27,9 @@
+ #include <sound/pcm.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
++#include <sound/soc-acpi.h>
+ #include "../../codecs/da7213.h"
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
+ 
+ static const struct snd_kcontrol_new controls[] = {
+ 	SOC_DAPM_PIN_SWITCH("Headphone Jack"),
+@@ -224,7 +224,7 @@ static char codec_name[16]; /* i2c-<HID>:00 with HID being 8 chars */
+ static int bytcht_da7213_probe(struct platform_device *pdev)
+ {
+ 	struct snd_soc_card *card;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	const char *i2c_name = NULL;
+ 	int dai_index = 0;
+ 	int ret_val = 0;
+@@ -243,7 +243,7 @@ static int bytcht_da7213_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	/* fixup codec name based on HID */
+-	i2c_name = sst_acpi_find_name_from_hid(mach->id);
++	i2c_name = snd_soc_acpi_find_name_from_hid(mach->id);
+ 	if (i2c_name) {
+ 		snprintf(codec_name, sizeof(codec_name),
+ 			"%s%s", "i2c-", i2c_name);
+diff --git a/sound/soc/intel/boards/bytcht_es8316.c b/sound/soc/intel/boards/bytcht_es8316.c
+index 6acacc0aeedb..8088396717e3 100644
+--- a/sound/soc/intel/boards/bytcht_es8316.c
++++ b/sound/soc/intel/boards/bytcht_es8316.c
+@@ -29,8 +29,8 @@
+ #include <sound/pcm.h>
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
++#include <sound/soc-acpi.h>
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
+ #include "../common/sst-dsp.h"
+ 
+ struct byt_cht_es8316_private {
+diff --git a/sound/soc/intel/boards/bytcr_rt5640.c b/sound/soc/intel/boards/bytcr_rt5640.c
+index 3eeb02036aa1..f2c0fc415e52 100644
+--- a/sound/soc/intel/boards/bytcr_rt5640.c
++++ b/sound/soc/intel/boards/bytcr_rt5640.c
+@@ -32,9 +32,9 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ #include <sound/jack.h>
++#include <sound/soc-acpi.h>
+ #include "../../codecs/rt5640.h"
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
+ #include "../common/sst-dsp.h"
+ 
+ enum {
+@@ -737,7 +737,7 @@ struct acpi_chan_package {   /* ACPICA seems to require 64 bit integers */
+ static int snd_byt_rt5640_mc_probe(struct platform_device *pdev)
+ {
+ 	struct byt_rt5640_private *priv;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	const char *i2c_name = NULL;
+ 	int ret_val = 0;
+ 	int dai_index = 0;
+@@ -762,7 +762,7 @@ static int snd_byt_rt5640_mc_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	/* fixup codec name based on HID */
+-	i2c_name = sst_acpi_find_name_from_hid(mach->id);
++	i2c_name = snd_soc_acpi_find_name_from_hid(mach->id);
+ 	if (i2c_name) {
+ 		snprintf(byt_rt5640_codec_name, sizeof(byt_rt5640_codec_name),
+ 			"%s%s", "i2c-", i2c_name);
+@@ -796,7 +796,7 @@ static int snd_byt_rt5640_mc_probe(struct platform_device *pdev)
+ 		/* format specified: 2 64-bit integers */
+ 		struct acpi_buffer format = {sizeof("NN"), "NN"};
+ 		struct acpi_buffer state = {0, NULL};
+-		struct sst_acpi_package_context pkg_ctx;
++		struct snd_soc_acpi_package_context pkg_ctx;
+ 		bool pkg_found = false;
+ 
+ 		state.length = sizeof(chan_package);
+@@ -808,7 +808,8 @@ static int snd_byt_rt5640_mc_probe(struct platform_device *pdev)
+ 		pkg_ctx.state = &state;
+ 		pkg_ctx.data_valid = false;
+ 
+-		pkg_found = sst_acpi_find_package_from_hid(mach->id, &pkg_ctx);
++		pkg_found = snd_soc_acpi_find_package_from_hid(mach->id,
++							       &pkg_ctx);
+ 		if (pkg_found) {
+ 			if (chan_package.aif_value == 1) {
+ 				dev_info(&pdev->dev, "BIOS Routing: AIF1 connected\n");
+diff --git a/sound/soc/intel/boards/bytcr_rt5651.c b/sound/soc/intel/boards/bytcr_rt5651.c
+index 1dad5c98c9ef..51de1bbe8ecd 100644
+--- a/sound/soc/intel/boards/bytcr_rt5651.c
++++ b/sound/soc/intel/boards/bytcr_rt5651.c
+@@ -30,9 +30,9 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ #include <sound/jack.h>
++#include <sound/soc-acpi.h>
+ #include "../../codecs/rt5651.h"
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
+ 
+ enum {
+ 	BYT_RT5651_DMIC_MAP,
+@@ -443,7 +443,7 @@ static char byt_rt5651_codec_name[16]; /* i2c-<HID>:00 with HID being 8 chars */
+ static int snd_byt_rt5651_mc_probe(struct platform_device *pdev)
+ {
+ 	struct byt_rt5651_private *priv;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	const char *i2c_name = NULL;
+ 	int ret_val = 0;
+ 	int dai_index = 0;
+@@ -468,7 +468,7 @@ static int snd_byt_rt5651_mc_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	/* fixup codec name based on HID */
+-	i2c_name = sst_acpi_find_name_from_hid(mach->id);
++	i2c_name = snd_soc_acpi_find_name_from_hid(mach->id);
+ 	if (i2c_name) {
+ 		snprintf(byt_rt5651_codec_name, sizeof(byt_rt5651_codec_name),
+ 			"%s%s", "i2c-", i2c_name);
+diff --git a/sound/soc/intel/boards/cht_bsw_rt5645.c b/sound/soc/intel/boards/cht_bsw_rt5645.c
+index 18b6ced69ab4..f898ee140cdc 100644
+--- a/sound/soc/intel/boards/cht_bsw_rt5645.c
++++ b/sound/soc/intel/boards/cht_bsw_rt5645.c
+@@ -32,9 +32,9 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ #include <sound/jack.h>
++#include <sound/soc-acpi.h>
+ #include "../../codecs/rt5645.h"
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
+ 
+ #define CHT_PLAT_CLK_3_HZ	19200000
+ #define CHT_CODEC_DAI1	"rt5645-aif1"
+@@ -530,7 +530,7 @@ struct acpi_chan_package {   /* ACPICA seems to require 64 bit integers */
+ static int snd_cht_mc_probe(struct platform_device *pdev)
+ {
+ 	struct snd_soc_card *card = snd_soc_cards[0].soc_card;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	struct cht_mc_private *drv;
+ 	const char *i2c_name = NULL;
+ 	bool found = false;
+@@ -573,7 +573,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
+ 		}
+ 
+ 	/* fixup codec name based on HID */
+-	i2c_name = sst_acpi_find_name_from_hid(mach->id);
++	i2c_name = snd_soc_acpi_find_name_from_hid(mach->id);
+ 	if (i2c_name) {
+ 		snprintf(cht_rt5645_codec_name, sizeof(cht_rt5645_codec_name),
+ 			"%s%s", "i2c-", i2c_name);
+@@ -606,7 +606,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
+ 		/* format specified: 2 64-bit integers */
+ 		struct acpi_buffer format = {sizeof("NN"), "NN"};
+ 		struct acpi_buffer state = {0, NULL};
+-		struct sst_acpi_package_context pkg_ctx;
++		struct snd_soc_acpi_package_context pkg_ctx;
+ 		bool pkg_found = false;
+ 
+ 		state.length = sizeof(chan_package);
+@@ -618,7 +618,8 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
+ 		pkg_ctx.state = &state;
+ 		pkg_ctx.data_valid = false;
+ 
+-		pkg_found = sst_acpi_find_package_from_hid(mach->id, &pkg_ctx);
++		pkg_found = snd_soc_acpi_find_package_from_hid(mach->id,
++							       &pkg_ctx);
+ 		if (pkg_found) {
+ 			if (chan_package.aif_value == 1) {
+ 				dev_info(&pdev->dev, "BIOS Routing: AIF1 connected\n");
+diff --git a/sound/soc/intel/boards/cht_bsw_rt5672.c b/sound/soc/intel/boards/cht_bsw_rt5672.c
+index d135640702e9..f8f21eee9b2d 100644
+--- a/sound/soc/intel/boards/cht_bsw_rt5672.c
++++ b/sound/soc/intel/boards/cht_bsw_rt5672.c
+@@ -24,9 +24,10 @@
+ #include <sound/pcm_params.h>
+ #include <sound/soc.h>
+ #include <sound/jack.h>
++#include <sound/soc-acpi.h>
+ #include "../../codecs/rt5670.h"
+ #include "../atom/sst-atom-controls.h"
+-#include "../common/sst-acpi.h"
++
+ 
+ /* The platform clock #3 outputs 19.2Mhz clock to codec as I2S MCLK */
+ #define CHT_PLAT_CLK_3_HZ	19200000
+@@ -383,7 +384,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
+ {
+ 	int ret_val = 0;
+ 	struct cht_mc_private *drv;
+-	struct sst_acpi_mach *mach = pdev->dev.platform_data;
++	struct snd_soc_acpi_mach *mach = pdev->dev.platform_data;
+ 	const char *i2c_name;
+ 	int i;
+ 
+@@ -395,7 +396,7 @@ static int snd_cht_mc_probe(struct platform_device *pdev)
+ 
+ 	/* fixup codec name based on HID */
+ 	if (mach) {
+-		i2c_name = sst_acpi_find_name_from_hid(mach->id);
++		i2c_name = snd_soc_acpi_find_name_from_hid(mach->id);
+ 		if (i2c_name) {
+ 			snprintf(drv->codec_name, sizeof(drv->codec_name),
+ 				 "i2c-%s", i2c_name);
+diff --git a/sound/soc/intel/common/Makefile b/sound/soc/intel/common/Makefile
+index 0e029f354f6b..0f46ff27d9a0 100644
+--- a/sound/soc/intel/common/Makefile
++++ b/sound/soc/intel/common/Makefile
+@@ -1,11 +1,9 @@
+ # SPDX-License-Identifier: GPL-2.0
+ snd-soc-sst-dsp-objs := sst-dsp.o
+ snd-soc-sst-acpi-objs := sst-acpi.o
+-snd-soc-sst-match-objs := sst-match-acpi.o
+ snd-soc-sst-ipc-objs := sst-ipc.o
+ snd-soc-sst-firmware-objs := sst-firmware.o
+ 
+ obj-$(CONFIG_SND_SOC_INTEL_SST) += snd-soc-sst-dsp.o snd-soc-sst-ipc.o
+ obj-$(CONFIG_SND_SOC_INTEL_SST_ACPI) += snd-soc-sst-acpi.o
+-obj-$(CONFIG_SND_SOC_INTEL_SST_MATCH) += snd-soc-sst-match.o
+ obj-$(CONFIG_SND_SOC_INTEL_SST_FIRMWARE) += snd-soc-sst-firmware.o
+diff --git a/sound/soc/intel/common/sst-acpi.c b/sound/soc/intel/common/sst-acpi.c
+index 1285cc597b6b..9866998de8be 100644
+--- a/sound/soc/intel/common/sst-acpi.c
++++ b/sound/soc/intel/common/sst-acpi.c
+@@ -21,7 +21,7 @@
+ #include <linux/platform_device.h>
+ 
+ #include "sst-dsp.h"
+-#include "sst-acpi.h"
++#include <sound/soc-acpi.h>
+ 
+ #define SST_LPT_DSP_DMA_ADDR_OFFSET	0x0F0000
+ #define SST_WPT_DSP_DMA_ADDR_OFFSET	0x0FE000
+@@ -30,7 +30,7 @@
+ /* Descriptor for setting up SST platform data */
+ struct sst_acpi_desc {
+ 	const char *drv_name;
+-	struct sst_acpi_mach *machines;
++	struct snd_soc_acpi_mach *machines;
+ 	/* Platform resource indexes. Must set to -1 if not used */
+ 	int resindex_lpe_base;
+ 	int resindex_pcicfg_base;
+@@ -49,7 +49,7 @@ struct sst_acpi_priv {
+ 	struct platform_device *pdev_pcm;
+ 	struct sst_pdata sst_pdata;
+ 	struct sst_acpi_desc *desc;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ };
+ 
+ static void sst_acpi_fw_cb(const struct firmware *fw, void *context)
+@@ -59,7 +59,7 @@ static void sst_acpi_fw_cb(const struct firmware *fw, void *context)
+ 	struct sst_acpi_priv *sst_acpi = platform_get_drvdata(pdev);
+ 	struct sst_pdata *sst_pdata = &sst_acpi->sst_pdata;
+ 	struct sst_acpi_desc *desc = sst_acpi->desc;
+-	struct sst_acpi_mach *mach = sst_acpi->mach;
++	struct snd_soc_acpi_mach *mach = sst_acpi->mach;
+ 
+ 	sst_pdata->fw = fw;
+ 	if (!fw) {
+@@ -85,7 +85,7 @@ static int sst_acpi_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	struct sst_acpi_priv *sst_acpi;
+ 	struct sst_pdata *sst_pdata;
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 	struct sst_acpi_desc *desc;
+ 	struct resource *mmio;
+ 	int ret = 0;
+@@ -99,7 +99,7 @@ static int sst_acpi_probe(struct platform_device *pdev)
+ 		return -ENODEV;
+ 
+ 	desc = (struct sst_acpi_desc *)id->driver_data;
+-	mach = sst_acpi_find_machine(desc->machines);
++	mach = snd_soc_acpi_find_machine(desc->machines);
+ 	if (mach == NULL) {
+ 		dev_err(dev, "No matching ASoC machine driver found\n");
+ 		return -ENODEV;
+@@ -179,7 +179,7 @@ static int sst_acpi_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static struct sst_acpi_mach haswell_machines[] = {
++static struct snd_soc_acpi_mach haswell_machines[] = {
+ 	{ "INT33CA", "haswell-audio", "intel/IntcSST1.bin", NULL, NULL, NULL },
+ 	{}
+ };
+@@ -197,7 +197,7 @@ static struct sst_acpi_desc sst_acpi_haswell_desc = {
+ 	.dma_size = SST_LPT_DSP_DMA_SIZE,
+ };
+ 
+-static struct sst_acpi_mach broadwell_machines[] = {
++static struct snd_soc_acpi_mach broadwell_machines[] = {
+ 	{ "INT343A", "broadwell-audio", "intel/IntcSST2.bin", NULL, NULL, NULL },
+ 	{ "RT5677CE", "bdw-rt5677", "intel/IntcSST2.bin", NULL, NULL, NULL },
+ 	{}
+@@ -217,7 +217,7 @@ static struct sst_acpi_desc sst_acpi_broadwell_desc = {
+ };
+ 
+ #if !IS_ENABLED(CONFIG_SND_SST_IPC_ACPI)
+-static struct sst_acpi_mach baytrail_machines[] = {
++static struct snd_soc_acpi_mach baytrail_machines[] = {
+ 	{ "10EC5640", "byt-rt5640", "intel/fw_sst_0f28.bin-48kHz_i2s_master", NULL, NULL, NULL },
+ 	{ "193C9890", "byt-max98090", "intel/fw_sst_0f28.bin-48kHz_i2s_master", NULL, NULL, NULL },
+ 	{}
+diff --git a/sound/soc/intel/common/sst-acpi.h b/sound/soc/intel/common/sst-acpi.h
+deleted file mode 100644
+index afe9b87b8bd5..000000000000
+--- a/sound/soc/intel/common/sst-acpi.h
++++ /dev/null
+@@ -1,82 +0,0 @@
+-/*
+- * Copyright (C) 2013-15, Intel Corporation. All rights reserved.
+- *
+- * This program is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public License version
+- * 2 as published by the Free Software Foundation.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- */
+-
+-#include <linux/stddef.h>
+-#include <linux/acpi.h>
+-
+-struct sst_acpi_package_context {
+-	char *name;           /* package name */
+-	int length;           /* number of elements */
+-	struct acpi_buffer *format;
+-	struct acpi_buffer *state;
+-	bool data_valid;
+-};
+-
+-#if IS_ENABLED(CONFIG_ACPI)
+-/* translation fron HID to I2C name, needed for DAI codec_name */
+-const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN]);
+-bool sst_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
+-				    struct sst_acpi_package_context *ctx);
+-#else
+-static inline const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
+-{
+-	return NULL;
+-}
+-static inline bool sst_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
+-					   struct sst_acpi_package_context *ctx)
+-{
+-	return false;
+-}
+-#endif
+-
+-/* acpi match */
+-struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines);
+-
+-/* acpi check hid */
+-bool sst_acpi_check_hid(const u8 hid[ACPI_ID_LEN]);
+-
+-/* Descriptor for SST ASoC machine driver */
+-struct sst_acpi_mach {
+-	/* ACPI ID for the matching machine driver. Audio codec for instance */
+-	const u8 id[ACPI_ID_LEN];
+-	/* machine driver name */
+-	const char *drv_name;
+-	/* firmware file name */
+-	const char *fw_filename;
+-
+-	/* board name */
+-	const char *board;
+-	struct sst_acpi_mach * (*machine_quirk)(void *arg);
+-	const void *quirk_data;
+-	void *pdata;
+-};
+-
+-#define SST_ACPI_MAX_CODECS 3
+-
+-/**
+- * struct sst_codecs: Structure to hold secondary codec information apart from
+- * the matched one, this data will be passed to the quirk function to match
+- * with the ACPI detected devices
+- *
+- * @num_codecs: number of secondary codecs used in the platform
+- * @codecs: holds the codec IDs
+- *
+- */
+-struct sst_codecs {
+-	int num_codecs;
+-	u8 codecs[SST_ACPI_MAX_CODECS][ACPI_ID_LEN];
+-};
+-
+-/* check all codecs */
+-struct sst_acpi_mach *sst_acpi_codec_list(void *arg);
+diff --git a/sound/soc/intel/skylake/skl.c b/sound/soc/intel/skylake/skl.c
+index 575b0cbd6ccd..53c373886d6b 100644
+--- a/sound/soc/intel/skylake/skl.c
++++ b/sound/soc/intel/skylake/skl.c
+@@ -28,7 +28,7 @@
+ #include <linux/firmware.h>
+ #include <linux/delay.h>
+ #include <sound/pcm.h>
+-#include "../common/sst-acpi.h"
++#include <sound/soc-acpi.h>
+ #include <sound/hda_register.h>
+ #include <sound/hdaudio.h>
+ #include <sound/hda_i915.h>
+@@ -516,7 +516,7 @@ static int skl_find_mchine(struct skl *skl, void *driver_data)
+ 	    IS_ENABLED(CONFIG_SND_SOC_INTEL_CNL_FPGA))
+ 		goto out;
+ 
+-	mach = sst_acpi_find_machine(mach);
++	mach = snd_soc_acpi_find_machine(mach);
+ 	if (mach == NULL) {
+ 		dev_err(bus->dev, "No matching machine driver found\n");
+ 		return -ENODEV;
+@@ -1000,33 +1000,33 @@ static void skl_remove(struct pci_dev *pci)
+ 	dev_set_drvdata(&pci->dev, NULL);
+ }
+ 
+-static struct sst_codecs skl_codecs = {
++static struct snd_soc_acpi_codecs skl_codecs = {
+ 	.num_codecs = 1,
+ 	.codecs = {"10508825"}
+ };
+ 
+-static struct sst_codecs kbl_codecs = {
++static struct snd_soc_acpi_codecs kbl_codecs = {
+ 	.num_codecs = 1,
+ 	.codecs = {"10508825"}
+ };
+ 
+-static struct sst_codecs bxt_codecs = {
++static struct snd_soc_acpi_codecs bxt_codecs = {
+ 	.num_codecs = 1,
+ 	.codecs = {"MX98357A"}
+ };
+ 
+-static struct sst_codecs kbl_poppy_codecs = {
++static struct snd_soc_acpi_codecs kbl_poppy_codecs = {
+ 	.num_codecs = 1,
+ 	.codecs = {"10EC5663"}
+ };
+ 
+-static struct sst_codecs kbl_5663_5514_codecs = {
++static struct snd_soc_acpi_codecs kbl_5663_5514_codecs = {
+ 	.num_codecs = 2,
+ 	.codecs = {"10EC5663", "10EC5514"}
+ };
+ 
+ 
+-static struct sst_acpi_mach sst_skl_devdata[] = {
++static struct snd_soc_acpi_mach sst_skl_devdata[] = {
+ 	{
+ 		.id = "INT343A",
+ 		.drv_name = "skl_alc286s_i2s",
+@@ -1036,7 +1036,7 @@ static struct sst_acpi_mach sst_skl_devdata[] = {
+ 		.id = "INT343B",
+ 		.drv_name = "skl_n88l25_s4567",
+ 		.fw_filename = "intel/dsp_fw_release.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &skl_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+@@ -1044,14 +1044,14 @@ static struct sst_acpi_mach sst_skl_devdata[] = {
+ 		.id = "MX98357A",
+ 		.drv_name = "skl_n88l25_m98357a",
+ 		.fw_filename = "intel/dsp_fw_release.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &skl_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+ 	{}
+ };
+ 
+-static struct sst_acpi_mach sst_bxtp_devdata[] = {
++static struct snd_soc_acpi_mach sst_bxtp_devdata[] = {
+ 	{
+ 		.id = "INT343A",
+ 		.drv_name = "bxt_alc298s_i2s",
+@@ -1061,7 +1061,7 @@ static struct sst_acpi_mach sst_bxtp_devdata[] = {
+ 		.id = "DLGS7219",
+ 		.drv_name = "bxt_da7219_max98357a_i2s",
+ 		.fw_filename = "intel/dsp_fw_bxtn.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &bxt_codecs,
+ 	},
+ 	{
+@@ -1072,7 +1072,7 @@ static struct sst_acpi_mach sst_bxtp_devdata[] = {
+ 	{}
+ };
+ 
+-static struct sst_acpi_mach sst_kbl_devdata[] = {
++static struct snd_soc_acpi_mach sst_kbl_devdata[] = {
+ 	{
+ 		.id = "INT343A",
+ 		.drv_name = "kbl_alc286s_i2s",
+@@ -1082,7 +1082,7 @@ static struct sst_acpi_mach sst_kbl_devdata[] = {
+ 		.id = "INT343B",
+ 		.drv_name = "kbl_n88l25_s4567",
+ 		.fw_filename = "intel/dsp_fw_kbl.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &kbl_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+@@ -1090,7 +1090,7 @@ static struct sst_acpi_mach sst_kbl_devdata[] = {
+ 		.id = "MX98357A",
+ 		.drv_name = "kbl_n88l25_m98357a",
+ 		.fw_filename = "intel/dsp_fw_kbl.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &kbl_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+@@ -1098,7 +1098,7 @@ static struct sst_acpi_mach sst_kbl_devdata[] = {
+ 		.id = "MX98927",
+ 		.drv_name = "kbl_r5514_5663_max",
+ 		.fw_filename = "intel/dsp_fw_kbl.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &kbl_5663_5514_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+@@ -1106,7 +1106,7 @@ static struct sst_acpi_mach sst_kbl_devdata[] = {
+ 		.id = "MX98927",
+ 		.drv_name = "kbl_rt5663_m98927",
+ 		.fw_filename = "intel/dsp_fw_kbl.bin",
+-		.machine_quirk = sst_acpi_codec_list,
++		.machine_quirk = snd_soc_acpi_codec_list,
+ 		.quirk_data = &kbl_poppy_codecs,
+ 		.pdata = &skl_dmic_data
+ 	},
+@@ -1119,7 +1119,7 @@ static struct sst_acpi_mach sst_kbl_devdata[] = {
+ 	{}
+ };
+ 
+-static struct sst_acpi_mach sst_glk_devdata[] = {
++static struct snd_soc_acpi_mach sst_glk_devdata[] = {
+ 	{
+ 		.id = "INT343A",
+ 		.drv_name = "glk_alc298s_i2s",
+@@ -1128,7 +1128,7 @@ static struct sst_acpi_mach sst_glk_devdata[] = {
+ 	{}
+ };
+ 
+-static const struct sst_acpi_mach sst_cnl_devdata[] = {
++static const struct snd_soc_acpi_mach sst_cnl_devdata[] = {
+ #if !IS_ENABLED(CONFIG_SND_SOC_RT700)
+ 	{
+ 		.id = "INT34C2",
+@@ -1143,7 +1143,7 @@ static const struct sst_acpi_mach sst_cnl_devdata[] = {
+ #endif
+ };
+ 
+-static struct sst_acpi_mach sst_icl_devdata[] = {
++static struct snd_soc_acpi_mach sst_icl_devdata[] = {
+ #if IS_ENABLED(CONFIG_SND_SOC_RT700)
+ 	{ "dummy", "icl_rt700", "intel/dsp_fw_icl.bin", NULL, NULL, NULL },
+ #elif IS_ENABLED(CONFIG_SND_SOC_WM5110)
+diff --git a/sound/soc/intel/common/sst-match-acpi.c b/sound/soc/soc-acpi.c
+similarity index 63%
+rename from sound/soc/intel/common/sst-match-acpi.c
+rename to sound/soc/soc-acpi.c
+index b4a929562218..29a6fc8e282b 100644
+--- a/sound/soc/intel/common/sst-match-acpi.c
++++ b/sound/soc/soc-acpi.c
+@@ -1,5 +1,5 @@
+ /*
+- * sst_match_apci.c - SST (LPE) match for ACPI enumeration.
++ * soc-apci.c - support for ACPI enumeration.
+  *
+  * Copyright (c) 2013-15, Intel Corporation.
+  *
+@@ -14,9 +14,9 @@
+  * more details.
+  */
+ 
+-#include "sst-acpi.h"
++#include <sound/soc-acpi.h>
+ 
+-static acpi_status sst_acpi_find_name(acpi_handle handle, u32 level,
++static acpi_status snd_soc_acpi_find_name(acpi_handle handle, u32 level,
+ 				      void *context, void **ret)
+ {
+ 	struct acpi_device *adev;
+@@ -34,12 +34,12 @@ static acpi_status sst_acpi_find_name(acpi_handle handle, u32 level,
+ 	return AE_OK;
+ }
+ 
+-const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
++const char *snd_soc_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
+ {
+ 	const char *name = NULL;
+ 	acpi_status status;
+ 
+-	status = acpi_get_devices(hid, sst_acpi_find_name, NULL,
++	status = acpi_get_devices(hid, snd_soc_acpi_find_name, NULL,
+ 				  (void **)&name);
+ 
+ 	if (ACPI_FAILURE(status) || name[0] == '\0')
+@@ -47,9 +47,9 @@ const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
+ 
+ 	return name;
+ }
+-EXPORT_SYMBOL_GPL(sst_acpi_find_name_from_hid);
++EXPORT_SYMBOL_GPL(snd_soc_acpi_find_name_from_hid);
+ 
+-static acpi_status sst_acpi_mach_match(acpi_handle handle, u32 level,
++static acpi_status snd_soc_acpi_mach_match(acpi_handle handle, u32 level,
+ 				       void *context, void **ret)
+ {
+ 	unsigned long long sta;
+@@ -63,26 +63,27 @@ static acpi_status sst_acpi_mach_match(acpi_handle handle, u32 level,
+ 	return AE_OK;
+ }
+ 
+-bool sst_acpi_check_hid(const u8 hid[ACPI_ID_LEN])
++bool snd_soc_acpi_check_hid(const u8 hid[ACPI_ID_LEN])
+ {
+ 	acpi_status status;
+ 	bool found = false;
+ 
+-	status = acpi_get_devices(hid, sst_acpi_mach_match, &found, NULL);
++	status = acpi_get_devices(hid, snd_soc_acpi_mach_match, &found, NULL);
+ 
+ 	if (ACPI_FAILURE(status))
+ 		return false;
+ 
+ 	return found;
+ }
+-EXPORT_SYMBOL_GPL(sst_acpi_check_hid);
++EXPORT_SYMBOL_GPL(snd_soc_acpi_check_hid);
+ 
+-struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines)
++struct snd_soc_acpi_mach *
++snd_soc_acpi_find_machine(struct snd_soc_acpi_mach *machines)
+ {
+-	struct sst_acpi_mach *mach;
++	struct snd_soc_acpi_mach *mach;
+ 
+ 	for (mach = machines; mach->id[0]; mach++) {
+-		if (sst_acpi_check_hid(mach->id) == true) {
++		if (sst_soc_acpi_check_hid(mach->id) == true) {
+ 			if (mach->machine_quirk)
+ 				mach = mach->machine_quirk(mach);
+ 			return mach;
+@@ -90,14 +91,14 @@ struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines)
+ 	}
+ 	return NULL;
+ }
+-EXPORT_SYMBOL_GPL(sst_acpi_find_machine);
++EXPORT_SYMBOL_GPL(snd_soc_acpi_find_machine);
+ 
+-static acpi_status sst_acpi_find_package(acpi_handle handle, u32 level,
+-					void *context, void **ret)
++static acpi_status snd_soc_acpi_find_package(acpi_handle handle, u32 level,
++					     void *context, void **ret)
+ {
+ 	struct acpi_device *adev;
+ 	acpi_status status = AE_OK;
+-	struct sst_acpi_package_context *pkg_ctx = context;
++	struct snd_soc_acpi_package_context *pkg_ctx = context;
+ 
+ 	pkg_ctx->data_valid = false;
+ 
+@@ -135,37 +136,38 @@ static acpi_status sst_acpi_find_package(acpi_handle handle, u32 level,
+ 	return AE_OK;
+ }
+ 
+-bool sst_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
+-				struct sst_acpi_package_context *ctx)
++bool snd_soc_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
++				struct snd_soc_acpi_package_context *ctx)
+ {
+ 	acpi_status status;
+ 
+-	status = acpi_get_devices(hid, sst_acpi_find_package, ctx, NULL);
++	status = acpi_get_devices(hid, snd_soc_acpi_find_package, ctx, NULL);
+ 
+ 	if (ACPI_FAILURE(status) || !ctx->data_valid)
+ 		return false;
+ 
+ 	return true;
+ }
+-EXPORT_SYMBOL_GPL(sst_acpi_find_package_from_hid);
++EXPORT_SYMBOL_GPL(snd_soc_acpi_find_package_from_hid);
+ 
+-struct sst_acpi_mach *sst_acpi_codec_list(void *arg)
++struct snd_soc_acpi_mach *snd_soc_acpi_codec_list(void *arg)
+ {
+-	struct sst_acpi_mach *mach = arg;
+-	struct sst_codecs *codec_list = (struct sst_codecs *) mach->quirk_data;
++	struct snd_soc_acpi_mach *mach = arg;
++	struct snd_soc_acpi_codecs *codec_list =
++		(struct snd_soc_acpi_codecs *) mach->quirk_data;
+ 	int i;
+ 
+ 	if (mach->quirk_data == NULL)
+ 		return mach;
+ 
+ 	for (i = 0; i < codec_list->num_codecs; i++) {
+-		if (sst_acpi_check_hid(codec_list->codecs[i]) != true)
++		if (snd_soc_acpi_check_hid(codec_list->codecs[i]) != true)
+ 			return NULL;
+ 	}
+ 
+ 	return mach;
+ }
+-EXPORT_SYMBOL_GPL(sst_acpi_codec_list);
++EXPORT_SYMBOL_GPL(snd_soc_acpi_codec_list);
+ 
+ MODULE_LICENSE("GPL v2");
+-MODULE_DESCRIPTION("Intel Common ACPI Match module");
++MODULE_DESCRIPTION("ALSA SoC ACPI module");
+-- 
+2.17.1
+

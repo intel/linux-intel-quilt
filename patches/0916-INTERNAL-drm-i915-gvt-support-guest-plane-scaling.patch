@@ -1,0 +1,372 @@
+From 27458005b38bebde13f340305765fc02cb702f44 Mon Sep 17 00:00:00 2001
+From: Fei Jiang <fei.jiang@intel.com>
+Date: Thu, 12 Apr 2018 18:12:18 +0800
+Subject: [PATCH 0916/1040] [INTERNAL]drm/i915/gvt: support guest plane scaling
+
+It is to support plane scaling feature, need let guest access PS_CTRL,
+PS_WIN, PS_POS registers. Use parameter domain_scaler_owner to control
+domain's scaler ownership.
+Validate with IGT test: kms_plane_scaling.
+SOS only patch.
+
+Signed-off-by: Fei Jiang <fei.jiang@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c   |  20 +++-
+ drivers/gpu/drm/i915/gvt/gvt.h       |   6 ++
+ drivers/gpu/drm/i915/gvt/handlers.c  | 135 ++++++++++++++++-----------
+ drivers/gpu/drm/i915/gvt/reg.h       |   4 +
+ drivers/gpu/drm/i915/gvt/vgpu.c      |  13 +++
+ drivers/gpu/drm/i915/i915_params.c   |  25 +++++
+ drivers/gpu/drm/i915/i915_params.h   |   3 +-
+ drivers/gpu/drm/i915/intel_display.c |   5 +
+ 8 files changed, 153 insertions(+), 58 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 1f9a2c20d588..7ab158758bec 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -465,15 +465,33 @@ int bxt_check_planes(struct intel_vgpu *vgpu, int pipe)
+ 	return ret;
+ }
+ 
++#define BITS_PER_DOMAIN 4
++#define MAX_SCALERS_PER_DOMAIN 2
++
++#define DOMAIN_SCALER_OWNER(owner, pipe, scaler) \
++	((((owner) >> (pipe) * BITS_PER_DOMAIN * MAX_SCALERS_PER_DOMAIN) >>  \
++	BITS_PER_DOMAIN * (scaler)) & 0xf)
++
+ void intel_gvt_init_pipe_info(struct intel_gvt *gvt)
+ {
+-	int pipe;
++	enum pipe pipe;
++	unsigned int scaler;
++	unsigned int domain_scaler_owner = i915_modparams.domain_scaler_owner;
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
+ 
+ 	for (pipe = PIPE_A; pipe <= PIPE_C; pipe++) {
+ 		gvt->pipe_info[pipe].pipe_num = pipe;
+ 		gvt->pipe_info[pipe].gvt = gvt;
+ 		INIT_WORK(&gvt->pipe_info[pipe].vblank_work,
+ 				intel_gvt_vblank_work);
++		/* Each nibble represents domain id
++		 * ids can be from 0-F. 0 for Dom0, 1,2,3...0xF for DomUs
++		 * scaler_owner[i] holds the id of the domain that owns it,
++		 * eg:0,1,2 etc
++		 */
++		for_each_universal_scaler(dev_priv, pipe, scaler)
++			gvt->pipe_info[pipe].scaler_owner[scaler] =
++			DOMAIN_SCALER_OWNER(domain_scaler_owner, pipe, scaler);
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 91b85397c59f..c4dadcc927ed 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -290,6 +290,7 @@ struct intel_gvt_pipe_info {
+ 	struct work_struct vblank_work;
+ 	struct intel_dom0_plane_regs dom0_regs[I915_MAX_PLANES - 1];
+ 	int plane_owner[I915_MAX_PLANES - 1];
++	int scaler_owner[SKL_NUM_SCALERS];
+ };
+ 
+ struct intel_gvt {
+@@ -440,6 +441,11 @@ void intel_vgpu_write_fence(struct intel_vgpu *vgpu,
+ 	idr_for_each_entry((&(gvt)->vgpu_idr), (vgpu), (id)) \
+ 		for_each_if(vgpu->active)
+ 
++#define for_each_universal_scaler(__dev_priv, __pipe, __s)		\
++	for ((__s) = 0;							\
++	     (__s) < INTEL_INFO(__dev_priv)->num_scalers[(__pipe)] + 1; \
++	     (__s)++)
++
+ static inline void intel_vgpu_write_pci_bar(struct intel_vgpu *vgpu,
+ 					    u32 offset, u32 val, bool low)
+ {
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 9afca195df45..5c28e5cdb83b 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -764,6 +764,45 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	return 0;
+ }
+ 
++static int skl_ps_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
++		void *p_data, unsigned int bytes)
++{
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	unsigned int pipe = SKL_PS_REG_TO_PIPE(offset);
++	unsigned int scaler = SKL_PS_REG_TO_SCALER(offset) - 1;
++
++	if (pipe >=  I915_MAX_PIPES || scaler >= SKL_NUM_SCALERS ||
++	    vgpu->gvt->pipe_info[pipe].scaler_owner[scaler] != vgpu->id) {
++		gvt_vgpu_err("Unsupport pipe %d, scaler %d scaling\n",
++			pipe, scaler);
++		return 0;
++	}
++
++	if (!(vgpu_vreg(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE))
++		return 0;
++
++	if (offset == _PS_1A_CTRL || offset == _PS_2A_CTRL ||
++	   offset == _PS_1B_CTRL || offset == _PS_2B_CTRL ||
++	   offset == _PS_1C_CTRL) {
++		unsigned int plane;
++
++		if (SKL_PS_REG_VALUE_TO_PLANE(*(u32 *)p_data) == 0) {
++			gvt_vgpu_err("Unsupport crtc scaling for UOS\n");
++			return 0;
++		}
++		plane = SKL_PS_REG_VALUE_TO_PLANE(*(u32 *)p_data) - 1;
++		if (plane >= I915_MAX_PLANES ||
++		    vgpu->gvt->pipe_info[pipe].plane_owner[plane] != vgpu->id) {
++			gvt_vgpu_err("Unsupport plane %d scaling\n", plane);
++			return 0;
++		}
++	}
++
++	write_vreg(vgpu, offset, p_data, bytes);
++	I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++	return 0;
++}
++
+ static int skl_plane_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+@@ -1303,22 +1342,6 @@ static int pvinfo_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	return 0;
+ }
+ 
+-static int pf_write(struct intel_vgpu *vgpu,
+-		unsigned int offset, void *p_data, unsigned int bytes)
+-{
+-	u32 val = *(u32 *)p_data;
+-
+-	if ((offset == _PS_1A_CTRL || offset == _PS_2A_CTRL ||
+-	   offset == _PS_1B_CTRL || offset == _PS_2B_CTRL ||
+-	   offset == _PS_1C_CTRL) && (val & PS_PLANE_SEL_MASK) != 0) {
+-		WARN_ONCE(true, "VM(%d): guest is trying to scaling a plane\n",
+-			  vgpu->id);
+-		return 0;
+-	}
+-
+-	return intel_vgpu_default_mmio_write(vgpu, offset, p_data, bytes);
+-}
+-
+ static int power_well_ctl_mmio_write(struct intel_vgpu *vgpu,
+ 		unsigned int offset, void *p_data, unsigned int bytes)
+ {
+@@ -2914,26 +2937,26 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(0x6c05c, D_SKL | D_KBL);
+ 	MMIO_DH(0X6c060, D_SKL | D_KBL, dpll_status_read, NULL);
+ 
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 1), D_SKL_PLUS, NULL, pf_write);
+-
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 1), D_SKL_PLUS, NULL, pf_write);
+-
+-	MMIO_DH(SKL_PS_CTRL(PIPE_A, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_A, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_B, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_B, 1), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_C, 0), D_SKL_PLUS, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_C, 1), D_SKL_PLUS, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 0), D_SKL_PLUS, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 1), D_SKL_PLUS, NULL, skl_ps_mmio_write);
+ 
+ 	MMIO_DH(CUR_BUF_CFG(PIPE_A), D_SKL_PLUS, NULL, NULL);
+ 	MMIO_DH(CUR_BUF_CFG(PIPE_B), D_SKL_PLUS, NULL, NULL);
+@@ -3072,26 +3095,26 @@ static int init_bxt_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(0x6c05c, D_BXT);
+ 	MMIO_DH(0X6c060, D_BXT, dpll_status_read, NULL);
+ 
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 1), D_BXT, NULL, pf_write);
+-
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 1), D_BXT, NULL, pf_write);
+-
+-	MMIO_DH(SKL_PS_CTRL(PIPE_A, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_A, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_B, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_B, 1), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_C, 0), D_BXT, NULL, pf_write);
+-	MMIO_DH(SKL_PS_CTRL(PIPE_C, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 1), D_BXT, NULL, skl_ps_mmio_write);
++
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 1), D_BXT, NULL, skl_ps_mmio_write);
++
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 1), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 0), D_BXT, NULL, skl_ps_mmio_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 1), D_BXT, NULL, skl_ps_mmio_write);
+ 
+ 	MMIO_DH(CUR_BUF_CFG(PIPE_A), D_BXT, NULL, NULL);
+ 	MMIO_DH(CUR_BUF_CFG(PIPE_B), D_BXT, NULL, NULL);
+diff --git a/drivers/gpu/drm/i915/gvt/reg.h b/drivers/gpu/drm/i915/gvt/reg.h
+index 0beec530aabc..db26f31d4928 100644
+--- a/drivers/gpu/drm/i915/gvt/reg.h
++++ b/drivers/gpu/drm/i915/gvt/reg.h
+@@ -58,6 +58,10 @@
+ #define _REG_701C4(pipe, plane) (0x701c4 + pipe * 0x1000 + plane * 0x100)
+ #define _REG_701AC(pipe, plane) (0x701ac + pipe * 0x1000 + plane * 0x100)
+ 
++#define SKL_PS_REG_TO_PIPE(reg) (((reg) >> 11) & 0x3)
++#define SKL_PS_REG_TO_SCALER(reg) (((reg) >> 8) & 0x3)
++#define SKL_PS_REG_VALUE_TO_PLANE(val) (((val) >> 25) & 0x7)
++
+ #define SKL_PLANE_REG_TO_PIPE(reg) (((reg) >> 12) & 0x3)
+ #define SKL_PLANE_REG_TO_PLANE(reg) ((((reg) & 0xFFF) - 0x180) >> 8)
+ #define SKL_FLIP_EVENT(pipe, plane) (PRIMARY_A_FLIP_DONE + (plane)*3 + pipe)
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index b6c9bbf55240..f5802413591a 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -37,6 +37,11 @@
+ 
+ void populate_pvinfo_page(struct intel_vgpu *vgpu)
+ {
++	enum pipe pipe;
++	int scaler;
++	struct intel_gvt *gvt = vgpu->gvt;
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++
+ 	/* setup the ballooning information */
+ 	vgpu_vreg64(vgpu, vgtif_reg(magic)) = VGT_MAGIC;
+ 	vgpu_vreg(vgpu, vgtif_reg(version_major)) = 1;
+@@ -57,6 +62,14 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
+ 
+ 	vgpu_vreg(vgpu, vgtif_reg(enable_pvmmio)) = 0;
+ 
++	vgpu_vreg(vgpu, vgtif_reg(scaler_owned)) = 0;
++	for_each_pipe(dev_priv, pipe)
++		for_each_universal_scaler(dev_priv, pipe, scaler)
++			if (gvt->pipe_info[pipe].scaler_owner[scaler] ==
++				vgpu->id)
++				vgpu_vreg(vgpu, vgtif_reg(scaler_owned)) |=
++					1 << (pipe * SKL_NUM_SCALERS + scaler);
++
+ 	gvt_dbg_core("Populate PVINFO PAGE for vGPU %d\n", vgpu->id);
+ 	gvt_dbg_core("aperture base [GMADR] 0x%llx size 0x%llx\n",
+ 		vgpu_aperture_gmadr_base(vgpu), vgpu_aperture_sz(vgpu));
+diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
+index e9a2647309fc..5c582c14d471 100644
+--- a/drivers/gpu/drm/i915/i915_params.c
++++ b/drivers/gpu/drm/i915/i915_params.c
+@@ -83,6 +83,7 @@ struct i915_params i915_modparams __read_mostly = {
+ 	.domain_plane_owners = 0,
+ 	.bg_color = 0x00000000,
+ 	.gvt_emulate_hdmi = true,
++	.domain_scaler_owner = 0x21100,
+ };
+ 
+ i915_param_named(modeset, int, 0400,
+@@ -321,3 +322,27 @@ MODULE_PARM_DESC(bg_color, "Set the background (canvas) color");
+ 
+ module_param_named(gvt_emulate_hdmi, i915_modparams.gvt_emulate_hdmi, bool, 0400);
+ MODULE_PARM_DESC(gvt_emulate_hdmi, "GVT-g emulate HDMI or DP port for Guest OS.");
++
++module_param_named_unsafe(domain_scaler_owner,
++			  i915_modparams.domain_scaler_owner, int, 0400);
++/* pipeA Scaler = BITS 0-7 pipeB scaler = 8-15, pipeC = 16-19
++ *
++ * +----------+------------+-------------+------------+
++ * |unused    |  Pipe C    |   Pipe B    |   Pipe A   |
++ * +----------+------------+-------------+------------+
++ * 31       20 19        16 15           8 7           0
++ *
++ * Each nibble represents domain id. 0 for Dom0, 1,2,3...0xF for DomUs
++ * eg: domain_plane_owners = 0x00030210 // 0x000|3|02|10
++ * plane                 domain
++ * scaler_owner1A -0
++ * scaler_owner2A -1
++ * scaler_owner3A -2
++ * scaler_owner4A -0
++ * scaler_owner1B -3
++ * scaler_owner2B -0
++ *
++ */
++MODULE_PARM_DESC(domain_scaler_owner, "scaler owners for each domain and for\n"
++	"each pipe ids can be from 0-F, eg domain_scaler_owners = 0x00030210\n"
++	"scaler owner: 1C:3 2B:0 1B:2 2A:1 1A:0 (0x0 - default value)\n");
+diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
+index 4e1654e67efe..73b5e6231b8a 100644
+--- a/drivers/gpu/drm/i915/i915_params.h
++++ b/drivers/gpu/drm/i915/i915_params.h
+@@ -79,7 +79,8 @@
+ 	func(bool, disable_gvt_fw_loading); \
+ 	func(int, gvt_workload_priority); \
+ 	func(bool, enable_initial_modeset); \
+-	func(bool, gvt_emulate_hdmi);
++	func(bool, gvt_emulate_hdmi); \
++	func(int, domain_scaler_owner);
+ 
+ #define MEMBER(T, member) T member
+ struct i915_params {
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index f0354e7ed0c0..a6f4a915cacd 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -13640,6 +13640,11 @@ static void intel_crtc_init_scalers(struct intel_crtc *crtc,
+ 		scaler->in_use = 0;
+ 		scaler->mode = PS_SCALER_MODE_DYN;
+ 		scaler->owned = 1;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++		if (!intel_vgpu_active(dev_priv) &&
++		    dev_priv->gvt->pipe_info[crtc->pipe].scaler_owner[i] != 0)
++			scaler->owned = 0;
++#endif
+ 		if (intel_vgpu_active(dev_priv) &&
+ 			 !(1 << (crtc->pipe * SKL_NUM_SCALERS + i) &
+ 			  dev_priv->vgpu.scaler_owned))
+-- 
+2.17.1
+
