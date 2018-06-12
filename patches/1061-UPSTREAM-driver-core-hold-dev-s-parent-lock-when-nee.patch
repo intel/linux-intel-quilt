@@ -1,0 +1,176 @@
+From 0452e31b16e32a3d7e5424bc63ad30af1f2e2855 Mon Sep 17 00:00:00 2001
+From: Martin Liu <liumartin@google.com>
+Date: Thu, 31 May 2018 00:31:36 +0800
+Subject: [PATCH 1061/1061] UPSTREAM: driver core: hold dev's parent lock when
+ needed
+
+[ Upstream commit 8c97a46af04b4f7c0a0dded031fef1806872e648 ]
+
+SoC have internal I/O buses that can't be proved for devices. The
+devices on the buses can be accessed directly without additinal
+configuration required. This type of bus is represented as
+"simple-bus". In some platforms, we name "soc" with "simple-bus"
+attribute and many devices are hooked under it described in DT
+(device tree).
+
+In commit bf74ad5bc417 ("Hold the device's parent's lock during
+probe and remove") to solve USB subsystem lock sequence since
+USB device's characteristic. Thus "soc" needs to be locked
+whenever a device and driver's probing happen under "soc" bus.
+During this period, an async driver tries to probe a device which
+is under the "soc" bus would be blocked until previous driver
+finish the probing and release "soc" lock. And the next probing
+under the "soc" bus need to wait for async finish. Because of
+that, driver's async probe for init time improvement will be
+shadowed.
+
+Since many devices don't have USB devices' characteristic, they
+actually don't need parent's lock. Thus, we introduce a lock flag
+in bus_type struct and driver core would lock the parent lock base
+on the flag. For USB, we set this flag in usb_bus_type to keep
+original lock behavior in driver core.
+
+Async probe could have more benefit after this patch.
+
+Signed-off-by: Martin Liu <liumartin@google.com>
+Acked-by: Alan Stern <stern@rowland.harvard.edu>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Lili Li <lili.li@intel.com>
+---
+ drivers/base/bus.c        | 16 ++++++++--------
+ drivers/base/dd.c         |  8 ++++----
+ drivers/usb/core/driver.c |  1 +
+ include/linux/device.h    |  4 ++++
+ 4 files changed, 17 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/base/bus.c b/drivers/base/bus.c
+index 22a64fd3309b..641a52bef168 100644
+--- a/drivers/base/bus.c
++++ b/drivers/base/bus.c
+@@ -186,10 +186,10 @@ static ssize_t unbind_store(struct device_driver *drv, const char *buf,
+ 
+ 	dev = bus_find_device_by_name(bus, NULL, buf);
+ 	if (dev && dev->driver == drv) {
+-		if (dev->parent)	/* Needed for USB */
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_lock(dev->parent);
+ 		device_release_driver(dev);
+-		if (dev->parent)
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_unlock(dev->parent);
+ 		err = count;
+ 	}
+@@ -213,12 +213,12 @@ static ssize_t bind_store(struct device_driver *drv, const char *buf,
+ 
+ 	dev = bus_find_device_by_name(bus, NULL, buf);
+ 	if (dev && dev->driver == NULL && driver_match_device(drv, dev)) {
+-		if (dev->parent)	/* Needed for USB */
++		if (dev->parent && bus->need_parent_lock)
+ 			device_lock(dev->parent);
+ 		device_lock(dev);
+ 		err = driver_probe_device(drv, dev);
+ 		device_unlock(dev);
+-		if (dev->parent)
++		if (dev->parent && bus->need_parent_lock)
+ 			device_unlock(dev->parent);
+ 
+ 		if (err > 0) {
+@@ -737,10 +737,10 @@ static int __must_check bus_rescan_devices_helper(struct device *dev,
+ 	int ret = 0;
+ 
+ 	if (!dev->driver) {
+-		if (dev->parent)	/* Needed for USB */
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_lock(dev->parent);
+ 		ret = device_attach(dev);
+-		if (dev->parent)
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_unlock(dev->parent);
+ 	}
+ 	return ret < 0 ? ret : 0;
+@@ -772,10 +772,10 @@ EXPORT_SYMBOL_GPL(bus_rescan_devices);
+ int device_reprobe(struct device *dev)
+ {
+ 	if (dev->driver) {
+-		if (dev->parent)        /* Needed for USB */
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_lock(dev->parent);
+ 		device_release_driver(dev);
+-		if (dev->parent)
++		if (dev->parent && dev->bus->need_parent_lock)
+ 			device_unlock(dev->parent);
+ 	}
+ 	return bus_rescan_devices_helper(dev, NULL);
+diff --git a/drivers/base/dd.c b/drivers/base/dd.c
+index ad44b40fe284..7ecf921c45fc 100644
+--- a/drivers/base/dd.c
++++ b/drivers/base/dd.c
+@@ -784,13 +784,13 @@ static int __driver_attach(struct device *dev, void *data)
+ 		return ret;
+ 	} /* ret > 0 means positive match */
+ 
+-	if (dev->parent)	/* Needed for USB */
++	if (dev->parent && dev->bus->need_parent_lock)
+ 		device_lock(dev->parent);
+ 	device_lock(dev);
+ 	if (!dev->driver)
+ 		driver_probe_device(drv, dev);
+ 	device_unlock(dev);
+-	if (dev->parent)
++	if (dev->parent && dev->bus->need_parent_lock)
+ 		device_unlock(dev->parent);
+ 
+ 	return 0;
+@@ -885,7 +885,7 @@ void device_release_driver_internal(struct device *dev,
+ 				    struct device_driver *drv,
+ 				    struct device *parent)
+ {
+-	if (parent)
++	if (parent && dev->bus->need_parent_lock)
+ 		device_lock(parent);
+ 
+ 	device_lock(dev);
+@@ -893,7 +893,7 @@ void device_release_driver_internal(struct device *dev,
+ 		__device_release_driver(dev, parent);
+ 
+ 	device_unlock(dev);
+-	if (parent)
++	if (parent && dev->bus->need_parent_lock)
+ 		device_unlock(parent);
+ }
+ 
+diff --git a/drivers/usb/core/driver.c b/drivers/usb/core/driver.c
+index eb87a259d55c..1c40a037ba8e 100644
+--- a/drivers/usb/core/driver.c
++++ b/drivers/usb/core/driver.c
+@@ -1914,4 +1914,5 @@ struct bus_type usb_bus_type = {
+ 	.name =		"usb",
+ 	.match =	usb_device_match,
+ 	.uevent =	usb_uevent,
++	.need_parent_lock =	true,
+ };
+diff --git a/include/linux/device.h b/include/linux/device.h
+index 16c0a8f80288..14032dbf0d21 100644
+--- a/include/linux/device.h
++++ b/include/linux/device.h
+@@ -97,6 +97,8 @@ extern void bus_remove_file(struct bus_type *, struct bus_attribute *);
+  * @p:		The private data of the driver core, only the driver core can
+  *		touch this.
+  * @lock_key:	Lock class key for use by the lock validator
++ * @need_parent_lock:	When probing or removing a device on this bus, the
++ *			device core should lock the device's parent.
+  *
+  * A bus is a channel between the processor and one or more devices. For the
+  * purposes of the device model, all devices are connected via a bus, even if
+@@ -135,6 +137,8 @@ struct bus_type {
+ 
+ 	struct subsys_private *p;
+ 	struct lock_class_key lock_key;
++
++	bool need_parent_lock;
+ };
+ 
+ extern int __must_check bus_register(struct bus_type *bus);
+-- 
+2.17.1
+
