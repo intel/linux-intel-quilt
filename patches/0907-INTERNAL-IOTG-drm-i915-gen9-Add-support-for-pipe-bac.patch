@@ -1,0 +1,501 @@
+From 7bce9bcfbdf4d5c22a832d733bab77b0931d6751 Mon Sep 17 00:00:00 2001
+From: Matt Roper <matthew.d.roper@intel.com>
+Date: Wed, 10 Feb 2016 18:39:12 -0800
+Subject: [PATCH 0907/1082] INTERNAL [IOTG] drm/i915/gen9: Add support for pipe
+ background color
+
+Gen9 platforms allow CRTC's to be programmed with a background/canvas
+color below the programmable planes.  Let's expose this as a property to
+allow userspace to program a desired value.
+
+To support CRTC background color, we need a way of communicating RGB
+color values to the DRM.  However there is often a mismatch between how
+userspace wants to represent the color value vs how it must be
+programmed into the hardware; this mismatch can easily lead to
+non-obvious bugs.  Let's create a kernel-side property type that
+standardizes the user<->kernel format and add some macros that allow
+drivers to extract the bits they care about without having to worry
+about the internal representation.  This RGBA property type may also be
+useful for future properties like color keys.
+
+These properties are still exposed to userspace as range properties, so
+the only userspace change we need are some helpers to build RGBA values
+appropriately.
+
+Signed-off-by: Matt Roper <matthew.d.roper@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/drm_atomic.c                 |   4 +
+ drivers/gpu/drm/drm_blend.c                  |  15 ++++
+ drivers/gpu/drm/drm_property.c               |  24 ++++++
+ drivers/gpu/drm/i915/i915_debugfs.c          |   8 ++
+ drivers/gpu/drm/i915/i915_params.c           |   5 ++
+ drivers/gpu/drm/i915/i915_params.h           |   1 +
+ drivers/gpu/drm/i915/i915_reg.h              |   9 +++
+ drivers/gpu/drm/i915/intel_display.c         |  48 ++++++++++++
+ drivers/gpu/drm/i915/intel_initial_modeset.c |  12 +++
+ include/drm/drm_blend.h                      | 105 +++++++++++++++++++++++++++
+ include/drm/drm_crtc.h                       |  10 +++
+ include/drm/drm_mode_config.h                |   5 ++
+ include/drm/drm_property.h                   |   2 +
+ 13 files changed, 248 insertions(+)
+
+diff --git a/drivers/gpu/drm/drm_atomic.c b/drivers/gpu/drm/drm_atomic.c
+index d17d04112406..e4b83735fa74 100644
+--- a/drivers/gpu/drm/drm_atomic.c
++++ b/drivers/gpu/drm/drm_atomic.c
+@@ -471,6 +471,8 @@ int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
+ 
+ 	if (property == config->prop_active)
+ 		state->active = val;
++	else if (property == config->prop_background_color)
++		state->background_color.v = val;
+ 	else if (property == config->prop_mode_id) {
+ 		struct drm_property_blob *mode =
+ 			drm_property_lookup_blob(dev, val);
+@@ -565,6 +567,8 @@ drm_atomic_crtc_get_property(struct drm_crtc *crtc,
+ 		*val = (state->gamma_lut) ? state->gamma_lut->base.id : 0;
+ 	else if (property == config->prop_out_fence_ptr)
+ 		*val = 0;
++	else if (property == config->prop_background_color)
++		*val = state->background_color.v;
+ 	else if (crtc->funcs->atomic_get_property)
+ 		return crtc->funcs->atomic_get_property(crtc, state, property, val);
+ 	else
+diff --git a/drivers/gpu/drm/drm_blend.c b/drivers/gpu/drm/drm_blend.c
+index 2e5e089dd912..d96609d22788 100644
+--- a/drivers/gpu/drm/drm_blend.c
++++ b/drivers/gpu/drm/drm_blend.c
+@@ -204,6 +204,21 @@ unsigned int drm_rotation_simplify(unsigned int rotation,
+ }
+ EXPORT_SYMBOL(drm_rotation_simplify);
+ 
++/**
++ * drm_mode_create_background_color_property - create CRTC color property
++ * @dev: DRM device
++ *
++ * Creates a property to represent CRTC background/canvas color.  Called by a
++ * driver the first time it's needed, must be attached to desired CRTC's.
++ */
++struct drm_property *
++drm_mode_create_background_color_property(struct drm_device *dev)
++{
++	return drm_property_create_rgba(dev, DRM_MODE_PROP_ATOMIC,
++					"background_color");
++}
++EXPORT_SYMBOL(drm_mode_create_background_color_property);
++
+ /**
+  * drm_plane_create_zpos_property - create mutable zpos property
+  * @plane: drm plane
+diff --git a/drivers/gpu/drm/drm_property.c b/drivers/gpu/drm/drm_property.c
+index bc5128203056..7916385dd385 100644
+--- a/drivers/gpu/drm/drm_property.c
++++ b/drivers/gpu/drm/drm_property.c
+@@ -354,6 +354,30 @@ struct drm_property *drm_property_create_bool(struct drm_device *dev, int flags,
+ }
+ EXPORT_SYMBOL(drm_property_create_bool);
+ 
++/**
++ * drm_property_create_rgba - create a new RGBA property type
++ * @dev: drm device
++ * @flags: flags specifying the property type
++ * @name: name of the property
++ *
++ * This creates a new generic drm property which can then be attached to a drm
++ * object with drm_object_attach_property. The returned property object must be
++ * freed with drm_property_destroy.
++ *
++ * Userspace should use the DRM_RGBA() macro to build values with the proper
++ * bit layout.
++ *
++ * Returns:
++ * A pointer to the newly created property on success, NULL on failure.
++ */
++struct drm_property *drm_property_create_rgba(struct drm_device *dev, int flags,
++					      const char *name)
++{
++	return drm_property_create_range(dev, flags, name,
++					 0, GENMASK_ULL(63, 0));
++}
++EXPORT_SYMBOL(drm_property_create_rgba);
++
+ /**
+  * drm_property_add_enum - add a possible value to an enumeration property
+  * @property: enumeration property to change
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index ff9feba1951f..01566cada403 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -3284,6 +3284,14 @@ static int i915_display_info(struct seq_file *m, void *unused)
+ 			intel_scaler_info(m, crtc);
+ 			intel_plane_info(m, crtc);
+ 		}
++		if (INTEL_GEN(dev_priv) >= 9 && pipe_config->base.active) {
++			struct drm_rgba background = pipe_config->base.background_color;
++
++			seq_printf(m, "\tbackground color (10bpc): r=%x g=%x b=%x\n",
++				   DRM_RGBA_REDBITS(background, 10),
++				   DRM_RGBA_GREENBITS(background, 10),
++				   DRM_RGBA_BLUEBITS(background, 10));
++		}
+ 
+ 		seq_printf(m, "\tunderrun reporting: cpu=%s pch=%s \n",
+ 			   yesno(!crtc->cpu_fifo_underrun_disabled),
+diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
+index 37c43f245da8..7f7dcda55bc4 100644
+--- a/drivers/gpu/drm/i915/i915_params.c
++++ b/drivers/gpu/drm/i915/i915_params.c
+@@ -81,6 +81,7 @@ struct i915_params i915_modparams __read_mostly = {
+ 	.splash = NULL,
+ 	.avail_planes_per_pipe = 0,
+ 	.domain_plane_owners = 0,
++	.bg_color = 0x00000000,
+ };
+ 
+ i915_param_named(modeset, int, 0400,
+@@ -314,3 +315,7 @@ MODULE_PARM_DESC(domain_plane_owners, "plane owners for each domain and for each
+ 		  planes owner: 3C:2 2C:2 1C:1 4B:1 3B:1 2B:1 1B:0 4A:0 3A:0 2A:1 1A:0 \
+ 		  (0x0 - default value)");
+ 
++module_param_named_unsafe(bg_color, i915_modparams.bg_color, uint, 0400);
++MODULE_PARM_DESC(bg_color, "Set the background (canvas) color");
++
++
+diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
+index 8e49a55966d4..c5bdc870769d 100644
+--- a/drivers/gpu/drm/i915/i915_params.h
++++ b/drivers/gpu/drm/i915/i915_params.h
+@@ -57,6 +57,7 @@
+ 	func(char *, splash); \
+ 	func(unsigned int, avail_planes_per_pipe); \
+ 	func(unsigned long long, domain_plane_owners); \
++	func(unsigned int, bg_color); \
+ 	/* leave bools at the end to not create holes */ \
+ 	func(bool, alpha_support); \
+ 	func(bool, enable_cmd_parser); \
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 1ca430975079..3ce296f1186f 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -5431,6 +5431,15 @@ enum {
+ #define   PIPEMISC_DITHER_TYPE_SP	(0<<2)
+ #define PIPEMISC(pipe)			_MMIO_PIPE2(pipe, _PIPE_MISC_A)
+ 
++/* Skylake pipe bottom color */
++#define _PIPE_BOTTOM_COLOR_A        0x70034
++#define _PIPE_BOTTOM_COLOR_B        0x71034
++#define _PIPE_BOTTOM_COLOR_C        0x72034
++#define PIPE_BOTTOM_GAMMA_ENABLE   (1 << 31)
++#define PIPE_BOTTOM_CSC_ENABLE     (1 << 30)
++#define PIPE_BOTTOM_COLOR_MASK     0x3FFFFFFF
++#define PIPE_BOTTOM_COLOR(pipe) _MMIO_PIPE(pipe, _PIPE_BOTTOM_COLOR_A, _PIPE_BOTTOM_COLOR_B)
++
+ #define VLV_DPFLIPSTAT				_MMIO(VLV_DISPLAY_BASE + 0x70028)
+ #define   PIPEB_LINE_COMPARE_INT_EN		(1<<29)
+ #define   PIPEB_HLINE_INT_EN			(1<<28)
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 88738582a1c6..a473bc6e7719 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -3866,6 +3866,26 @@ static void intel_update_pipe_config(struct intel_crtc *crtc,
+ 	}
+ }
+ 
++static void intel_update_background_color(struct intel_crtc *crtc)
++{
++	struct drm_device *dev = crtc->base.dev;
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	struct intel_crtc_state *pipe_config =
++		to_intel_crtc_state(crtc->base.state);
++	struct drm_rgba background = pipe_config->base.background_color;
++	uint32_t val;
++
++	if (INTEL_GEN(dev_priv) >= 9) {
++		/* BGR 16bpc ==> RGB 10bpc */
++		val = DRM_RGBA_REDBITS(background, 10) << 20
++		    | DRM_RGBA_GREENBITS(background, 10) << 10
++		    | DRM_RGBA_BLUEBITS(background, 10);
++
++
++		I915_WRITE(PIPE_BOTTOM_COLOR(crtc->pipe), val);
++	}
++}
++
+ static void intel_fdi_normal_train(struct intel_crtc *crtc)
+ {
+ 	struct drm_device *dev = crtc->base.dev;
+@@ -10655,6 +10675,11 @@ static int intel_crtc_atomic_check(struct drm_crtc *crtc,
+ 							 pipe_config);
+ 	}
+ 
++	if (crtc->state->background_color.v != crtc_state->background_color.v) {
++		pipe_config->update_pipe = true;
++		crtc_state->planes_changed = true;
++	}
++
+ 	return ret;
+ }
+ 
+@@ -13002,6 +13027,9 @@ static void intel_begin_crtc_commit(struct drm_crtc *crtc,
+ 	/* Perform vblank evasion around commit operation */
+ 	intel_pipe_update_start(intel_crtc);
+ 
++	if (to_intel_crtc_state(crtc->state)->update_pipe)
++		intel_update_background_color(intel_crtc);
++
+ 	if (modeset)
+ 		goto out;
+ 
+@@ -13615,6 +13643,20 @@ static void intel_crtc_init_scalers(struct intel_crtc *crtc,
+ 	scaler_state->scaler_id = -1;
+ }
+ 
++static void intel_create_background_color_property(struct drm_device *dev,
++						   struct intel_crtc *crtc)
++{
++	if (!dev->mode_config.prop_background_color)
++		dev->mode_config.prop_background_color =
++			drm_mode_create_background_color_property(dev);
++	if (!dev->mode_config.prop_background_color)
++		return;
++
++	drm_object_attach_property(&crtc->base.base,
++				   dev->mode_config.prop_background_color,
++				   crtc->base.state->background_color.v);
++}
++
+ static int intel_crtc_init_restrict_planes(struct drm_i915_private *dev_priv,
+ 					   enum pipe pipe, int planes_mask)
+ {
+@@ -13758,6 +13800,12 @@ static int intel_crtc_init(struct drm_i915_private *dev_priv, enum pipe pipe)
+ 
+ 	WARN_ON(drm_crtc_index(&intel_crtc->base) != intel_crtc->pipe);
+ 
++	if (INTEL_GEN(dev_priv) >= 9) {
++		crtc_state->base.background_color = drm_rgba(16, 0, 0, 0, 0);
++		intel_create_background_color_property(&dev_priv->drm,
++						       intel_crtc);
++	}
++
+ 	return 0;
+ 
+ fail:
+diff --git a/drivers/gpu/drm/i915/intel_initial_modeset.c b/drivers/gpu/drm/i915/intel_initial_modeset.c
+index 304353547131..493b401f0a63 100644
+--- a/drivers/gpu/drm/i915/intel_initial_modeset.c
++++ b/drivers/gpu/drm/i915/intel_initial_modeset.c
+@@ -334,6 +334,8 @@ static int update_crtc_state(struct drm_atomic_state *state,
+ 			     struct drm_crtc *crtc)
+ {
+ 	struct drm_crtc_state *crtc_state;
++	struct drm_rgba bgcolor;
++	unsigned int bg_color = i915_modparams.bg_color;
+ 	int ret;
+ 
+ 	crtc_state = drm_atomic_get_crtc_state(state, crtc);
+@@ -351,6 +353,16 @@ static int update_crtc_state(struct drm_atomic_state *state,
+ 	if (!IS_GEN9(to_i915(state->dev)))
+ 	    return 0;
+ 
++	/* Set the background color based on module parameter */
++	bgcolor =drm_rgba(8,
++			  (bg_color & 0x000000ff),
++			  (bg_color & 0x0000ff00) >> 8,
++			  (bg_color & 0x00ff0000) >> 16,
++			  (bg_color & 0xff000000) >> 24);
++
++	ret = drm_atomic_crtc_set_property(crtc, crtc_state,
++					   state->dev->mode_config.prop_background_color,
++					   bgcolor.v);
+ 	WARN_ON(ret);
+ 
+ 	return 0;
+diff --git a/include/drm/drm_blend.h b/include/drm/drm_blend.h
+index 17606026590b..6a810dae8fc8 100644
+--- a/include/drm/drm_blend.h
++++ b/include/drm/drm_blend.h
+@@ -31,6 +31,43 @@ struct drm_device;
+ struct drm_atomic_state;
+ struct drm_plane;
+ 
++/**
++ * struct drm_rgba - RGBA property value type
++ * @v: Internal representation of RGBA, stored in 16bpc format
++ *
++ * Structure to abstract away the representation of RGBA values with precision
++ * up to 16 bits per color component.  This is primarily intended for use with
++ * DRM properties that need to take a color value since we don't want userspace
++ * to have to worry about the bit layout expected by the underlying hardware.
++ *
++ * We wrap the value in a structure here so that the compiler will flag any
++ * accidental attempts by driver code to directly attempt bitwise operations
++ * that could potentially misinterpret the value.  Drivers should instead use
++ * the DRM_RGBA_{RED,GREEN,BLUE,ALPHA}BITS() macros to obtain the component
++ * bits and then build values in the format their hardware expects.
++ */
++struct drm_rgba {
++	uint64_t v;
++};
++
++/*
++ * Rotation property bits. DRM_ROTATE_<degrees> rotates the image by the
++ * specified amount in degrees in counter clockwise direction. DRM_REFLECT_X and
++ * DRM_REFLECT_Y reflects the image along the specified axis prior to rotation
++ *
++ * WARNING: These defines are UABI since they're exposed in the rotation
++ * property.
++ */
++#define DRM_ROTATE_0	BIT(0)
++#define DRM_ROTATE_90	BIT(1)
++#define DRM_ROTATE_180	BIT(2)
++#define DRM_ROTATE_270	BIT(3)
++#define DRM_ROTATE_MASK (DRM_ROTATE_0   | DRM_ROTATE_90 | \
++			 DRM_ROTATE_180 | DRM_ROTATE_270)
++#define DRM_REFLECT_X	BIT(4)
++#define DRM_REFLECT_Y	BIT(5)
++#define DRM_REFLECT_MASK (DRM_REFLECT_X | DRM_REFLECT_Y)
++
+ static inline bool drm_rotation_90_or_270(unsigned int rotation)
+ {
+ 	return rotation & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270);
+@@ -42,6 +79,8 @@ int drm_plane_create_rotation_property(struct drm_plane *plane,
+ unsigned int drm_rotation_simplify(unsigned int rotation,
+ 				   unsigned int supported_rotations);
+ 
++struct drm_property *drm_mode_create_background_color_property(struct drm_device *dev);
++
+ int drm_plane_create_zpos_property(struct drm_plane *plane,
+ 				   unsigned int zpos,
+ 				   unsigned int min, unsigned int max);
+@@ -49,4 +88,70 @@ int drm_plane_create_zpos_immutable_property(struct drm_plane *plane,
+ 					     unsigned int zpos);
+ int drm_atomic_normalize_zpos(struct drm_device *dev,
+ 			      struct drm_atomic_state *state);
++
++/**
++ * drm_rgba - Build RGBA property values
++ * @bpc: Bits per component value for @red, @green, @blue, and @alpha parameters
++ * @red: Red component value
++ * @green: Green component value
++ * @blue: Blue component value
++ * @alpha: Alpha component value
++ *
++ * Helper to build RGBA 16bpc color values with the bits laid out in the format
++ * expected by DRM RGBA properties.
++ *
++ * Returns:
++ * An RGBA structure encapsulating the requested RGBA value.
++ */
++static inline struct drm_rgba
++drm_rgba(unsigned bpc,
++	 uint16_t red,
++	 uint16_t green,
++	 uint16_t blue,
++	 uint16_t alpha)
++{
++	int shift;
++	struct drm_rgba val;
++
++	if (WARN_ON(bpc > 16))
++		bpc = 16;
++
++	/*
++	 * If we were provided with fewer than 16 bpc, shift the value we
++	 * received into the most significant bits.
++	 */
++	shift = 16 - bpc;
++
++	val.v = red << shift;
++	val.v <<= 16;
++	val.v |= green << shift;
++	val.v <<= 16;
++	val.v |= blue << shift;
++	val.v <<= 16;
++	val.v |= alpha << shift;
++
++	return val;
++}
++
++static inline uint16_t
++drm_rgba_bits(struct drm_rgba c, unsigned compshift, unsigned bits) {
++	uint64_t val;
++
++	if (WARN_ON(bits > 16))
++		bits = 16;
++
++	val = c.v & GENMASK_ULL(compshift + 15, compshift);
++	return val >> (compshift + 16 - bits);
++}
++
++/*
++ * Macros to access the individual color components of an RGBA property value.
++ * If the requested number of bits is less than 16, only the most significant
++ * bits of the color component will be returned.
++ */
++#define DRM_RGBA_REDBITS(c, bits)   drm_rgba_bits(c, 48, bits)
++#define DRM_RGBA_GREENBITS(c, bits) drm_rgba_bits(c, 32, bits)
++#define DRM_RGBA_BLUEBITS(c, bits)  drm_rgba_bits(c, 16, bits)
++#define DRM_RGBA_ALPHABITS(c, bits) drm_rgba_bits(c, 0, bits)
++
+ #endif
+diff --git a/include/drm/drm_crtc.h b/include/drm/drm_crtc.h
+index aa5e373a1005..8a2049c88ae6 100644
+--- a/include/drm/drm_crtc.h
++++ b/include/drm/drm_crtc.h
+@@ -91,6 +91,12 @@ struct drm_plane_helper_funcs;
+  * @connector_mask: bitmask of (1 << drm_connector_index(connector)) of attached connectors
+  * @encoder_mask: bitmask of (1 << drm_encoder_index(encoder)) of attached encoders
+  * @mode_blob: &drm_property_blob for @mode
++ * @degamma_lut: Lookup table for converting framebuffer pixel data
++ *	before apply the conversion matrix
++ * @ctm: Transformation matrix
++ * @gamma_lut: Lookup table for converting pixel data after the
++ *	conversion matrix
++ * @background_color: background/canvas color of regions not covered by planes
+  * @state: backpointer to global drm_atomic_state
+  *
+  * Note that the distinction between @enable and @active is rather subtile:
+@@ -260,6 +266,10 @@ struct drm_crtc_state {
+ 	 * userspace one frame too late. This doesn't allow for a real atomic
+ 	 * update, but it should avoid tearing.
+ 	 */
++
++	/* CRTC background color */
++	struct drm_rgba background_color;
++
+ 	struct drm_pending_vblank_event *event;
+ 
+ 	struct drm_atomic_state *state;
+diff --git a/include/drm/drm_mode_config.h b/include/drm/drm_mode_config.h
+index 35cd59280ef2..f1aefd50499c 100644
+--- a/include/drm/drm_mode_config.h
++++ b/include/drm/drm_mode_config.h
+@@ -616,6 +616,11 @@ struct drm_mode_config {
+ 	 */
+ 	struct drm_property *prop_mode_id;
+ 
++	/**
++	 * @prop_background_color: RGBA background color for CRTC.
++	 */
++	struct drm_property *prop_background_color;
++
+ 	/**
+ 	 * @dvi_i_subconnector_property: Optional DVI-I property to
+ 	 * differentiate between analog or digital mode.
+diff --git a/include/drm/drm_property.h b/include/drm/drm_property.h
+index 37355c623e6c..13b8177faaa6 100644
+--- a/include/drm/drm_property.h
++++ b/include/drm/drm_property.h
+@@ -258,6 +258,8 @@ struct drm_property *drm_property_create_object(struct drm_device *dev,
+ 						int flags, const char *name, uint32_t type);
+ struct drm_property *drm_property_create_bool(struct drm_device *dev, int flags,
+ 					      const char *name);
++struct drm_property *drm_property_create_rgba(struct drm_device *dev, int flags,
++					      const char *name);
+ int drm_property_add_enum(struct drm_property *property, int index,
+ 			  uint64_t value, const char *name);
+ void drm_property_destroy(struct drm_device *dev, struct drm_property *property);
+-- 
+2.14.4
+

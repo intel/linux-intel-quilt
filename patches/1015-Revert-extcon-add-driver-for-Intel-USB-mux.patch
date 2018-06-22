@@ -1,0 +1,206 @@
+From 25059fc6c55cb2444d475810e9026d19478621d4 Mon Sep 17 00:00:00 2001
+From: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Date: Mon, 21 May 2018 14:54:08 -0700
+Subject: [PATCH 1015/1082] Revert "extcon: add driver for Intel USB mux"
+
+This reverts commit 432fc7d4e95e5867abbbd68f1097a6a257a42376.
+
+Signed-off-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+---
+ drivers/extcon/Kconfig               |  17 ------
+ drivers/extcon/Makefile              |   1 -
+ drivers/extcon/extcon-intel-usb.c    | 110 -----------------------------------
+ include/linux/extcon/intel_usb_mux.h |  29 ---------
+ 4 files changed, 157 deletions(-)
+ delete mode 100644 drivers/extcon/extcon-intel-usb.c
+ delete mode 100644 include/linux/extcon/intel_usb_mux.h
+
+diff --git a/drivers/extcon/Kconfig b/drivers/extcon/Kconfig
+index 1101eb3a2242..a7bca4207f44 100644
+--- a/drivers/extcon/Kconfig
++++ b/drivers/extcon/Kconfig
+@@ -157,21 +157,4 @@ config EXTCON_USBC_CROS_EC
+ 	  Say Y here to enable USB Type C cable detection extcon support when
+ 	  using Chrome OS EC based USB Type-C ports.
+ 
+-config EXTCON_INTEL_USB
+-	bool "Intel USB MUX support"
+-	depends on X86 && USB
+-	help
+-	  Intel SoCs and chipsets often have an internal USB mux that is used to
+-	  share one USB port between an USB Device Controller and xHCI. The mux
+-	  is by default controlled by BIOS/FW, but on some platforms that is not
+-	  possible and the OS has to configure the mux with this driver.
+-
+-	  The driver relies on events from some external source. The mux has no
+-	  means to detect a change in the cable connection status on its own.
+-	  That makes this driver useful only on platforms where a separate
+-	  component exists, for example PMIC, that can detect connection status
+-	  changes on the USB port behind the mux.
+-
+-	  If unsure, say N.
+-
+ endif
+diff --git a/drivers/extcon/Makefile b/drivers/extcon/Makefile
+index 1cb698882fa1..0888fdeded72 100644
+--- a/drivers/extcon/Makefile
++++ b/drivers/extcon/Makefile
+@@ -22,4 +22,3 @@ obj-$(CONFIG_EXTCON_RT8973A)	+= extcon-rt8973a.o
+ obj-$(CONFIG_EXTCON_SM5502)	+= extcon-sm5502.o
+ obj-$(CONFIG_EXTCON_USB_GPIO)	+= extcon-usb-gpio.o
+ obj-$(CONFIG_EXTCON_USBC_CROS_EC) += extcon-usbc-cros-ec.o
+-obj-$(CONFIG_EXTCON_INTEL_USB)	+= extcon-intel-usb.o
+diff --git a/drivers/extcon/extcon-intel-usb.c b/drivers/extcon/extcon-intel-usb.c
+deleted file mode 100644
+index 9290eb79ae57..000000000000
+--- a/drivers/extcon/extcon-intel-usb.c
++++ /dev/null
+@@ -1,110 +0,0 @@
+-/**
+- * extcon-intel-usb.c - Driver for Intel USB mux
+- *
+- * Copyright (C) 2015 Intel Corporation
+- * Author: Heikki Krogerus <heikki.krogerus@linux.intel.com>
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation.
+- */
+-
+-#include <linux/slab.h>
+-#include <linux/extcon.h>
+-
+-#include <linux/extcon/intel_usb_mux.h>
+-
+-#include "extcon.h"
+-
+-#define INTEL_MUX_CFG0		0x00
+-#define INTEL_MUX_CFG1		0x04
+-
+-#define CFG0_SW_DRD_MODE_MASK	0x3
+-#define CFG0_SW_DRD_DYN		0
+-#define CFG0_SW_DRD_STATIC_HOST	1
+-#define CFG0_SW_DRD_STATIC_DEV	2
+-#define CFG0_SW_SYNC_SS_AND_HS	BIT(2)
+-#define CFG0_SW_SWITCH_EN	BIT(16)
+-#define CFG0_SW_IDPIN		BIT(20)
+-#define CFG0_SW_IDPIN_EN	BIT(21)
+-#define CFG0_SW_VBUS_VALID	BIT(24)
+-
+-#define CFG1_MODE		BIT(29)
+-
+-struct intel_usb_mux {
+-	struct notifier_block nb;
+-	struct extcon_dev edev;
+-	void __iomem *regs;
+-};
+-
+-static const int intel_mux_cable[] = {
+-	EXTCON_USB_HOST,
+-	EXTCON_NONE,
+-};
+-
+-static int intel_usb_mux_notifier(struct notifier_block *nb,
+-				  unsigned long old, void *ptr)
+-{
+-	struct intel_usb_mux *mux = container_of(nb, struct intel_usb_mux, nb);
+-	u32 val;
+-
+-	if (mux->edev.state)
+-		val = CFG0_SW_IDPIN_EN | CFG0_SW_DRD_STATIC_HOST;
+-	else
+-		val = CFG0_SW_IDPIN_EN | CFG0_SW_IDPIN | CFG0_SW_VBUS_VALID |
+-		      CFG0_SW_DRD_STATIC_DEV;
+-
+-	writel(val, mux->regs);
+-	return NOTIFY_OK;
+-}
+-
+-struct intel_usb_mux *intel_usb_mux_register(struct device *dev,
+-					     struct resource *r)
+-{
+-	struct intel_usb_mux *mux;
+-	int ret;
+-
+-	mux = kzalloc(sizeof(*mux), GFP_KERNEL);
+-	if (!mux)
+-		return ERR_PTR(-ENOMEM);
+-
+-	mux->regs = ioremap_nocache(r->start, resource_size(r));
+-	if (!mux->regs) {
+-		kfree(mux);
+-		return ERR_PTR(-ENOMEM);
+-	}
+-
+-	mux->edev.dev.parent = dev;
+-	mux->edev.supported_cable = intel_mux_cable;
+-
+-	ret = extcon_dev_register(&mux->edev);
+-	if (ret)
+-		goto err;
+-
+-	mux->edev.name = "intel_usb_mux";
+-	mux->edev.state = !!(readl(mux->regs + INTEL_MUX_CFG1) & CFG1_MODE);
+-
+-	/* An external source needs to tell us what to do */
+-	mux->nb.notifier_call = intel_usb_mux_notifier;
+-	ret = extcon_register_notifier(&mux->edev, EXTCON_USB_HOST, &mux->nb);
+-	if (ret) {
+-		dev_err(&mux->edev.dev, "failed to register notifier\n");
+-		extcon_dev_unregister(&mux->edev);
+-		goto err;
+-	}
+-	return mux;
+-err:
+-	iounmap(mux->regs);
+-	kfree(mux);
+-	return ERR_PTR(ret);
+-}
+-EXPORT_SYMBOL_GPL(intel_usb_mux_register);
+-
+-void intel_usb_mux_unregister(struct intel_usb_mux *mux)
+-{
+-	extcon_unregister_notifier(&mux->edev, EXTCON_USB_HOST, &mux->nb);
+-	extcon_dev_unregister(&mux->edev);
+-	iounmap(mux->regs);
+-	kfree(mux);
+-}
+-EXPORT_SYMBOL_GPL(intel_usb_mux_unregister);
+diff --git a/include/linux/extcon/intel_usb_mux.h b/include/linux/extcon/intel_usb_mux.h
+deleted file mode 100644
+index 060263a80d24..000000000000
+--- a/include/linux/extcon/intel_usb_mux.h
++++ /dev/null
+@@ -1,29 +0,0 @@
+-/*
+- * Driver for Intel USB mux
+- *
+- * Copyright (C) 2015 Intel Corporation
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation.
+- */
+-
+-#ifndef _INTEL_USB_MUX_H
+-#define _INTEL_USB_MUX_H
+-
+-struct intel_usb_mux;
+-
+-#ifdef CONFIG_EXTCON_INTEL_USB
+-struct intel_usb_mux *intel_usb_mux_register(struct device *dev,
+-					     struct resource *r);
+-void intel_usb_mux_unregister(struct intel_usb_mux *mux);
+-#else
+-static inline struct intel_usb_mux *intel_usb_mux_register(struct device *dev,
+-							   struct resource *r)
+-{
+-	return NULL;
+-}
+-static inline void intel_usb_mux_unregister(struct intel_usb_mux *mux) { }
+-#endif /* CONFIG_EXTCON_INTEL_USB */
+-
+-#endif /* _INTEL_USB_MUX_H */
+-- 
+2.14.4
+

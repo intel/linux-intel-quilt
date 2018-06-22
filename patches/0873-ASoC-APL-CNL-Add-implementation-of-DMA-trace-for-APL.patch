@@ -1,0 +1,111 @@
+From 19f81f2a6150c975100b3bc13bb91c770977455e Mon Sep 17 00:00:00 2001
+From: Yan Wang <yan.wang@linux.intel.com>
+Date: Wed, 21 Mar 2018 17:01:36 +0800
+Subject: [PATCH 0873/1082] ASoC: APL/CNL: Add implementation of DMA trace for
+ APL/CNL.
+
+Need some initialization and releasing code on kernel driver
+because host DMA need different setting with GPDMA.
+And need save stream tag into IPC message to the firmware.
+
+Signed-off-by: Yan Wang <yan.wang@linux.intel.com>
+---
+ sound/soc/sof/ops.h   | 26 ++++++++++++++++++++++++++
+ sound/soc/sof/trace.c | 27 +++++++++++++++++++++++++++
+ 2 files changed, 53 insertions(+)
+
+diff --git a/sound/soc/sof/ops.h b/sound/soc/sof/ops.h
+index f28a0dfad510..d28a55c8a44f 100644
+--- a/sound/soc/sof/ops.h
++++ b/sound/soc/sof/ops.h
+@@ -193,6 +193,32 @@ static inline int snd_sof_dsp_cmd_done(struct snd_sof_dev *sdev)
+ 		return 0;
+ }
+ 
++/* host DMA trace */
++static inline int snd_sof_dma_trace_init(struct snd_sof_dev *sdev,
++					 u32 *stream_tag)
++{
++	if (sdev->ops->trace_init)
++		return sdev->ops->trace_init(sdev, stream_tag);
++	else
++		return 0;
++}
++
++static inline int snd_sof_dma_trace_release(struct snd_sof_dev *sdev)
++{
++	if (sdev->ops->trace_release)
++		return sdev->ops->trace_release(sdev);
++	else
++		return 0;
++}
++
++static inline int snd_sof_dma_trace_trigger(struct snd_sof_dev *sdev, int cmd)
++{
++	if (sdev->ops->trace_trigger)
++		return sdev->ops->trace_trigger(sdev, cmd);
++	else
++		return 0;
++}
++
+ int snd_sof_dsp_update_bits_unlocked(struct snd_sof_dev *sdev, u32 bar,
+ 				     u32 offset, u32 mask, u32 value);
+ 
+diff --git a/sound/soc/sof/trace.c b/sound/soc/sof/trace.c
+index 5bb12b7569f8..7e22ee4b9301 100644
+--- a/sound/soc/sof/trace.c
++++ b/sound/soc/sof/trace.c
+@@ -206,6 +206,14 @@ int snd_sof_init_trace(struct snd_sof_dev *sdev)
+ 	init_waitqueue_head(&sdev->trace_sleep);
+ 	sdev->host_offset = 0;
+ 
++	ret = snd_sof_dma_trace_init(sdev, &params.stream_tag);
++	if (ret < 0) {
++		dev_err(sdev->dev,
++			"error: fail in snd_sof_dma_trace_init %d\n", ret);
++		goto table_err;
++	}
++	dev_dbg(sdev->dev, "stream_tag: %d\n", params.stream_tag);
++
+ 	/* send IPC to the DSP */
+ 	ret = sof_ipc_tx_message(sdev->ipc,
+ 				 params.hdr.cmd, &params, sizeof(params),
+@@ -216,6 +224,13 @@ int snd_sof_init_trace(struct snd_sof_dev *sdev)
+ 		goto table_err;
+ 	}
+ 
++	ret = snd_sof_dma_trace_trigger(sdev, SNDRV_PCM_TRIGGER_START);
++	if (ret < 0) {
++		dev_err(sdev->dev,
++			"error: snd_sof_dma_trace_trigger: start: %d\n", ret);
++		goto table_err;
++	}
++
+ 	sdev->dtrace_is_enabled = true;
+ 	return 0;
+ 
+@@ -253,9 +268,21 @@ void snd_sof_trace_notify_for_error(struct snd_sof_dev *sdev)
+ 
+ void snd_sof_release_trace(struct snd_sof_dev *sdev)
+ {
++	int ret;
++
+ 	if (!sdev->dtrace_is_enabled)
+ 		return;
+ 
++	ret = snd_sof_dma_trace_trigger(sdev, SNDRV_PCM_TRIGGER_STOP);
++	if (ret < 0)
++		dev_err(sdev->dev,
++			"error: snd_sof_dma_trace_trigger: stop: %d\n", ret);
++
++	ret = snd_sof_dma_trace_release(sdev);
++	if (ret < 0)
++		dev_err(sdev->dev,
++			"error: fail in snd_sof_dma_trace_release %d\n", ret);
++
+ 	snd_dma_free_pages(&sdev->dmatb);
+ 	snd_dma_free_pages(&sdev->dmatp);
+ }
+-- 
+2.14.4
+
