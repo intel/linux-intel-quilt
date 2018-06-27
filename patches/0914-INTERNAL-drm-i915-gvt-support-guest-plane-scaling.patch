@@ -1,7 +1,7 @@
 From 41e8b2836950b14a9fa79e8da1254175a41472f7 Mon Sep 17 00:00:00 2001
 From: Fei Jiang <fei.jiang@intel.com>
 Date: Thu, 12 Apr 2018 18:12:18 +0800
-Subject: [PATCH 0914/1094] [INTERNAL]drm/i915/gvt: support guest plane scaling
+Subject: [PATCH 0914/1097] [INTERNAL]drm/i915/gvt: support guest plane scaling
 
 It is to support plane scaling feature, need let guest access PS_CTRL,
 PS_WIN, PS_POS registers. Use parameter domain_scaler_owner to control
@@ -22,7 +22,7 @@ Signed-off-by: Fei Jiang <fei.jiang@intel.com>
  8 files changed, 153 insertions(+), 58 deletions(-)
 
 diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
-index 1f9a2c20d588..7ab158758bec 100644
+index 1f9a2c2..7ab1587 100644
 --- a/drivers/gpu/drm/i915/gvt/display.c
 +++ b/drivers/gpu/drm/i915/gvt/display.c
 @@ -465,15 +465,33 @@ int bxt_check_planes(struct intel_vgpu *vgpu, int pipe)
@@ -61,7 +61,7 @@ index 1f9a2c20d588..7ab158758bec 100644
  }
  
 diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
-index 91b85397c59f..c4dadcc927ed 100644
+index 91b8539..c4dadcc 100644
 --- a/drivers/gpu/drm/i915/gvt/gvt.h
 +++ b/drivers/gpu/drm/i915/gvt/gvt.h
 @@ -290,6 +290,7 @@ struct intel_gvt_pipe_info {
@@ -85,7 +85,7 @@ index 91b85397c59f..c4dadcc927ed 100644
  					    u32 offset, u32 val, bool low)
  {
 diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
-index 9afca195df45..5c28e5cdb83b 100644
+index 9afca19..5c28e5c 100644
 --- a/drivers/gpu/drm/i915/gvt/handlers.c
 +++ b/drivers/gpu/drm/i915/gvt/handlers.c
 @@ -764,6 +764,45 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
@@ -252,7 +252,7 @@ index 9afca195df45..5c28e5cdb83b 100644
  	MMIO_DH(CUR_BUF_CFG(PIPE_A), D_BXT, NULL, NULL);
  	MMIO_DH(CUR_BUF_CFG(PIPE_B), D_BXT, NULL, NULL);
 diff --git a/drivers/gpu/drm/i915/gvt/reg.h b/drivers/gpu/drm/i915/gvt/reg.h
-index 0beec530aabc..db26f31d4928 100644
+index 0beec53..db26f31 100644
 --- a/drivers/gpu/drm/i915/gvt/reg.h
 +++ b/drivers/gpu/drm/i915/gvt/reg.h
 @@ -58,6 +58,10 @@
@@ -267,7 +267,7 @@ index 0beec530aabc..db26f31d4928 100644
  #define SKL_PLANE_REG_TO_PLANE(reg) ((((reg) & 0xFFF) - 0x180) >> 8)
  #define SKL_FLIP_EVENT(pipe, plane) (PRIMARY_A_FLIP_DONE + (plane)*3 + pipe)
 diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
-index b6c9bbf55240..f5802413591a 100644
+index b6c9bbf..f580241 100644
 --- a/drivers/gpu/drm/i915/gvt/vgpu.c
 +++ b/drivers/gpu/drm/i915/gvt/vgpu.c
 @@ -37,6 +37,11 @@
@@ -298,7 +298,7 @@ index b6c9bbf55240..f5802413591a 100644
  	gvt_dbg_core("aperture base [GMADR] 0x%llx size 0x%llx\n",
  		vgpu_aperture_gmadr_base(vgpu), vgpu_aperture_sz(vgpu));
 diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
-index e9a2647309fc..5c582c14d471 100644
+index e9a2647..5c582c1 100644
 --- a/drivers/gpu/drm/i915/i915_params.c
 +++ b/drivers/gpu/drm/i915/i915_params.c
 @@ -83,6 +83,7 @@ struct i915_params i915_modparams __read_mostly = {
@@ -338,7 +338,7 @@ index e9a2647309fc..5c582c14d471 100644
 +	"each pipe ids can be from 0-F, eg domain_scaler_owners = 0x00030210\n"
 +	"scaler owner: 1C:3 2B:0 1B:2 2A:1 1A:0 (0x0 - default value)\n");
 diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
-index 4e1654e67efe..73b5e6231b8a 100644
+index 4e1654e..73b5e62 100644
 --- a/drivers/gpu/drm/i915/i915_params.h
 +++ b/drivers/gpu/drm/i915/i915_params.h
 @@ -79,7 +79,8 @@
@@ -352,7 +352,7 @@ index 4e1654e67efe..73b5e6231b8a 100644
  #define MEMBER(T, member) T member
  struct i915_params {
 diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
-index f0354e7ed0c0..a6f4a915cacd 100644
+index f0354e7..a6f4a91 100644
 --- a/drivers/gpu/drm/i915/intel_display.c
 +++ b/drivers/gpu/drm/i915/intel_display.c
 @@ -13640,6 +13640,11 @@ static void intel_crtc_init_scalers(struct intel_crtc *crtc,
@@ -368,5 +368,5 @@ index f0354e7ed0c0..a6f4a915cacd 100644
  			 !(1 << (crtc->pipe * SKL_NUM_SCALERS + i) &
  			  dev_priv->vgpu.scaler_owned))
 -- 
-2.14.4
+2.7.4
 
