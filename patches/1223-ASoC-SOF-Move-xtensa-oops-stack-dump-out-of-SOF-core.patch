@@ -1,0 +1,502 @@
+From c754573180f37a9c016fcb43199765ad2cefc172 Mon Sep 17 00:00:00 2001
+From: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Date: Thu, 14 Jun 2018 21:38:15 +0100
+Subject: [PATCH 1223/1240] ASoC: SOF: Move xtensa oops/stack dump out of SOF
+ core
+
+Move it to sof/xtensa/core.c
+
+Signed-off-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+---
+ sound/soc/sof/Kconfig         |   1 +
+ sound/soc/sof/Makefile        |   1 +
+ sound/soc/sof/core.c          | 134 +----------------------------------
+ sound/soc/sof/intel/Kconfig   |   1 +
+ sound/soc/sof/intel/bdw.c     |   3 +
+ sound/soc/sof/intel/byt.c     |   3 +
+ sound/soc/sof/intel/hda.c     |   3 +
+ sound/soc/sof/intel/hsw.c     |   3 +
+ sound/soc/sof/sof-priv.h      |  24 +++++++
+ sound/soc/sof/xtensa/Kconfig  |   3 +
+ sound/soc/sof/xtensa/Makefile |   7 ++
+ sound/soc/sof/xtensa/core.c   | 159 ++++++++++++++++++++++++++++++++++++++++++
+ 12 files changed, 210 insertions(+), 132 deletions(-)
+ create mode 100644 sound/soc/sof/xtensa/Kconfig
+ create mode 100644 sound/soc/sof/xtensa/Makefile
+ create mode 100644 sound/soc/sof/xtensa/core.c
+
+diff --git a/sound/soc/sof/Kconfig b/sound/soc/sof/Kconfig
+index 0b2e7a5..bdae3f5 100644
+--- a/sound/soc/sof/Kconfig
++++ b/sound/soc/sof/Kconfig
+@@ -42,3 +42,4 @@ config SND_SOC_SOF_FORCE_NOCODEC_MODE
+           If unsure select "N".
+ 
+ source "sound/soc/sof/intel/Kconfig"
++source "sound/soc/sof/xtensa/Kconfig"
+diff --git a/sound/soc/sof/Makefile b/sound/soc/sof/Makefile
+index b759554..e081723 100644
+--- a/sound/soc/sof/Makefile
++++ b/sound/soc/sof/Makefile
+@@ -22,3 +22,4 @@ obj-$(SND_SOC_SOF_PLATFORM) += sof-platform-dev.o
+ obj-$(CONFIG_SND_SOC_SOF_SPIDSP) += snd-sof-spi.o
+ 
+ obj-$(CONFIG_SND_SOC_SOF_INTEL)	+= intel/
++obj-$(CONFIG_SND_SOC_SOF_XTENSA) += xtensa/
+diff --git a/sound/soc/sof/core.c b/sound/soc/sof/core.c
+index 9e0e340..b523496 100644
+--- a/sound/soc/sof/core.c
++++ b/sound/soc/sof/core.c
+@@ -140,136 +140,6 @@ static const struct sof_panic_msg panic_msg[] = {
+ 	{SOF_IPC_PANIC_IDLE, "can't enter idle"},
+ };
+ 
+-struct sof_exception_cause {
+-	u32 id;
+-	const char *msg;
+-	const char *description;
+-};
+-
+-/* From 4.4.1.5 table 4-64 Exception Causes of
+- * Xtensa Instruction Set Architecture (ISA) Reference Manual
+- */
+-static const struct sof_exception_cause xtensa_exception_causes[] = {
+-	{0, "IllegalInstructionCause", "Illegal instruction"},
+-	{1, "SyscallCause", "SYSCALL instruction"},
+-	{2, "InstructionFetchErrorCause",
+-	"Processor internal physical address or data error during instruction fetch"},
+-	{3, "LoadStoreErrorCause",
+-	"Processor internal physical address or data error during load or store"},
+-	{4, "Level1InterruptCause",
+-	"Level-1 interrupt as indicated by set level-1 bits in the INTERRUPT register"},
+-	{5, "AllocaCause",
+-	"MOVSP instruction, if caller’s registers are not in the register file"},
+-	{6, "IntegerDivideByZeroCause",
+-	"QUOS, QUOU, REMS, or REMU divisor operand is zero"},
+-	{8, "PrivilegedCause",
+-	"Attempt to execute a privileged operation when CRING ? 0"},
+-	{9, "LoadStoreAlignmentCause", "Load or store to an unaligned address"},
+-	{12, "InstrPIFDataErrorCause",
+-	"PIF data error during instruction fetch"},
+-	{13, "LoadStorePIFDataErrorCause",
+-	"Synchronous PIF data error during LoadStore access"},
+-	{14, "InstrPIFAddrErrorCause",
+-	"PIF address error during instruction fetch"},
+-	{15, "LoadStorePIFAddrErrorCause",
+-	"Synchronous PIF address error during LoadStore access"},
+-	{16, "InstTLBMissCause", "Error during Instruction TLB refill"},
+-	{17, "InstTLBMultiHitCause",
+-	"Multiple instruction TLB entries matched"},
+-	{18, "InstFetchPrivilegeCause",
+-	"An instruction fetch referenced a virtual address at a ring level less than CRING"},
+-	{20, "InstFetchProhibitedCause",
+-	"An instruction fetch referenced a page mapped with an attribute that does not permit instruction fetch"},
+-	{24, "LoadStoreTLBMissCause",
+-	"Error during TLB refill for a load or store"},
+-	{25, "LoadStoreTLBMultiHitCause",
+-	"Multiple TLB entries matched for a load or store"},
+-	{26, "LoadStorePrivilegeCause",
+-	"A load or store referenced a virtual address at a ring level less than CRING"},
+-	{28, "LoadProhibitedCause",
+-	"A load referenced a page mapped with an attribute that does not permit loads"},
+-	{32, "Coprocessor0Disabled",
+-	"Coprocessor 0 instruction when cp0 disabled"},
+-	{33, "Coprocessor1Disabled",
+-	"Coprocessor 1 instruction when cp1 disabled"},
+-	{34, "Coprocessor2Disabled",
+-	"Coprocessor 2 instruction when cp2 disabled"},
+-	{35, "Coprocessor3Disabled",
+-	"Coprocessor 3 instruction when cp3 disabled"},
+-	{36, "Coprocessor4Disabled",
+-	"Coprocessor 4 instruction when cp4 disabled"},
+-	{37, "Coprocessor5Disabled",
+-	"Coprocessor 5 instruction when cp5 disabled"},
+-	{38, "Coprocessor6Disabled",
+-	"Coprocessor 6 instruction when cp6 disabled"},
+-	{39, "Coprocessor7Disabled",
+-	"Coprocessor 7 instruction when cp7 disabled"},
+-};
+-
+-/* only need xtensa atm */
+-static void sof_arch_dsp_oops(struct snd_sof_dev *sdev, void *oops)
+-{
+-	struct sof_ipc_dsp_oops_xtensa *xoops = oops;
+-	int i;
+-
+-	dev_err(sdev->dev, "error: DSP Firmware Oops\n");
+-	for (i = 0; i < ARRAY_SIZE(xtensa_exception_causes); i++) {
+-		if (xtensa_exception_causes[i].id == xoops->exccause) {
+-			dev_err(sdev->dev, "error: Exception Cause: %s, %s\n",
+-				xtensa_exception_causes[i].msg,
+-				xtensa_exception_causes[i].description);
+-		}
+-	}
+-	dev_err(sdev->dev, "EXCCAUSE 0x%8.8x EXCVADDR 0x%8.8x PS       0x%8.8x SAR     0x%8.8x\n",
+-		xoops->exccause, xoops->excvaddr, xoops->ps, xoops->sar);
+-	dev_err(sdev->dev, "EPC1     0x%8.8x EPC2     0x%8.8x EPC3     0x%8.8x EPC4    0x%8.8x",
+-		xoops->epc1, xoops->epc2, xoops->epc3, xoops->epc4);
+-	dev_err(sdev->dev, "EPC5     0x%8.8x EPC6     0x%8.8x EPC7     0x%8.8x DEPC    0x%8.8x",
+-		xoops->epc5, xoops->epc6, xoops->epc7, xoops->depc);
+-	dev_err(sdev->dev, "EPS2     0x%8.8x EPS3     0x%8.8x EPS4     0x%8.8x EPS5    0x%8.8x",
+-		xoops->eps2, xoops->eps3, xoops->eps4, xoops->eps5);
+-	dev_err(sdev->dev, "EPS6     0x%8.8x EPS7     0x%8.8x INTENABL 0x%8.8x INTERRU 0x%8.8x",
+-		xoops->eps6, xoops->eps7, xoops->intenable, xoops->interrupt);
+-}
+-
+-static void sof_dsp_dump_stack(struct snd_sof_dev *sdev, void *oops,
+-			       u32 *stack, u32 stack_words)
+-{
+-	struct sof_ipc_dsp_oops_xtensa *xoops = oops;
+-	u32 stack_ptr = xoops->stack;
+-	int i;
+-
+-	dev_err(sdev->dev, "stack dump from 0x%8.8x\n", stack_ptr);
+-
+-	for (i = 0; i <= stack_words - 4; i += 4) {
+-		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x 0x%8.8x 0x%8.8x\n",
+-			stack_ptr + i, stack[i], stack[i + 1], stack[i + 2],
+-			stack[i + 3]);
+-	}
+-
+-	/* deal with any remaining words */
+-	switch (stack_words - i) {
+-	case 0:
+-		break;
+-	case 1:
+-		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x\n",
+-			stack_ptr + stack_words - 1, stack[stack_words - 1]);
+-		break;
+-	case 2:
+-		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x\n",
+-			stack_ptr + stack_words - 2, stack[stack_words - 2],
+-			stack[stack_words - 1]);
+-		break;
+-	case 3:
+-		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x 0x%8.8x\n",
+-			stack_ptr + stack_words - 3, stack[stack_words - 3],
+-			stack[stack_words - 2], stack[stack_words - 1]);
+-		break;
+-	default:
+-		break;
+-	}
+-}
+-
+ int snd_sof_get_status(struct snd_sof_dev *sdev, u32 panic_code,
+ 		       u32 tracep_code, void *oops, void *stack,
+ 		       size_t stack_words)
+@@ -301,8 +171,8 @@ int snd_sof_get_status(struct snd_sof_dev *sdev, u32 panic_code,
+ 	dev_err(sdev->dev, "error: trace point %8.8x\n", tracep_code);
+ 
+ out:
+-	sof_arch_dsp_oops(sdev, oops);
+-	sof_dsp_dump_stack(sdev, oops, stack, stack_words);
++	sof_oops(sdev, oops);
++	sof_stack(sdev, oops, stack, stack_words);
+ 	return -EFAULT;
+ }
+ EXPORT_SYMBOL(snd_sof_get_status);
+diff --git a/sound/soc/sof/intel/Kconfig b/sound/soc/sof/intel/Kconfig
+index 2780750..d9b4b6a 100644
+--- a/sound/soc/sof/intel/Kconfig
++++ b/sound/soc/sof/intel/Kconfig
+@@ -3,6 +3,7 @@ config SND_SOC_SOF_INTEL
+ 	depends on SND_SOC_SOF
+ 	depends on SND_DMA_SGBUF
+ 	select SND_SOC_INTEL_MACH
++	select SND_SOC_SOF_XTENSA
+ 	help
+           This adds support for Sound Open Firmware for Intel(R) platforms.
+           Say Y if you have such a device.
+diff --git a/sound/soc/sof/intel/bdw.c b/sound/soc/sof/intel/bdw.c
+index d1dbef55..eb8ee7d 100644
+--- a/sound/soc/sof/intel/bdw.c
++++ b/sound/soc/sof/intel/bdw.c
+@@ -600,6 +600,9 @@ static int bdw_probe(struct snd_sof_dev *sdev)
+ 	u32 base, size;
+ 	int ret = 0;
+ 
++	/* set DSP arch ops */
++	sdev->arch_ops = &sof_xtensa_arch_ops;
++
+ 	/* LPE base */
+ 	mmio = platform_get_resource(pdev, IORESOURCE_MEM,
+ 				     desc->resindex_lpe_base);
+diff --git a/sound/soc/sof/intel/byt.c b/sound/soc/sof/intel/byt.c
+index 3103987..fa76478 100644
+--- a/sound/soc/sof/intel/byt.c
++++ b/sound/soc/sof/intel/byt.c
+@@ -531,6 +531,9 @@ static int byt_acpi_probe(struct snd_sof_dev *sdev)
+ 	u32 base, size;
+ 	int ret = 0;
+ 
++	/* set DSP arch ops */
++	sdev->arch_ops = &sof_xtensa_arch_ops;
++
+ 	/* DSP DMA can only access low 31 bits of host memory */
+ 	ret = dma_coerce_mask_and_coherent(sdev->dev, DMA_BIT_MASK(31));
+ 	if (ret < 0) {
+diff --git a/sound/soc/sof/intel/hda.c b/sound/soc/sof/intel/hda.c
+index de138cf..7949d6d 100644
+--- a/sound/soc/sof/intel/hda.c
++++ b/sound/soc/sof/intel/hda.c
+@@ -311,6 +311,9 @@ int hda_dsp_probe(struct snd_sof_dev *sdev)
+ 	int i;
+ 	int ret = 0;
+ 
++	/* set DSP arch ops */
++	sdev->arch_ops = &sof_xtensa_arch_ops;
++
+ 	chip = get_chip_info(pci->device);
+ 	if (!chip) {
+ 		dev_err(sdev->dev, "no such device supported, chip id:%x\n",
+diff --git a/sound/soc/sof/intel/hsw.c b/sound/soc/sof/intel/hsw.c
+index b9a5102..e401673 100644
+--- a/sound/soc/sof/intel/hsw.c
++++ b/sound/soc/sof/intel/hsw.c
+@@ -601,6 +601,9 @@ static int hsw_probe(struct snd_sof_dev *sdev)
+ 	u32 base, size;
+ 	int ret = 0;
+ 
++	/* set DSP arch ops */
++	sdev->arch_ops = &sof_xtensa_arch_ops;
++
+ 	/* LPE base */
+ 	mmio = platform_get_resource(pdev, IORESOURCE_MEM,
+ 				     desc->resindex_lpe_base);
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index bde985f..6cc8513 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -134,6 +134,12 @@ struct snd_sof_dsp_ops {
+ 	int (*trace_trigger)(struct snd_sof_dev *sdev, int cmd);
+ };
+ 
++struct sof_arch_ops {
++	void (*dsp_oops)(struct snd_sof_dev *sdev, void *oops);
++	void (*dsp_stack)(struct snd_sof_dev *sdev, void *oops,
++			  u32 *stack, u32 stack_words);
++};
++
+ struct snd_sof_pdata;
+ 
+ struct sof_ops_table {
+@@ -254,6 +260,7 @@ struct snd_sof_dev {
+ 	struct snd_sof_pdata *pdata;
+ 	const struct snd_sof_dsp_ops *ops;
+ 	struct sof_intel_hda_dev *hda;	/* for HDA based DSP HW */
++	const struct sof_arch_ops *arch_ops;
+ 
+ 	/* IPC */
+ 	struct snd_sof_ipc *ipc;
+@@ -434,4 +441,21 @@ int snd_sof_bytes_get(struct snd_kcontrol *kcontrol,
+ int snd_sof_bytes_put(struct snd_kcontrol *kcontrol,
+ 		      struct snd_ctl_elem_value *ucontrol);
+ 
++/*
++ * DSP Architectures.
++ */
++static inline void sof_stack(struct snd_sof_dev *sdev, void *oops, u32 *stack,
++			     u32 stack_words)
++{
++	if (sdev->arch_ops->dsp_stack)
++		sdev->arch_ops->dsp_stack(sdev, oops, stack, stack_words);
++}
++
++static inline void sof_oops(struct snd_sof_dev *sdev, void *oops)
++{
++	if (sdev->arch_ops->dsp_oops)
++		sdev->arch_ops->dsp_oops(sdev, oops);
++}
++
++extern const struct sof_arch_ops sof_xtensa_arch_ops;
+ #endif
+diff --git a/sound/soc/sof/xtensa/Kconfig b/sound/soc/sof/xtensa/Kconfig
+new file mode 100644
+index 0000000..f66f17b
+--- /dev/null
++++ b/sound/soc/sof/xtensa/Kconfig
+@@ -0,0 +1,3 @@
++config SND_SOC_SOF_XTENSA
++	tristate
++
+diff --git a/sound/soc/sof/xtensa/Makefile b/sound/soc/sof/xtensa/Makefile
+new file mode 100644
+index 0000000..34b27be
+--- /dev/null
++++ b/sound/soc/sof/xtensa/Makefile
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
++
++ccflags-y += -DDEBUG
++
++snd-sof-xtensa-dsp-objs := core.o
++
++obj-$(CONFIG_SND_SOC_SOF_XTENSA) += snd-sof-xtensa-dsp.o
+diff --git a/sound/soc/sof/xtensa/core.c b/sound/soc/sof/xtensa/core.c
+new file mode 100644
+index 0000000..5ca9185
+--- /dev/null
++++ b/sound/soc/sof/xtensa/core.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
++/*
++ * This file is provided under a dual BSD/GPLv2 license.  When using or
++ * redistributing this file, you may do so under either license.
++ *
++ * Copyright(c) 2018 Intel Corporation. All rights reserved.
++ *
++ * Author: Pan Xiuli <xiuli.pan@linux.intel.com>
++ */
++
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/delay.h>
++#include <asm/page.h>
++#include <asm/pgtable.h>
++#include <sound/core.h>
++#include <sound/soc.h>
++#include <sound/sof.h>
++#include "../sof-priv.h"
++#include "../ops.h"
++
++struct xtensa_exception_cause {
++	u32 id;
++	const char *msg;
++	const char *description;
++};
++
++/* From 4.4.1.5 table 4-64 Exception Causes of
++ * Xtensa Instruction Set Architecture (ISA) Reference Manual
++ */
++static const struct xtensa_exception_cause xtensa_exception_causes[] = {
++	{0, "IllegalInstructionCause", "Illegal instruction"},
++	{1, "SyscallCause", "SYSCALL instruction"},
++	{2, "InstructionFetchErrorCause",
++	"Processor internal physical address or data error during instruction fetch"},
++	{3, "LoadStoreErrorCause",
++	"Processor internal physical address or data error during load or store"},
++	{4, "Level1InterruptCause",
++	"Level-1 interrupt as indicated by set level-1 bits in the INTERRUPT register"},
++	{5, "AllocaCause",
++	"MOVSP instruction, if caller’s registers are not in the register file"},
++	{6, "IntegerDivideByZeroCause",
++	"QUOS, QUOU, REMS, or REMU divisor operand is zero"},
++	{8, "PrivilegedCause",
++	"Attempt to execute a privileged operation when CRING ? 0"},
++	{9, "LoadStoreAlignmentCause", "Load or store to an unaligned address"},
++	{12, "InstrPIFDataErrorCause",
++	"PIF data error during instruction fetch"},
++	{13, "LoadStorePIFDataErrorCause",
++	"Synchronous PIF data error during LoadStore access"},
++	{14, "InstrPIFAddrErrorCause",
++	"PIF address error during instruction fetch"},
++	{15, "LoadStorePIFAddrErrorCause",
++	"Synchronous PIF address error during LoadStore access"},
++	{16, "InstTLBMissCause", "Error during Instruction TLB refill"},
++	{17, "InstTLBMultiHitCause",
++	"Multiple instruction TLB entries matched"},
++	{18, "InstFetchPrivilegeCause",
++	"An instruction fetch referenced a virtual address at a ring level less than CRING"},
++	{20, "InstFetchProhibitedCause",
++	"An instruction fetch referenced a page mapped with an attribute that does not permit instruction fetch"},
++	{24, "LoadStoreTLBMissCause",
++	"Error during TLB refill for a load or store"},
++	{25, "LoadStoreTLBMultiHitCause",
++	"Multiple TLB entries matched for a load or store"},
++	{26, "LoadStorePrivilegeCause",
++	"A load or store referenced a virtual address at a ring level less than CRING"},
++	{28, "LoadProhibitedCause",
++	"A load referenced a page mapped with an attribute that does not permit loads"},
++	{32, "Coprocessor0Disabled",
++	"Coprocessor 0 instruction when cp0 disabled"},
++	{33, "Coprocessor1Disabled",
++	"Coprocessor 1 instruction when cp1 disabled"},
++	{34, "Coprocessor2Disabled",
++	"Coprocessor 2 instruction when cp2 disabled"},
++	{35, "Coprocessor3Disabled",
++	"Coprocessor 3 instruction when cp3 disabled"},
++	{36, "Coprocessor4Disabled",
++	"Coprocessor 4 instruction when cp4 disabled"},
++	{37, "Coprocessor5Disabled",
++	"Coprocessor 5 instruction when cp5 disabled"},
++	{38, "Coprocessor6Disabled",
++	"Coprocessor 6 instruction when cp6 disabled"},
++	{39, "Coprocessor7Disabled",
++	"Coprocessor 7 instruction when cp7 disabled"},
++};
++
++/* only need xtensa atm */
++static void xtensa_dsp_oops(struct snd_sof_dev *sdev, void *oops)
++{
++	struct sof_ipc_dsp_oops_xtensa *xoops = oops;
++	int i;
++
++	dev_err(sdev->dev, "error: DSP Firmware Oops\n");
++	for (i = 0; i < ARRAY_SIZE(xtensa_exception_causes); i++) {
++		if (xtensa_exception_causes[i].id == xoops->exccause) {
++			dev_err(sdev->dev, "error: Exception Cause: %s, %s\n",
++				xtensa_exception_causes[i].msg,
++				xtensa_exception_causes[i].description);
++		}
++	}
++	dev_err(sdev->dev, "EXCCAUSE 0x%8.8x EXCVADDR 0x%8.8x PS       0x%8.8x SAR     0x%8.8x\n",
++		xoops->exccause, xoops->excvaddr, xoops->ps, xoops->sar);
++	dev_err(sdev->dev, "EPC1     0x%8.8x EPC2     0x%8.8x EPC3     0x%8.8x EPC4    0x%8.8x",
++		xoops->epc1, xoops->epc2, xoops->epc3, xoops->epc4);
++	dev_err(sdev->dev, "EPC5     0x%8.8x EPC6     0x%8.8x EPC7     0x%8.8x DEPC    0x%8.8x",
++		xoops->epc5, xoops->epc6, xoops->epc7, xoops->depc);
++	dev_err(sdev->dev, "EPS2     0x%8.8x EPS3     0x%8.8x EPS4     0x%8.8x EPS5    0x%8.8x",
++		xoops->eps2, xoops->eps3, xoops->eps4, xoops->eps5);
++	dev_err(sdev->dev, "EPS6     0x%8.8x EPS7     0x%8.8x INTENABL 0x%8.8x INTERRU 0x%8.8x",
++		xoops->eps6, xoops->eps7, xoops->intenable, xoops->interrupt);
++}
++
++static void xtensa_stack(struct snd_sof_dev *sdev, void *oops, u32 *stack,
++			 u32 stack_words)
++{
++	struct sof_ipc_dsp_oops_xtensa *xoops = oops;
++	u32 stack_ptr = xoops->stack;
++	int i;
++
++	dev_err(sdev->dev, "stack dump from 0x%8.8x\n", stack_ptr);
++
++	for (i = 0; i <= stack_words - 4; i += 4) {
++		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x 0x%8.8x 0x%8.8x\n",
++			stack_ptr + i, stack[i], stack[i + 1], stack[i + 2],
++			stack[i + 3]);
++	}
++
++	/* deal with any remaining words */
++	switch (stack_words - i) {
++	case 0:
++		break;
++	case 1:
++		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x\n",
++			stack_ptr + stack_words - 1, stack[stack_words - 1]);
++		break;
++	case 2:
++		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x\n",
++			stack_ptr + stack_words - 2, stack[stack_words - 2],
++			stack[stack_words - 1]);
++		break;
++	case 3:
++		dev_err(sdev->dev, "0x%8.8x: 0x%8.8x 0x%8.8x 0x%8.8x\n",
++			stack_ptr + stack_words - 3, stack[stack_words - 3],
++			stack[stack_words - 2], stack[stack_words - 1]);
++		break;
++	default:
++		break;
++	}
++}
++
++const struct sof_arch_ops sof_xtensa_arch_ops = {
++	.dsp_oops = xtensa_dsp_oops,
++	.dsp_stack = xtensa_stack,
++};
++EXPORT_SYMBOL(sof_xtensa_arch_ops);
++
++MODULE_DESCRIPTION("SOF Xtensa DSP support");
++MODULE_LICENSE("Dual BSD/GPL");
+-- 
+2.7.4
+

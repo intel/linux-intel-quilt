@@ -1,0 +1,100 @@
+From 08e73b69dc8375a5dae630b89eacc5110adf8e95 Mon Sep 17 00:00:00 2001
+From: Keyon Jie <yang.jie@linux.intel.com>
+Date: Fri, 22 Jun 2018 22:32:11 +0800
+Subject: [PATCH 1230/1240] ASoC: SOF: core: register DAIs from platform
+ drivers.
+
+Register all DAI from platform driver
+
+Signed-off-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Signed-off-by: Keyon Jie <yang.jie@linux.intel.com>
+---
+ sound/soc/sof/core.c     |  8 +++++---
+ sound/soc/sof/sof-priv.h | 18 ++++++++++++++++--
+ 2 files changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/sof/core.c b/sound/soc/sof/core.c
+index b523496..ce31593 100644
+--- a/sound/soc/sof/core.c
++++ b/sound/soc/sof/core.c
+@@ -210,7 +210,7 @@ static int sof_probe(struct platform_device *pdev)
+ 	spin_lock_init(&sdev->ipc_lock);
+ 	spin_lock_init(&sdev->hw_lock);
+ 
+-	/* set up platform and component drivers */
++	/* set up platform component driver */
+ 	snd_sof_new_platform_drv(sdev);
+ 	snd_sof_new_dai_drv(sdev);
+ 
+@@ -271,14 +271,16 @@ static int sof_probe(struct platform_device *pdev)
+ 		goto fw_run_err;
+ 	}
+ 
+-	ret = snd_soc_register_component(&pdev->dev,  sdev->cmpnt_drv,
+-					 &sdev->dai_drv, sdev->num_dai);
++	ret = snd_soc_register_component(&pdev->dev, sdev->cmpnt_drv,
++					 sdev->ops->dai_drv->drv,
++					 sdev->ops->dai_drv->num_drv);
+ 	if (ret < 0) {
+ 		dev_err(sdev->dev,
+ 			"error: failed to register DSP DAI driver %d\n", ret);
+ 		goto comp_err;
+ 	}
+ 
++	/* init DMA trace */
+ 	ret = snd_sof_init_trace(sdev);
+ 	if (ret < 0) {
+ 		dev_warn(sdev->dev,
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index fabfcb2..271f649 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -43,6 +43,14 @@
+ /* max number of FE PCMs before BEs */
+ #define SOF_BE_PCM_BASE		16
+ 
++/* convenience constructor for DAI driver streams */
++#define SOF_DAI_STREAM(sname, scmin, scmax, srates, sfmt) \
++	{.stream_name = sname, .channels_min = scmin, .channels_max = scmax, \
++	 .rates = srates, .formats = sfmt}
++
++#define SOF_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE | \
++	SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_FLOAT)
++
+ struct snd_sof_dev;
+ struct snd_sof_ipc_msg;
+ struct snd_sof_ipc;
+@@ -52,6 +60,11 @@ struct snd_soc_component;
+ struct sof_intel_hda_dev;
+ struct snd_sof_pdata;
+ 
++struct snd_sof_dai_drv {
++	struct snd_soc_dai_driver *drv;
++	int num_drv;
++};
++
+ /*
+  * SOF DSP HW abstraction operations.
+  * Used to abstract DSP HW architecture and any IO busses between host CPU
+@@ -139,6 +152,9 @@ struct snd_sof_dsp_ops {
+ 	int (*trace_init)(struct snd_sof_dev *sdev, u32 *stream_tag);
+ 	int (*trace_release)(struct snd_sof_dev *sdev);
+ 	int (*trace_trigger)(struct snd_sof_dev *sdev, int cmd);
++
++	/* DAI ops */
++	struct snd_sof_dai_drv *dai_drv;
+ };
+ 
+ /* DSP architecture specific callbacks for oops and stack dumps */
+@@ -263,8 +279,6 @@ struct snd_sof_dev {
+ 	/* ASoC components */
+ 	struct snd_soc_platform_driver plat_drv;
+ 	const struct snd_soc_component_driver *cmpnt_drv;
+-	struct snd_soc_dai_driver dai_drv;
+-	int num_dai;
+ 
+ 	/* DSP firmware boot */
+ 	wait_queue_head_t boot_wait;
+-- 
+2.7.4
+

@@ -1,0 +1,76 @@
+From d71e1e9c9138c9fb6a44b99252bd5e7c396a7705 Mon Sep 17 00:00:00 2001
+From: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Date: Thu, 14 Jun 2018 20:53:59 +0100
+Subject: [PATCH 1145/1240] ASoC: topology: Add callback for DAPM route
+ load/unload
+
+Add a callback fro clients for notification about DAPM route loading and
+unloading.
+
+Signed-off-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+(cherry picked from commit 503e79b793fea5de626db73accf8e8994bc4289d)
+---
+ include/sound/soc-topology.h |  7 +++++++
+ sound/soc/soc-topology.c     | 13 +++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/include/sound/soc-topology.h b/include/sound/soc-topology.h
+index e1f265e..401ef2c 100644
+--- a/include/sound/soc-topology.h
++++ b/include/sound/soc-topology.h
+@@ -32,6 +32,7 @@ struct snd_kcontrol_new;
+ struct snd_soc_dai_link;
+ struct snd_soc_dai_driver;
+ struct snd_soc_dai;
++struct snd_soc_dapm_route;
+ 
+ /* object scan be loaded and unloaded in groups with identfying indexes */
+ #define SND_SOC_TPLG_INDEX_ALL	0	/* ID that matches all FW objects */
+@@ -116,6 +117,12 @@ struct snd_soc_tplg_ops {
+ 	int (*control_unload)(struct snd_soc_component *,
+ 		struct snd_soc_dobj *);
+ 
++	/* DAPM graph route element loading and unloading */
++	int (*dapm_route_load)(struct snd_soc_component *, int index,
++		struct snd_soc_dapm_route *route);
++	int (*dapm_route_unload)(struct snd_soc_component *,
++		struct snd_soc_dobj *);
++
+ 	/* external widget init - used for any driver specific init */
+ 	int (*widget_load)(struct snd_soc_component *, int index,
+ 		struct snd_soc_dapm_widget *,
+diff --git a/sound/soc/soc-topology.c b/sound/soc/soc-topology.c
+index de66dcb..0b89a8c 100644
+--- a/sound/soc/soc-topology.c
++++ b/sound/soc/soc-topology.c
+@@ -1156,6 +1156,17 @@ static int soc_tplg_kcontrol_elems_load(struct soc_tplg *tplg,
+ 	return 0;
+ }
+ 
++/* optionally pass new dynamic kcontrol to component driver. */
++static int soc_tplg_add_route(struct soc_tplg *tplg,
++	struct snd_soc_dapm_route *route)
++{
++	if (tplg->comp && tplg->ops && tplg->ops->dapm_route_load)
++		return tplg->ops->dapm_route_load(tplg->comp, tplg->index,
++			route);
++
++	return 0;
++}
++
+ static int soc_tplg_dapm_graph_elems_load(struct soc_tplg *tplg,
+ 	struct snd_soc_tplg_hdr *hdr)
+ {
+@@ -1204,6 +1215,8 @@ static int soc_tplg_dapm_graph_elems_load(struct soc_tplg *tplg,
+ 		else
+ 			route.control = elem->control;
+ 
++		soc_tplg_add_route(tplg, &route);
++
+ 		/* add route, but keep going if some fail */
+ 		snd_soc_dapm_add_routes(dapm, &route, 1);
+ 	}
+-- 
+2.7.4
+

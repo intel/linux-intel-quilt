@@ -1,0 +1,76 @@
+From aad00d1ce41a3d868fe88df9b9c36de713f45206 Mon Sep 17 00:00:00 2001
+From: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Date: Sat, 9 Jun 2018 23:06:25 -0700
+Subject: [PATCH 1213/1240] ASoC: SOF: topology: free volume table while
+ unloading pga widget
+
+Free the volume table associated with the pga widget when it is
+unloaded.
+
+Tested on: Minnowboard Turbot w/ RT5651 and Up^2 w/ Hifiberry DAC+ PRO
+Passed sanity tests on both
+
+SOF: Master
+SOFT: master
+Kernel: https://github.com/thesofproject/linux branch: topic/sof-dev
+
+Signed-off-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+---
+ sound/soc/sof/topology.c | 33 ++++++++++++++++++++++++++++-----
+ 1 file changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/sof/topology.c b/sound/soc/sof/topology.c
+index a2c986e..cdf21b0 100644
+--- a/sound/soc/sof/topology.c
++++ b/sound/soc/sof/topology.c
+@@ -1380,19 +1380,42 @@ static int sof_widget_ready(struct snd_soc_component *scomp, int index,
+ static int sof_widget_unload(struct snd_soc_component *scomp,
+ 			     struct snd_soc_dobj *dobj)
+ {
++	const struct snd_kcontrol_new *kc = NULL;
++	struct snd_soc_dapm_widget *widget;
++	struct snd_sof_control *scontrol;
+ 	struct snd_sof_widget *swidget;
++	struct soc_mixer_control *sm;
+ 	struct snd_sof_dai *dai;
+ 
+ 	swidget = dobj->private;
+ 	if (!swidget)
+ 		return 0;
+ 
+-	dai = swidget->private;
++	widget = swidget->widget;
++
++	switch (swidget->id) {
++	case snd_soc_dapm_dai_in:
++	case snd_soc_dapm_dai_out:
++		dai = swidget->private;
++
++		/* remove and free dai object */
++		if (dai) {
++			list_del(&dai->list);
++			kfree(dai);
++		}
++		break;
++	case snd_soc_dapm_pga:
++
++		/* get volume kcontrol */
++		kc = &widget->kcontrol_news[0];
++		sm = (struct soc_mixer_control *)kc->private_value;
++		scontrol = sm->dobj.private;
+ 
+-	/* remove and free dai object */
+-	if (dai) {
+-		list_del(&dai->list);
+-		kfree(dai);
++		/* free volume table */
++		kfree(scontrol->volume_table);
++		break;
++	default:
++		break;
+ 	}
+ 
+ 	/* remove and free swidget object */
+-- 
+2.7.4
+

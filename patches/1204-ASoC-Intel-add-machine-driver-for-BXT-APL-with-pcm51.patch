@@ -1,0 +1,256 @@
+From 710d5d9a3fb0e53187fdfada770a79f2d93adbb3 Mon Sep 17 00:00:00 2001
+From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Date: Mon, 23 Apr 2018 12:06:09 -0500
+Subject: [PATCH 1204/1240] ASoC: Intel: add machine driver for BXT/APL with
+ pcm512x codec
+
+This patch adds the machine driver for the Up2 board with the Hifiberry
+DAC+ codec.
+
+Signed-off-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+---
+ sound/soc/intel/boards/Kconfig       |  10 ++
+ sound/soc/intel/boards/Makefile      |   4 +-
+ sound/soc/intel/boards/bxt_pcm512x.c | 186 +++++++++++++++++++++++++++++++++++
+ 3 files changed, 198 insertions(+), 2 deletions(-)
+ create mode 100644 sound/soc/intel/boards/bxt_pcm512x.c
+
+diff --git a/sound/soc/intel/boards/Kconfig b/sound/soc/intel/boards/Kconfig
+index 9f2c631..dde7b4f 100644
+--- a/sound/soc/intel/boards/Kconfig
++++ b/sound/soc/intel/boards/Kconfig
+@@ -240,6 +240,16 @@ config SND_SOC_INTEL_BXT_RT298_MACH
+ 	   Say Y or m if you have such a device. This is a recommended option.
+ 	   If unsure select "N".
+ 
++config SND_SOC_INTEL_BXT_PCM512x_MACH
++	tristate "Broxton with TI PCM512x codec"
++	depends on MFD_INTEL_LPSS && I2C && ACPI
++	select SND_SOC_PCM512x_I2C
++	help
++	  This adds support for ASoC machine driver for Broxton platforms
++	  with TI PCM512x I2S audio codec.
++	  Say Y or m if you have such a device. This is a recommended option.
++	  If unsure select "N".
++
+ endif ##  SND_SOC_INTEL_SKL || SND_SOC_SOF_APOLLOLAKE
+ 
+ if  SND_SOC_INTEL_SKL
+diff --git a/sound/soc/intel/boards/Makefile b/sound/soc/intel/boards/Makefile
+index 139e383..c21bd2f 100644
+--- a/sound/soc/intel/boards/Makefile
++++ b/sound/soc/intel/boards/Makefile
+@@ -6,7 +6,7 @@ snd-soc-sst-bdw-rt5677-mach-objs := bdw-rt5677.o
+ snd-soc-sst-broadwell-objs := broadwell.o
+ snd-soc-sst-bxt-da7219_max98357a-objs := bxt_da7219_max98357a.o
+ snd-soc-sst-bxt-rt298-objs := bxt_rt298.o
+-snd-soc-sst_bxt_tdf8532-objs := bxt_tdf8532.o
++snd-soc-sst-bxt-pcm512x-objs := bxt_pcm512x.o
+ snd-soc-sst-bytcr-rt5640-objs := bytcr_rt5640.o
+ snd-soc-sst-bytcr-rt5651-objs := bytcr_rt5651.o
+ snd-soc-sst-cht-bsw-rt5672-objs := cht_bsw_rt5672.o
+@@ -35,7 +35,7 @@ obj-$(CONFIG_SND_SOC_INTEL_BYT_RT5640_MACH) += snd-soc-sst-byt-rt5640-mach.o
+ obj-$(CONFIG_SND_SOC_INTEL_BYT_MAX98090_MACH) += snd-soc-sst-byt-max98090-mach.o
+ obj-$(CONFIG_SND_SOC_INTEL_BXT_DA7219_MAX98357A_MACH) += snd-soc-sst-bxt-da7219_max98357a.o
+ obj-$(CONFIG_SND_SOC_INTEL_BXT_RT298_MACH) += snd-soc-sst-bxt-rt298.o
+-obj-$(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) += snd-soc-sst_bxt_tdf8532.o
++obj-$(CONFIG_SND_SOC_INTEL_BXT_PCM512x_MACH) += snd-soc-sst-bxt-pcm512x.o
+ obj-$(CONFIG_SND_SOC_INTEL_BROADWELL_MACH) += snd-soc-sst-broadwell.o
+ obj-$(CONFIG_SND_SOC_INTEL_BDW_RT5677_MACH) += snd-soc-sst-bdw-rt5677-mach.o
+ obj-$(CONFIG_SND_SOC_INTEL_BYTCR_RT5640_MACH) += snd-soc-sst-bytcr-rt5640.o
+diff --git a/sound/soc/intel/boards/bxt_pcm512x.c b/sound/soc/intel/boards/bxt_pcm512x.c
+new file mode 100644
+index 0000000..5bc8085
+--- /dev/null
++++ b/sound/soc/intel/boards/bxt_pcm512x.c
+@@ -0,0 +1,186 @@
++/*
++ *  bxt-pcm512x.c - ASoc Machine driver for Intel Baytrail and
++ *             Cherrytrail-based platforms, with TI PCM512x codec
++ *
++ *  Copyright (C) 2016 Intel Corporation
++ *  Author: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
++ *
++ *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; version 2 of the License.
++ *
++ *  This program is distributed in the hope that it will be useful, but
++ *  WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ */
++#define DEBUG
++
++#include <linux/module.h>
++#include <linux/acpi.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <asm/platform_sst_audio.h>
++#include <sound/pcm.h>
++#include <sound/pcm_params.h>
++#include <sound/soc.h>
++#include <sound/soc-acpi.h>
++#include "../../codecs/pcm512x.h"
++#include "../atom/sst-atom-controls.h"
++
++static const struct snd_soc_dapm_widget dapm_widgets[] = {
++	SND_SOC_DAPM_SPK("Ext Spk", NULL),
++};
++
++static const struct snd_soc_dapm_route audio_map[] = {
++	/* Speaker */
++	{"Ext Spk", NULL, "OUTR"},
++	{"Ext Spk", NULL, "OUTL"},
++};
++
++static int codec_fixup(struct snd_soc_pcm_runtime *rtd,
++		       struct snd_pcm_hw_params *params)
++{
++	struct snd_interval *rate = hw_param_interval(params,
++					SNDRV_PCM_HW_PARAM_RATE);
++	struct snd_interval *channels = hw_param_interval(params,
++					SNDRV_PCM_HW_PARAM_CHANNELS);
++	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
++
++	/* The ADSP will covert the FE rate to 48k, stereo */
++	rate->min = 48000;
++	rate->max = 48000;
++	channels->min = 2;
++	channels->max = 2;
++
++	/* set SSP5 to 24 bit */
++	snd_mask_none(fmt);
++	snd_mask_set(fmt, SNDRV_PCM_FORMAT_S24_LE);
++
++	return 0;
++}
++
++static int aif1_startup(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	struct snd_soc_codec *codec = rtd->codec;
++
++	snd_soc_update_bits(codec, PCM512x_GPIO_CONTROL_1, 0x08, 0x08);
++
++	return snd_pcm_hw_constraint_single(substream->runtime,
++			SNDRV_PCM_HW_PARAM_RATE, 48000);
++}
++
++static void aif1_shutdown(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = substream->private_data;
++	struct snd_soc_codec *codec = rtd->codec;
++
++	snd_soc_update_bits(codec, PCM512x_GPIO_CONTROL_1, 0x08, 0x00);
++}
++
++static int init(struct snd_soc_pcm_runtime *rtd)
++{
++	struct snd_soc_codec *codec = rtd->codec;
++
++	snd_soc_update_bits(codec, PCM512x_GPIO_EN, 0x08, 0x08);
++	snd_soc_update_bits(codec, PCM512x_GPIO_OUTPUT_4, 0x0f, 0x02);
++	snd_soc_update_bits(codec, PCM512x_GPIO_CONTROL_1, 0x08, 0x08);
++
++	return 0;
++}
++
++static const struct snd_soc_ops aif1_ops = {
++	.startup = aif1_startup,
++	.shutdown = aif1_shutdown,
++};
++
++static struct snd_soc_dai_link dailink[] = {
++	/* CODEC<->CODEC link */
++	/* back ends */
++	{
++		.name = "SSP5-Codec",
++		.id = 0,
++		.cpu_dai_name = "sof-audio",
++		.platform_name = "sof-audio",
++		.no_pcm = 1,
++		.codec_dai_name = "pcm512x-hifi",
++		.codec_name = "i2c-104C5122:00",
++		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF
++						| SND_SOC_DAIFMT_CBS_CFS,
++		.init = init,
++		.be_hw_params_fixup = codec_fixup,
++		.nonatomic = true,
++		.dpcm_playback = 1,
++	},
++};
++
++/* SoC card */
++static struct snd_soc_card bxt_pcm512x_card = {
++	.name = "bxt-pcm512x",
++	.owner = THIS_MODULE,
++	.dai_link = dailink,
++	.num_links = ARRAY_SIZE(dailink),
++	.dapm_widgets = dapm_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(dapm_widgets),
++	.dapm_routes = audio_map,
++	.num_dapm_routes = ARRAY_SIZE(audio_map),
++};
++
++ /* i2c-<HID>:00 with HID being 8 chars */
++static char codec_name[SND_ACPI_I2C_ID_LEN];
++
++static int bxt_pcm512x_probe(struct platform_device *pdev)
++{
++	struct snd_soc_card *card;
++	struct snd_soc_acpi_mach *mach;
++	const char *i2c_name = NULL;
++	int dai_index = 0;
++	int ret_val = 0, i;
++
++	mach = (&pdev->dev)->platform_data;
++	card = &bxt_pcm512x_card;
++	card->dev = &pdev->dev;
++
++	/* fix index of codec dai */
++	for (i = 0; i < ARRAY_SIZE(dailink); i++) {
++		if (!strcmp(dailink[i].codec_name, "i2c-104C5122:00")) {
++			dai_index = i;
++			break;
++		}
++	}
++
++	/* fixup codec name based on HID */
++	i2c_name = acpi_dev_get_first_match_name(mach->id, NULL, -1);
++	if (i2c_name) {
++		snprintf(codec_name, sizeof(codec_name),
++			 "%s%s", "i2c-", i2c_name);
++		dailink[dai_index].codec_name = codec_name;
++	}
++
++	ret_val = devm_snd_soc_register_card(&pdev->dev, card);
++	if (ret_val) {
++		dev_err(&pdev->dev,
++			"snd_soc_register_card failed %d\n", ret_val);
++		return ret_val;
++	}
++	platform_set_drvdata(pdev, card);
++	return ret_val;
++}
++
++static struct platform_driver bxt_pcm521x_driver = {
++	.driver = {
++		.name = "bxt-pcm512x",
++	},
++	.probe = bxt_pcm512x_probe,
++};
++module_platform_driver(bxt_pcm521x_driver);
++
++MODULE_DESCRIPTION("ASoC Intel(R) Broxton + PCM512x Machine driver");
++MODULE_AUTHOR("Pierre-Louis Bossart");
++MODULE_LICENSE("GPL v2");
++MODULE_ALIAS("platform:bxt-pcm512x");
+-- 
+2.7.4
+

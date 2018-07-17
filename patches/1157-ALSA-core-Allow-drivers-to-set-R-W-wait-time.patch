@@ -1,0 +1,72 @@
+From d24552ce0656b199f0d2cd2130b1e5a27d96e620 Mon Sep 17 00:00:00 2001
+From: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+Date: Mon, 8 Jan 2018 20:15:35 +0000
+Subject: [PATCH 1157/1240] ALSA: core: Allow drivers to set R/W wait time.
+
+Currently ALSA core blocks userspace for about 10 seconds for PCM R/W IO.
+This needs to be configurable for modern hardware like DSPs where no
+pointer update in milliseconds can indicate terminal DSP errors.
+
+Add a substream variable to set the wait time in ms. This allows userspace
+and drivers to recover more quickly from terminal DSP errors.
+
+Signed-off-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+---
+ include/sound/pcm.h  |  6 ++++++
+ sound/core/pcm_lib.c | 15 ++++++++++-----
+ 2 files changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/include/sound/pcm.h b/include/sound/pcm.h
+index 388221f..a03a104 100644
+--- a/include/sound/pcm.h
++++ b/include/sound/pcm.h
+@@ -455,6 +455,7 @@ struct snd_pcm_substream {
+         /* -- timer section -- */
+ 	struct snd_timer *timer;		/* timer */
+ 	unsigned timer_running: 1;	/* time is running */
++	unsigned wait_time;	/* time in ms for R/W to wait for avail */
+ 	/* -- next substream -- */
+ 	struct snd_pcm_substream *next;
+ 	/* -- linked substreams -- */
+@@ -572,6 +573,11 @@ int snd_pcm_start(struct snd_pcm_substream *substream);
+ int snd_pcm_stop(struct snd_pcm_substream *substream, snd_pcm_state_t status);
+ int snd_pcm_drain_done(struct snd_pcm_substream *substream);
+ int snd_pcm_stop_xrun(struct snd_pcm_substream *substream);
++static inline void snd_pcm_wait_time(struct snd_pcm_substream *substream,
++	unsigned wait_time)
++{
++	substream->wait_time = wait_time;
++}
+ #ifdef CONFIG_PM
+ int snd_pcm_suspend(struct snd_pcm_substream *substream);
+ int snd_pcm_suspend_all(struct snd_pcm *pcm);
+diff --git a/sound/core/pcm_lib.c b/sound/core/pcm_lib.c
+index faa6786..cda95e1 100644
+--- a/sound/core/pcm_lib.c
++++ b/sound/core/pcm_lib.c
+@@ -1839,12 +1839,17 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
+ 	if (runtime->no_period_wakeup)
+ 		wait_time = MAX_SCHEDULE_TIMEOUT;
+ 	else {
+-		wait_time = 10;
+-		if (runtime->rate) {
+-			long t = runtime->period_size * 2 / runtime->rate;
+-			wait_time = max(t, wait_time);
++		/* use wait time from substream if available */
++		if (substream->wait_time) {
++			wait_time = msecs_to_jiffies(substream->wait_time);
++		} else {
++			wait_time = 10;
++			if (runtime->rate) {
++				long t = runtime->period_size * 2 / runtime->rate;
++				wait_time = max(t, wait_time);
++			}
++			wait_time = msecs_to_jiffies(wait_time * 1000);
+ 		}
+-		wait_time = msecs_to_jiffies(wait_time * 1000);
+ 	}
+ 
+ 	for (;;) {
+-- 
+2.7.4
+

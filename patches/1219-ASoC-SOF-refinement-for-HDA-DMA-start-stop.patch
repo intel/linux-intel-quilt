@@ -1,0 +1,137 @@
+From f4567004781a11401d36636e3baaed04d6814c03 Mon Sep 17 00:00:00 2001
+From: Keyon Jie <yang.jie@linux.intel.com>
+Date: Wed, 13 Jun 2018 20:09:27 +0800
+Subject: [PATCH 1219/1240] ASoC: SOF: refinement for HDA DMA start/stop
+
+1. Update to follow the start/stop sequence suggested by firmware team.
+
+2. Preserve trigger stop to fix module unload/reload fail regression
+issue introduced by commit:
+[WORKAROUND] ASoC: SOF: start HDA DMA at hw_params() stage and remove
+stream_trigger().
+
+Signed-off-by: Keyon Jie <yang.jie@linux.intel.com>
+---
+ sound/soc/sof/intel/apl.c     |  1 +
+ sound/soc/sof/intel/cnl.c     |  1 +
+ sound/soc/sof/intel/hda-pcm.c | 23 ++++++++---------------
+ sound/soc/sof/intel/skl.c     |  1 +
+ sound/soc/sof/pcm.c           |  5 +++++
+ sound/soc/sof/sof-priv.h      |  5 +++++
+ 6 files changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/sound/soc/sof/intel/apl.c b/sound/soc/sof/intel/apl.c
+index 98274b0..d36e30d 100644
+--- a/sound/soc/sof/intel/apl.c
++++ b/sound/soc/sof/intel/apl.c
+@@ -80,6 +80,7 @@ struct snd_sof_dsp_ops sof_apl_ops = {
+ 	.host_stream_open = hda_dsp_pcm_open,
+ 	.host_stream_close = hda_dsp_pcm_close,
+ 	.host_stream_hw_params = hda_dsp_pcm_hw_params,
++	.host_stream_trigger = hda_dsp_pcm_trigger,
+ 
+ 	/* firmware loading */
+ 	.load_firmware = hda_dsp_cl_load_fw,
+diff --git a/sound/soc/sof/intel/cnl.c b/sound/soc/sof/intel/cnl.c
+index 8f9ad19..80d6cc7 100644
+--- a/sound/soc/sof/intel/cnl.c
++++ b/sound/soc/sof/intel/cnl.c
+@@ -208,6 +208,7 @@ struct snd_sof_dsp_ops sof_cnl_ops = {
+ 	.host_stream_open = hda_dsp_pcm_open,
+ 	.host_stream_close = hda_dsp_pcm_close,
+ 	.host_stream_hw_params = hda_dsp_pcm_hw_params,
++	.host_stream_trigger = hda_dsp_pcm_trigger,
+ 
+ 	/* firmware loading */
+ 	.load_firmware = hda_dsp_cl_load_fw,
+diff --git a/sound/soc/sof/intel/hda-pcm.c b/sound/soc/sof/intel/hda-pcm.c
+index 1b50d87..0abb2e5 100644
+--- a/sound/soc/sof/intel/hda-pcm.c
++++ b/sound/soc/sof/intel/hda-pcm.c
+@@ -123,24 +123,17 @@ int hda_dsp_pcm_hw_params(struct snd_sof_dev *sdev,
+ 	/* disable SPIB, to enable buffer wrap for stream */
+ 	hda_dsp_stream_spib_config(sdev, stream, HDA_DSP_SPIB_DISABLE, 0);
+ 
+-	/*
+-	 * start HDA DMA here, as DSP require the DMA copy is available
+-	 * at its trigger start, which is actually before stream trigger
+-	 * start
+-	 */
+-	snd_sof_dsp_update_bits(sdev, HDA_DSP_HDA_BAR, SOF_HDA_INTCTL,
+-				1 << stream->index,
+-				1 << stream->index);
+-
+-	snd_sof_dsp_update_bits(sdev, HDA_DSP_HDA_BAR, stream->sd_offset,
+-				SOF_HDA_SD_CTL_DMA_START |
+-				SOF_HDA_CL_DMA_SD_INT_MASK,
+-				SOF_HDA_SD_CTL_DMA_START |
+-				SOF_HDA_CL_DMA_SD_INT_MASK);
+-
+ 	return stream->tag;
+ }
+ 
++int hda_dsp_pcm_trigger(struct snd_sof_dev *sdev,
++			struct snd_pcm_substream *substream, int cmd)
++{
++	struct sof_intel_hda_stream *stream = substream->runtime->private_data;
++
++	return hda_dsp_stream_trigger(sdev, stream, cmd);
++}
++
+ int hda_dsp_pcm_open(struct snd_sof_dev *sdev,
+ 		     struct snd_pcm_substream *substream)
+ {
+diff --git a/sound/soc/sof/intel/skl.c b/sound/soc/sof/intel/skl.c
+index 671f452..d4b6de6 100644
+--- a/sound/soc/sof/intel/skl.c
++++ b/sound/soc/sof/intel/skl.c
+@@ -85,6 +85,7 @@ struct snd_sof_dsp_ops sof_skl_ops = {
+ 	.host_stream_open = hda_dsp_pcm_open,
+ 	.host_stream_close = hda_dsp_pcm_close,
+ 	.host_stream_hw_params = hda_dsp_pcm_hw_params,
++	.host_stream_trigger = hda_dsp_pcm_trigger,
+ 
+ 	/* firmware loading */
+ 	.load_firmware = hda_dsp_cl_load_fw,
+diff --git a/sound/soc/sof/pcm.c b/sound/soc/sof/pcm.c
+index 32ca808..558d054 100644
+--- a/sound/soc/sof/pcm.c
++++ b/sound/soc/sof/pcm.c
+@@ -197,6 +197,7 @@ static int sof_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 	struct snd_sof_pcm *spcm = rtd->sof;
+ 	struct sof_ipc_stream stream;
+ 	struct sof_ipc_reply reply;
++	const struct snd_sof_dsp_ops *ops = sdev->ops;
+ 	int ret = 0;
+ 
+ 	/* nothing todo for BE */
+@@ -231,6 +232,10 @@ static int sof_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 		return -EINVAL;
+ 	}
+ 
++	/* set RUN firstly per the sequence suggested by firmware team */
++	if (ops && ops->host_stream_trigger)
++		ret = ops->host_stream_trigger(sdev, substream, cmd);
++
+ 	/* send IPC to the DSP */
+ 	ret = sof_ipc_tx_message(sdev->ipc, stream.hdr.cmd, &stream,
+ 				 sizeof(stream), &reply, sizeof(reply));
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index 7e86fae..bde985f 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -116,6 +116,11 @@ struct snd_sof_dsp_ops {
+ 				     struct snd_pcm_substream *substream,
+ 				     struct snd_pcm_hw_params *params);
+ 
++	/* host stream trigger */
++	int (*host_stream_trigger)(struct snd_sof_dev *sdev,
++				   struct snd_pcm_substream *substream,
++				   int cmd);
++
+ 	/* FW loading */
+ 	int (*load_firmware)(struct snd_sof_dev *sof_dev,
+ 			     const struct firmware *fw);
+-- 
+2.7.4
+
