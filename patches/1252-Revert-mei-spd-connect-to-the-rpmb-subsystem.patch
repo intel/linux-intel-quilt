@@ -1,0 +1,406 @@
+From 0ce52734ef8b5f6700789557e2d20e603f6e9e5a Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Thu, 31 May 2018 22:55:53 +0300
+Subject: [PATCH 1252/1286] Revert "mei: spd: connect to the rpmb subsystem"
+
+This reverts commit 131ea7c031fd8c361b7a2d9423286c18700232cb.
+
+Change-Id: I160a0b025c6102014ae486b49d122184385e1685
+---
+ drivers/misc/mei/spd/Kconfig  |   2 +-
+ drivers/misc/mei/spd/Makefile |   1 -
+ drivers/misc/mei/spd/cmd.c    |  67 +---------------
+ drivers/misc/mei/spd/main.c   |   2 -
+ drivers/misc/mei/spd/rpmb.c   | 183 ------------------------------------------
+ drivers/misc/mei/spd/spd.h    |  11 ---
+ 6 files changed, 4 insertions(+), 262 deletions(-)
+ delete mode 100644 drivers/misc/mei/spd/rpmb.c
+
+diff --git a/drivers/misc/mei/spd/Kconfig b/drivers/misc/mei/spd/Kconfig
+index 085f9ca..8347fbc 100644
+--- a/drivers/misc/mei/spd/Kconfig
++++ b/drivers/misc/mei/spd/Kconfig
+@@ -3,7 +3,7 @@
+ #
+ config INTEL_MEI_SPD
+ 	tristate "Intel MEI Host Storage Proxy Driver"
+-	depends on INTEL_MEI && BLOCK && RPMB
++	depends on INTEL_MEI && BLOCK
+ 	help
+ 	  A driver for the host storage proxy ME client
+ 	  The driver enables ME FW to store data on a storage devices
+diff --git a/drivers/misc/mei/spd/Makefile b/drivers/misc/mei/spd/Makefile
+index 5cbc149..0d3ac8e 100644
+--- a/drivers/misc/mei/spd/Makefile
++++ b/drivers/misc/mei/spd/Makefile
+@@ -6,7 +6,6 @@ obj-$(CONFIG_INTEL_MEI_SPD) += mei_spd.o
+ mei_spd-objs := main.o
+ mei_spd-objs += cmd.o
+ mei_spd-objs += gpp.o
+-mei_spd-objs += rpmb.o
+ mei_spd-$(CONFIG_DEBUG_FS) += debugfs.o
+ 
+ ccflags-y += -D__CHECK_ENDIAN__
+diff --git a/drivers/misc/mei/spd/cmd.c b/drivers/misc/mei/spd/cmd.c
+index d034596..6049298 100644
+--- a/drivers/misc/mei/spd/cmd.c
++++ b/drivers/misc/mei/spd/cmd.c
+@@ -22,9 +22,6 @@
+ #define spd_cmd_size(_cmd) \
+ 	(sizeof(struct spd_cmd_hdr) + \
+ 	 sizeof(struct spd_cmd_##_cmd))
+-#define spd_cmd_rpmb_size(_cmd) \
+-	(spd_cmd_size(_cmd) + SPD_CLIENT_RPMB_DATA_MAX_SIZE)
+-
+ #define to_spd_hdr(_buf) (struct spd_cmd_hdr *)(_buf)
+ #define to_spd_cmd(_cmd, _buf) \
+ 	(struct spd_cmd_##_cmd *)((_buf) + sizeof(struct spd_cmd_hdr))
+@@ -244,7 +241,7 @@ int mei_spd_cmd_storage_status_req(struct mei_spd *spd)
+ 
+ 	req = to_spd_cmd(storage_status_req, spd->buf);
+ 	req->gpp_on = mei_spd_gpp_is_open(spd);
+-	req->rpmb_on = mei_spd_rpmb_is_open(spd);
++	req->rpmb_on = 0;
+ 
+ 	ret = mei_cldev_send(spd->cldev, spd->buf, req_len);
+ 	if (ret != req_len) {
+@@ -321,60 +318,6 @@ static int mei_spd_cmd_gpp_read(struct mei_spd *spd, struct spd_cmd *cmd,
+ 	return SPD_STATUS_SUCCESS;
+ }
+ 
+-static int mei_spd_cmd_rpmb_read(struct mei_spd *spd,
+-				 struct spd_cmd *cmd,
+-				 ssize_t out_buf_sz)
+-{
+-	u8 *frame = cmd->rpmb_read.rpmb_frame;
+-
+-	if (out_buf_sz != spd_cmd_rpmb_size(rpmb_read)) {
+-		spd_err(spd, "Wrong request size\n");
+-		return SPD_STATUS_INVALID_COMMAND;
+-	}
+-
+-	if (mei_spd_rpmb_cmd_req(spd, RPMB_READ_DATA, frame))
+-		return SPD_STATUS_GENERAL_FAILURE;
+-
+-	spd_dbg(spd, "read RPMB frame performed\n");
+-	return SPD_STATUS_SUCCESS;
+-}
+-
+-static int mei_spd_cmd_rpmb_write(struct mei_spd *spd,
+-				  struct spd_cmd *cmd,
+-				  ssize_t out_buf_sz)
+-{
+-	u8 *frame = cmd->rpmb_write.rpmb_frame;
+-
+-	if (out_buf_sz != spd_cmd_rpmb_size(rpmb_write)) {
+-		spd_err(spd, "Wrong request size\n");
+-		return SPD_STATUS_INVALID_COMMAND;
+-	}
+-
+-	if (mei_spd_rpmb_cmd_req(spd, RPMB_WRITE_DATA, frame))
+-		return SPD_STATUS_GENERAL_FAILURE;
+-
+-	spd_dbg(spd, "write RPMB frame performed\n");
+-	return SPD_STATUS_SUCCESS;
+-}
+-
+-static int mei_spd_cmd_rpmb_get_counter(struct mei_spd *spd,
+-					struct spd_cmd *cmd,
+-					ssize_t out_buf_sz)
+-{
+-	u8 *frame = cmd->rpmb_get_counter.rpmb_frame;
+-
+-	if (out_buf_sz != spd_cmd_rpmb_size(rpmb_get_counter)) {
+-		spd_err(spd, "Wrong request size\n");
+-		return SPD_STATUS_INVALID_COMMAND;
+-	}
+-
+-	if (mei_spd_rpmb_cmd_req(spd, RPMB_WRITE_DATA, frame))
+-		return SPD_STATUS_GENERAL_FAILURE;
+-
+-	spd_dbg(spd, "get RPMB counter performed\n");
+-	return SPD_STATUS_SUCCESS;
+-}
+-
+ static int mei_spd_cmd_response(struct mei_spd *spd, ssize_t out_buf_sz)
+ {
+ 	struct spd_cmd *cmd = (struct spd_cmd *)spd->buf;
+@@ -393,7 +336,6 @@ static int mei_spd_cmd_response(struct mei_spd *spd, ssize_t out_buf_sz)
+ 		if (ret)
+ 			break;
+ 		mutex_unlock(&spd->lock);
+-		mei_spd_rpmb_init(spd);
+ 		mei_spd_gpp_init(spd);
+ 		mutex_lock(&spd->lock);
+ 		break;
+@@ -435,13 +377,10 @@ static int mei_spd_cmd_request(struct mei_spd *spd, ssize_t out_buf_sz)
+ 
+ 	switch (spd_cmd) {
+ 	case SPD_RPMB_WRITE_CMD:
+-		ret = mei_spd_cmd_rpmb_write(spd, cmd, out_buf_sz);
+-		break;
+ 	case SPD_RPMB_READ_CMD:
+-		ret = mei_spd_cmd_rpmb_read(spd, cmd, out_buf_sz);
+-		break;
+ 	case SPD_RPMB_GET_COUNTER_CMD:
+-		ret = mei_spd_cmd_rpmb_get_counter(spd, cmd, out_buf_sz);
++		spd_err(spd, "Command %d is not supported\n", spd_cmd);
++		ret = SPD_STATUS_NOT_SUPPORTED;
+ 		break;
+ 	case SPD_GPP_WRITE_CMD:
+ 		ret = mei_spd_cmd_gpp_write(spd, cmd, out_buf_sz);
+diff --git a/drivers/misc/mei/spd/main.c b/drivers/misc/mei/spd/main.c
+index 24a597e..c8c202f 100644
+--- a/drivers/misc/mei/spd/main.c
++++ b/drivers/misc/mei/spd/main.c
+@@ -63,7 +63,6 @@ static int mei_spd_probe(struct mei_cl_device *cldev,
+ 
+ 	spd_dbg(spd, "protocol version %d\n", ver);
+ 	mei_spd_gpp_prepare(spd);
+-	mei_spd_rpmb_prepare(spd);
+ 	mutex_lock(&spd->lock);
+ 	ret = mei_spd_cmd_init_req(spd);
+ 	mutex_unlock(&spd->lock);
+@@ -91,7 +90,6 @@ static int mei_spd_remove(struct mei_cl_device *cldev)
+ 	if (spd->state == MEI_SPD_STATE_RUNNING) {
+ 		spd->state = MEI_SPD_STATE_STOPPING;
+ 		mei_spd_gpp_exit(spd);
+-		mei_spd_rpmb_exit(spd);
+ 		mutex_lock(&spd->lock);
+ 		mei_spd_cmd_storage_status_req(spd);
+ 		mutex_unlock(&spd->lock);
+diff --git a/drivers/misc/mei/spd/rpmb.c b/drivers/misc/mei/spd/rpmb.c
+deleted file mode 100644
+index 8e18db0..0000000
+--- a/drivers/misc/mei/spd/rpmb.c
++++ /dev/null
+@@ -1,183 +0,0 @@
+-/*
+- * Intel Host Storage Interface Linux driver
+- * Copyright (c) 2015 - 2016, Intel Corporation.
+- *
+- * This program is free software; you can redistribute it and/or modify it
+- * under the terms and conditions of the GNU General Public License,
+- * version 2, as published by the Free Software Foundation.
+- *
+- * This program is distributed in the hope it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+- * more details.
+- *
+- */
+-
+-#include "cmd.h"
+-#include "spd.h"
+-
+-static int mei_spd_rpmb_start(struct mei_spd *spd, struct rpmb_dev *rdev)
+-{
+-	if (spd->rdev == rdev)
+-		return 0;
+-
+-	if (spd->rdev) {
+-		spd_warn(spd, "rpmb device already registered\n");
+-		return -EEXIST;
+-	}
+-
+-	spd->rdev = rpmb_dev_get(rdev);
+-	spd_dbg(spd, "rpmb partition created\n");
+-	return 0;
+-}
+-
+-static int mei_spd_rpmb_stop(struct mei_spd *spd, struct rpmb_dev *rdev)
+-{
+-	if (!spd->rdev) {
+-		spd_dbg(spd, "Already stopped\n");
+-		return -EPROTO;
+-	}
+-
+-	if (rdev && spd->rdev != rdev) {
+-		spd_dbg(spd, "Wrong RPMB on stop\n");
+-		return -EINVAL;
+-	}
+-
+-	rpmb_dev_put(spd->rdev);
+-	spd->rdev = NULL;
+-
+-	spd_dbg(spd, "rpmb partition removed\n");
+-	return 0;
+-}
+-
+-static int mei_spd_rpmb_match(struct mei_spd *spd, struct rpmb_dev *rdev)
+-{
+-	if (spd->dev_id_sz && rdev->ops->dev_id) {
+-		if (rdev->ops->dev_id_len != spd->dev_id_sz ||
+-		    memcmp(rdev->ops->dev_id, spd->dev_id,
+-			   rdev->ops->dev_id_len)) {
+-			spd_dbg(spd, "ignore request for another rpmb\n");
+-			/* return 0; FW sends garbage now, ignore it */
+-		}
+-	}
+-
+-	switch (rdev->ops->type) {
+-	case RPMB_TYPE_EMMC:
+-		if (spd->dev_type != SPD_TYPE_EMMC)
+-			return 0;
+-		break;
+-	case RPMB_TYPE_UFS:
+-		if (spd->dev_type != SPD_TYPE_UFS)
+-			return 0;
+-		break;
+-	default:
+-		return 0;
+-	}
+-
+-	return 1;
+-}
+-
+-static int rpmb_add_device(struct device *dev, struct class_interface *intf)
+-{
+-	struct mei_spd *spd =
+-		container_of(intf, struct mei_spd, rpmb_interface);
+-	struct rpmb_dev *rdev = to_rpmb_dev(dev);
+-
+-	if (!mei_spd_rpmb_match(spd, rdev))
+-		return 0;
+-
+-	mutex_lock(&spd->lock);
+-	if (mei_spd_rpmb_start(spd, rdev)) {
+-		mutex_unlock(&spd->lock);
+-		return 0;
+-	}
+-
+-	schedule_work(&spd->status_send_w);
+-	mutex_unlock(&spd->lock);
+-
+-	return 0;
+-}
+-
+-static void rpmb_remove_device(struct device *dev, struct class_interface *intf)
+-{
+-	struct mei_spd *spd =
+-		container_of(intf, struct mei_spd, rpmb_interface);
+-	struct rpmb_dev *rdev = to_rpmb_dev(dev);
+-
+-	if (!mei_spd_rpmb_match(spd, rdev))
+-		return;
+-
+-	mutex_lock(&spd->lock);
+-	if (mei_spd_rpmb_stop(spd, rdev)) {
+-		mutex_unlock(&spd->lock);
+-		return;
+-	}
+-
+-	if (spd->state != MEI_SPD_STATE_STOPPING)
+-		schedule_work(&spd->status_send_w);
+-	mutex_unlock(&spd->lock);
+-}
+-
+-void mei_spd_rpmb_prepare(struct mei_spd *spd)
+-{
+-	spd->rpmb_interface.add_dev    = rpmb_add_device;
+-	spd->rpmb_interface.remove_dev = rpmb_remove_device;
+-	spd->rpmb_interface.class      = &rpmb_class;
+-}
+-
+-/**
+- * mei_spd_rpmb_init - init RPMB connection
+- *
+- * @spd: device
+- *
+- * Locking: spd->lock should not be held
+- * Returns: 0 if initialized successfully, <0 otherwise
+- */
+-int mei_spd_rpmb_init(struct mei_spd *spd)
+-{
+-	int ret;
+-
+-	ret = class_interface_register(&spd->rpmb_interface);
+-	if (ret)
+-		spd_err(spd, "Can't register interface\n");
+-	return ret;
+-}
+-
+-/**
+- * mei_spd_rpmb_exit - clean RPMB connection
+- *
+- * @spd: device
+- *
+- * Locking: spd->lock should not be held
+- */
+-void mei_spd_rpmb_exit(struct mei_spd *spd)
+-{
+-	class_interface_unregister(&spd->rpmb_interface);
+-}
+-
+-int mei_spd_rpmb_cmd_req(struct mei_spd *spd, u16 req_type, void *buf)
+-{
+-	struct rpmb_data d;
+-	struct rpmb_frame *frame = buf;
+-	int ret;
+-
+-	if (!spd->rdev) {
+-		spd_err(spd, "RPMB not ready\n");
+-		return -ENODEV;
+-	}
+-
+-	d.req_type = req_type;
+-	d.icmd.nframes = 1;
+-	d.icmd.frames  = frame;
+-	d.ocmd.nframes = 1;
+-	d.ocmd.frames  = frame;
+-	ret = rpmb_cmd_req(spd->rdev, &d);
+-	if (ret)
+-		spd_err(spd, "RPMB req failed ret = %d\n", ret);
+-	return ret;
+-}
+-
+-bool mei_spd_rpmb_is_open(struct mei_spd *spd)
+-{
+-	return !!spd->rdev;
+-}
+diff --git a/drivers/misc/mei/spd/spd.h b/drivers/misc/mei/spd/spd.h
+index 85e8220..61c9ac5 100644
+--- a/drivers/misc/mei/spd/spd.h
++++ b/drivers/misc/mei/spd/spd.h
+@@ -60,7 +60,6 @@
+ 
+ #include <linux/fs.h>
+ #include <linux/mei_cl_bus.h>
+-#include <linux/rpmb.h>
+ 
+ enum mei_spd_state {
+ 	MEI_SPD_STATE_INIT,
+@@ -80,8 +79,6 @@ enum mei_spd_state {
+  * @dev_type:  storage device type
+  * @dev_id_sz: device id size
+  * @dev_id:    device id string
+- * @rdev:      RPMB device
+- * @rpmb_interface: gpp class interface for discovery
+  * @lock:      mutex to sync request processing
+  * @state:     driver state
+  * @status_send_w: workitem for sending status to the FW
+@@ -97,8 +94,6 @@ struct mei_spd {
+ 	u32    dev_type;
+ 	u32    dev_id_sz;
+ 	u8     *dev_id;
+-	struct rpmb_dev *rdev;
+-	struct class_interface rpmb_interface;
+ 	struct mutex lock;
+ 	enum mei_spd_state state;
+ 	struct work_struct status_send_w;
+@@ -124,12 +119,6 @@ void mei_spd_gpp_exit(struct mei_spd *spd);
+ int mei_spd_gpp_read(struct mei_spd *spd, size_t off, u8 *data, size_t size);
+ int mei_spd_gpp_write(struct mei_spd *spd, size_t off, u8 *data, size_t size);
+ 
+-void mei_spd_rpmb_prepare(struct mei_spd *spd);
+-bool mei_spd_rpmb_is_open(struct mei_spd *spd);
+-int mei_spd_rpmb_init(struct mei_spd *spd);
+-void mei_spd_rpmb_exit(struct mei_spd *spd);
+-int mei_spd_rpmb_cmd_req(struct mei_spd *spd, u16 req_type, void *buf);
+-
+ #if IS_ENABLED(CONFIG_DEBUG_FS)
+ int mei_spd_dbgfs_register(struct mei_spd *spd, const char *name);
+ void mei_spd_dbgfs_deregister(struct mei_spd *spd);
+-- 
+2.7.4
+

@@ -1,0 +1,194 @@
+From 8ff679f84eb07e2b72f5fe7b498553ea90a7ccb4 Mon Sep 17 00:00:00 2001
+From: Radhakrishna Sripada <radhakrishna.sripada@intel.com>
+Date: Thu, 26 Jul 2018 16:55:06 -0700
+Subject: [PATCH 1286/1286] drm/i915: Fix memory leak in intel_hdcp auth
+
+Static code analysis tool reported memory leak in
+intel_hdcp_auth_downstream. Fixing the memory leak.
+
+v2: Rebase, move free to a cleanup label(Jani)
+
+Cc: Jani Nikula <jani.nikula@linux.intel.com>
+Cc: Anusha Srivatsa <anusha.srivatsa@intel.com>
+Signed-off-by: Radhakrishna Sripada <radhakrishna.sripada@intel.com>
+Reviewed-by: Anusha Srivatsa <anusha.srivatsa@intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20180404225957.7457-1-radhakrishna.sripada@intel.com
+
+Backported from upstream commit: 46a67c4d16ec86ca84a93f7dc92c54138e38a129
+---
+ drivers/gpu/drm/i915/intel_hdcp.c | 41 +++++++++++++++++++++------------------
+ 1 file changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index 36cbee1..253d22d 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -214,13 +214,13 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 
+ 	ret = shim->read_ksv_fifo(intel_dig_port, num_downstream, ksv_fifo);
+ 	if (ret)
+-		return ret;
++		goto err;
+ 
+ 	/* Process V' values from the receiver */
+ 	for (i = 0; i < DRM_HDCP_V_PRIME_NUM_PARTS; i++) {
+ 		ret = shim->read_v_prime_part(intel_dig_port, i, &vprime);
+ 		if (ret)
+-			return ret;
++			goto err;
+ 		I915_WRITE(HDCP_SHA_V_PRIME(i), vprime);
+ 	}
+ 
+@@ -250,7 +250,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 
+ 		ret = intel_write_sha_text(dev_priv, sha_text);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 
+ 		/* Programming guide writes this every 64 bytes */
+ 		sha_idx += sizeof(sha_text);
+@@ -273,7 +273,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 
+ 		ret = intel_write_sha_text(dev_priv, sha_text);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_leftovers = 0;
+ 		sha_text = 0;
+ 		sha_idx += sizeof(sha_text);
+@@ -291,21 +291,21 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 		ret = intel_write_sha_text(dev_priv,
+ 					   bstatus[0] << 8 | bstatus[1]);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 32 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 16 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_16);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 	} else if (sha_leftovers == 1) {
+@@ -316,21 +316,21 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 		sha_text = (sha_text & 0xffffff00) >> 8;
+ 		ret = intel_write_sha_text(dev_priv, sha_text);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 32 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 24 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_8);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 	} else if (sha_leftovers == 2) {
+@@ -339,7 +339,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 		sha_text |= bstatus[0] << 24 | bstatus[1] << 16;
+ 		ret = intel_write_sha_text(dev_priv, sha_text);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 64 bits of M0 */
+@@ -347,7 +347,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 		for (i = 0; i < 2; i++) {
+ 			ret = intel_write_sha_text(dev_priv, 0);
+ 			if (ret < 0)
+-				return ret;
++				goto err;
+ 			sha_idx += sizeof(sha_text);
+ 		}
+ 	} else if (sha_leftovers == 3) {
+@@ -356,28 +356,28 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 		sha_text |= bstatus[0] << 24;
+ 		ret = intel_write_sha_text(dev_priv, sha_text);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 8 bits of text, 24 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_8);
+ 		ret = intel_write_sha_text(dev_priv, bstatus[1]);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 32 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 
+ 		/* Write 8 bits of M0 */
+ 		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_24);
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 	} else {
+ 		DRM_ERROR("Invalid number of leftovers %d\n", sha_leftovers);
+@@ -389,7 +389,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 	while ((sha_idx % 64) < (64 - sizeof(sha_text))) {
+ 		ret = intel_write_sha_text(dev_priv, 0);
+ 		if (ret < 0)
+-			return ret;
++			goto err;
+ 		sha_idx += sizeof(sha_text);
+ 	}
+ 
+@@ -401,7 +401,7 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 	sha_text = (num_downstream * 5 + 10) * 8;
+ 	ret = intel_write_sha_text(dev_priv, sha_text);
+ 	if (ret < 0)
+-		return ret;
++		goto err;
+ 
+ 	/* Tell the HW we're done with the hash and wait for it to ACK */
+ 	I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_COMPLETE_HASH);
+@@ -418,7 +418,10 @@ int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
+ 
+ 	DRM_DEBUG_KMS("HDCP is enabled (%d downstream devices)\n",
+ 		      num_downstream);
+-	return 0;
++	ret = 0;
++err:
++	kfree(ksv_fifo);
++	return ret;
+ }
+ 
+ /* Implements Part 1 of the HDCP authorization procedure */
+-- 
+2.7.4
+
