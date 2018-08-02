@@ -1,0 +1,127 @@
+From 1ed004fdc781a7b19c815ef35b7ee8443935a2e6 Mon Sep 17 00:00:00 2001
+From: Arnd Bergmann <arnd@arndb.de>
+Date: Wed, 10 May 2017 11:21:27 +0200
+Subject: [PATCH 186/343] ANDROID: memory_state_time: fix undefined behavior
+ with missing DT properties
+
+kernelci reports warnings about unintialized variable usage:
+
+drivers/misc/memory_state_time.c:351:12: warning: 'lenf' is used uninitialized in this function [-Wuninitialized]
+drivers/misc/memory_state_time.c:321:14: warning: 'lenb' is used uninitialized in this function [-Wuninitialized]
+
+In both cases we try to continue without a DT property but use the
+length that has not been assigned at this point. This rearranges the
+code in the two functions to bail out earlier in case of an error.
+
+The patch is needed for both android-common-4.9, 4.4 and 3.18.
+
+Link: https://kernelci.org/build/id/591177f459b5147648b12d54/logs/
+Fixes: ad3c02f8b3a5 ("ANDROID: Implement memory_state_time, used by qcom,cpubw")
+Cc: James Carr <carrja@google.com>
+Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@google.com>
+---
+ drivers/misc/memory_state_time.c | 78 ++++++++++++++++++++++------------------
+ 1 file changed, 43 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/misc/memory_state_time.c b/drivers/misc/memory_state_time.c
+index 34c797a..ba94dcf 100644
+--- a/drivers/misc/memory_state_time.c
++++ b/drivers/misc/memory_state_time.c
+@@ -296,27 +296,31 @@ static int get_bw_buckets(struct device *dev)
+ 	struct device_node *node = dev->of_node;
+ 
+ 	of_property_read_u32(node, NUM_SOURCES, &num_sources);
+-	if (of_find_property(node, BW_TBL, &lenb)) {
+-		bandwidths = devm_kzalloc(dev,
+-				sizeof(*bandwidths) * num_sources, GFP_KERNEL);
+-		if (!bandwidths)
+-			return -ENOMEM;
+-		lenb /= sizeof(*bw_buckets);
+-		bw_buckets = devm_kzalloc(dev, lenb * sizeof(*bw_buckets),
+-				GFP_KERNEL);
+-		if (!bw_buckets) {
+-			devm_kfree(dev, bandwidths);
+-			return -ENOMEM;
+-		}
+-		ret = of_property_read_u32_array(node, BW_TBL, bw_buckets,
+-				lenb);
+-		if (ret < 0) {
+-			devm_kfree(dev, bandwidths);
+-			devm_kfree(dev, bw_buckets);
+-			pr_err("Unable to read bandwidth table from device tree.\n");
+-			return ret;
+-		}
++	if (!of_find_property(node, BW_TBL, &lenb)) {
++		pr_err("Missing %s property\n", BW_TBL);
++		return -ENODATA;
++	}
++
++	bandwidths = devm_kzalloc(dev,
++			sizeof(*bandwidths) * num_sources, GFP_KERNEL);
++	if (!bandwidths)
++		return -ENOMEM;
++	lenb /= sizeof(*bw_buckets);
++	bw_buckets = devm_kzalloc(dev, lenb * sizeof(*bw_buckets),
++			GFP_KERNEL);
++	if (!bw_buckets) {
++		devm_kfree(dev, bandwidths);
++		return -ENOMEM;
++	}
++	ret = of_property_read_u32_array(node, BW_TBL, bw_buckets,
++			lenb);
++	if (ret < 0) {
++		devm_kfree(dev, bandwidths);
++		devm_kfree(dev, bw_buckets);
++		pr_err("Unable to read bandwidth table from device tree.\n");
++		return ret;
+ 	}
++
+ 	curr_bw = 0;
+ 	num_buckets = lenb;
+ 	return 0;
+@@ -332,22 +336,26 @@ static int freq_buckets_init(struct device *dev)
+ 	int ret, lenf;
+ 	struct device_node *node = dev->of_node;
+ 
+-	if (of_find_property(node, FREQ_TBL, &lenf)) {
+-		lenf /= sizeof(*freq_buckets);
+-		freq_buckets = devm_kzalloc(dev, lenf * sizeof(*freq_buckets),
+-				GFP_KERNEL);
+-		if (!freq_buckets)
+-			return -ENOMEM;
+-		pr_debug("freqs found len %d\n", lenf);
+-		ret = of_property_read_u32_array(node, FREQ_TBL, freq_buckets,
+-				lenf);
+-		if (ret < 0) {
+-			devm_kfree(dev, freq_buckets);
+-			pr_err("Unable to read frequency table from device tree.\n");
+-			return ret;
+-		}
+-		pr_debug("ret freq %d\n", ret);
++	if (!of_find_property(node, FREQ_TBL, &lenf)) {
++		pr_err("Missing %s property\n", FREQ_TBL);
++		return -ENODATA;
+ 	}
++
++	lenf /= sizeof(*freq_buckets);
++	freq_buckets = devm_kzalloc(dev, lenf * sizeof(*freq_buckets),
++			GFP_KERNEL);
++	if (!freq_buckets)
++		return -ENOMEM;
++	pr_debug("freqs found len %d\n", lenf);
++	ret = of_property_read_u32_array(node, FREQ_TBL, freq_buckets,
++			lenf);
++	if (ret < 0) {
++		devm_kfree(dev, freq_buckets);
++		pr_err("Unable to read frequency table from device tree.\n");
++		return ret;
++	}
++	pr_debug("ret freq %d\n", ret);
++
+ 	num_freqs = lenf;
+ 	curr_freq = freq_buckets[LOWEST_FREQ];
+ 
+-- 
+2.7.4
+

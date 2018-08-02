@@ -1,0 +1,116 @@
+From b3358ac97b4d6e10fe9db5996a076e8562f2b0be Mon Sep 17 00:00:00 2001
+From: JP Abgrall <jpa@google.com>
+Date: Fri, 7 Feb 2014 18:40:10 -0800
+Subject: [PATCH 077/343] ANDROID: net: ipv4: tcp: add a sysctl to config the
+ tcp_default_init_rwnd
+
+The default initial rwnd is hardcoded to 10.
+
+Now we allow it to be controlled via
+  /proc/sys/net/ipv4/tcp_default_init_rwnd
+which limits the values from 3 to 100
+
+This is somewhat needed because ipv6 routes are
+autoconfigured by the kernel.
+
+See "An Argument for Increasing TCP's Initial Congestion Window"
+in https://developers.google.com/speed/articles/tcp_initcwnd_paper.pdf
+
+Change-Id: I386b2a9d62de0ebe05c1ebe1b4bd91b314af5c54
+Signed-off-by: JP Abgrall <jpa@google.com>
+
+Conflicts:
+	net/ipv4/sysctl_net_ipv4.c
+	net/ipv4/tcp_input.c
+
+[AmitP: Folded following android-4.9 commit changes into this patch
+        3823c8b26e6e ("ANDROID: tcp: fix tcp_default_init_rwnd() for 4.1")]
+Signed-off-by: Amit Pundir <amit.pundir@linaro.org>
+---
+ include/net/tcp.h          |  2 ++
+ net/ipv4/sysctl_net_ipv4.c | 22 ++++++++++++++++++++++
+ net/ipv4/tcp_input.c       |  1 +
+ net/ipv4/tcp_output.c      |  2 +-
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index cd3ecda9..0ea98d8 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -247,6 +247,8 @@ extern long sysctl_tcp_mem[3];
+ #define TCP_RACK_STATIC_REO_WND  0x2 /* Use static RACK reo wnd */
+ #define TCP_RACK_NO_DUPTHRESH    0x4 /* Do not use DUPACK threshold in RACK */
+ 
++extern int sysctl_tcp_default_init_rwnd;
++
+ extern atomic_long_t tcp_memory_allocated;
+ extern struct percpu_counter tcp_sockets_allocated;
+ extern unsigned long tcp_memory_pressure;
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 5fa335f..8008431 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -201,6 +201,21 @@ static int ipv4_ping_group_range(struct ctl_table *table, int write,
+ 	return ret;
+ }
+ 
++/* Validate changes from /proc interface. */
++static int proc_tcp_default_init_rwnd(struct ctl_table *ctl, int write,
++				      void __user *buffer,
++				      size_t *lenp, loff_t *ppos)
++{
++	int old_value = *(int *)ctl->data;
++	int ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
++	int new_value = *(int *)ctl->data;
++
++	if (write && ret == 0 && (new_value < 3 || new_value > 100))
++		*(int *)ctl->data = old_value;
++
++	return ret;
++}
++
+ static int proc_tcp_congestion_control(struct ctl_table *ctl, int write,
+ 				       void __user *buffer, size_t *lenp, loff_t *ppos)
+ {
+@@ -509,6 +524,13 @@ static struct ctl_table ipv4_table[] = {
+ 		.proc_handler   = proc_tcp_available_ulp,
+ 	},
+ 	{
++		.procname       = "tcp_default_init_rwnd",
++		.data           = &sysctl_tcp_default_init_rwnd,
++		.maxlen         = sizeof(int),
++		.mode           = 0644,
++		.proc_handler   = proc_tcp_default_init_rwnd
++	},
++	{
+ 		.procname	= "icmp_msgs_per_sec",
+ 		.data		= &sysctl_icmp_msgs_per_sec,
+ 		.maxlen		= sizeof(int),
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index 3bcd30a..d5834b7 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -80,6 +80,7 @@
+ #include <linux/static_key.h>
+ 
+ int sysctl_tcp_max_orphans __read_mostly = NR_FILE;
++int sysctl_tcp_default_init_rwnd __read_mostly = TCP_INIT_CWND * 2;
+ 
+ #define FLAG_DATA		0x01 /* Incoming frame contained data.		*/
+ #define FLAG_WIN_UPDATE		0x02 /* Incoming ACK was a window update.	*/
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index c4172c1..d1db053 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -187,7 +187,7 @@ u32 tcp_default_init_rwnd(u32 mss)
+ 	 * (RFC 3517, Section 4, NextSeg() rule (2)). Further place a
+ 	 * limit when mss is larger than 1460.
+ 	 */
+-	u32 init_rwnd = TCP_INIT_CWND * 2;
++	u32 init_rwnd = sysctl_tcp_default_init_rwnd;
+ 
+ 	if (mss > 1460)
+ 		init_rwnd = max((1460 * init_rwnd) / mss, 2U);
+-- 
+2.7.4
+

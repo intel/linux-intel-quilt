@@ -1,0 +1,64 @@
+From 2a5c6c7fa8ce51cd0234cb9891090db51acb716d Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Wed, 11 Apr 2018 16:19:10 -0700
+Subject: [PATCH 317/343] ANDROID: sdcardfs: Check for private data earlier
+
+When an sdcardfs dentry is destroyed, it may not yet
+have its fsdata initialized. It must be checked before
+we try to access the paths in its private data.
+
+Additionally, when cleaning up the superblock after
+a failure, we don't have our sb private data, so
+check for that case.
+
+Bug: 77923821
+Change-Id: I89caf6e121ed86480b42024664453fe0031bbcf3
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+---
+ fs/sdcardfs/dentry.c | 2 ++
+ fs/sdcardfs/lookup.c | 2 --
+ fs/sdcardfs/main.c   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/fs/sdcardfs/dentry.c b/fs/sdcardfs/dentry.c
+index e9426a6..166f14b 100644
+--- a/fs/sdcardfs/dentry.c
++++ b/fs/sdcardfs/dentry.c
+@@ -131,6 +131,8 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 
+ static void sdcardfs_d_release(struct dentry *dentry)
+ {
++	if (!dentry || !dentry->d_fsdata)
++		return;
+ 	/* release and reset the lower paths */
+ 	if (has_graft_path(dentry))
+ 		sdcardfs_put_reset_orig_path(dentry);
+diff --git a/fs/sdcardfs/lookup.c b/fs/sdcardfs/lookup.c
+index 7dab5f7..2ff3051 100644
+--- a/fs/sdcardfs/lookup.c
++++ b/fs/sdcardfs/lookup.c
+@@ -41,8 +41,6 @@ void sdcardfs_destroy_dentry_cache(void)
+ 
+ void free_dentry_private_data(struct dentry *dentry)
+ {
+-	if (!dentry || !dentry->d_fsdata)
+-		return;
+ 	kmem_cache_free(sdcardfs_dentry_cachep, dentry->d_fsdata);
+ 	dentry->d_fsdata = NULL;
+ }
+diff --git a/fs/sdcardfs/main.c b/fs/sdcardfs/main.c
+index e4fd3fb..c312010 100644
+--- a/fs/sdcardfs/main.c
++++ b/fs/sdcardfs/main.c
+@@ -422,7 +422,7 @@ void sdcardfs_kill_sb(struct super_block *sb)
+ {
+ 	struct sdcardfs_sb_info *sbi;
+ 
+-	if (sb->s_magic == SDCARDFS_SUPER_MAGIC) {
++	if (sb->s_magic == SDCARDFS_SUPER_MAGIC && sb->s_fs_info) {
+ 		sbi = SDCARDFS_SB(sb);
+ 		mutex_lock(&sdcardfs_super_list_lock);
+ 		list_del(&sbi->list);
+-- 
+2.7.4
+
