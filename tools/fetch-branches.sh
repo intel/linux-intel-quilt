@@ -8,13 +8,12 @@
 rc=$1
 # first arg is the tag name for the RC to use.
 manifest=$2
-origin=$3
 
 git checkout $rc
 
 for b in `cat $manifest`; do 
 	git branch -D $b
-	git checkout -b $b $origin/dev/staging/$b
+	git checkout -b $b origin/dev/staging/$b
 done
 
 

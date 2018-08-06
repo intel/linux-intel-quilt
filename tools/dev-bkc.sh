@@ -18,8 +18,7 @@ for b in `cat $manifest`; do
 	git merge --no-ff $b
 	while [ "$(git diff | grep '<<<<<<<')" != "" ] || [ "$(git diff --cached | grep '<<<<<<<')" != "" ] ; do
 		echo in subshell.  fix merge for ${b} and exit to continue
-		bash --rcfile <(cat ~/.bashrc ; echo
-		'PS1="${debian_chroot:+($debian_chroot)}\u@\h:\w\$ \[\033[0;33m\]Fix $b Merge$ \[\033[00m\]"')
+		bash --rcfile <(cat ~/.bashrc ; echo 'PS1="FIXEME\u@\h:\w\$ \[\033[0;33m\]Fix $b Merge$ \[\033[00m\]"')
 		read -n 1 -p "Do you want to continue (y/n)?" answer
 		case $answer in
 			[Yy]) continue;;
