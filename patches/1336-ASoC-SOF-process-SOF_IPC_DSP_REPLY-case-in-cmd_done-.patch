@@ -1,0 +1,92 @@
+From 1632b1d05cce351c28105e4e26346d55c2bd9412 Mon Sep 17 00:00:00 2001
+From: Rander Wang <rander.wang@linux.intel.com>
+Date: Tue, 3 Jul 2018 13:47:06 +0800
+Subject: [PATCH 1336/1375] ASoC: SOF: process SOF_IPC_DSP_REPLY case in
+ cmd_done on APL
+
+Set DONE bit in cmd_done function which processes msgs,
+rather than doing it in IRQ function. But if a msg is not
+in the rx list, it can only be done at IRQ function
+
+Signed-off-by: Rander Wang <rander.wang@linux.intel.com>
+---
+ sound/soc/sof/intel/hda-ipc.c | 45 +++++++++++++++++++++++++++++--------------
+ 1 file changed, 31 insertions(+), 14 deletions(-)
+
+diff --git a/sound/soc/sof/intel/hda-ipc.c b/sound/soc/sof/intel/hda-ipc.c
+index 38b4111..0fb3f48 100644
+--- a/sound/soc/sof/intel/hda-ipc.c
++++ b/sound/soc/sof/intel/hda-ipc.c
+@@ -37,11 +37,29 @@
+ int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev, int dir)
+ {
+ 	if (dir == SOF_IPC_HOST_REPLY) {
+-		/* tell DSP cmd is done - clear busy interrupt */
++		/*
++		 * tell DSP cmd is done - clear busy
++		 * interrupt and send reply msg to dsp
++		 */
+ 		snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
+ 					       HDA_DSP_REG_HIPCT,
+ 					       HDA_DSP_REG_HIPCT_BUSY,
+ 					       HDA_DSP_REG_HIPCT_BUSY);
++	} else {
++		/*
++		 * set DONE bit - tell DSP we have received the reply msg
++		 * from DSP, and processed it, don't send more reply to host
++		 */
++		snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
++					       HDA_DSP_REG_HIPCIE,
++					       HDA_DSP_REG_HIPCIE_DONE,
++					       HDA_DSP_REG_HIPCIE_DONE);
++
++		/* unmask Done interrupt */
++		snd_sof_dsp_update_bits(sdev, HDA_DSP_BAR,
++					HDA_DSP_REG_HIPCCTL,
++					HDA_DSP_REG_HIPCCTL_DONE,
++					HDA_DSP_REG_HIPCCTL_DONE);
+ 	}
+ 
+ 	return 0;
+@@ -113,6 +131,7 @@ irqreturn_t hda_dsp_ipc_irq_thread(int irq, void *context)
+ 	struct snd_sof_dev *sdev = (struct snd_sof_dev *)context;
+ 	u32 hipci, hipcie, hipct, hipcte, msg = 0, msg_ext = 0;
+ 	irqreturn_t ret = IRQ_NONE;
++	int reply = -EINVAL;
+ 
+ 	/* here we handle IPC interrupts only */
+ 	if (!(sdev->irq_status & HDA_DSP_ADSPIS_IPC))
+@@ -142,19 +161,17 @@ irqreturn_t hda_dsp_ipc_irq_thread(int irq, void *context)
+ 
+ 		/* handle immediate reply from DSP core - ignore ROM messages */
+ 		if (msg != 0x1004000)
+-			snd_sof_ipc_reply(sdev, msg);
+-
+-		/* clear DONE bit - tell DSP we have completed the operation */
+-		snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
+-					       HDA_DSP_REG_HIPCIE,
+-					       HDA_DSP_REG_HIPCIE_DONE,
+-					       HDA_DSP_REG_HIPCIE_DONE);
+-
+-		/* unmask Done interrupt */
+-		snd_sof_dsp_update_bits(sdev, HDA_DSP_BAR,
+-					HDA_DSP_REG_HIPCCTL,
+-					HDA_DSP_REG_HIPCCTL_DONE,
+-					HDA_DSP_REG_HIPCCTL_DONE);
++			reply = snd_sof_ipc_reply(sdev, msg);
++
++		/*
++		 * handle immediate reply from DSP core. If the msg is
++		 * found, set done bit in cmd_done which is called at the
++		 * end of message processing function, else set it here
++		 * because the done bit can't be set in cmd_done function
++		 * which is triggered by msg
++		 */
++		if (reply)
++			hda_dsp_ipc_cmd_done(sdev, SOF_IPC_DSP_REPLY);
+ 
+ 		ret = IRQ_HANDLED;
+ 	}
+-- 
+2.7.4
+
