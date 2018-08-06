@@ -1,0 +1,138 @@
+From bff5f0a3bafa6a7b24a57de8498f38760373bcaa Mon Sep 17 00:00:00 2001
+From: Vincent Guittot <vincent.guittot@linaro.org>
+Date: Wed, 23 May 2018 10:50:35 +0200
+Subject: [PATCH 414/438] FROMLIST: sched: remove rt_avg code
+
+rt_avg is no more used anywhere so we can remove all related code
+
+Cc: Ingo Molnar <mingo@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Vincent Guittot <vincent.guittot@linaro.org>
+[ Fixed trivial conflicts in kernel/sched/sched.h ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I2d620d01574a3cac9054893f04578e4e4b8bde96
+---
+ kernel/sched/core.c  | 26 --------------------------
+ kernel/sched/fair.c  |  2 --
+ kernel/sched/sched.h | 20 --------------------
+ 3 files changed, 48 deletions(-)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 60e799a..a501cc0 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -657,23 +657,6 @@ bool sched_can_stop_tick(struct rq *rq)
+ 	return true;
+ }
+ #endif /* CONFIG_NO_HZ_FULL */
+-
+-void sched_avg_update(struct rq *rq)
+-{
+-	s64 period = sched_avg_period();
+-
+-	while ((s64)(rq_clock(rq) - rq->age_stamp) > period) {
+-		/*
+-		 * Inline assembly required to prevent the compiler
+-		 * optimising this loop into a divmod call.
+-		 * See __iter_div_u64_rem() for another example of this.
+-		 */
+-		asm("" : "+rm" (rq->age_stamp));
+-		rq->age_stamp += period;
+-		rq->rt_avg /= 2;
+-	}
+-}
+-
+ #endif /* CONFIG_SMP */
+ 
+ #if defined(CONFIG_RT_GROUP_SCHED) || (defined(CONFIG_FAIR_GROUP_SCHED) && \
+@@ -5728,13 +5711,6 @@ void set_rq_offline(struct rq *rq)
+ 	}
+ }
+ 
+-static void set_cpu_rq_start_time(unsigned int cpu)
+-{
+-	struct rq *rq = cpu_rq(cpu);
+-
+-	rq->age_stamp = sched_clock_cpu(cpu);
+-}
+-
+ /*
+  * used to mark begin/end of suspend/resume:
+  */
+@@ -5852,7 +5828,6 @@ static void sched_rq_cpu_starting(unsigned int cpu)
+ 
+ int sched_cpu_starting(unsigned int cpu)
+ {
+-	set_cpu_rq_start_time(cpu);
+ 	sched_rq_cpu_starting(cpu);
+ 	sched_tick_start(cpu);
+ 	return 0;
+@@ -6120,7 +6095,6 @@ void __init sched_init(void)
+ 
+ #ifdef CONFIG_SMP
+ 	idle_thread_set_boot_cpu();
+-	set_cpu_rq_start_time(smp_processor_id());
+ #endif
+ 	init_sched_fair_class();
+ 
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index cbe909be..44714c4 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -5408,8 +5408,6 @@ static void cpu_load_update(struct rq *this_rq, unsigned long this_load,
+ 
+ 		this_rq->cpu_load[i] = (old_load * (scale - 1) + new_load) >> i;
+ 	}
+-
+-	sched_avg_update(this_rq);
+ }
+ 
+ /* Used instead of source_load when we know the type == 0 */
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index ca43a4e..cda317c 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -887,8 +887,6 @@ struct rq {
+ 
+ 	struct list_head cfs_tasks;
+ 
+-	u64			rt_avg;
+-	u64			age_stamp;
+ 	struct sched_avg	avg_rt;
+ 	struct sched_avg	avg_dl;
+ #if defined(CONFIG_IRQ_TIME_ACCOUNTING) || defined(CONFIG_PARAVIRT_TIME_ACCOUNTING)
+@@ -1778,11 +1776,6 @@ extern const_debug unsigned int sysctl_sched_time_avg;
+ extern const_debug unsigned int sysctl_sched_nr_migrate;
+ extern const_debug unsigned int sysctl_sched_migration_cost;
+ 
+-static inline u64 sched_avg_period(void)
+-{
+-	return (u64)sysctl_sched_time_avg * NSEC_PER_MSEC / 2;
+-}
+-
+ #ifdef CONFIG_SCHED_HRTICK
+ 
+ /*
+@@ -1827,19 +1820,6 @@ unsigned long arch_scale_max_freq_capacity(struct sched_domain *sd, int cpu)
+ }
+ #endif
+ 
+-#ifdef CONFIG_SMP
+-extern void sched_avg_update(struct rq *rq);
+-
+-static inline void sched_rt_avg_update(struct rq *rq, u64 rt_delta)
+-{
+-	rq->rt_avg += rt_delta * arch_scale_freq_capacity(cpu_of(rq));
+-	sched_avg_update(rq);
+-}
+-#else
+-static inline void sched_rt_avg_update(struct rq *rq, u64 rt_delta) { }
+-static inline void sched_avg_update(struct rq *rq) { }
+-#endif
+-
+ struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+ 	__acquires(rq->lock);
+ 
+-- 
+2.7.4
+

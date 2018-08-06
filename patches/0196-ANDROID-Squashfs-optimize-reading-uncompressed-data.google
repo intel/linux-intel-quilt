@@ -1,0 +1,122 @@
+From cc7b7be7b09b2e155da3b59a8a58a7f3675cacbe Mon Sep 17 00:00:00 2001
+From: Adrien Schildknecht <adriens@google.com>
+Date: Thu, 29 Sep 2016 15:25:30 -0700
+Subject: [PATCH 196/438] ANDROID: Squashfs: optimize reading uncompressed data
+
+When dealing with uncompressed data, there is no need to read a whole
+block (default 128K) to get the desired page: the pages are
+independent from each others.
+
+This patch change the readpages logic so that reading uncompressed
+data only read the number of pages advised by the readahead algorithm.
+
+Moreover, if the page actor contains holes (i.e. pages that are already
+up-to-date), squashfs skips the buffer_head associated to those pages.
+
+This patch greatly improve the performance of random reads for
+uncompressed files because squashfs only read what is needed. It also
+reduces the number of unnecessary reads.
+
+Change-Id: I90a77343bb994a1de7482eb43eaf6d2021502c22
+Signed-off-by: Adrien Schildknecht <adriens@google.com>
+---
+ fs/squashfs/block.c       | 25 +++++++++++++++++++++++++
+ fs/squashfs/file_direct.c | 37 ++++++++++++++++++++++++++++++-------
+ 2 files changed, 55 insertions(+), 7 deletions(-)
+
+diff --git a/fs/squashfs/block.c b/fs/squashfs/block.c
+index f64ce9d..a339984 100644
+--- a/fs/squashfs/block.c
++++ b/fs/squashfs/block.c
+@@ -212,6 +212,22 @@ static void squashfs_bio_end_io(struct bio *bio)
+ 	kfree(bio_req);
+ }
+ 
++static int bh_is_optional(struct squashfs_read_request *req, int idx)
++{
++	int start_idx, end_idx;
++	struct squashfs_sb_info *msblk = req->sb->s_fs_info;
++
++	start_idx = (idx * msblk->devblksize - req->offset) >> PAGE_SHIFT;
++	end_idx = ((idx + 1) * msblk->devblksize - req->offset + 1) >> PAGE_SHIFT;
++	if (start_idx >= req->output->pages)
++		return 1;
++	if (start_idx < 0)
++		start_idx = end_idx;
++	if (end_idx >= req->output->pages)
++		end_idx = start_idx;
++	return !req->output->page[start_idx] && !req->output->page[end_idx];
++}
++
+ static int actor_getblks(struct squashfs_read_request *req, u64 block)
+ {
+ 	int i;
+@@ -221,6 +237,15 @@ static int actor_getblks(struct squashfs_read_request *req, u64 block)
+ 		return -ENOMEM;
+ 
+ 	for (i = 0; i < req->nr_buffers; ++i) {
++		/*
++		 * When dealing with an uncompressed block, the actor may
++		 * contains NULL pages. There's no need to read the buffers
++		 * associated with these pages.
++		 */
++		if (!req->compressed && bh_is_optional(req, i)) {
++			req->bh[i] = NULL;
++			continue;
++		}
+ 		req->bh[i] = sb_getblk(req->sb, block + i);
+ 		if (!req->bh[i]) {
+ 			while (--i) {
+diff --git a/fs/squashfs/file_direct.c b/fs/squashfs/file_direct.c
+index a978811..dc87f77 100644
+--- a/fs/squashfs/file_direct.c
++++ b/fs/squashfs/file_direct.c
+@@ -111,15 +111,38 @@ int squashfs_readpages_block(struct page *target_page,
+ 	struct squashfs_page_actor *actor;
+ 	struct inode *inode = mapping->host;
+ 	struct squashfs_sb_info *msblk = inode->i_sb->s_fs_info;
+-	int file_end = (i_size_read(inode) - 1) >> PAGE_SHIFT;
++	int start_index, end_index, file_end, actor_pages, res;
+ 	int mask = (1 << (msblk->block_log - PAGE_SHIFT)) - 1;
+-	int start_index = page_index & ~mask;
+-	int end_index = start_index | mask;
+-	int actor_pages, res;
+ 
+-	if (end_index > file_end)
+-		end_index = file_end;
+-	actor_pages = end_index - start_index + 1;
++	/*
++	 * If readpage() is called on an uncompressed datablock, we can just
++	 * read the pages instead of fetching the whole block.
++	 * This greatly improves the performance when a process keep doing
++	 * random reads because we only fetch the necessary data.
++	 * The readahead algorithm will take care of doing speculative reads
++	 * if necessary.
++	 * We can't read more than 1 block even if readahead provides use more
++	 * pages because we don't know yet if the next block is compressed or
++	 * not.
++	 */
++	if (bsize && !SQUASHFS_COMPRESSED_BLOCK(bsize)) {
++		u64 block_end = block + msblk->block_size;
++
++		block += (page_index & mask) * PAGE_SIZE;
++		actor_pages = (block_end - block) / PAGE_SIZE;
++		if (*nr_pages < actor_pages)
++			actor_pages = *nr_pages;
++		start_index = page_index;
++		bsize = min_t(int, bsize, (PAGE_SIZE * actor_pages)
++					  | SQUASHFS_COMPRESSED_BIT_BLOCK);
++	} else {
++		file_end = (i_size_read(inode) - 1) >> PAGE_SHIFT;
++		start_index = page_index & ~mask;
++		end_index = start_index | mask;
++		if (end_index > file_end)
++			end_index = file_end;
++		actor_pages = end_index - start_index + 1;
++	}
+ 
+ 	actor = actor_from_page_cache(actor_pages, target_page,
+ 				      readahead_pages, nr_pages, start_index,
+-- 
+2.7.4
+

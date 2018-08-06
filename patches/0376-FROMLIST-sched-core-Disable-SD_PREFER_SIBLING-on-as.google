@@ -1,0 +1,83 @@
+From f44220fd313b4ad4bcaf5b819fa99a1477345934 Mon Sep 17 00:00:00 2001
+From: Morten Rasmussen <morten.rasmussen@arm.com>
+Date: Thu, 28 Jun 2018 17:31:25 +0100
+Subject: [PATCH 376/438] FROMLIST: sched/core: Disable SD_PREFER_SIBLING on
+ asymmetric cpu capacity domains
+
+The 'prefer sibling' sched_domain flag is intended to encourage
+spreading tasks to sibling sched_domain to take advantage of more caches
+and core for SMT systems. It has recently been changed to be on all
+non-NUMA topology level. However, spreading across domains with cpu
+capacity asymmetry isn't desirable, e.g. spreading from high capacity to
+low capacity cpus even if high capacity cpus aren't overutilized might
+give access to more cache but the cpu will be slower and possibly lead
+to worse overall throughput.
+
+To prevent this, we need to remove SD_PREFER_SIBLING on the sched_domain
+level immediately below SD_ASYM_CPUCAPACITY.
+
+cc: Ingo Molnar <mingo@redhat.com>
+cc: Peter Zijlstra <peterz@infradead.org>
+
+Signed-off-by: Morten Rasmussen <morten.rasmussen@arm.com>
+Change-Id: I8400c9a26d57da10e45b64c6f93bc1b99eb5c3c8
+---
+ kernel/sched/topology.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index ad0d670..044f860 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -1160,7 +1160,7 @@ sd_init(struct sched_domain_topology_level *tl,
+ 					| 0*SD_SHARE_CPUCAPACITY
+ 					| 0*SD_SHARE_PKG_RESOURCES
+ 					| 0*SD_SERIALIZE
+-					| 0*SD_PREFER_SIBLING
++					| 1*SD_PREFER_SIBLING
+ 					| 0*SD_NUMA
+ 					| sd_flags
+ 					,
+@@ -1206,17 +1206,21 @@ sd_init(struct sched_domain_topology_level *tl,
+ 	if (sd->flags & SD_ASYM_CPUCAPACITY) {
+ 		struct sched_domain *t = sd;
+ 
++		/*
++		 * Don't attempt to spread across cpus of different capacities.
++		 */
++		if (sd->child)
++			sd->child->flags &= ~SD_PREFER_SIBLING;
++
+ 		for_each_lower_domain(t)
+ 			t->flags |= SD_BALANCE_WAKE;
+ 	}
+ 
+ 	if (sd->flags & SD_SHARE_CPUCAPACITY) {
+-		sd->flags |= SD_PREFER_SIBLING;
+ 		sd->imbalance_pct = 110;
+ 		sd->smt_gain = 1178; /* ~15% */
+ 
+ 	} else if (sd->flags & SD_SHARE_PKG_RESOURCES) {
+-		sd->flags |= SD_PREFER_SIBLING;
+ 		sd->imbalance_pct = 117;
+ 		sd->cache_nice_tries = 1;
+ 		sd->busy_idx = 2;
+@@ -1227,6 +1231,7 @@ sd_init(struct sched_domain_topology_level *tl,
+ 		sd->busy_idx = 3;
+ 		sd->idle_idx = 2;
+ 
++		sd->flags &= ~SD_PREFER_SIBLING;
+ 		sd->flags |= SD_SERIALIZE;
+ 		if (sched_domains_numa_distance[tl->numa_level] > RECLAIM_DISTANCE) {
+ 			sd->flags &= ~(SD_BALANCE_EXEC |
+@@ -1236,7 +1241,6 @@ sd_init(struct sched_domain_topology_level *tl,
+ 
+ #endif
+ 	} else {
+-		sd->flags |= SD_PREFER_SIBLING;
+ 		sd->cache_nice_tries = 1;
+ 		sd->busy_idx = 2;
+ 		sd->idle_idx = 1;
+-- 
+2.7.4
+

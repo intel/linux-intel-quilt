@@ -1,0 +1,100 @@
+From f349030a14ae4bae08a8fac494026316b2f3ab20 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Wed, 8 Mar 2017 17:45:46 -0800
+Subject: [PATCH 253/438] ANDROID: sdcardfs: Use d_invalidate instead of
+ drop_recurisve
+
+drop_recursive did not properly remove stale dentries.
+Instead, we use the vfs's d_invalidate, which does the proper cleanup.
+
+Additionally, remove the no longer used drop_recursive, and
+fixup_top_recursive that that are no longer used.
+
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Change-Id: Ibff61b0c34b725b024a050169047a415bc90f0d8
+---
+ fs/sdcardfs/derived_perm.c | 40 ----------------------------------------
+ fs/sdcardfs/inode.c        |  2 +-
+ fs/sdcardfs/sdcardfs.h     |  2 --
+ 3 files changed, 1 insertion(+), 43 deletions(-)
+
+diff --git a/fs/sdcardfs/derived_perm.c b/fs/sdcardfs/derived_perm.c
+index 69ffbf2..72ae4b9 100644
+--- a/fs/sdcardfs/derived_perm.c
++++ b/fs/sdcardfs/derived_perm.c
+@@ -308,46 +308,6 @@ void fixup_perms_recursive(struct dentry *dentry, struct limit_search *limit)
+ 	__fixup_perms_recursive(dentry, limit, 0);
+ }
+ 
+-void drop_recursive(struct dentry *parent)
+-{
+-	struct dentry *dentry;
+-	struct sdcardfs_inode_info *info;
+-	if (!d_inode(parent))
+-		return;
+-	info = SDCARDFS_I(d_inode(parent));
+-	spin_lock(&parent->d_lock);
+-	list_for_each_entry(dentry, &parent->d_subdirs, d_child) {
+-		if (d_inode(dentry)) {
+-			if (SDCARDFS_I(d_inode(parent))->top != SDCARDFS_I(d_inode(dentry))->top) {
+-				drop_recursive(dentry);
+-				d_drop(dentry);
+-			}
+-		}
+-	}
+-	spin_unlock(&parent->d_lock);
+-}
+-
+-void fixup_top_recursive(struct dentry *parent)
+-{
+-	struct dentry *dentry;
+-	struct sdcardfs_inode_info *info;
+-
+-	if (!d_inode(parent))
+-		return;
+-	info = SDCARDFS_I(d_inode(parent));
+-	spin_lock(&parent->d_lock);
+-	list_for_each_entry(dentry, &parent->d_subdirs, d_child) {
+-		if (d_inode(dentry)) {
+-			if (SDCARDFS_I(d_inode(parent))->top != SDCARDFS_I(d_inode(dentry))->top) {
+-				get_derived_permission(parent, dentry);
+-				fixup_tmp_permissions(d_inode(dentry));
+-				fixup_top_recursive(dentry);
+-			}
+-		}
+-	}
+-	spin_unlock(&parent->d_lock);
+-}
+-
+ /* main function for updating derived permission */
+ inline void update_derived_permission_lock(struct dentry *dentry)
+ {
+diff --git a/fs/sdcardfs/inode.c b/fs/sdcardfs/inode.c
+index 5d05449..9052ed4 100644
+--- a/fs/sdcardfs/inode.c
++++ b/fs/sdcardfs/inode.c
+@@ -533,7 +533,7 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 	get_derived_permission_new(new_dentry->d_parent, old_dentry, &new_dentry->d_name);
+ 	fixup_tmp_permissions(d_inode(old_dentry));
+ 	fixup_lower_ownership(old_dentry, new_dentry->d_name.name);
+-	drop_recursive(old_dentry); /* Can't fixup ownership recursively :( */
++	d_invalidate(old_dentry); /* Can't fixup ownership recursively :( */
+ out:
+ 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
+ 	dput(lower_old_dir_dentry);
+diff --git a/fs/sdcardfs/sdcardfs.h b/fs/sdcardfs/sdcardfs.h
+index a42125e..09ec1e4 100644
+--- a/fs/sdcardfs/sdcardfs.h
++++ b/fs/sdcardfs/sdcardfs.h
+@@ -484,8 +484,6 @@ extern void setup_derived_state(struct inode *inode, perm_t perm, userid_t useri
+ 			uid_t uid, bool under_android, struct inode *top);
+ extern void get_derived_permission(struct dentry *parent, struct dentry *dentry);
+ extern void get_derived_permission_new(struct dentry *parent, struct dentry *dentry, const struct qstr *name);
+-extern void drop_recursive(struct dentry *parent);
+-extern void fixup_top_recursive(struct dentry *parent);
+ extern void fixup_perms_recursive(struct dentry *dentry, struct limit_search *limit);
+ 
+ extern void update_derived_permission_lock(struct dentry *dentry);
+-- 
+2.7.4
+
