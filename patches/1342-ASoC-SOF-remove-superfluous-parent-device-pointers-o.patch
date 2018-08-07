@@ -1,0 +1,140 @@
+From 0ede6215f39cb05afe07c46e42cde31b6549a6f5 Mon Sep 17 00:00:00 2001
+From: Keyon Jie <yang.jie@linux.intel.com>
+Date: Mon, 16 Jul 2018 13:05:31 +0800
+Subject: [PATCH 1342/1375] ASoC: SOF: remove superfluous parent device
+ pointers of snd_sof_pdata
+
+We had pointers for parent device of snd_sof_pdata, pci for pci_dev,
+pdev for platform_device, and spi for spi_device (intended to but not
+added yet). All of these can be retrieved from parent dev via
+container_of(), so they are actually superfluous.
+
+Here remove these pointers to kinds of parent devices, add an enum
+sof_device_type and simplify the initialization of snd_sof_dev->parent
+correspondingly.
+
+Signed-off-by: Keyon Jie <yang.jie@linux.intel.com>
+---
+ include/sound/sof.h          | 12 +++++++++---
+ sound/soc/sof/core.c         | 11 +++--------
+ sound/soc/sof/sof-acpi-dev.c |  7 ++++---
+ sound/soc/sof/sof-pci-dev.c  |  2 +-
+ sound/soc/sof/sof-spi-dev.c  |  2 +-
+ 5 files changed, 18 insertions(+), 16 deletions(-)
+
+diff --git a/include/sound/sof.h b/include/sound/sof.h
+index e522e13..835d0ae 100644
+--- a/include/sound/sof.h
++++ b/include/sound/sof.h
+@@ -23,6 +23,13 @@
+ 
+ struct snd_sof_dsp_ops;
+ 
++/* SOF probe type */
++enum sof_device_type {
++	SOF_DEVICE_PCI = 0,
++	SOF_DEVICE_APCI,
++	SOF_DEVICE_SPI
++};
++
+ /*
+  * SOF Platform data.
+  */
+@@ -32,10 +39,9 @@ struct snd_sof_pdata {
+ 	const char *drv_name;
+ 	const char *name;
+ 
+-	/* parent devices */
++	/* parent device */
+ 	struct device *dev;
+-	struct pci_dev *pci;
+-	struct platform_device *pdev;
++	enum sof_device_type type;
+ 
+ 	/* descriptor */
+ 	const struct sof_dev_desc *desc;
+diff --git a/sound/soc/sof/core.c b/sound/soc/sof/core.c
+index ee76082..5aad175 100644
+--- a/sound/soc/sof/core.c
++++ b/sound/soc/sof/core.c
+@@ -239,14 +239,9 @@ static int sof_probe(struct platform_device *pdev)
+ 
+ 	/* initialize sof device */
+ 	sdev->dev = &pdev->dev;
+-	if (plat_data->pci) {
+-		sdev->pci = plat_data->pci;
+-		sdev->parent = &plat_data->pci->dev;
+-	} else if (plat_data->pdev) {
+-		sdev->parent = &plat_data->pdev->dev;
+-	} else {
+-		sdev->parent = plat_data->dev;
+-	}
++	sdev->parent = plat_data->dev;
++	if (plat_data->type == SOF_DEVICE_PCI)
++		sdev->pci = container_of(plat_data->dev, struct pci_dev, dev);
+ 	sdev->ops = plat_data->machine->pdata;
+ 
+ 	sdev->pdata = plat_data;
+diff --git a/sound/soc/sof/sof-acpi-dev.c b/sound/soc/sof/sof-acpi-dev.c
+index 9ada41f..dd268c1 100644
+--- a/sound/soc/sof/sof-acpi-dev.c
++++ b/sound/soc/sof/sof-acpi-dev.c
+@@ -121,7 +121,7 @@ static struct platform_device *
+ 	mfld_new_mach_data(struct snd_sof_pdata *sof_pdata)
+ {
+ 	struct snd_soc_acpi_mach pmach;
+-	struct device *dev = &sof_pdata->pdev->dev;
++	struct device *dev = sof_pdata->dev;
+ 	const struct snd_soc_acpi_mach *mach = sof_pdata->machine;
+ 	struct platform_device *pdev = NULL;
+ 
+@@ -139,7 +139,7 @@ static void sof_acpi_fw_cb(const struct firmware *fw, void *context)
+ 	struct sof_platform_priv *priv = context;
+ 	struct snd_sof_pdata *sof_pdata = priv->sof_pdata;
+ 	const struct snd_soc_acpi_mach *mach = sof_pdata->machine;
+-	struct device *dev = &sof_pdata->pdev->dev;
++	struct device *dev = sof_pdata->dev;
+ 
+ 	sof_pdata->fw = fw;
+ 	if (!fw) {
+@@ -273,7 +273,8 @@ static int sof_acpi_probe(struct platform_device *pdev)
+ 	 */
+ 	sof_pdata->desc = desc;
+ 	priv->sof_pdata = sof_pdata;
+-	sof_pdata->pdev = pdev;
++	sof_pdata->dev = &pdev->dev;
++	sof_pdata->type = SOF_DEVICE_APCI;
+ 	dev_set_drvdata(&pdev->dev, priv);
+ 
+ 	/* do we need to generate any machine plat data ? */
+diff --git a/sound/soc/sof/sof-pci-dev.c b/sound/soc/sof/sof-pci-dev.c
+index 470d7d5..152a3d3 100644
+--- a/sound/soc/sof/sof-pci-dev.c
++++ b/sound/soc/sof/sof-pci-dev.c
+@@ -251,8 +251,8 @@ static int sof_pci_probe(struct pci_dev *pci,
+ 	sof_pdata->machine = mach;
+ 	sof_pdata->desc = (struct sof_dev_desc *)pci_id->driver_data;
+ 	priv->sof_pdata = sof_pdata;
+-	sof_pdata->pci = pci;
+ 	sof_pdata->dev = &pci->dev;
++	sof_pdata->type = SOF_DEVICE_PCI;
+ 
+ 	/* register machine driver */
+ 	sof_pdata->pdev_mach =
+diff --git a/sound/soc/sof/sof-spi-dev.c b/sound/soc/sof/sof-spi-dev.c
+index 45860bf..57928d1 100644
+--- a/sound/soc/sof/sof-spi-dev.c
++++ b/sound/soc/sof/sof-spi-dev.c
+@@ -89,8 +89,8 @@ static int sof_spi_probe(struct spi_device *spi)
+ 	sof_pdata->machine = mach;
+ 	sof_pdata->desc = (struct sof_dev_desc *)pci_id->driver_data;
+ 	priv->sof_pdata = sof_pdata;
+-	sof_pdata->spi = spi;
+ 	sof_pdata->dev = dev;
++	sof_pdata->type = SOF_DEVICE_SPI;
+ 
+ 	/* register machine driver */
+ 	sof_pdata->pdev_mach =
+-- 
+2.7.4
+

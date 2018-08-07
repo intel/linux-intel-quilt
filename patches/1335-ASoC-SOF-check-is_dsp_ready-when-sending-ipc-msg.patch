@@ -1,0 +1,75 @@
+From cdb25ffa4690f42419d10c9b906602be30382294 Mon Sep 17 00:00:00 2001
+From: Rander Wang <rander.wang@linux.intel.com>
+Date: Fri, 6 Jul 2018 17:46:24 +0800
+Subject: [PATCH 1335/1375] ASoC: SOF: check is_dsp_ready when sending ipc msg
+
+Refine the implementation of is_dsp_ready on APL&CNL
+BUSY bit means dsp is ready, DONE bit means host has
+processed the reply msg. The next ipc msg should check
+both bits to make sure both dsp and host is ready
+
+Signed-off-by: Rander Wang <rander.wang@linux.intel.com>
+Signed-off-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
+---
+ sound/soc/sof/intel/cnl.c     | 8 +++++---
+ sound/soc/sof/intel/hda-ipc.c | 8 +++++---
+ sound/soc/sof/ipc.c           | 2 +-
+ 3 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/sound/soc/sof/intel/cnl.c b/sound/soc/sof/intel/cnl.c
+index c1b902f..b7b7de9 100644
+--- a/sound/soc/sof/intel/cnl.c
++++ b/sound/soc/sof/intel/cnl.c
+@@ -147,10 +147,12 @@ static int cnl_ipc_cmd_done(struct snd_sof_dev *sdev, int dir)
+ 
+ static int cnl_ipc_is_ready(struct snd_sof_dev *sdev)
+ {
+-	u64 val;
++	u64 busy, done;
+ 
+-	val = snd_sof_dsp_read(sdev, HDA_DSP_BAR, CNL_DSP_REG_HIPCIDR);
+-	if (val & CNL_DSP_REG_HIPCIDR_BUSY)
++	busy = snd_sof_dsp_read(sdev, HDA_DSP_BAR, CNL_DSP_REG_HIPCIDR);
++	done = snd_sof_dsp_read(sdev, HDA_DSP_BAR, CNL_DSP_REG_HIPCIDA);
++	if ((busy & CNL_DSP_REG_HIPCIDR_BUSY) ||
++	    (done & CNL_DSP_REG_HIPCIDA_DONE))
+ 		return 0;
+ 
+ 	return 1;
+diff --git a/sound/soc/sof/intel/hda-ipc.c b/sound/soc/sof/intel/hda-ipc.c
+index e3e0c8f..38b4111 100644
+--- a/sound/soc/sof/intel/hda-ipc.c
++++ b/sound/soc/sof/intel/hda-ipc.c
+@@ -49,11 +49,13 @@ int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev, int dir)
+ 
+ int hda_dsp_ipc_is_ready(struct snd_sof_dev *sdev)
+ {
+-	u64 val;
++	u64 busy, done;
+ 
+ 	/* is DSP ready for next IPC command */
+-	val = snd_sof_dsp_read(sdev, HDA_DSP_BAR, HDA_DSP_REG_HIPCI);
+-	if (val & HDA_DSP_REG_HIPCI_BUSY)
++	busy = snd_sof_dsp_read(sdev, HDA_DSP_BAR, HDA_DSP_REG_HIPCI);
++	done = snd_sof_dsp_read(sdev, HDA_DSP_BAR, HDA_DSP_REG_HIPCIE);
++	if ((busy & HDA_DSP_REG_HIPCI_BUSY) ||
++	    (done & HDA_DSP_REG_HIPCIE_DONE))
+ 		return 0;
+ 
+ 	return 1;
+diff --git a/sound/soc/sof/ipc.c b/sound/soc/sof/ipc.c
+index 52524fb..be6a98e 100644
+--- a/sound/soc/sof/ipc.c
++++ b/sound/soc/sof/ipc.c
+@@ -179,7 +179,7 @@ static void ipc_tx_next_msg(struct work_struct *work)
+ 	spin_lock_irq(&sdev->ipc_lock);
+ 
+ 	/* send message if HW read and message in TX list */
+-	if (list_empty(&ipc->tx_list))
++	if (list_empty(&ipc->tx_list) || !snd_sof_dsp_is_ready(sdev))
+ 		goto out;
+ 
+ 	/* sned first message in TX list */
+-- 
+2.7.4
+
