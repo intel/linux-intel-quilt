@@ -1,0 +1,72 @@
+From b3fbfc58f4841b625356e6a0816b0da34fda4e03 Mon Sep 17 00:00:00 2001
+From: Xinyun Liu <xinyun.liu@intel.com>
+Date: Tue, 29 May 2018 20:59:19 +0800
+Subject: [PATCH 1047/1371] drm/i915/gvt: use array to avoid potential buffer
+ overflow
+
+Signed-off-by: Xinyun Liu <xinyun.liu@intel.com>
+Reviewed-by: Min He <min.he@intel.com>
+Acked-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/execlist.c  |  2 +-
+ drivers/gpu/drm/i915/gvt/execlist.h  | 13 +++++--------
+ drivers/gpu/drm/i915/gvt/scheduler.c |  3 +--
+ 3 files changed, 7 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/execlist.c b/drivers/gpu/drm/i915/gvt/execlist.c
+index e763844..037371c 100644
+--- a/drivers/gpu/drm/i915/gvt/execlist.c
++++ b/drivers/gpu/drm/i915/gvt/execlist.c
+@@ -605,7 +605,7 @@ static void read_guest_pdps(struct intel_vgpu *vgpu,
+ 	u64 gpa;
+ 	int i;
+ 
+-	gpa = ring_context_gpa + RING_CTX_OFF(pdp3_UDW.val);
++	gpa = ring_context_gpa + RING_CTX_OFF(pdps[0].val);
+ 
+ 	for (i = 0; i < 8; i++)
+ 		intel_gvt_hypervisor_read_gpa(vgpu,
+diff --git a/drivers/gpu/drm/i915/gvt/execlist.h b/drivers/gpu/drm/i915/gvt/execlist.h
+index 7eced40..d2348b4 100644
+--- a/drivers/gpu/drm/i915/gvt/execlist.h
++++ b/drivers/gpu/drm/i915/gvt/execlist.h
+@@ -146,14 +146,11 @@ struct execlist_ring_context {
+ 	u32 nop4;
+ 	u32 lri_cmd_2;
+ 	struct execlist_mmio_pair ctx_timestamp;
+-	struct execlist_mmio_pair pdp3_UDW;
+-	struct execlist_mmio_pair pdp3_LDW;
+-	struct execlist_mmio_pair pdp2_UDW;
+-	struct execlist_mmio_pair pdp2_LDW;
+-	struct execlist_mmio_pair pdp1_UDW;
+-	struct execlist_mmio_pair pdp1_LDW;
+-	struct execlist_mmio_pair pdp0_UDW;
+-	struct execlist_mmio_pair pdp0_LDW;
++	/*
++	 * pdps[8]={ pdp3_UDW, pdp3_LDW, pdp2_UDW, pdp2_LDW,
++	 *           pdp1_UDW, pdp1_LDW, pdp0_UDW, pdp0_LDW}
++	 */
++	struct execlist_mmio_pair pdps[8];
+ };
+ 
+ struct intel_vgpu_elsp_dwords {
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 7932e55..95b8a3e 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -45,11 +45,10 @@ static void set_context_pdp_root_pointer(
+ 		struct execlist_ring_context *ring_context,
+ 		u32 pdp[8])
+ {
+-	struct execlist_mmio_pair *pdp_pair = &ring_context->pdp3_UDW;
+ 	int i;
+ 
+ 	for (i = 0; i < 8; i++)
+-		pdp_pair[i].val = pdp[7 - i];
++		ring_context->pdps[i].val = pdp[7 - i];
+ }
+ 
+ /*
+-- 
+2.7.4
+

@@ -1,0 +1,168 @@
+From a12d4e33831b32232c899b57aba75e5f39c18e1b Mon Sep 17 00:00:00 2001
+From: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Date: Mon, 21 May 2018 14:47:41 -0700
+Subject: [PATCH 1006/1371] Revert "phy-intel-dualrole: initialize intel phy
+ directly in driver"
+
+This reverts commit afe94cf6669d58443b8a04f1511d4e4486c1aa44.
+
+Signed-off-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+---
+ drivers/usb/dwc3/dwc3-pci.c          | 29 ++++++++++++++++++++++++++---
+ drivers/usb/host/xhci-pci.c          | 31 +++++++++++++++++++++++++++++++
+ drivers/usb/host/xhci.h              |  1 +
+ drivers/usb/phy/phy-intel-dualrole.c | 17 ++---------------
+ 4 files changed, 60 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-pci.c b/drivers/usb/dwc3/dwc3-pci.c
+index e11e39b..abf2810 100644
+--- a/drivers/usb/dwc3/dwc3-pci.c
++++ b/drivers/usb/dwc3/dwc3-pci.c
+@@ -57,6 +57,7 @@
+  */
+ struct dwc3_pci {
+ 	struct platform_device *dwc3;
++	struct platform_device	*usb2_phy;
+ 	struct pci_dev *pci;
+ 
+ 	guid_t guid;
+@@ -128,8 +129,29 @@ static int dwc3_pci_quirks(struct dwc3_pci *dwc)
+ 		if (pdev->device == PCI_DEVICE_ID_INTEL_BXT ||
+ 		    pdev->device == PCI_DEVICE_ID_INTEL_BXT_M ||
+ 		    pdev->device == PCI_DEVICE_ID_INTEL_APL ) {
+-			if (IS_ERR_OR_NULL(usb_get_phy(USB_PHY_TYPE_USB2)))
+-				return -ENOMEM;
++
++			if (IS_ERR_OR_NULL(usb_get_phy(USB_PHY_TYPE_USB2))) {
++				/* Unable to get phy, very likely intel_usb_dr_phy
++				 * platform device not yet allocated. Possible
++				 * race with another drivers.
++				 */
++				dwc->usb2_phy = platform_device_alloc(
++								"intel_usb_dr_phy", 0);
++				if (dwc->usb2_phy) {
++					dwc->usb2_phy->dev.parent = &pdev->dev;
++					ret = platform_device_add(dwc->usb2_phy);
++					if (ret) {
++						platform_device_put(dwc->usb2_phy);
++						return ret;
++					}
++				} else if (IS_ERR_OR_NULL(usb_get_phy(USB_PHY_TYPE_USB2))) {
++					/* In case of a race and another driver allocate
++					 * intel_usb_dr_phy platform device earlier, check
++					 * whether phy is already available. If not return error.
++					 */
++					return -ENOMEM;
++				}
++			}
+ 		}
+ 
+ 
+@@ -254,7 +276,8 @@ static void dwc3_pci_remove(struct pci_dev *pci)
+ 
+ 	device_init_wakeup(&pci->dev, false);
+ 	pm_runtime_get(&pci->dev);
+-
++	if(dwc->usb2_phy)
++		platform_device_unregister(dwc->usb2_phy);
+ 	platform_device_unregister(dwc->dwc3);
+ }
+ 
+diff --git a/drivers/usb/host/xhci-pci.c b/drivers/usb/host/xhci-pci.c
+index 01a8c7e..1e06ab7 100644
+--- a/drivers/usb/host/xhci-pci.c
++++ b/drivers/usb/host/xhci-pci.c
+@@ -95,6 +95,35 @@ static int xhci_pci_reinit(struct xhci_hcd *xhci, struct pci_dev *pdev)
+ 		hcd = xhci_to_hcd(xhci);
+ 
+ 		hcd->usb_phy = usb_get_phy(USB_PHY_TYPE_USB2);
++
++		if (IS_ERR_OR_NULL(hcd->usb_phy)) {
++			/* Unable to get phy, very likely intel_usb_dr_phy
++			 * platform device not yet allocated. Possible
++			 * race with another drivers.
++			 */
++			int ret;
++			xhci->usb2_phy = platform_device_alloc(
++								"intel_usb_dr_phy", 0);
++			if (xhci->usb2_phy) {
++				xhci->usb2_phy->dev.parent = &pdev->dev;
++					ret = platform_device_add(xhci->usb2_phy);
++				if (ret) {
++					platform_device_put(xhci->usb2_phy);
++					return ret;
++				}
++			} else {
++				/* In case of a race and another driver allocate
++				 * intel_usb_dr_phy platform device earlier, check
++				 * whether phy is already available. If not return error.
++				 */
++				hcd->usb_phy = usb_get_phy(USB_PHY_TYPE_USB2);
++				if (IS_ERR_OR_NULL(hcd->usb_phy))
++					return -ENOMEM;
++			}
++		}
++
++		hcd->usb_phy = usb_get_phy(USB_PHY_TYPE_USB2);
++
+ 		if (!IS_ERR_OR_NULL(hcd->usb_phy)) {
+ 			retval = otg_set_host(hcd->usb_phy->otg, &hcd->self);
+ 			if (retval)
+@@ -383,6 +412,8 @@ static void xhci_pci_remove(struct pci_dev *dev)
+ 
+ 	xhci = hcd_to_xhci(pci_get_drvdata(dev));
+ 	xhci->xhc_state |= XHCI_STATE_REMOVING;
++	if(xhci->usb2_phy)
++		platform_device_unregister(xhci->usb2_phy);
+ 	if (xhci->shared_hcd) {
+ 		usb_remove_hcd(xhci->shared_hcd);
+ 		usb_put_hcd(xhci->shared_hcd);
+diff --git a/drivers/usb/host/xhci.h b/drivers/usb/host/xhci.h
+index 11232e6..2c65565 100644
+--- a/drivers/usb/host/xhci.h
++++ b/drivers/usb/host/xhci.h
+@@ -1862,6 +1862,7 @@ struct xhci_hcd {
+ 	struct timer_list	comp_mode_recovery_timer;
+ 	u32			port_status_u0;
+ 	u16			test_mode;
++	struct platform_device	*usb2_phy;
+ /* Compliance Mode Timer Triggered every 2 seconds */
+ #define COMP_MODE_RCVRY_MSECS 2000
+ 
+diff --git a/drivers/usb/phy/phy-intel-dualrole.c b/drivers/usb/phy/phy-intel-dualrole.c
+index eae21d7..0eaaf8e 100644
+--- a/drivers/usb/phy/phy-intel-dualrole.c
++++ b/drivers/usb/phy/phy-intel-dualrole.c
+@@ -390,27 +390,14 @@ static struct platform_driver intel_dr_phy_driver = {
+ 	},
+ };
+ 
+-struct platform_device *intel_dr_phy_device;
+-
+ static int __init intel_dr_phy_init(void)
+ {
+-	int ret;
+-	ret = platform_driver_register(&intel_dr_phy_driver);
+-	if (ret)
+-		return ret;
+-
+-	intel_dr_phy_device = platform_device_register_simple("intel_usb_dr_phy", 0, NULL, 0);
+-	if (IS_ERR(intel_dr_phy_device) || !platform_get_drvdata(intel_dr_phy_device)) {
+-		platform_driver_unregister(&intel_dr_phy_driver);
+-		return -ENODEV;
+-	}
+-	return 0;
++	return platform_driver_register(&intel_dr_phy_driver);
+ }
+-rootfs_initcall(intel_dr_phy_init);
++subsys_initcall(intel_dr_phy_init);
+ 
+ static void __exit intel_dr_phy_exit(void)
+ {
+-	platform_device_unregister(intel_dr_phy_device);
+ 	platform_driver_unregister(&intel_dr_phy_driver);
+ }
+ module_exit(intel_dr_phy_exit);
+-- 
+2.7.4
+

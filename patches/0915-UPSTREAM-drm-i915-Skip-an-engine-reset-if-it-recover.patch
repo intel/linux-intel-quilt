@@ -1,0 +1,60 @@
+From e20280d93e2cc56535245b88f6ae866c298d85a1 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Sat, 16 Dec 2017 00:22:06 +0000
+Subject: [PATCH 0915/1371] [UPSTREAM] drm/i915: Skip an engine reset if it
+ recovered before our preparations
+
+At the beginning of a reset, we disable the submission method and find
+the stuck request. We expect to find a stuck request for we have
+declared the engine stalled. However, if we find no active request, the
+engine must have recovered from its stall before we could issue a reset,
+so let the engine continue on without a reset. If the engine is truly
+stuck, we will back soon enough with the next reset attempt.
+
+v2: Remove the stale debug message.
+
+Change-Id: I937c4cc8932e1b5b83d2adcbeabcbc33014b8f4e
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michel Thierry <michel.thierry@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Michel Thierry <michel.thierry@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171216002206.31737-1-chris@chris-wilson.co.uk
+Signed-off-by: Jeff McGee <jeff.mcgee@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 84ff28ae..62a81b9 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -2031,19 +2031,19 @@ int i915_reset_engine(struct intel_engine_cs *engine, unsigned int flags)
+ 
+ 	GEM_BUG_ON(!test_bit(I915_RESET_ENGINE + engine->id, &error->flags));
+ 
++	active_request = i915_gem_reset_prepare_engine(engine);
++	if (IS_ERR_OR_NULL(active_request)) {
++		/* Either the previous reset failed, or we pardon the reset. */
++		ret = PTR_ERR(active_request);
++		goto out;
++	}
++
+ 	if (!(flags & I915_RESET_QUIET)) {
+ 		dev_notice(engine->i915->drm.dev,
+ 			   "Resetting %s after gpu hang\n", engine->name);
+ 	}
+ 	error->reset_engine_count[engine->id]++;
+ 
+-	active_request = i915_gem_reset_prepare_engine(engine);
+-	if (IS_ERR(active_request)) {
+-		DRM_DEBUG_DRIVER("Previous reset failed, promote to full reset\n");
+-		ret = PTR_ERR(active_request);
+-		goto out;
+-	}
+-
+ 	ret = intel_gpu_reset(engine->i915, intel_engine_flag(engine));
+ 	if (ret) {
+ 		/* If we fail here, we expect to fallback to a global reset */
+-- 
+2.7.4
+

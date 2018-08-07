@@ -1,0 +1,68 @@
+From d039b5a886c319a75daa09cea5842a6a88dd0728 Mon Sep 17 00:00:00 2001
+From: Axel Lin <axel.lin@ingics.com>
+Date: Fri, 13 Oct 2017 09:21:01 +0800
+Subject: [PATCH 0727/1371] ASoC: max98925: Return proper error if revision
+ mismatch
+
+Return proper error instead of 0 if the revision does not match.
+
+Signed-off-by: Axel Lin <axel.lin@ingics.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+(cherry picked from commit d6e18b8295593d8f59e92f6634577cbacae14629)
+---
+ sound/soc/codecs/max98925.c | 23 +++++++++++++----------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/sound/soc/codecs/max98925.c b/sound/soc/codecs/max98925.c
+index 327eaa2..921f95f 100644
+--- a/sound/soc/codecs/max98925.c
++++ b/sound/soc/codecs/max98925.c
+@@ -579,7 +579,7 @@ static int max98925_i2c_probe(struct i2c_client *i2c,
+ 		ret = PTR_ERR(max98925->regmap);
+ 		dev_err(&i2c->dev,
+ 				"Failed to allocate regmap: %d\n", ret);
+-		goto err_out;
++		return ret;
+ 	}
+ 
+ 	if (!of_property_read_u32(i2c->dev.of_node, "vmon-slot-no", &value)) {
+@@ -596,16 +596,20 @@ static int max98925_i2c_probe(struct i2c_client *i2c,
+ 		}
+ 		max98925->i_slot = value;
+ 	}
+-	ret = regmap_read(max98925->regmap,
+-			MAX98925_REV_VERSION, &reg);
+-	if ((ret < 0) ||
+-		((reg != MAX98925_VERSION) &&
+-		(reg != MAX98925_VERSION1))) {
+-		dev_err(&i2c->dev,
+-			"device initialization error (%d 0x%02X)\n",
++
++	ret = regmap_read(max98925->regmap, MAX98925_REV_VERSION, &reg);
++	if (ret < 0) {
++		dev_err(&i2c->dev, "Read revision failed\n");
++		return ret;
++	}
++
++	if ((reg != MAX98925_VERSION) && (reg != MAX98925_VERSION1)) {
++		ret = -ENODEV;
++		dev_err(&i2c->dev, "Invalid revision (%d 0x%02X)\n",
+ 			ret, reg);
+-		goto err_out;
++		return ret;
+ 	}
++
+ 	dev_info(&i2c->dev, "device version 0x%02X\n", reg);
+ 
+ 	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_max98925,
+@@ -613,7 +617,6 @@ static int max98925_i2c_probe(struct i2c_client *i2c,
+ 	if (ret < 0)
+ 		dev_err(&i2c->dev,
+ 				"Failed to register codec: %d\n", ret);
+-err_out:
+ 	return ret;
+ }
+ 
+-- 
+2.7.4
+
