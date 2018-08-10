@@ -1,0 +1,73 @@
+From 180e326077a13cd1e212bfc3f6b7c5ffec5d2733 Mon Sep 17 00:00:00 2001
+From: Quentin Perret <quentin.perret@arm.com>
+Date: Thu, 26 Apr 2018 14:58:51 +0100
+Subject: [PATCH 385/437] FROMLIST: arch_topology: Start Energy Aware
+ Scheduling
+
+Energy Aware Scheduling (EAS) starts when the scheduling domains are
+built if the Energy Model (EM) is present. However, in the typical case
+of Arm/Arm64 systems, the EM is provided after the scheduling domains
+are first built at boot time, which results in EAS staying disabled.
+
+Fix this issue by re-building the scheduling domain from the arch
+topology driver, once CPUfreq is up and running and when the CPU
+capacities have been updated to their final value.
+
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: Id286b3f4a6049269cfbfb0e391f63fd3da76f71c
+---
+ drivers/base/arch_topology.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/base/arch_topology.c b/drivers/base/arch_topology.c
+index ab0dff2..6ff2237 100644
+--- a/drivers/base/arch_topology.c
++++ b/drivers/base/arch_topology.c
+@@ -10,7 +10,9 @@
+ #include <linux/arch_topology.h>
+ #include <linux/cpu.h>
+ #include <linux/cpufreq.h>
++#include <linux/cpuset.h>
+ #include <linux/device.h>
++#include <linux/energy_model.h>
+ #include <linux/of.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
+@@ -287,6 +289,9 @@ static cpumask_var_t cpus_to_visit;
+ static void parsing_done_workfn(struct work_struct *work);
+ static DECLARE_WORK(parsing_done_work, parsing_done_workfn);
+ 
++static void start_eas_workfn(struct work_struct *work);
++static DECLARE_WORK(start_eas_work, start_eas_workfn);
++
+ static int
+ init_cpu_capacity_callback(struct notifier_block *nb,
+ 			   unsigned long val,
+@@ -320,6 +325,7 @@ init_cpu_capacity_callback(struct notifier_block *nb,
+ 		free_raw_capacity();
+ 		pr_debug("cpu_capacity: parsing done\n");
+ 		schedule_work(&parsing_done_work);
++		schedule_work(&start_eas_work);
+ 	}
+ 
+ 	return 0;
+@@ -365,6 +371,15 @@ static void parsing_done_workfn(struct work_struct *work)
+ 	free_cpumask_var(cpus_to_visit);
+ }
+ 
++static void start_eas_workfn(struct work_struct *work)
++{
++	/* Make sure the EM knows about the updated CPU capacities. */
++	em_rescale_cpu_capacity();
++
++	/* Inform the scheduler about the EM availability. */
++	rebuild_sched_domains();
++}
++
+ #else
+ core_initcall(free_raw_capacity);
+ #endif
+-- 
+2.7.4
+

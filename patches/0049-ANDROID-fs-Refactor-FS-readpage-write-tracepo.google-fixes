@@ -1,0 +1,386 @@
+From 664239fc976628b72c538840c369f82c3f43260a Mon Sep 17 00:00:00 2001
+From: Mohan Srinivasan <srmohan@google.com>
+Date: Fri, 10 Feb 2017 14:26:23 -0800
+Subject: [PATCH 049/441] ANDROID: fs: Refactor FS readpage/write tracepoints.
+
+Refactor the fs readpage/write tracepoints to move the
+inode->path lookup outside the tracepoint code, and pass a pointer
+to the path into the tracepoint code instead. This is necessary
+because the tracepoint code runs non-preemptible. Thanks to
+Trilok Soni for catching this in 4.4.
+
+Signed-off-by: Mohan Srinivasan <srmohan@google.com>
+
+[AmitP: Folded following android-4.9 commit changes into this patch
+        a5c4dbb05ab7 ("ANDROID: Replace spaces by '_' for some android filesystem tracepoints.")]
+Signed-off-by: Amit Pundir <amit.pundir@linaro.org>
+---
+ fs/ext4/inline.c                           | 12 ++++++--
+ fs/ext4/inode.c                            | 45 ++++++++++++++++++++++++------
+ fs/ext4/readpage.c                         |  6 ++++
+ fs/f2fs/data.c                             | 33 ++++++++++++++++++----
+ fs/f2fs/inline.c                           | 13 +++++++--
+ fs/mpage.c                                 |  6 ++++
+ include/trace/events/android_fs.h          | 44 +++++++++++++++++++++++++----
+ include/trace/events/android_fs_template.h | 37 ++++++++----------------
+ 8 files changed, 145 insertions(+), 51 deletions(-)
+
+diff --git a/fs/ext4/inline.c b/fs/ext4/inline.c
+index f029cec..82841d5 100644
+--- a/fs/ext4/inline.c
++++ b/fs/ext4/inline.c
+@@ -506,8 +506,16 @@ int ext4_readpage_inline(struct inode *inode, struct page *page)
+ 		return -EAGAIN;
+ 	}
+ 
+-	trace_android_fs_dataread_start(inode, page_offset(page), PAGE_SIZE,
+-					current->pid, current->comm);
++	if (trace_android_fs_dataread_start_enabled()) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
++		trace_android_fs_dataread_start(inode, page_offset(page),
++						PAGE_SIZE, current->pid,
++						path, current->comm);
++	}
+ 
+ 	/*
+ 	 * Current inline data can only exist in the 1st page,
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 5ca68f2..fba473f 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -1254,8 +1254,16 @@ static int ext4_write_begin(struct file *file, struct address_space *mapping,
+ 	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+ 		return -EIO;
+ 
+-	trace_android_fs_datawrite_start(inode, pos, len,
+-					 current->pid, current->comm);
++	if (trace_android_fs_datawrite_start_enabled()) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
++		trace_android_fs_datawrite_start(inode, pos, len,
++						 current->pid, path,
++						 current->comm);
++	}
+ 	trace_ext4_write_begin(inode, pos, len, flags);
+ 	/*
+ 	 * Reserve one block more for addition to orphan list in case
+@@ -3029,8 +3037,16 @@ static int ext4_da_write_begin(struct file *file, struct address_space *mapping,
+ 					len, flags, pagep, fsdata);
+ 	}
+ 	*fsdata = (void *)0;
+-	trace_android_fs_datawrite_start(inode, pos, len,
+-					 current->pid, current->comm);
++	if (trace_android_fs_datawrite_start_enabled()) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
++		trace_android_fs_datawrite_start(inode, pos, len,
++						 current->pid,
++						 path, current->comm);
++	}
+ 	trace_ext4_da_write_begin(inode, pos, len, flags);
+ 
+ 	if (ext4_test_inode_state(inode, EXT4_STATE_MAY_INLINE_DATA)) {
+@@ -3868,16 +3884,27 @@ static ssize_t ext4_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+ 		return 0;
+ 
+ 	if (trace_android_fs_dataread_start_enabled() &&
+-	    (rw == READ))
++	    (rw == READ)) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
+ 		trace_android_fs_dataread_start(inode, offset, count,
+-						current->pid,
++						current->pid, path,
+ 						current->comm);
++	}
+ 	if (trace_android_fs_datawrite_start_enabled() &&
+-	    (rw == WRITE))
++	    (rw == WRITE)) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
+ 		trace_android_fs_datawrite_start(inode, offset, count,
+-						 current->pid,
++						 current->pid, path,
+ 						 current->comm);
+-
++	}
+ 	trace_ext4_direct_IO_enter(inode, offset, count, iov_iter_rw(iter));
+ 	if (iov_iter_rw(iter) == READ)
+ 		ret = ext4_direct_IO_read(iocb, iter);
+diff --git a/fs/ext4/readpage.c b/fs/ext4/readpage.c
+index 1010a3c..039aa69 100644
+--- a/fs/ext4/readpage.c
++++ b/fs/ext4/readpage.c
+@@ -118,11 +118,17 @@ ext4_submit_bio_read(struct bio *bio)
+ 		struct page *first_page = bio->bi_io_vec[0].bv_page;
+ 
+ 		if (first_page != NULL) {
++			char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++			path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    first_page->mapping->host);
+ 			trace_android_fs_dataread_start(
+ 				first_page->mapping->host,
+ 				page_offset(first_page),
+ 				bio->bi_iter.bi_size,
+ 				current->pid,
++				path,
+ 				current->comm);
+ 		}
+ 	}
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+index cf3cc2a..9965d40 100644
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -2245,8 +2245,16 @@ static int f2fs_write_begin(struct file *file, struct address_space *mapping,
+ 	block_t blkaddr = NULL_ADDR;
+ 	int err = 0;
+ 
+-	trace_android_fs_datawrite_start(inode, pos, len,
+-					 current->pid, current->comm);
++	if (trace_android_fs_datawrite_start_enabled()) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
++		trace_android_fs_datawrite_start(inode, pos, len,
++						 current->pid, path,
++						 current->comm);
++	}
+ 	trace_f2fs_write_begin(inode, pos, len, flags);
+ 
+ 	if (f2fs_is_atomic_file(inode) &&
+@@ -2408,14 +2416,27 @@ static ssize_t f2fs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+ 	trace_f2fs_direct_IO_enter(inode, offset, count, rw);
+ 
+ 	if (trace_android_fs_dataread_start_enabled() &&
+-	    (rw == READ))
++	    (rw == READ)) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
+ 		trace_android_fs_dataread_start(inode, offset,
+-						count, current->pid,
++						count, current->pid, path,
+ 						current->comm);
++	}
+ 	if (trace_android_fs_datawrite_start_enabled() &&
+-	    (rw == WRITE))
++	    (rw == WRITE)) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
+ 		trace_android_fs_datawrite_start(inode, offset, count,
+-						 current->pid, current->comm);
++						 current->pid, path,
++						 current->comm);
++	}
+ 
+ 	if (rw == WRITE && whint_mode == WHINT_MODE_OFF)
+ 		iocb->ki_hint = WRITE_LIFE_NOT_SET;
+diff --git a/fs/f2fs/inline.c b/fs/f2fs/inline.c
+index 8ca752c..3f0c74d 100644
+--- a/fs/f2fs/inline.c
++++ b/fs/f2fs/inline.c
+@@ -87,9 +87,16 @@ int f2fs_read_inline_data(struct inode *inode, struct page *page)
+ {
+ 	struct page *ipage;
+ 
+-	trace_android_fs_dataread_start(inode, page_offset(page),
+-					PAGE_SIZE, current->pid,
+-					current->comm);
++	if (trace_android_fs_dataread_start_enabled()) {
++		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++		path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    inode);
++		trace_android_fs_dataread_start(inode, page_offset(page),
++						PAGE_SIZE, current->pid,
++						path, current->comm);
++	}
+ 
+ 	ipage = f2fs_get_node_page(F2FS_I_SB(inode), inode->i_ino);
+ 	if (IS_ERR(ipage)) {
+diff --git a/fs/mpage.c b/fs/mpage.c
+index c31b6a4..93e3cf7 100644
+--- a/fs/mpage.c
++++ b/fs/mpage.c
+@@ -82,11 +82,17 @@ static struct bio *mpage_bio_submit(int op, int op_flags, struct bio *bio)
+ 		struct page *first_page = bio->bi_io_vec[0].bv_page;
+ 
+ 		if (first_page != NULL) {
++			char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
++
++			path = android_fstrace_get_pathname(pathbuf,
++						    MAX_TRACE_PATHBUF_LEN,
++						    first_page->mapping->host);
+ 			trace_android_fs_dataread_start(
+ 				first_page->mapping->host,
+ 				page_offset(first_page),
+ 				bio->bi_iter.bi_size,
+ 				current->pid,
++				path,
+ 				current->comm);
+ 		}
+ 	}
+diff --git a/include/trace/events/android_fs.h b/include/trace/events/android_fs.h
+index 531da43..4950953 100644
+--- a/include/trace/events/android_fs.h
++++ b/include/trace/events/android_fs.h
+@@ -9,8 +9,8 @@
+ 
+ DEFINE_EVENT(android_fs_data_start_template, android_fs_dataread_start,
+ 	TP_PROTO(struct inode *inode, loff_t offset, int bytes,
+-		 pid_t pid, char *command),
+-	TP_ARGS(inode, offset, bytes, pid, command));
++		 pid_t pid, char *pathname, char *command),
++	TP_ARGS(inode, offset, bytes, pid, pathname, command));
+ 
+ DEFINE_EVENT(android_fs_data_end_template, android_fs_dataread_end,
+ 	TP_PROTO(struct inode *inode, loff_t offset, int bytes),
+@@ -18,14 +18,48 @@ DEFINE_EVENT(android_fs_data_end_template, android_fs_dataread_end,
+ 
+ DEFINE_EVENT(android_fs_data_start_template, android_fs_datawrite_start,
+ 	TP_PROTO(struct inode *inode, loff_t offset, int bytes,
+-		 pid_t pid, char *command),
+-	TP_ARGS(inode, offset, bytes, pid, command));
++		 pid_t pid, char *pathname, char *command),
++	TP_ARGS(inode, offset, bytes, pid, pathname, command));
+ 
+ DEFINE_EVENT(android_fs_data_end_template, android_fs_datawrite_end,
+ 	TP_PROTO(struct inode *inode, loff_t offset, int bytes),
+-	TP_ARGS(inode, offset, bytes));
++	     TP_ARGS(inode, offset, bytes));
+ 
+ #endif /* _TRACE_ANDROID_FS_H */
+ 
+ /* This part must be outside protection */
+ #include <trace/define_trace.h>
++
++#ifndef ANDROID_FSTRACE_GET_PATHNAME
++#define ANDROID_FSTRACE_GET_PATHNAME
++
++/* Sizes an on-stack array, so careful if sizing this up ! */
++#define MAX_TRACE_PATHBUF_LEN	256
++
++static inline char *
++android_fstrace_get_pathname(char *buf, int buflen, struct inode *inode)
++{
++	char *path;
++	struct dentry *d;
++
++	/*
++	 * d_obtain_alias() will either iput() if it locates an existing
++	 * dentry or transfer the reference to the new dentry created.
++	 * So get an extra reference here.
++	 */
++	ihold(inode);
++	d = d_obtain_alias(inode);
++	if (likely(!IS_ERR(d))) {
++		path = dentry_path_raw(d, buf, buflen);
++		if (unlikely(IS_ERR(path))) {
++			strcpy(buf, "ERROR");
++			path = buf;
++		}
++		dput(d);
++	} else {
++		strcpy(buf, "ERROR");
++		path = buf;
++	}
++	return path;
++}
++#endif
+diff --git a/include/trace/events/android_fs_template.h b/include/trace/events/android_fs_template.h
+index 618988b..b23d17b 100644
+--- a/include/trace/events/android_fs_template.h
++++ b/include/trace/events/android_fs_template.h
+@@ -5,11 +5,10 @@
+ 
+ DECLARE_EVENT_CLASS(android_fs_data_start_template,
+ 	TP_PROTO(struct inode *inode, loff_t offset, int bytes,
+-		 pid_t pid, char *command),
+-	TP_ARGS(inode, offset, bytes, pid, command),
++		 pid_t pid, char *pathname, char *command),
++	TP_ARGS(inode, offset, bytes, pid, pathname, command),
+ 	TP_STRUCT__entry(
+-		__array(char, path, MAX_FILTER_STR_VAL);
+-		__field(char *, pathname);
++		__string(pathbuf, pathname);
+ 		__field(loff_t,	offset);
+ 		__field(int,	bytes);
+ 		__field(loff_t,	i_size);
+@@ -19,40 +18,26 @@ DECLARE_EVENT_CLASS(android_fs_data_start_template,
+ 	),
+ 	TP_fast_assign(
+ 		{
+-			struct dentry *d;
+-
+ 			/*
+-			 * Grab a reference to the inode here because
+-			 * d_obtain_alias() will either drop the inode
+-			 * reference if it locates an existing dentry
+-			 * or transfer the reference to the new dentry
+-			 * created. In our case, the file is still open,
+-			 * so the dentry is guaranteed to exist (connected),
+-			 * so d_obtain_alias() drops the reference we
+-			 * grabbed here.
++			 * Replace the spaces in filenames and cmdlines
++			 * because this screws up the tooling that parses
++			 * the traces.
+ 			 */
+-			ihold(inode);
+-			d = d_obtain_alias(inode);
+-			if (!IS_ERR(d)) {
+-				__entry->pathname = dentry_path(d,
+-							__entry->path,
+-							MAX_FILTER_STR_VAL);
+-				dput(d);
+-			} else
+-				__entry->pathname = ERR_PTR(-EINVAL);
++			__assign_str(pathbuf, pathname);
++			(void)strreplace(__get_str(pathbuf), ' ', '_');
+ 			__entry->offset		= offset;
+ 			__entry->bytes		= bytes;
+ 			__entry->i_size		= i_size_read(inode);
+ 			__assign_str(cmdline, command);
++			(void)strreplace(__get_str(cmdline), ' ', '_');
+ 			__entry->pid		= pid;
+ 			__entry->ino		= inode->i_ino;
+ 		}
+ 	),
+ 	TP_printk("entry_name %s, offset %llu, bytes %d, cmdline %s,"
+ 		  " pid %d, i_size %llu, ino %lu",
+-		  (IS_ERR(__entry->pathname) ? "ERROR" : __entry->pathname),
+-		  __entry->offset, __entry->bytes, __get_str(cmdline),
+-		  __entry->pid, __entry->i_size,
++		  __get_str(pathbuf), __entry->offset, __entry->bytes,
++		  __get_str(cmdline), __entry->pid, __entry->i_size,
+ 		  (unsigned long) __entry->ino)
+ );
+ 
+-- 
+2.7.4
+

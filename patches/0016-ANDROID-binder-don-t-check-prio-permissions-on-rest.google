@@ -1,0 +1,113 @@
+From e84cd02f7bcaad49c8a0517112b2035674c10428 Mon Sep 17 00:00:00 2001
+From: Martijn Coenen <maco@android.com>
+Date: Fri, 26 May 2017 10:48:56 -0700
+Subject: [PATCH 016/437] ANDROID: binder: don't check prio permissions on
+ restore.
+
+Because we have disabled RT priority inheritance for
+the regular binder domain, the following can happen:
+
+1) thread A (prio 98) calls into thread B
+2) because RT prio inheritance is disabled, thread B
+   runs at the lowest nice (prio 100) instead
+3) thread B calls back into A; A will run at prio 100
+   for the duration of the transaction
+4) When thread A is done with the call from B, we will
+   try to restore the prio back to 98. But, we fail
+   because the process doesn't hold CAP_SYS_NICE,
+   neither is RLIMIT_RT_PRIO set.
+
+While the proper fix going forward will be to
+correctly apply CAP_SYS_NICE or RLIMIT_RT_PRIO,
+for now it seems reasonable to not check permissions
+on the restore path.
+
+Change-Id: Ibede5960c9b7bb786271c001e405de50be64d944
+Signed-off-by: Martijn Coenen <maco@android.com>
+---
+ drivers/android/binder.c | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index 53dc0a7..fca7665 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -1161,8 +1161,9 @@ static int to_kernel_prio(int policy, int user_priority)
+ 		return MAX_USER_RT_PRIO - 1 - user_priority;
+ }
+ 
+-static void binder_set_priority(struct task_struct *task,
+-				struct binder_priority desired)
++static void binder_do_set_priority(struct task_struct *task,
++				   struct binder_priority desired,
++				   bool verify)
+ {
+ 	int priority; /* user-space prio value */
+ 	bool has_cap_nice;
+@@ -1175,7 +1176,7 @@ static void binder_set_priority(struct task_struct *task,
+ 
+ 	priority = to_userspace_prio(policy, desired.prio);
+ 
+-	if (is_rt_policy(policy) && !has_cap_nice) {
++	if (verify && is_rt_policy(policy) && !has_cap_nice) {
+ 		long max_rtprio = task_rlimit(task, RLIMIT_RTPRIO);
+ 
+ 		if (max_rtprio == 0) {
+@@ -1186,7 +1187,7 @@ static void binder_set_priority(struct task_struct *task,
+ 		}
+ 	}
+ 
+-	if (is_fair_policy(policy) && !has_cap_nice) {
++	if (verify && is_fair_policy(policy) && !has_cap_nice) {
+ 		long min_nice = rlimit_to_nice(task_rlimit(task, RLIMIT_NICE));
+ 
+ 		if (min_nice > MAX_NICE) {
+@@ -1219,6 +1220,18 @@ static void binder_set_priority(struct task_struct *task,
+ 		set_user_nice(task, priority);
+ }
+ 
++static void binder_set_priority(struct task_struct *task,
++				struct binder_priority desired)
++{
++	binder_do_set_priority(task, desired, /* verify = */ true);
++}
++
++static void binder_restore_priority(struct task_struct *task,
++				    struct binder_priority desired)
++{
++	binder_do_set_priority(task, desired, /* verify = */ false);
++}
++
+ static void binder_transaction_priority(struct task_struct *task,
+ 					struct binder_transaction *t,
+ 					struct binder_priority node_prio,
+@@ -3333,7 +3346,7 @@ static void binder_transaction(struct binder_proc *proc,
+ 		binder_enqueue_thread_work_ilocked(target_thread, &t->work);
+ 		binder_inner_proc_unlock(target_proc);
+ 		wake_up_interruptible_sync(&target_thread->wait);
+-		binder_set_priority(current, in_reply_to->saved_priority);
++		binder_restore_priority(current, in_reply_to->saved_priority);
+ 		binder_free_transaction(in_reply_to);
+ 	} else if (!(t->flags & TF_ONE_WAY)) {
+ 		BUG_ON(t->buffer->async_transaction != 0);
+@@ -3437,7 +3450,7 @@ static void binder_transaction(struct binder_proc *proc,
+ 
+ 	BUG_ON(thread->return_error.cmd != BR_OK);
+ 	if (in_reply_to) {
+-		binder_set_priority(current, in_reply_to->saved_priority);
++		binder_restore_priority(current, in_reply_to->saved_priority);
+ 		thread->return_error.cmd = BR_TRANSACTION_COMPLETE;
+ 		binder_enqueue_thread_work(thread, &thread->return_error.work);
+ 		binder_send_failed_reply(in_reply_to, return_error);
+@@ -4018,7 +4031,7 @@ static int binder_thread_read(struct binder_proc *proc,
+ 			wait_event_interruptible(binder_user_error_wait,
+ 						 binder_stop_on_user_error < 2);
+ 		}
+-		binder_set_priority(current, proc->default_priority);
++		binder_restore_priority(current, proc->default_priority);
+ 	}
+ 
+ 	if (non_block) {
+-- 
+2.7.4
+

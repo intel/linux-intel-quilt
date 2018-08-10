@@ -1,0 +1,83 @@
+From b501d6f1d8f2f6c8ecad01059d291d741a209d40 Mon Sep 17 00:00:00 2001
+From: Subash Abhinov Kasiviswanathan <subashab@codeaurora.org>
+Date: Wed, 2 Nov 2016 11:56:40 -0600
+Subject: [PATCH 117/441] ANDROID: netfilter: xt_IDLETIMER: Use fullsock when
+ querying uid
+
+sock_i_uid() acquires the sk_callback_lock which does not exist for
+sockets in TCP_NEW_SYN_RECV state. This results in errors showing up
+as spinlock bad magic. Fix this by looking for the full sock as
+suggested by Eric.
+
+Callstack for reference -
+
+-003|rwlock_bug
+-004|arch_read_lock
+-004|do_raw_read_lock
+-005|raw_read_lock_bh
+-006|sock_i_uid
+-007|from_kuid_munged(inline)
+-007|reset_timer
+-008|idletimer_tg_target
+-009|ipt_do_table
+-010|iptable_mangle_hook
+-011|nf_iterate
+-012|nf_hook_slow
+-013|NF_HOOK_COND(inline)
+-013|ip_output
+-014|ip_local_out
+-015|ip_build_and_send_pkt
+-016|tcp_v4_send_synack
+-017|atomic_sub_return(inline)
+-017|reqsk_put(inline)
+-017|tcp_conn_request
+-018|tcp_v4_conn_request
+-019|tcp_rcv_state_process
+-020|tcp_v4_do_rcv
+-021|tcp_v4_rcv
+-022|ip_local_deliver_finish
+-023|NF_HOOK_THRESH(inline)
+-023|NF_HOOK(inline)
+-023|ip_local_deliver
+-024|ip_rcv_finish
+-025|NF_HOOK_THRESH(inline)
+-025|NF_HOOK(inline)
+-025|ip_rcv
+-026|deliver_skb(inline)
+-026|deliver_ptype_list_skb(inline)
+-026|__netif_receive_skb_core
+-027|__netif_receive_skb
+-028|netif_receive_skb_internal
+-029|netif_receive_skb
+
+Change-Id: Ic8f3a3d2d7af31434d1163b03971994e2125d552
+Signed-off-by: Subash Abhinov Kasiviswanathan <subashab@codeaurora.org>
+Cc: Eric Dumazet <edumazet@google.com>
+---
+ net/netfilter/xt_IDLETIMER.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/net/netfilter/xt_IDLETIMER.c b/net/netfilter/xt_IDLETIMER.c
+index a385487..673860a 100644
+--- a/net/netfilter/xt_IDLETIMER.c
++++ b/net/netfilter/xt_IDLETIMER.c
+@@ -49,6 +49,7 @@
+ #include <linux/notifier.h>
+ #include <net/net_namespace.h>
+ #include <net/sock.h>
++#include <net/inet_sock.h>
+ 
+ struct idletimer_tg_attr {
+ 	struct attribute attr;
+@@ -354,7 +355,7 @@ static void reset_timer(const struct idletimer_tg_info *info,
+ 		/* Stores the uid resposible for waking up the radio */
+ 		if (skb && (skb->sk)) {
+ 			timer->uid = from_kuid_munged(current_user_ns(),
+-						sock_i_uid(skb->sk));
++					sock_i_uid(skb_to_full_sk(skb)));
+ 		}
+ 
+ 		/* checks if there is a pending inactive notification*/
+-- 
+2.7.4
+

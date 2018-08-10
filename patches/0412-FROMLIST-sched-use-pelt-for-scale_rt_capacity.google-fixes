@@ -1,0 +1,133 @@
+From e3b3862886cf823003ac4d8f6d0a865bf0343ec2 Mon Sep 17 00:00:00 2001
+From: Vincent Guittot <vincent.guittot@linaro.org>
+Date: Fri, 27 Apr 2018 15:08:23 +0200
+Subject: [PATCH 412/441] FROMLIST: sched: use pelt for scale_rt_capacity()
+
+The utilization of the CPU by rt, dl and interrupts are now tracked with
+PELT so we can use these metrics instead of rt_avg to evaluate the remaining
+capacity available for cfs class.
+
+scale_rt_capacity() behavior has been changed and now returns the remaining
+capacity available for cfs instead of a scaling factor because rt, dl and
+interrupt provide now absolute utilization value.
+
+The same formula as schedutil is used:
+  irq util_avg + (1 - irq util_avg / max capacity ) * /Sum rq util_avg
+but the implementation is different because it doesn't return the same value
+and doesn't benefit of the same optimization
+
+Cc: Ingo Molnar <mingo@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Vincent Guittot <vincent.guittot@linaro.org>
+[ - Fixed issue with the max freq capping in update_cpu_capacity()
+  - Fixed compile warning for !CONFIG_IRQ_TIME_ACCOUNTING ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I4a25191bba3b7b19d075f5a95845caebdbcb9c24
+---
+ kernel/sched/deadline.c |  2 --
+ kernel/sched/fair.c     | 37 ++++++++++++++++++-------------------
+ kernel/sched/pelt.c     |  2 +-
+ kernel/sched/rt.c       |  2 --
+ 4 files changed, 19 insertions(+), 24 deletions(-)
+
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 1a49ad9..a201105 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -1180,8 +1180,6 @@ static void update_curr_dl(struct rq *rq)
+ 	curr->se.exec_start = now;
+ 	cgroup_account_cputime(curr, delta_exec);
+ 
+-	sched_rt_avg_update(rq, delta_exec);
+-
+ 	if (dl_entity_is_special(dl_se))
+ 		return;
+ 
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index c5db839..cbe909be 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -8276,28 +8276,27 @@ static inline int get_sd_load_idx(struct sched_domain *sd,
+ static unsigned long scale_rt_capacity(int cpu)
+ {
+ 	struct rq *rq = cpu_rq(cpu);
+-	u64 total, used, age_stamp, avg;
+-	s64 delta;
+-
+-	/*
+-	 * Since we're reading these variables without serialization make sure
+-	 * we read them once before doing sanity checks on them.
+-	 */
+-	age_stamp = READ_ONCE(rq->age_stamp);
+-	avg = READ_ONCE(rq->rt_avg);
+-	delta = __rq_clock_broken(rq) - age_stamp;
+-
+-	if (unlikely(delta < 0))
+-		delta = 0;
++	unsigned long max = arch_scale_cpu_capacity(NULL, cpu);
++	unsigned long used, free;
++#if defined(CONFIG_IRQ_TIME_ACCOUNTING) || defined(CONFIG_PARAVIRT_TIME_ACCOUNTING)
++	unsigned long irq = READ_ONCE(rq->avg_irq.util_avg);
+ 
+-	total = sched_avg_period() + delta;
++	if (unlikely(irq >= max))
++		return 1;
++#endif
+ 
+-	used = div_u64(avg, total);
++	used = READ_ONCE(rq->avg_rt.util_avg);
++	used += READ_ONCE(rq->avg_dl.util_avg);
+ 
+-	if (likely(used < SCHED_CAPACITY_SCALE))
+-		return SCHED_CAPACITY_SCALE - used;
++	if (unlikely(used >= max))
++		return 1;
+ 
+-	return 1;
++	free = max - used;
++#if defined(CONFIG_IRQ_TIME_ACCOUNTING) || defined(CONFIG_PARAVIRT_TIME_ACCOUNTING)
++	free *= (max - irq);
++	free /= max;
++#endif
++	return free;
+ }
+ 
+ void init_max_cpu_capacity(struct max_cpu_capacity *mcc) {
+@@ -8340,7 +8339,7 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
+ 
+ skip_unlock: __attribute__ ((unused));
+ 	capacity *= scale_rt_capacity(cpu);
+-	capacity >>= SCHED_CAPACITY_SHIFT;
++	capacity /= arch_scale_cpu_capacity(sd, cpu);
+ 
+ 	if (!capacity)
+ 		capacity = 1;
+diff --git a/kernel/sched/pelt.c b/kernel/sched/pelt.c
+index ead6d8b..35475c0 100644
+--- a/kernel/sched/pelt.c
++++ b/kernel/sched/pelt.c
+@@ -237,7 +237,7 @@ ___update_load_avg(struct sched_avg *sa, unsigned long load, unsigned long runna
+ 	 */
+ 	sa->load_avg = div_u64(load * sa->load_sum, divider);
+ 	sa->runnable_load_avg =	div_u64(runnable * sa->runnable_load_sum, divider);
+-	sa->util_avg = sa->util_sum / divider;
++	WRITE_ONCE(sa->util_avg, sa->util_sum / divider);
+ }
+ 
+ /*
+diff --git a/kernel/sched/rt.c b/kernel/sched/rt.c
+index a43c6ec..0be707d 100644
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -975,8 +975,6 @@ static void update_curr_rt(struct rq *rq)
+ 	curr->se.exec_start = now;
+ 	cgroup_account_cputime(curr, delta_exec);
+ 
+-	sched_rt_avg_update(rq, delta_exec);
+-
+ 	if (!rt_bandwidth_enabled())
+ 		return;
+ 
+-- 
+2.7.4
+

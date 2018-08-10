@@ -1,0 +1,185 @@
+From e4786f6cdb9ae880a7d1b7a3d55cb2866cb36db6 Mon Sep 17 00:00:00 2001
+From: Sultan Alsawaf <sultanxda@gmail.com>
+Date: Sun, 3 Jun 2018 10:47:51 -0700
+Subject: [PATCH 336/441] ANDROID: Fix massive cpufreq_times memory leaks
+
+Every time _cpu_up() is called for a CPU, idle_thread_get() is called
+which then re-initializes a CPU's idle thread that was already
+previously created and cached in a global variable in
+smpboot.c. idle_thread_get() calls init_idle() which then calls
+__sched_fork(). __sched_fork() is where cpufreq_task_times_init() is,
+and cpufreq_task_times_init() allocates memory for the task struct's
+time_in_state array.
+
+Since idle_thread_get() reuses a task struct instance that was already
+previously created, this means that every time it calls init_idle(),
+cpufreq_task_times_init() allocates this array again and overwrites
+the existing allocation that the idle thread already had.
+
+This causes memory to be leaked every time a CPU is onlined. In order
+to fix this, move allocation of time_in_state into _do_fork to avoid
+allocating it at all for idle threads. The cpufreq times interface is
+intended to be used for tracking userspace tasks, so we can safely
+remove it from the kernel's idle threads without killing any
+functionality.
+
+But that's not all!
+
+Task structs can be freed outside of release_task(), which creates
+another memory leak because a task struct can be freed without having
+its cpufreq times allocation freed. To fix this, free the cpufreq
+times allocation at the same time that task struct allocations are
+freed, in free_task().
+
+Since free_task() can also be called in error paths of copy_process()
+after dup_task_struct(), set time_in_state to NULL immediately after
+calling dup_task_struct() to avoid possible double free.
+
+Bug description and fix adapted from patch submitted by
+Sultan Alsawaf <sultanxda@gmail.com> at
+https://android-review.googlesource.com/c/kernel/msm/+/700134
+
+Bug: 110044919
+Test: Hikey960 builds, boots & reports /proc/<pid>/time_in_state
+correctly
+Change-Id: I12fe7611fc88eb7f6c39f8f7629ad27b6ec4722c
+Signed-off-by: Connor O'Brien <connoro@google.com>
+---
+ drivers/cpufreq/cpufreq_times.c | 9 ++++++---
+ include/linux/cpufreq_times.h   | 2 ++
+ kernel/exit.c                   | 3 ---
+ kernel/fork.c                   | 7 +++++++
+ kernel/sched/core.c             | 3 ---
+ 5 files changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/cpufreq/cpufreq_times.c b/drivers/cpufreq/cpufreq_times.c
+index f560e10..a43eeee 100644
+--- a/drivers/cpufreq/cpufreq_times.c
++++ b/drivers/cpufreq/cpufreq_times.c
+@@ -234,16 +234,19 @@ static int uid_time_in_state_seq_show(struct seq_file *m, void *v)
+ 
+ void cpufreq_task_times_init(struct task_struct *p)
+ {
+-	void *temp;
+ 	unsigned long flags;
+-	unsigned int max_state;
+ 
+ 	spin_lock_irqsave(&task_time_in_state_lock, flags);
+ 	p->time_in_state = NULL;
+ 	spin_unlock_irqrestore(&task_time_in_state_lock, flags);
+ 	p->max_state = 0;
++}
+ 
+-	max_state = READ_ONCE(next_offset);
++void cpufreq_task_times_alloc(struct task_struct *p)
++{
++	void *temp;
++	unsigned long flags;
++	unsigned int max_state = READ_ONCE(next_offset);
+ 
+ 	/* We use one array to avoid multiple allocs per task */
+ 	temp = kcalloc(max_state, sizeof(p->time_in_state[0]), GFP_ATOMIC);
+diff --git a/include/linux/cpufreq_times.h b/include/linux/cpufreq_times.h
+index 5441952..757bf0c 100644
+--- a/include/linux/cpufreq_times.h
++++ b/include/linux/cpufreq_times.h
+@@ -21,6 +21,7 @@
+ 
+ #ifdef CONFIG_CPU_FREQ_TIMES
+ void cpufreq_task_times_init(struct task_struct *p);
++void cpufreq_task_times_alloc(struct task_struct *p);
+ void cpufreq_task_times_exit(struct task_struct *p);
+ int proc_time_in_state_show(struct seq_file *m, struct pid_namespace *ns,
+ 			    struct pid *pid, struct task_struct *p);
+@@ -31,6 +32,7 @@ void cpufreq_task_times_remove_uids(uid_t uid_start, uid_t uid_end);
+ int single_uid_time_in_state_open(struct inode *inode, struct file *file);
+ #else
+ static inline void cpufreq_task_times_init(struct task_struct *p) {}
++static inline void cpufreq_task_times_alloc(struct task_struct *p) {}
+ static inline void cpufreq_task_times_exit(struct task_struct *p) {}
+ static inline void cpufreq_acct_update_power(struct task_struct *p,
+ 					     u64 cputime) {}
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 9ad586b..c3c7ac5 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -62,7 +62,6 @@
+ #include <linux/random.h>
+ #include <linux/rcuwait.h>
+ #include <linux/compat.h>
+-#include <linux/cpufreq_times.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/unistd.h>
+@@ -186,8 +185,6 @@ void release_task(struct task_struct *p)
+ {
+ 	struct task_struct *leader;
+ 	int zap_leader;
+-
+-	cpufreq_task_times_exit(p);
+ repeat:
+ 	/* don't need to get the RCU readlock here - the process is dead and
+ 	 * can't be modifying its own credentials. But shut RCU-lockdep up */
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 1b27bab..caaf53b 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -91,6 +91,7 @@
+ #include <linux/kcov.h>
+ #include <linux/livepatch.h>
+ #include <linux/thread_info.h>
++#include <linux/cpufreq_times.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/pgalloc.h>
+@@ -393,6 +394,8 @@ void put_task_stack(struct task_struct *tsk)
+ 
+ void free_task(struct task_struct *tsk)
+ {
++	cpufreq_task_times_exit(tsk);
++
+ #ifndef CONFIG_THREAD_INFO_IN_TASK
+ 	/*
+ 	 * The task is finally done with both the stack and thread_info,
+@@ -1665,6 +1668,8 @@ static __latent_entropy struct task_struct *copy_process(
+ 	if (!p)
+ 		goto fork_out;
+ 
++	cpufreq_task_times_init(p);
++
+ 	/*
+ 	 * This _must_ happen before we call free_task(), i.e. before we jump
+ 	 * to any of the bad_fork_* labels. This is to avoid freeing
+@@ -2126,6 +2131,8 @@ long _do_fork(unsigned long clone_flags,
+ 	if (IS_ERR(p))
+ 		return PTR_ERR(p);
+ 
++	cpufreq_task_times_alloc(p);
++
+ 	/*
+ 	 * Do this prior waking up the new thread - the thread pointer
+ 	 * might get invalid after that point, if the thread exits quickly.
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index b3403e1..fe365c9 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -6,7 +6,6 @@
+  *  Copyright (C) 1991-2002  Linus Torvalds
+  */
+ #include "sched.h"
+-#include <linux/cpufreq_times.h>
+ 
+ #include <linux/nospec.h>
+ 
+@@ -2182,8 +2181,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
+ #endif
+ 
+-	cpufreq_task_times_init(p);
+-
+ 	RB_CLEAR_NODE(&p->dl.rb_node);
+ 	init_dl_task_timer(&p->dl);
+ 	init_dl_inactive_task_timer(&p->dl);
+-- 
+2.7.4
+

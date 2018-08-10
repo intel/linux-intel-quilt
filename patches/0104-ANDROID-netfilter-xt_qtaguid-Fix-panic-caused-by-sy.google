@@ -1,0 +1,46 @@
+From f444fb62e8b923650511800397f7f8c4846d571e Mon Sep 17 00:00:00 2001
+From: John Stultz <john.stultz@linaro.org>
+Date: Fri, 22 Apr 2016 17:12:57 -0700
+Subject: [PATCH 104/437] ANDROID: netfilter: xt_qtaguid: Fix panic caused by
+ synack processing
+
+In upstream commit ca6fb06518836ef9b65dc0aac02ff97704d52a05
+(tcp: attach SYNACK messages to request sockets instead of
+listener)
+http://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=ca6fb0651883
+
+The building of synack messages was changed, which made it so
+the skb->sk points to a casted request_sock. This is problematic,
+as there is no sk_socket in a request_sock. So when the qtaguid_mt
+function tries to access the sk->sk_socket, it accesses uninitialized
+memory.
+
+After looking at how other netfilter implementations handle this,
+I realized there was a skb_to_full_sk() helper added, which the
+xt_qtaguid code isn't yet using.
+
+This patch adds its use, and resovles panics seen when accessing
+uninitialzed memory when processing synack packets.
+
+Reported-by: YongQin Liu <yongquin.liu@linaro.org>
+Signed-off-by: John Stultz <john.stultz@linaro.org>
+---
+ net/netfilter/xt_qtaguid.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/netfilter/xt_qtaguid.c b/net/netfilter/xt_qtaguid.c
+index 243d9b8..3f5a107 100644
+--- a/net/netfilter/xt_qtaguid.c
++++ b/net/netfilter/xt_qtaguid.c
+@@ -1689,7 +1689,7 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
+ 	/* default: Fall through and do UID releated work */
+ 	}
+ 
+-	sk = skb->sk;
++	sk = skb_to_full_sk(skb);
+ 	/*
+ 	 * When in TCP_TIME_WAIT the sk is not a "struct sock" but
+ 	 * "struct inet_timewait_sock" which is missing fields.
+-- 
+2.7.4
+

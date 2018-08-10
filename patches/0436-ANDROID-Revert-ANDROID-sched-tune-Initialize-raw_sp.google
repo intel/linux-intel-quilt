@@ -1,0 +1,53 @@
+From b6eaee0d93d59f4b0164add435d95d28a925d50f Mon Sep 17 00:00:00 2001
+From: Vikram Mulukutla <markivx@codeaurora.org>
+Date: Thu, 21 Sep 2017 17:24:24 -0700
+Subject: [PATCH 436/437] ANDROID: Revert "ANDROID: sched/tune: Initialize
+ raw_spin_lock in boosted_groups"
+
+This reverts commit c5616f2f874faa20b59b116177b99bf3948586df.
+
+If we re-init the per-cpu boostgroup spinlock every time that
+we add a new boosted cgroup, we can easily wipe out (reinit)
+a spinlock struct while in a critical section. We should only
+be setting up the per-cpu boostgroup data, and the spin_lock
+initialization need only happen once - which we're already
+doing in a postcore_initcall.
+
+For example:
+
+     -------- CPU 0 --------   | -------- CPU1 --------
+cgroupX boost group added      |
+schedtune_enqueue_task         |
+  acquires(bg->lock)           | cgroupY boost group added
+                               |  for_each_cpu()
+                               |    raw_spin_lock_init(bg->lock)
+  releases(bg->lock)           |
+      BUG (already unlocked)   |
+                               |
+
+This results in the following BUG from the debug spinlock code:
+	BUG: spinlock already unlocked on CPU#5, rcuop/6/68
+
+Bug: 32668852
+
+Change-Id: I3016702780b461a0cd95e26c538cd18df27d6316
+Signed-off-by: Vikram Mulukutla <markivx@codeaurora.org>
+---
+ kernel/sched/tune.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/kernel/sched/tune.c b/kernel/sched/tune.c
+index 521323a..065b9c1 100644
+--- a/kernel/sched/tune.c
++++ b/kernel/sched/tune.c
+@@ -450,7 +450,6 @@ schedtune_boostgroup_init(struct schedtune *st)
+ 		bg = &per_cpu(cpu_boost_groups, cpu);
+ 		bg->group[st->idx].boost = 0;
+ 		bg->group[st->idx].tasks = 0;
+-		raw_spin_lock_init(&bg->lock);
+ 	}
+ 
+ 	return 0;
+-- 
+2.7.4
+

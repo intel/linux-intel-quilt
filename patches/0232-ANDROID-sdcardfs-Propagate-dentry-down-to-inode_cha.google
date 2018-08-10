@@ -1,0 +1,60 @@
+From ed06836869b6e25b4fc02a79fb716579a870fee6 Mon Sep 17 00:00:00 2001
+From: Amit Pundir <amit.pundir@linaro.org>
+Date: Tue, 11 Oct 2016 13:26:17 +0530
+Subject: [PATCH 232/437] ANDROID: sdcardfs: Propagate dentry down to
+ inode_change_ok()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Since commit 31051c85b5e2 ("fs: Give dentry to inode_change_ok()
+instead of inode"), to avoid clearing of capabilities or security
+related extended attributes too early, inode_change_ok() will
+need to take dentry instead of inode. Propagate it down to
+sdcardfs_setattr() and also rename it to setattr_prepare(),
+otherwise we run into following build error:
+
+  CC [M]  fs/sdcardfs/inode.o
+fs/sdcardfs/inode.c: In function ‘sdcardfs_setattr’:
+fs/sdcardfs/inode.c:644:8: error: implicit declaration of function ‘inode_change_ok’ [-Werror=implicit-function-declaration]
+  err = inode_change_ok(inode, ia);
+        ^
+
+Change-Id: I714b4f4f68b7fea1ac82a71d2f323c76b11fa008
+Signed-off-by: Amit Pundir <amit.pundir@linaro.org>
+---
+ fs/sdcardfs/inode.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/fs/sdcardfs/inode.c b/fs/sdcardfs/inode.c
+index bd8a701..76b57c8 100644
+--- a/fs/sdcardfs/inode.c
++++ b/fs/sdcardfs/inode.c
+@@ -706,6 +706,7 @@ static int sdcardfs_setattr(struct vfsmount *mnt, struct dentry *dentry, struct
+ 	struct iattr lower_ia;
+ 	struct dentry *parent;
+ 	struct inode tmp;
++	struct dentry tmp_d;
+ 	struct inode *top;
+ 	const struct cred *saved_cred = NULL;
+ 
+@@ -736,13 +737,14 @@ static int sdcardfs_setattr(struct vfsmount *mnt, struct dentry *dentry, struct
+ 	tmp.i_size = i_size_read(inode);
+ 	release_top(SDCARDFS_I(inode));
+ 	tmp.i_sb = inode->i_sb;
++	tmp_d.d_inode = &tmp;
+ 
+ 	/*
+-	 * Check if user has permission to change inode.  We don't check if
++	 * Check if user has permission to change dentry.  We don't check if
+ 	 * this user can change the lower inode: that should happen when
+ 	 * calling notify_change on the lower inode.
+ 	 */
+-	err = inode_change_ok(&tmp, ia);
++	err = setattr_prepare(&tmp_d, ia);
+ 
+ 	if (!err) {
+ 		/* check the Android group ID */
+-- 
+2.7.4
+

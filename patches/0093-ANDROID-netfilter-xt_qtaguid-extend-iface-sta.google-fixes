@@ -1,0 +1,247 @@
+From c9c7a1dd765cb9d421b5017d7909f6e7180c92e7 Mon Sep 17 00:00:00 2001
+From: JP Abgrall <jpa@google.com>
+Date: Mon, 28 Jan 2013 16:50:44 -0800
+Subject: [PATCH 093/441] ANDROID: netfilter: xt_qtaguid: extend iface stat to
+ report protocols
+
+In the past the iface_stat_fmt would only show global bytes/packets
+for the skb-based numbers.
+For stall detection in userspace, distinguishing tcp vs other protocols
+makes it easier.
+Now we report
+  ifname total_skb_rx_bytes total_skb_rx_packets total_skb_tx_bytes
+  total_skb_tx_packets {rx,tx}_{tcp,udp,ohter}_{bytes,packets}
+
+Bug: 6818637
+Signed-off-by: JP Abgrall <jpa@google.com>
+---
+ net/netfilter/xt_qtaguid.c          | 90 ++++++++++++++++++++++---------------
+ net/netfilter/xt_qtaguid_internal.h | 21 ++++++++-
+ net/netfilter/xt_qtaguid_print.c    | 14 +++---
+ 3 files changed, 82 insertions(+), 43 deletions(-)
+
+diff --git a/net/netfilter/xt_qtaguid.c b/net/netfilter/xt_qtaguid.c
+index 923f1bdd..92e5f80 100644
+--- a/net/netfilter/xt_qtaguid.c
++++ b/net/netfilter/xt_qtaguid.c
+@@ -268,24 +268,6 @@ static inline void dc_add_byte_packets(struct data_counters *counters, int set,
+ 	counters->bpc[set][direction][ifs_proto].packets += packets;
+ }
+ 
+-static inline uint64_t dc_sum_bytes(struct data_counters *counters,
+-				    int set,
+-				    enum ifs_tx_rx direction)
+-{
+-	return counters->bpc[set][direction][IFS_TCP].bytes
+-		+ counters->bpc[set][direction][IFS_UDP].bytes
+-		+ counters->bpc[set][direction][IFS_PROTO_OTHER].bytes;
+-}
+-
+-static inline uint64_t dc_sum_packets(struct data_counters *counters,
+-				      int set,
+-				      enum ifs_tx_rx direction)
+-{
+-	return counters->bpc[set][direction][IFS_TCP].packets
+-		+ counters->bpc[set][direction][IFS_UDP].packets
+-		+ counters->bpc[set][direction][IFS_PROTO_OTHER].packets;
+-}
+-
+ static struct tag_node *tag_node_tree_search(struct rb_root *root, tag_t tag)
+ {
+ 	struct rb_node *node = root->rb_node;
+@@ -787,6 +769,53 @@ static struct iface_stat *get_iface_entry(const char *ifname)
+ 	return iface_entry;
+ }
+ 
++/* This is for fmt2 only */
++static int pp_iface_stat_line(bool header, char *outp,
++			      int char_count, struct iface_stat *iface_entry)
++{
++	int len;
++	if (header) {
++		len = snprintf(outp, char_count,
++			       "ifname "
++			       "total_skb_rx_bytes total_skb_rx_packets "
++			       "total_skb_tx_bytes total_skb_tx_packets "
++			       "rx_tcp_bytes rx_tcp_packets "
++			       "rx_udp_bytes rx_udp_packets "
++			       "rx_other_bytes rx_other_packets "
++			       "tx_tcp_bytes tx_tcp_packets "
++			       "tx_udp_bytes tx_udp_packets "
++			       "tx_other_bytes tx_other_packets\n"
++			);
++	} else {
++		struct data_counters *cnts;
++		int cnt_set = 0;   /* We only use one set for the device */
++		cnts = &iface_entry->totals_via_skb;
++		len = snprintf(
++			outp, char_count,
++			"%s "
++			"%llu %llu %llu %llu %llu %llu %llu %llu "
++			"%llu %llu %llu %llu %llu %llu %llu %llu\n",
++			iface_entry->ifname,
++			dc_sum_bytes(cnts, cnt_set, IFS_RX),
++			dc_sum_packets(cnts, cnt_set, IFS_RX),
++			dc_sum_bytes(cnts, cnt_set, IFS_TX),
++			dc_sum_packets(cnts, cnt_set, IFS_TX),
++			cnts->bpc[cnt_set][IFS_RX][IFS_TCP].bytes,
++			cnts->bpc[cnt_set][IFS_RX][IFS_TCP].packets,
++			cnts->bpc[cnt_set][IFS_RX][IFS_UDP].bytes,
++			cnts->bpc[cnt_set][IFS_RX][IFS_UDP].packets,
++			cnts->bpc[cnt_set][IFS_RX][IFS_PROTO_OTHER].bytes,
++			cnts->bpc[cnt_set][IFS_RX][IFS_PROTO_OTHER].packets,
++			cnts->bpc[cnt_set][IFS_TX][IFS_TCP].bytes,
++			cnts->bpc[cnt_set][IFS_TX][IFS_TCP].packets,
++			cnts->bpc[cnt_set][IFS_TX][IFS_UDP].bytes,
++			cnts->bpc[cnt_set][IFS_TX][IFS_UDP].packets,
++			cnts->bpc[cnt_set][IFS_TX][IFS_PROTO_OTHER].bytes,
++			cnts->bpc[cnt_set][IFS_TX][IFS_PROTO_OTHER].packets);
++	}
++	return len;
++}
++
+ static int iface_stat_fmt_proc_read(char *page, char **num_items_returned,
+ 				    off_t items_to_skip, int char_count,
+ 				    int *eof, void *data)
+@@ -816,11 +845,7 @@ static int iface_stat_fmt_proc_read(char *page, char **num_items_returned,
+ 		return 0;
+ 
+ 	if (fmt == 2 && item_index++ >= items_to_skip) {
+-		len = snprintf(outp, char_count,
+-			       "ifname "
+-			       "total_skb_rx_bytes total_skb_rx_packets "
+-			       "total_skb_tx_bytes total_skb_tx_packets\n"
+-			);
++		len = pp_iface_stat_line(true, outp, char_count, NULL);
+ 		if (len >= char_count) {
+ 			*outp = '\0';
+ 			return outp - page;
+@@ -865,16 +890,8 @@ static int iface_stat_fmt_proc_read(char *page, char **num_items_returned,
+ 				stats->tx_bytes, stats->tx_packets
+ 				);
+ 		} else {
+-			len = snprintf(
+-				outp, char_count,
+-				"%s "
+-				"%llu %llu %llu %llu\n",
+-				iface_entry->ifname,
+-				iface_entry->totals_via_skb[IFS_RX].bytes,
+-				iface_entry->totals_via_skb[IFS_RX].packets,
+-				iface_entry->totals_via_skb[IFS_TX].bytes,
+-				iface_entry->totals_via_skb[IFS_TX].packets
+-				);
++			len = pp_iface_stat_line(false, outp, char_count,
++						 iface_entry);
+ 		}
+ 		if (len >= char_count) {
+ 			spin_unlock_bh(&iface_stat_list_lock);
+@@ -1304,6 +1321,7 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
+ 	const struct net_device *el_dev;
+ 	enum ifs_tx_rx direction = par->in ? IFS_RX : IFS_TX;
+ 	int bytes = skb->len;
++	int proto;
+ 
+ 	if (!skb->dev) {
+ 		MT_DEBUG("qtaguid[%d]: no skb->dev\n", par->hooknum);
+@@ -1329,7 +1347,7 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
+ 		       par->hooknum, __func__);
+ 		BUG();
+ 	} else {
+-		int proto = ipx_proto(skb, par);
++		proto = ipx_proto(skb, par);
+ 		MT_DEBUG("qtaguid[%d]: dev name=%s type=%d fam=%d proto=%d\n",
+ 			 par->hooknum, el_dev->name, el_dev->type,
+ 			 par->family, proto);
+@@ -1347,8 +1365,8 @@ static void iface_stat_update_from_skb(const struct sk_buff *skb,
+ 	IF_DEBUG("qtaguid: %s(%s): entry=%p\n", __func__,
+ 		 el_dev->name, entry);
+ 
+-	entry->totals_via_skb[direction].bytes += bytes;
+-	entry->totals_via_skb[direction].packets++;
++	data_counters_update(&entry->totals_via_skb, 0, direction, proto,
++			     bytes);
+ 	spin_unlock_bh(&iface_stat_list_lock);
+ }
+ 
+diff --git a/net/netfilter/xt_qtaguid_internal.h b/net/netfilter/xt_qtaguid_internal.h
+index d79f838..6dc14a9 100644
+--- a/net/netfilter/xt_qtaguid_internal.h
++++ b/net/netfilter/xt_qtaguid_internal.h
+@@ -179,6 +179,25 @@ struct data_counters {
+ 	struct byte_packet_counters bpc[IFS_MAX_COUNTER_SETS][IFS_MAX_DIRECTIONS][IFS_MAX_PROTOS];
+ };
+ 
++static inline uint64_t dc_sum_bytes(struct data_counters *counters,
++				    int set,
++				    enum ifs_tx_rx direction)
++{
++	return counters->bpc[set][direction][IFS_TCP].bytes
++		+ counters->bpc[set][direction][IFS_UDP].bytes
++		+ counters->bpc[set][direction][IFS_PROTO_OTHER].bytes;
++}
++
++static inline uint64_t dc_sum_packets(struct data_counters *counters,
++				      int set,
++				      enum ifs_tx_rx direction)
++{
++	return counters->bpc[set][direction][IFS_TCP].packets
++		+ counters->bpc[set][direction][IFS_UDP].packets
++		+ counters->bpc[set][direction][IFS_PROTO_OTHER].packets;
++}
++
++
+ /* Generic X based nodes used as a base for rb_tree ops */
+ struct tag_node {
+ 	struct rb_node node;
+@@ -203,7 +222,7 @@ struct iface_stat {
+ 	struct net_device *net_dev;
+ 
+ 	struct byte_packet_counters totals_via_dev[IFS_MAX_DIRECTIONS];
+-	struct byte_packet_counters totals_via_skb[IFS_MAX_DIRECTIONS];
++	struct data_counters totals_via_skb;
+ 	/*
+ 	 * We keep the last_known, because some devices reset their counters
+ 	 * just before NETDEV_UP, while some will reset just before
+diff --git a/net/netfilter/xt_qtaguid_print.c b/net/netfilter/xt_qtaguid_print.c
+index 8cbd8e4..f6a00a3 100644
+--- a/net/netfilter/xt_qtaguid_print.c
++++ b/net/netfilter/xt_qtaguid_print.c
+@@ -177,9 +177,10 @@ char *pp_tag_stat(struct tag_stat *ts)
+ char *pp_iface_stat(struct iface_stat *is)
+ {
+ 	char *res;
+-	if (!is)
++	if (!is) {
+ 		res = kasprintf(GFP_ATOMIC, "iface_stat@null{}");
+-	else
++	} else {
++		struct data_counters *cnts = &is->totals_via_skb;
+ 		res = kasprintf(GFP_ATOMIC, "iface_stat@%p{"
+ 				"list=list_head{...}, "
+ 				"ifname=%s, "
+@@ -206,10 +207,10 @@ char *pp_iface_stat(struct iface_stat *is)
+ 				is->totals_via_dev[IFS_RX].packets,
+ 				is->totals_via_dev[IFS_TX].bytes,
+ 				is->totals_via_dev[IFS_TX].packets,
+-				is->totals_via_skb[IFS_RX].bytes,
+-				is->totals_via_skb[IFS_RX].packets,
+-				is->totals_via_skb[IFS_TX].bytes,
+-				is->totals_via_skb[IFS_TX].packets,
++				dc_sum_bytes(cnts, 0, IFS_RX),
++				dc_sum_packets(cnts, 0, IFS_RX),
++				dc_sum_bytes(cnts, 0, IFS_TX),
++				dc_sum_packets(cnts, 0, IFS_TX),
+ 				is->last_known_valid,
+ 				is->last_known[IFS_RX].bytes,
+ 				is->last_known[IFS_RX].packets,
+@@ -218,6 +219,7 @@ char *pp_iface_stat(struct iface_stat *is)
+ 				is->active,
+ 				is->net_dev,
+ 				is->proc_ptr);
++	}
+ 	_bug_on_err_or_null(res);
+ 	return res;
+ }
+-- 
+2.7.4
+

@@ -1,0 +1,49 @@
+From ccd8c0e03e15ce82e95f12170da0e95ec086954f Mon Sep 17 00:00:00 2001
+From: Pavankumar Kondeti <pkondeti@codeaurora.org>
+Date: Wed, 21 Jun 2017 09:22:45 +0530
+Subject: [PATCH 338/441] ANDROID: uid_sys_stats: Replace tasklist lock with
+ RCU in uid_cputime_show
+
+Tasklist lock is acuquired in uid_cputime_show for updating the stats
+for all tasks in the system. This can potentially disable preemption
+for several milli seconds. Replace tasklist_lock with RCU read side
+primitives.
+
+Change-Id: Ife69cb577bfdceaae6eb21b9bda09a0fe687e140
+Signed-off-by: Pavankumar Kondeti <pkondeti@codeaurora.org>
+---
+ drivers/misc/uid_sys_stats.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/uid_sys_stats.c b/drivers/misc/uid_sys_stats.c
+index fbf7db5..88dc1cd 100644
+--- a/drivers/misc/uid_sys_stats.c
++++ b/drivers/misc/uid_sys_stats.c
+@@ -346,13 +346,13 @@ static int uid_cputime_show(struct seq_file *m, void *v)
+ 		uid_entry->active_utime = 0;
+ 	}
+ 
+-	read_lock(&tasklist_lock);
++	rcu_read_lock();
+ 	do_each_thread(temp, task) {
+ 		uid = from_kuid_munged(user_ns, task_uid(task));
+ 		if (!uid_entry || uid_entry->uid != uid)
+ 			uid_entry = find_or_register_uid(uid);
+ 		if (!uid_entry) {
+-			read_unlock(&tasklist_lock);
++			rcu_read_unlock();
+ 			rt_mutex_unlock(&uid_lock);
+ 			pr_err("%s: failed to find the uid_entry for uid %d\n",
+ 				__func__, uid);
+@@ -362,7 +362,7 @@ static int uid_cputime_show(struct seq_file *m, void *v)
+ 		uid_entry->active_utime += utime;
+ 		uid_entry->active_stime += stime;
+ 	} while_each_thread(temp, task);
+-	read_unlock(&tasklist_lock);
++	rcu_read_unlock();
+ 
+ 	hash_for_each(hash_table, bkt, uid_entry, hash) {
+ 		u64 total_utime = uid_entry->utime +
+-- 
+2.7.4
+

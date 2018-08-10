@@ -1,0 +1,204 @@
+From e3ddedfd46324df11949cae12488c9d6a47a9451 Mon Sep 17 00:00:00 2001
+From: Quentin Perret <quentin.perret@arm.com>
+Date: Thu, 31 May 2018 11:26:52 +0100
+Subject: [PATCH 431/441] ANDROID: sched/events: Introduce schedtune trace
+ events
+
+Suggested-by: Patrick Bellasi <patrick.bellasi@arm.com>
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I2c43bcb37f57844a07aa36e339da00180e65b6c2
+---
+ include/trace/events/sched.h | 120 +++++++++++++++++++++++++++++++++++++++++++
+ kernel/sched/fair.c          |   4 ++
+ kernel/sched/tune.c          |   7 +++
+ 3 files changed, 131 insertions(+)
+
+diff --git a/include/trace/events/sched.h b/include/trace/events/sched.h
+index f566278..278d00d 100644
+--- a/include/trace/events/sched.h
++++ b/include/trace/events/sched.h
+@@ -844,6 +844,126 @@ TRACE_EVENT(sched_find_best_target,
+ 		  __entry->best_idle, __entry->best_active,
+ 		  __entry->target, __entry->backup)
+ );
++
++/*
++ * Tracepoint for accounting CPU  boosted utilization
++ */
++TRACE_EVENT(sched_boost_cpu,
++
++	TP_PROTO(int cpu, unsigned long util, long margin),
++
++	TP_ARGS(cpu, util, margin),
++
++	TP_STRUCT__entry(
++		__field( int,           cpu	)
++		__field( unsigned long, util	)
++		__field(long,           margin	)
++	),
++
++	TP_fast_assign(
++		__entry->cpu    = cpu;
++		__entry->util   = util;
++		__entry->margin = margin;
++	),
++
++	TP_printk("cpu=%d util=%lu margin=%ld",
++		__entry->cpu,
++		__entry->util,
++		__entry->margin)
++);
++
++/*
++ * Tracepoint for schedtune_tasks_update
++ */
++TRACE_EVENT(sched_tune_tasks_update,
++
++	TP_PROTO(struct task_struct *tsk, int cpu, int tasks, int idx,
++		int boost, int max_boost),
++
++	TP_ARGS(tsk, cpu, tasks, idx, boost, max_boost),
++
++	TP_STRUCT__entry(
++		__array( char,  comm,   TASK_COMM_LEN   )
++		__field( pid_t,         pid             )
++		__field( int,           cpu             )
++		__field( int,           tasks           )
++		__field( int,           idx             )
++		__field( int,           boost           )
++		__field( int,           max_boost       )
++	),
++
++	TP_fast_assign(
++		memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
++		__entry->pid            = tsk->pid;
++		__entry->cpu            = cpu;
++		__entry->tasks          = tasks;
++		__entry->idx            = idx;
++		__entry->boost          = boost;
++		__entry->max_boost      = max_boost;
++	),
++
++	TP_printk("pid=%d comm=%s "
++		"cpu=%d tasks=%d idx=%d boost=%d max_boost=%d",
++		__entry->pid, __entry->comm,
++		__entry->cpu, __entry->tasks, __entry->idx,
++		__entry->boost, __entry->max_boost)
++);
++
++/*
++ * Tracepoint for schedtune_boostgroup_update
++ */
++TRACE_EVENT(sched_tune_boostgroup_update,
++
++	TP_PROTO(int cpu, int variation, int max_boost),
++
++	TP_ARGS(cpu, variation, max_boost),
++
++	TP_STRUCT__entry(
++		__field( int,   cpu		)
++		__field( int,   variation	)
++		__field( int,   max_boost	)
++	),
++
++	TP_fast_assign(
++		__entry->cpu            = cpu;
++		__entry->variation      = variation;
++		__entry->max_boost      = max_boost;
++	),
++
++	TP_printk("cpu=%d variation=%d max_boost=%d",
++		__entry->cpu, __entry->variation, __entry->max_boost)
++);
++
++/*
++ * Tracepoint for accounting task boosted utilization
++ */
++TRACE_EVENT(sched_boost_task,
++
++	TP_PROTO(struct task_struct *tsk, unsigned long util, long margin),
++
++	TP_ARGS(tsk, util, margin),
++
++	TP_STRUCT__entry(
++		__array( char,  comm,   TASK_COMM_LEN	)
++		__field( pid_t,         pid		)
++		__field( unsigned long, util		)
++		__field( long,          margin		)
++
++	),
++
++	TP_fast_assign(
++		memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
++		__entry->pid    = tsk->pid;
++		__entry->util   = util;
++		__entry->margin = margin;
++	),
++
++	TP_printk("comm=%s pid=%d util=%lu margin=%ld",
++		__entry->comm, __entry->pid,
++		__entry->util,
++		__entry->margin)
++);
++
+ #endif /* CONFIG_SMP */
+ #endif /* _TRACE_SCHED_H */
+ 
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index b442175..3f058d4 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -5814,6 +5814,8 @@ boosted_cpu_util(int cpu)
+ 	unsigned long util = cpu_util_cfs(cpu_rq(cpu));
+ 	long margin = schedtune_cpu_margin(util, cpu);
+ 
++	trace_sched_boost_cpu(cpu, util, margin);
++
+ 	return util + margin;
+ }
+ 
+@@ -5841,6 +5843,8 @@ boosted_task_util(struct task_struct *task)
+ 	unsigned long util = task_util_est(task);
+ 	long margin = schedtune_task_margin(task);
+ 
++	trace_sched_boost_task(task, util, margin);
++
+ 	return util + margin;
+ }
+ 
+diff --git a/kernel/sched/tune.c b/kernel/sched/tune.c
+index 5c50423..521323a 100644
+--- a/kernel/sched/tune.c
++++ b/kernel/sched/tune.c
+@@ -159,14 +159,18 @@ schedtune_boostgroup_update(int idx, int boost)
+ 		/* Check if this update increase current max */
+ 		if (boost > cur_boost_max && bg->group[idx].tasks) {
+ 			bg->boost_max = boost;
++			trace_sched_tune_boostgroup_update(cpu, 1, bg->boost_max);
+ 			continue;
+ 		}
+ 
+ 		/* Check if this update has decreased current max */
+ 		if (cur_boost_max == old_boost && old_boost > boost) {
+ 			schedtune_cpu_update(cpu);
++			trace_sched_tune_boostgroup_update(cpu, -1, bg->boost_max);
+ 			continue;
+ 		}
++
++		trace_sched_tune_boostgroup_update(cpu, 0, bg->boost_max);
+ 	}
+ 
+ 	return 0;
+@@ -184,6 +188,9 @@ schedtune_tasks_update(struct task_struct *p, int cpu, int idx, int task_count)
+ 	/* Update boosted tasks count while avoiding to make it negative */
+ 	bg->group[idx].tasks = max(0, tasks);
+ 
++	trace_sched_tune_tasks_update(p, cpu, tasks, idx,
++			bg->group[idx].boost, bg->boost_max);
++
+ 	/* Boost group activation or deactivation on that RQ */
+ 	if (tasks == 1 || tasks == 0)
+ 		schedtune_cpu_update(cpu);
+-- 
+2.7.4
+

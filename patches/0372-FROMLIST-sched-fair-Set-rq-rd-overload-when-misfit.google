@@ -1,0 +1,100 @@
+From 4eae5300fa09804ab1a1aff8ec96c704bc526178 Mon Sep 17 00:00:00 2001
+From: Valentin Schneider <valentin.schneider@arm.com>
+Date: Tue, 27 Feb 2018 16:56:41 +0000
+Subject: [PATCH 372/437] FROMLIST: sched/fair: Set rq->rd->overload when
+ misfit
+
+Idle balance is a great opportunity to pull a misfit task. However,
+there are scenarios where misfit tasks are present but idle balance is
+prevented by the overload flag.
+
+A good example of this is a workload of n identical tasks. Let's suppose
+we have a 2+2 Arm big.LITTLE system. We then spawn 4 fairly
+CPU-intensive tasks - for the sake of simplicity let's say they are just
+CPU hogs, even when running on big CPUs.
+
+They are identical tasks, so on an SMP system they should all end at
+(roughly) the same time. However, in our case the LITTLE CPUs are less
+performing than the big CPUs, so tasks running on the LITTLEs will have
+a longer completion time.
+
+This means that the big CPUs will complete their work earlier, at which
+point they should pull the tasks from the LITTLEs. What we want to
+happen is summarized as follows:
+
+a,b,c,d are our CPU-hogging tasks
+_ signifies idling
+
+LITTLE_0 | a a a a _ _
+LITTLE_1 | b b b b _ _
+---------|-------------
+  big_0  | c c c c a a
+  big_1  | d d d d b b
+		  ^
+		  ^
+    Tasks end on the big CPUs, idle balance happens
+    and the misfit tasks are pulled straight away
+
+This however won't happen, because currently the overload flag is only
+set when there is any CPU that has more than one runnable task - which
+may very well not be the case here if our CPU-hogging workload is all
+there is to run.
+
+As such, this commit sets the overload flag in update_sg_lb_stats when
+a group is flagged as having a misfit task.
+
+cc: Ingo Molnar <mingo@redhat.com>
+cc: Peter Zijlstra <peterz@infradead.org>
+
+Signed-off-by: Valentin Schneider <valentin.schneider@arm.com>
+Change-Id: I86d5aab67bd2c91a0b193f21844a4634a492f331
+---
+ kernel/sched/fair.c  | 6 ++++--
+ kernel/sched/sched.h | 6 +++++-
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index ab8bfd2..990dd03 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -8370,7 +8370,7 @@ static bool update_nohz_stats(struct rq *rq, bool force)
+  * @load_idx: Load index of sched_domain of this_cpu for load calc.
+  * @local_group: Does group contain this_cpu.
+  * @sgs: variable to hold the statistics for this group.
+- * @overload: Indicate more than one runnable task for any CPU.
++ * @overload: Indicate pullable load (e.g. >1 runnable task).
+  * @overutilized: Indicate overutilization for any CPU.
+  */
+ static inline void update_sg_lb_stats(struct lb_env *env,
+@@ -8418,8 +8418,10 @@ static inline void update_sg_lb_stats(struct lb_env *env,
+ 			sgs->idle_cpus++;
+ 
+ 		if (env->sd->flags & SD_ASYM_CPUCAPACITY &&
+-		    sgs->group_misfit_task_load < rq->misfit_task_load)
++		    sgs->group_misfit_task_load < rq->misfit_task_load) {
+ 			sgs->group_misfit_task_load = rq->misfit_task_load;
++			*overload = 1;
++		}
+ 	}
+ 
+ 	/* Adjust by relative CPU capacity of the group */
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 90e9386..ea33476 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -702,7 +702,11 @@ struct root_domain {
+ 	cpumask_var_t		span;
+ 	cpumask_var_t		online;
+ 
+-	/* Indicate more than one runnable task for any CPU */
++	/*
++	 * Indicate pullable load on at least one CPU, e.g:
++	 * - More than one runnable task
++	 * - Running task is misfit
++	 */
+ 	int			overload;
+ 
+ 	/* Indicate one or more cpus over-utilized (tipping point) */
+-- 
+2.7.4
+

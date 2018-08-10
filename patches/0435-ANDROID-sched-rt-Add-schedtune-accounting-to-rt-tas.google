@@ -1,0 +1,143 @@
+From 72a994b30b75970aa3f6015a724f677c94f87021 Mon Sep 17 00:00:00 2001
+From: Chris Redpath <chris.redpath@arm.com>
+Date: Mon, 9 Jul 2018 16:54:02 +0100
+Subject: [PATCH 435/437] ANDROID: sched/rt: Add schedtune accounting to rt
+ task enqueue/dequeue
+
+rt tasks are currently not eligible for schedtune boosting. Make it so
+by adding enqueue/dequeue hooks.
+
+For rt tasks, schedtune only acts as a frequency boosting framework, it
+has no impact on placement decisions and the prefer_idle attribute is
+not used.
+
+Also prepare schedutil use of boosted util for rt task boosting
+
+With this change, schedtune accounting will include rt class tasks,
+however boosting currently only applies to the utilization provided by
+fair class tasks. Sum up the tracked CPU utilization applying boost to
+the aggregate util instead - this includes RT task util in the boosting
+if any tasks are runnable.
+
+Scenario 1, considering one CPU:
+1x rt task running, util 250, boost 0
+1x cfs task runnable, util 250, boost 50
+ previous util=250+(50pct_boosted_250) = 887
+ new      util=50_pct_boosted_500      = 762
+
+Scenario 2, considering one CPU:
+1x rt task running, util 250, boost 50
+1x cfs task runnable, util 250, boost 0
+ previous util=250+250                 = 500
+ new      util=50_pct_boosted_500      = 762
+
+Scenario 3, considering one CPU:
+1x rt task running, util 250, boost 50
+1x cfs task runnable, util 250, boost 50
+ previous util=250+(50pct_boosted_250) = 887
+ new      util=50_pct_boosted_500      = 762
+
+Scenario 4:
+1x rt task running, util 250, boost 50
+ previous util=250                 = 250
+ new      util=50_pct_boosted_250  = 637
+
+Change-Id: Ie287cbd0692468525095b5024db9faac8b2f4878
+Signed-off-by: Chris Redpath <chris.redpath@arm.com>
+(cherry picked from commit 8e266aebf737262aeca9662254a3e61ccc7f8dec)
+[ - Fixed conflicts in sugov related to PELT signals of all classes
+  - Fixed conflicts related to boosted_cpu_util being in a different
+    location ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+---
+ kernel/sched/cpufreq_schedutil.c | 3 +--
+ kernel/sched/fair.c              | 6 ++----
+ kernel/sched/rt.c                | 4 ++++
+ kernel/sched/tune.h              | 4 ++--
+ 4 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index 39033d0..4cf580c 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -224,8 +224,7 @@ static unsigned long sugov_get_util(struct sugov_cpu *sg_cpu)
+ 		return max;
+ 
+ 	/* Sum rq utilization */
+-	util = boosted_cpu_util(sg_cpu->cpu);
+-	util += cpu_util_rt(rq);
++	util = boosted_cpu_util(sg_cpu->cpu, cpu_util_rt(rq));
+ 
+ 	/*
+ 	 * Interrupt time is not seen by rqs utilization nso we can compare
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index a6fa54d..c09ed96 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -5811,9 +5811,9 @@ schedtune_task_margin(struct task_struct *task)
+ }
+ 
+ unsigned long
+-boosted_cpu_util(int cpu)
++boosted_cpu_util(int cpu, unsigned long other_util)
+ {
+-	unsigned long util = cpu_util_cfs(cpu_rq(cpu));
++	unsigned long util = cpu_util_cfs(cpu_rq(cpu)) + other_util;
+ 	long margin = schedtune_cpu_margin(util, cpu);
+ 
+ 	trace_sched_boost_cpu(cpu, util, margin);
+@@ -5837,8 +5837,6 @@ schedtune_task_margin(struct task_struct *task)
+ 
+ #endif /* CONFIG_SCHED_TUNE */
+ 
+-
+-
+ static inline unsigned long
+ boosted_task_util(struct task_struct *task)
+ {
+diff --git a/kernel/sched/rt.c b/kernel/sched/rt.c
+index 0be707d..3eed85f 100644
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -1329,6 +1329,8 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
+ {
+ 	struct sched_rt_entity *rt_se = &p->rt;
+ 
++	schedtune_enqueue_task(p, cpu_of(rq));
++
+ 	if (flags & ENQUEUE_WAKEUP)
+ 		rt_se->timeout = 0;
+ 
+@@ -1342,6 +1344,8 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
+ {
+ 	struct sched_rt_entity *rt_se = &p->rt;
+ 
++	schedtune_dequeue_task(p, cpu_of(rq));
++
+ 	update_curr_rt(rq);
+ 	dequeue_rt_entity(rt_se, flags);
+ 
+diff --git a/kernel/sched/tune.h b/kernel/sched/tune.h
+index bb187c6..821f026 100644
+--- a/kernel/sched/tune.h
++++ b/kernel/sched/tune.h
+@@ -20,7 +20,7 @@ int schedtune_prefer_idle(struct task_struct *tsk);
+ void schedtune_enqueue_task(struct task_struct *p, int cpu);
+ void schedtune_dequeue_task(struct task_struct *p, int cpu);
+ 
+-unsigned long boosted_cpu_util(int cpu);
++unsigned long boosted_cpu_util(int cpu, unsigned long other_util);
+ 
+ #else /* CONFIG_SCHED_TUNE */
+ 
+@@ -32,6 +32,6 @@ unsigned long boosted_cpu_util(int cpu);
+ #define schedtune_enqueue_task(task, cpu) do { } while (0)
+ #define schedtune_dequeue_task(task, cpu) do { } while (0)
+ 
+-#define boosted_cpu_util(cpu) cpu_util_cfs(cpu_rq(cpu))
++#define boosted_cpu_util(cpu, other_util) cpu_util_cfs(cpu_rq(cpu))
+ 
+ #endif /* CONFIG_SCHED_TUNE */
+-- 
+2.7.4
+
