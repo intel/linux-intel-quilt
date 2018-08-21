@@ -1,0 +1,111 @@
+From 9711596cf0d6a3e786f3f5266f3cb76ebcf88461 Mon Sep 17 00:00:00 2001
+From: Vincent Guittot <vincent.guittot@linaro.org>
+Date: Wed, 2 May 2018 11:21:34 +0200
+Subject: [PATCH 402/435] FROMLIST: cpufreq/schedutil: use dl utilization
+ tracking
+
+Now that we have both the dl class bandwidth requirement and the dl class
+utilization, we can detect when CPU is fully used so we should run at max.
+Otherwise, we keep using the dl bandwidth requirement to define the
+utilization of the CPU
+
+Cc: Ingo Molnar <mingo@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Vincent Guittot <vincent.guittot@linaro.org>
+[ Fixed conflict with EAS ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I12f532fc0f7ec2682d94f94d6e8e128dea36c26a
+---
+ kernel/sched/cpufreq_schedutil.c | 23 +++++++++++++++++------
+ kernel/sched/sched.h             |  7 ++++++-
+ 2 files changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index dd09c1c..796fcb5 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -57,6 +57,7 @@ struct sugov_cpu {
+ 	/* The fields below are only needed when sharing a policy: */
+ 	unsigned long		util_cfs;
+ 	unsigned long		util_dl;
++	unsigned long		bw_dl;
+ 	unsigned long		util_rt;
+ 	unsigned long		max;
+ 
+@@ -188,6 +189,7 @@ static void sugov_get_util(struct sugov_cpu *sg_cpu)
+ 	sg_cpu->max = arch_scale_cpu_capacity(NULL, sg_cpu->cpu);
+ 	sg_cpu->util_cfs = cpu_util_cfs(rq);
+ 	sg_cpu->util_dl  = cpu_util_dl(rq);
++	sg_cpu->bw_dl    = cpu_bw_dl(rq);
+ 	sg_cpu->util_rt  = cpu_util_rt(rq);
+ }
+ 
+@@ -199,20 +201,29 @@ static unsigned long sugov_aggregate_util(struct sugov_cpu *sg_cpu)
+ 	if (rt_rq_is_runnable(&rq->rt))
+ 		return sg_cpu->max;
+ 
+-	util = sg_cpu->util_dl;
+-	util += sg_cpu->util_cfs;
++	util = sg_cpu->util_cfs;
+ 	util += sg_cpu->util_rt;
+ 
++	if ((util + sg_cpu->util_dl) >= sg_cpu->max)
++		return sg_cpu->max;
++
+ 	/*
+-	 * Utilization required by DEADLINE must always be granted while, for
+-	 * FAIR, we use blocked utilization of IDLE CPUs as a mechanism to
+-	 * gracefully reduce the frequency when no tasks show up for longer
++	 * As there is still idle time on the CPU, we need to compute the
++	 * utilization level of the CPU.
++	 *
++	 * Bandwidth required by DEADLINE must always be granted while, for
++	 * FAIR and RT, we use blocked utilization of IDLE CPUs as a mechanism
++	 * to gracefully reduce the frequency when no tasks show up for longer
+ 	 * periods of time.
+ 	 *
+ 	 * Ideally we would like to set util_dl as min/guaranteed freq and
+ 	 * util_cfs + util_dl as requested freq. However, cpufreq is not yet
+ 	 * ready for such an interface. So, we only do the latter for now.
+ 	 */
++
++	/* Add DL bandwidth requirement */
++	util += sg_cpu->bw_dl;
++
+ 	return min(sg_cpu->max, util);
+ }
+ 
+@@ -368,7 +379,7 @@ static inline bool sugov_cpu_is_busy(struct sugov_cpu *sg_cpu) { return false; }
+  */
+ static inline void ignore_dl_rate_limit(struct sugov_cpu *sg_cpu, struct sugov_policy *sg_policy)
+ {
+-	if (cpu_util_dl(cpu_rq(sg_cpu->cpu)) > sg_cpu->util_dl)
++	if (cpu_bw_dl(cpu_rq(sg_cpu->cpu)) > sg_cpu->bw_dl)
+ 		sg_policy->need_freq_update = true;
+ }
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index b011d90..433bac7 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -2249,11 +2249,16 @@ static inline void cpufreq_update_util(struct rq *rq, unsigned int flags) {}
+ #endif
+ 
+ #ifdef CONFIG_SMP
+-static inline unsigned long cpu_util_dl(struct rq *rq)
++static inline unsigned long cpu_bw_dl(struct rq *rq)
+ {
+ 	return (rq->dl.running_bw * SCHED_CAPACITY_SCALE) >> BW_SHIFT;
+ }
+ 
++static inline unsigned long cpu_util_dl(struct rq *rq)
++{
++	return READ_ONCE(rq->avg_dl.util_avg);
++}
++
+ static inline unsigned long cpu_util_cfs(struct rq *rq)
+ {
+ 	unsigned long util = READ_ONCE(rq->cfs.avg.util_avg);
+-- 
+2.7.4
+

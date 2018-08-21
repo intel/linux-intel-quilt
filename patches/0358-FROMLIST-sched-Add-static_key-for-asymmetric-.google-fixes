@@ -1,0 +1,95 @@
+From 8c50f4cbf92314b5243393866f5dde265c93b5ed Mon Sep 17 00:00:00 2001
+From: Morten Rasmussen <morten.rasmussen@arm.com>
+Date: Thu, 1 Feb 2018 11:44:13 +0000
+Subject: [PATCH 358/435] FROMLIST: sched: Add static_key for asymmetric cpu
+ capacity optimizations
+
+The existing asymmetric cpu capacity code should cause minimal overhead
+for others. Putting it behind a static_key, it has been done for SMT
+optimizations, would make it easier to extend and improve without
+causing harm to others moving forward.
+
+cc: Ingo Molnar <mingo@redhat.com>
+cc: Peter Zijlstra <peterz@infradead.org>
+
+Signed-off-by: Morten Rasmussen <morten.rasmussen@arm.com>
+Change-Id: I6c87bd086f1e3fada16d8c39257f8d02b41fa794
+---
+ kernel/sched/fair.c     |  3 +++
+ kernel/sched/sched.h    |  1 +
+ kernel/sched/topology.c | 19 +++++++++++++++++++
+ 3 files changed, 23 insertions(+)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 98e52f4..19b295d 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -6608,6 +6608,9 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
+ {
+ 	long min_cap, max_cap;
+ 
++	if (!static_branch_unlikely(&sched_asym_cpucapacity))
++		return 0;
++
+ 	min_cap = min(capacity_orig_of(prev_cpu), capacity_orig_of(cpu));
+ 	max_cap = cpu_rq(cpu)->rd->max_cpu_capacity;
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index f3344ae..bd95fc8 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1179,6 +1179,7 @@ DECLARE_PER_CPU(struct sched_domain_shared *, sd_llc_shared);
+ DECLARE_PER_CPU(struct sched_domain *, sd_numa);
+ DECLARE_PER_CPU(struct sched_domain *, sd_asym);
+ DECLARE_PER_CPU(struct sched_domain *, sd_ea);
++extern struct static_key_false sched_asym_cpucapacity;
+ 
+ struct sched_group_capacity {
+ 	atomic_t		ref;
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 2b779cb..0016a59 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -415,6 +415,7 @@ DEFINE_PER_CPU(struct sched_domain_shared *, sd_llc_shared);
+ DEFINE_PER_CPU(struct sched_domain *, sd_numa);
+ DEFINE_PER_CPU(struct sched_domain *, sd_asym);
+ DEFINE_PER_CPU(struct sched_domain *, sd_ea);
++DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
+ 
+ static void update_top_cache_domain(int cpu)
+ {
+@@ -445,6 +446,21 @@ static void update_top_cache_domain(int cpu)
+ 	rcu_assign_pointer(per_cpu(sd_ea, cpu), sd);
+ }
+ 
++static void update_asym_cpucapacity(int cpu)
++{
++	int enable = false;
++
++	rcu_read_lock();
++	if (lowest_flag_domain(cpu, SD_ASYM_CPUCAPACITY))
++		enable = true;
++	rcu_read_unlock();
++
++	if (enable) {
++		/* This expects to be hotplug-safe */
++		static_branch_enable_cpuslocked(&sched_asym_cpucapacity);
++	}
++}
++
+ /*
+  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
+  * hold the hotplug lock.
+@@ -1894,6 +1910,9 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	}
+ 	rcu_read_unlock();
+ 
++	if (!cpumask_empty(cpu_map))
++		update_asym_cpucapacity(cpumask_first(cpu_map));
++
+ 	if (rq && sched_debug_enabled) {
+ 		pr_info("root domain span: %*pbl (max cpu_capacity = %lu)\n",
+ 			cpumask_pr_args(cpu_map), rq->rd->max_cpu_capacity);
+-- 
+2.7.4
+

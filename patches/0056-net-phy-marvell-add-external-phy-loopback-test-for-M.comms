@@ -1,0 +1,136 @@
+From 8d34561f8417b3860bfa0381f3bfc18f579b97e4 Mon Sep 17 00:00:00 2001
+From: "Tan, Tee Min" <tee.min.tan@intel.com>
+Date: Wed, 15 Aug 2018 19:02:26 +0800
+Subject: [PATCH 56/58] net: phy: marvell: add external phy loopback test for
+ Marvell 88E1510
+
+Added m88e1510_phy_ext_loopback() in marvell.c for enabling stub
+external phy loopback test for Marvell 88E1512.
+
+Change-Id: I999099d5a8d1b097aeab5f28f647b4c325666c8b
+Signed-off-by: Tan, Tee Min <tee.min.tan@intel.com>
+---
+ drivers/net/phy/marvell.c    | 27 +++++++++++++++++++++++++++
+ drivers/net/phy/phy_device.c | 33 +++++++++++++++++++++++++++++++++
+ include/linux/phy.h          |  2 ++
+ 3 files changed, 62 insertions(+)
+
+diff --git a/drivers/net/phy/marvell.c b/drivers/net/phy/marvell.c
+index 1cd439b..c9e80cb 100644
+--- a/drivers/net/phy/marvell.c
++++ b/drivers/net/phy/marvell.c
+@@ -150,6 +150,8 @@
+ #define MII_88E1510_GEN_CTRL_REG_1_MODE_MASK	0x7
+ #define MII_88E1510_GEN_CTRL_REG_1_MODE_SGMII	0x1	/* SGMII to copper */
+ #define MII_88E1510_GEN_CTRL_REG_1_RESET	0x8000	/* Soft reset */
++#define MII_88E1512_CHECKER_CTRL		0x12	/* Checker CTRL reg */
++#define MII_88E1512_ENABLE_STUB_TEST		0x8	/* Enable Stub Test */
+ 
+ #define LPA_FIBER_1000HALF	0x40
+ #define LPA_FIBER_1000FULL	0x20
+@@ -1528,6 +1530,30 @@ static void marvell_get_stats(struct phy_device *phydev,
+ 		data[i] = marvell_get_stat(phydev, i);
+ }
+ 
++int m88e1510_phy_ext_loopback(struct phy_device *phydev, bool enable)
++{
++	int err;
++
++	/* Select page 6 */
++	err = marvell_set_page(phydev, 6);
++	if (err < 0)
++		return err;
++
++	err = phy_modify(phydev, MII_88E1512_CHECKER_CTRL,
++			 MII_88E1512_ENABLE_STUB_TEST,
++			 enable ? MII_88E1512_ENABLE_STUB_TEST : 0);
++
++	if (err < 0)
++		return err;
++
++	/* Reset page selection */
++	err = marvell_set_page(phydev, MII_MARVELL_COPPER_PAGE);
++	if (err < 0)
++		return err;
++
++	return 0;
++}
++
+ #ifdef CONFIG_HWMON
+ static int m88e1121_get_temp(struct phy_device *phydev, long *temp)
+ {
+@@ -2241,6 +2267,7 @@ static struct phy_driver marvell_drivers[] = {
+ 		.get_strings = marvell_get_strings,
+ 		.get_stats = marvell_get_stats,
+ 		.set_loopback = genphy_loopback,
++		.set_ext_loopback = m88e1510_phy_ext_loopback,
+ 	},
+ 	{
+ 		.phy_id = MARVELL_PHY_ID_88E1540,
+diff --git a/drivers/net/phy/phy_device.c b/drivers/net/phy/phy_device.c
+index b9f5f40..d3444d9 100644
+--- a/drivers/net/phy/phy_device.c
++++ b/drivers/net/phy/phy_device.c
+@@ -1252,6 +1252,39 @@ int phy_loopback(struct phy_device *phydev, bool enable)
+ }
+ EXPORT_SYMBOL(phy_loopback);
+ 
++int phy_ext_loopback(struct phy_device *phydev, bool enable)
++{
++	struct phy_driver *phydrv = to_phy_driver(phydev->mdio.dev.driver);
++	int ret = 0;
++
++	mutex_lock(&phydev->lock);
++
++	if (enable && phydev->loopback_enabled) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	if (!enable && !phydev->loopback_enabled) {
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if (phydev->drv && phydrv->set_ext_loopback)
++		ret = phydrv->set_ext_loopback(phydev, enable);
++	else
++		ret = -EOPNOTSUPP;
++
++	if (ret)
++		goto out;
++
++	phydev->loopback_enabled = enable;
++
++out:
++	mutex_unlock(&phydev->lock);
++	return ret;
++}
++EXPORT_SYMBOL(phy_ext_loopback);
++
+ /**
+  * phy_reset_after_clk_enable - perform a PHY reset if needed
+  * @phydev: target phy_device struct
+diff --git a/include/linux/phy.h b/include/linux/phy.h
+index 09c4762..5830ff6 100644
+--- a/include/linux/phy.h
++++ b/include/linux/phy.h
+@@ -660,6 +660,7 @@ struct phy_driver {
+ 			    struct ethtool_tunable *tuna,
+ 			    const void *data);
+ 	int (*set_loopback)(struct phy_device *dev, bool enable);
++	int (*set_ext_loopback)(struct phy_device *dev, bool enable);
+ };
+ #define to_phy_driver(d) container_of(to_mdio_common_driver(d),		\
+ 				      struct phy_driver, mdiodrv)
+@@ -927,6 +928,7 @@ int phy_suspend(struct phy_device *phydev);
+ int phy_resume(struct phy_device *phydev);
+ int __phy_resume(struct phy_device *phydev);
+ int phy_loopback(struct phy_device *phydev, bool enable);
++int phy_ext_loopback(struct phy_device *phydev, bool enable);
+ struct phy_device *phy_attach(struct net_device *dev, const char *bus_id,
+ 			      phy_interface_t interface);
+ struct phy_device *phy_find_first(struct mii_bus *bus);
+-- 
+2.7.4
+

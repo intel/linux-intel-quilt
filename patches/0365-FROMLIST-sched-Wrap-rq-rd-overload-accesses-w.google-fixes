@@ -1,0 +1,63 @@
+From 1dc72a8671277cbd454972eb4fb16bba0104067a Mon Sep 17 00:00:00 2001
+From: Valentin Schneider <valentin.schneider@arm.com>
+Date: Tue, 27 Feb 2018 16:20:21 +0000
+Subject: [PATCH 365/435] FROMLIST: sched: Wrap rq->rd->overload accesses with
+ READ/WRITE_ONCE
+
+This variable can be read and set locklessly within update_sd_lb_stats().
+As such, READ/WRITE_ONCE are added to make sure nothing terribly wrong
+can happen because of the compiler.
+
+cc: Ingo Molnar <mingo@redhat.com>
+cc: Peter Zijlstra <peterz@infradead.org>
+
+Signed-off-by: Valentin Schneider <valentin.schneider@arm.com>
+Signed-off-by: Morten Rasmussen <morten.rasmussen@arm.com>
+Change-Id: I2b35baaebb9a55afa7877b049d2af1c255567601
+---
+ kernel/sched/fair.c  | 6 +++---
+ kernel/sched/sched.h | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 9086e4d..ab8bfd2 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -8640,8 +8640,8 @@ static inline void update_sd_lb_stats(struct lb_env *env, struct sd_lb_stats *sd
+ 
+ 	if (!env->sd->parent) {
+ 		/* update overload indicator if we are at root domain */
+-		if (env->dst_rq->rd->overload != overload)
+-			env->dst_rq->rd->overload = overload;
++		if (READ_ONCE(env->dst_rq->rd->overload) != overload)
++			WRITE_ONCE(env->dst_rq->rd->overload, overload);
+ 
+ 		/* Update over-utilization (tipping point, U >= 0) indicator */
+ 		if (READ_ONCE(env->dst_rq->rd->overutilized) != overutilized)
+@@ -10096,7 +10096,7 @@ static int idle_balance(struct rq *this_rq, struct rq_flags *rf)
+ 	rq_unpin_lock(this_rq, rf);
+ 
+ 	if (this_rq->avg_idle < sysctl_sched_migration_cost ||
+-	    !this_rq->rd->overload) {
++	    !READ_ONCE(this_rq->rd->overload)) {
+ 
+ 		rcu_read_lock();
+ 		sd = rcu_dereference_check_sched_domain(this_rq->sd);
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 15f5253..90e9386 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1691,8 +1691,8 @@ static inline void add_nr_running(struct rq *rq, unsigned count)
+ 
+ 	if (prev_nr < 2 && rq->nr_running >= 2) {
+ #ifdef CONFIG_SMP
+-		if (!rq->rd->overload)
+-			rq->rd->overload = 1;
++		if (!READ_ONCE(rq->rd->overload))
++			WRITE_ONCE(rq->rd->overload, 1);
+ #endif
+ 	}
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,73 @@
+From 20b3111db163b92172c03c9a238321d7c78964c4 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Tue, 20 Feb 2018 20:25:45 -0800
+Subject: [PATCH 297/435] ANDROID: sdcardfs: Hold i_mutex for i_size_write
+
+When we call i_size_write, we must be holding i_mutex to avoid
+possible lockups on 32 bit/SMP architectures. This is not
+necessary on 64 bit architectures.
+
+Change-Id: Ic3b946507c54d81b5c9046f9b57d25d4b0f9feef
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Bug: 73287721
+---
+ fs/sdcardfs/file.c | 22 ++++++++++++++--------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/fs/sdcardfs/file.c b/fs/sdcardfs/file.c
+index 5ac0b0b..2879d12 100644
+--- a/fs/sdcardfs/file.c
++++ b/fs/sdcardfs/file.c
+@@ -62,6 +62,7 @@ static ssize_t sdcardfs_write(struct file *file, const char __user *buf,
+ 	int err;
+ 	struct file *lower_file;
+ 	struct dentry *dentry = file->f_path.dentry;
++	struct inode *inode = d_inode(dentry);
+ 
+ 	/* check disk space */
+ 	if (!check_min_free_space(dentry, count, 0)) {
+@@ -73,10 +74,12 @@ static ssize_t sdcardfs_write(struct file *file, const char __user *buf,
+ 	err = vfs_write(lower_file, buf, count, ppos);
+ 	/* update our inode times+sizes upon a successful lower write */
+ 	if (err >= 0) {
+-		fsstack_copy_inode_size(d_inode(dentry),
+-					file_inode(lower_file));
+-		fsstack_copy_attr_times(d_inode(dentry),
+-					file_inode(lower_file));
++		if (sizeof(loff_t) > sizeof(long))
++			inode_lock(inode);
++		fsstack_copy_inode_size(inode, file_inode(lower_file));
++		fsstack_copy_attr_times(inode, file_inode(lower_file));
++		if (sizeof(loff_t) > sizeof(long))
++			inode_unlock(inode);
+ 	}
+ 
+ 	return err;
+@@ -391,6 +394,7 @@ ssize_t sdcardfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+ {
+ 	int err;
+ 	struct file *file = iocb->ki_filp, *lower_file;
++	struct inode *inode = file->f_path.dentry->d_inode;
+ 
+ 	lower_file = sdcardfs_lower_file(file);
+ 	if (!lower_file->f_op->write_iter) {
+@@ -405,10 +409,12 @@ ssize_t sdcardfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+ 	fput(lower_file);
+ 	/* update upper inode times/sizes as needed */
+ 	if (err >= 0 || err == -EIOCBQUEUED) {
+-		fsstack_copy_inode_size(file->f_path.dentry->d_inode,
+-					file_inode(lower_file));
+-		fsstack_copy_attr_times(file->f_path.dentry->d_inode,
+-					file_inode(lower_file));
++		if (sizeof(loff_t) > sizeof(long))
++			inode_lock(inode);
++		fsstack_copy_inode_size(inode, file_inode(lower_file));
++		fsstack_copy_attr_times(inode, file_inode(lower_file));
++		if (sizeof(loff_t) > sizeof(long))
++			inode_lock(inode);
+ 	}
+ out:
+ 	return err;
+-- 
+2.7.4
+
