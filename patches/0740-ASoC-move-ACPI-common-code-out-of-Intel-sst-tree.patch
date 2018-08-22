@@ -1,7 +1,7 @@
 From c56ed6d6253cf5b532b4ff4581219093d257f979 Mon Sep 17 00:00:00 2001
 From: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
 Date: Thu, 12 Oct 2017 18:49:38 -0500
-Subject: [PATCH 0740/1569] ASoC: move ACPI common code out of Intel/sst tree
+Subject: [PATCH 0740/1586] ASoC: move ACPI common code out of Intel/sst tree
 
 ACPI support is not specific to the Intel/SST driver. Move the enumeration
 and matching code which is not hardware-dependent to sound/soc and rename
@@ -20,26 +20,28 @@ Acked-by: Liam Girdwood <liam.r.girdwood@linux.intel.com>
 Signed-off-by: Mark Brown <broonie@kernel.org>
 (cherry picked from commit 7feb2f786a46d34cac760d5e246dfbdafafa0e96)
 ---
- include/sound/soc-acpi.h                           | 100 +++++++++++++++++++++
- sound/soc/Kconfig                                  |   3 +
- sound/soc/Makefile                                 |   6 ++
- sound/soc/intel/Kconfig                            |   1 +
- sound/soc/intel/atom/sst/sst_acpi.c                |  24 ++---
- sound/soc/intel/boards/bytcht_da7213.c             |   6 +-
- sound/soc/intel/boards/bytcht_es8316.c             |   2 +-
- sound/soc/intel/boards/bytcr_rt5640.c              |  11 +--
- sound/soc/intel/boards/bytcr_rt5651.c              |   6 +-
- sound/soc/intel/boards/cht_bsw_rt5645.c            |  11 +--
- sound/soc/intel/boards/cht_bsw_rt5672.c            |   7 +-
- sound/soc/intel/common/Makefile                    |   2 -
- sound/soc/intel/common/sst-acpi.c                  |  18 ++--
- sound/soc/intel/common/sst-acpi.h                  |  82 -----------------
- sound/soc/intel/skylake/skl.c                      |  40 ++++-----
- .../{intel/common/sst-match-acpi.c => soc-acpi.c}  |  56 ++++++------
- 16 files changed, 203 insertions(+), 172 deletions(-)
+ include/sound/soc-acpi.h                | 100 ++++++++++++++++++
+ sound/soc/Kconfig                       |   3 +
+ sound/soc/Makefile                      |   6 ++
+ sound/soc/intel/Kconfig                 |   1 +
+ sound/soc/intel/atom/sst/sst_acpi.c     |  24 ++---
+ sound/soc/intel/boards/bytcht_da7213.c  |   6 +-
+ sound/soc/intel/boards/bytcht_es8316.c  |   2 +-
+ sound/soc/intel/boards/bytcr_rt5640.c   |  11 +-
+ sound/soc/intel/boards/bytcr_rt5651.c   |   6 +-
+ sound/soc/intel/boards/cht_bsw_rt5645.c |  11 +-
+ sound/soc/intel/boards/cht_bsw_rt5672.c |   7 +-
+ sound/soc/intel/common/Makefile         |   2 -
+ sound/soc/intel/common/sst-acpi.c       |  18 ++--
+ sound/soc/intel/common/sst-acpi.h       |  82 ---------------
+ sound/soc/intel/common/sst-match-acpi.c | 171 -------------------------------
+ sound/soc/intel/skylake/skl.c           |  40 ++++----
+ sound/soc/soc-acpi.c                    | 173 ++++++++++++++++++++++++++++++++
+ 17 files changed, 347 insertions(+), 316 deletions(-)
  create mode 100644 include/sound/soc-acpi.h
  delete mode 100644 sound/soc/intel/common/sst-acpi.h
- rename sound/soc/{intel/common/sst-match-acpi.c => soc-acpi.c} (63%)
+ delete mode 100644 sound/soc/intel/common/sst-match-acpi.c
+ create mode 100644 sound/soc/soc-acpi.c
 
 diff --git a/include/sound/soc-acpi.h b/include/sound/soc-acpi.h
 new file mode 100644
@@ -692,6 +694,183 @@ index afe9b87..0000000
 -
 -/* check all codecs */
 -struct sst_acpi_mach *sst_acpi_codec_list(void *arg);
+diff --git a/sound/soc/intel/common/sst-match-acpi.c b/sound/soc/intel/common/sst-match-acpi.c
+deleted file mode 100644
+index b4a9295..0000000
+--- a/sound/soc/intel/common/sst-match-acpi.c
++++ /dev/null
+@@ -1,171 +0,0 @@
+-/*
+- * sst_match_apci.c - SST (LPE) match for ACPI enumeration.
+- *
+- * Copyright (c) 2013-15, Intel Corporation.
+- *
+- *
+- * This program is free software; you can redistribute it and/or modify it
+- * under the terms and conditions of the GNU General Public License,
+- * version 2, as published by the Free Software Foundation.
+- *
+- * This program is distributed in the hope it will be useful, but WITHOUT
+- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+- * more details.
+- */
+-
+-#include "sst-acpi.h"
+-
+-static acpi_status sst_acpi_find_name(acpi_handle handle, u32 level,
+-				      void *context, void **ret)
+-{
+-	struct acpi_device *adev;
+-	const char *name = NULL;
+-
+-	if (acpi_bus_get_device(handle, &adev))
+-		return AE_OK;
+-
+-	if (adev->status.present && adev->status.functional) {
+-		name = acpi_dev_name(adev);
+-		*(const char **)ret = name;
+-		return AE_CTRL_TERMINATE;
+-	}
+-
+-	return AE_OK;
+-}
+-
+-const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
+-{
+-	const char *name = NULL;
+-	acpi_status status;
+-
+-	status = acpi_get_devices(hid, sst_acpi_find_name, NULL,
+-				  (void **)&name);
+-
+-	if (ACPI_FAILURE(status) || name[0] == '\0')
+-		return NULL;
+-
+-	return name;
+-}
+-EXPORT_SYMBOL_GPL(sst_acpi_find_name_from_hid);
+-
+-static acpi_status sst_acpi_mach_match(acpi_handle handle, u32 level,
+-				       void *context, void **ret)
+-{
+-	unsigned long long sta;
+-	acpi_status status;
+-
+-	*(bool *)context = true;
+-	status = acpi_evaluate_integer(handle, "_STA", NULL, &sta);
+-	if (ACPI_FAILURE(status) || !(sta & ACPI_STA_DEVICE_PRESENT))
+-		*(bool *)context = false;
+-
+-	return AE_OK;
+-}
+-
+-bool sst_acpi_check_hid(const u8 hid[ACPI_ID_LEN])
+-{
+-	acpi_status status;
+-	bool found = false;
+-
+-	status = acpi_get_devices(hid, sst_acpi_mach_match, &found, NULL);
+-
+-	if (ACPI_FAILURE(status))
+-		return false;
+-
+-	return found;
+-}
+-EXPORT_SYMBOL_GPL(sst_acpi_check_hid);
+-
+-struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines)
+-{
+-	struct sst_acpi_mach *mach;
+-
+-	for (mach = machines; mach->id[0]; mach++) {
+-		if (sst_acpi_check_hid(mach->id) == true) {
+-			if (mach->machine_quirk)
+-				mach = mach->machine_quirk(mach);
+-			return mach;
+-		}
+-	}
+-	return NULL;
+-}
+-EXPORT_SYMBOL_GPL(sst_acpi_find_machine);
+-
+-static acpi_status sst_acpi_find_package(acpi_handle handle, u32 level,
+-					void *context, void **ret)
+-{
+-	struct acpi_device *adev;
+-	acpi_status status = AE_OK;
+-	struct sst_acpi_package_context *pkg_ctx = context;
+-
+-	pkg_ctx->data_valid = false;
+-
+-	if (acpi_bus_get_device(handle, &adev))
+-		return AE_OK;
+-
+-	if (adev->status.present && adev->status.functional) {
+-		struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
+-		union acpi_object  *myobj = NULL;
+-
+-		status = acpi_evaluate_object_typed(handle, pkg_ctx->name,
+-						NULL, &buffer,
+-						ACPI_TYPE_PACKAGE);
+-		if (ACPI_FAILURE(status))
+-			return AE_OK;
+-
+-		myobj = buffer.pointer;
+-		if (!myobj || myobj->package.count != pkg_ctx->length) {
+-			kfree(buffer.pointer);
+-			return AE_OK;
+-		}
+-
+-		status = acpi_extract_package(myobj,
+-					pkg_ctx->format, pkg_ctx->state);
+-		if (ACPI_FAILURE(status)) {
+-			kfree(buffer.pointer);
+-			return AE_OK;
+-		}
+-
+-		kfree(buffer.pointer);
+-		pkg_ctx->data_valid = true;
+-		return AE_CTRL_TERMINATE;
+-	}
+-
+-	return AE_OK;
+-}
+-
+-bool sst_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
+-				struct sst_acpi_package_context *ctx)
+-{
+-	acpi_status status;
+-
+-	status = acpi_get_devices(hid, sst_acpi_find_package, ctx, NULL);
+-
+-	if (ACPI_FAILURE(status) || !ctx->data_valid)
+-		return false;
+-
+-	return true;
+-}
+-EXPORT_SYMBOL_GPL(sst_acpi_find_package_from_hid);
+-
+-struct sst_acpi_mach *sst_acpi_codec_list(void *arg)
+-{
+-	struct sst_acpi_mach *mach = arg;
+-	struct sst_codecs *codec_list = (struct sst_codecs *) mach->quirk_data;
+-	int i;
+-
+-	if (mach->quirk_data == NULL)
+-		return mach;
+-
+-	for (i = 0; i < codec_list->num_codecs; i++) {
+-		if (sst_acpi_check_hid(codec_list->codecs[i]) != true)
+-			return NULL;
+-	}
+-
+-	return mach;
+-}
+-EXPORT_SYMBOL_GPL(sst_acpi_codec_list);
+-
+-MODULE_LICENSE("GPL v2");
+-MODULE_DESCRIPTION("Intel Common ACPI Match module");
 diff --git a/sound/soc/intel/skylake/skl.c b/sound/soc/intel/skylake/skl.c
 index 575b0cb..53c3738 100644
 --- a/sound/soc/intel/skylake/skl.c
@@ -861,160 +1040,184 @@ index 575b0cb..53c3738 100644
  #if IS_ENABLED(CONFIG_SND_SOC_RT700)
  	{ "dummy", "icl_rt700", "intel/dsp_fw_icl.bin", NULL, NULL, NULL },
  #elif IS_ENABLED(CONFIG_SND_SOC_WM5110)
-diff --git a/sound/soc/intel/common/sst-match-acpi.c b/sound/soc/soc-acpi.c
-similarity index 63%
-rename from sound/soc/intel/common/sst-match-acpi.c
-rename to sound/soc/soc-acpi.c
-index b4a9295..29a6fc8 100644
---- a/sound/soc/intel/common/sst-match-acpi.c
+diff --git a/sound/soc/soc-acpi.c b/sound/soc/soc-acpi.c
+new file mode 100644
+index 0000000..29a6fc8
+--- /dev/null
 +++ b/sound/soc/soc-acpi.c
-@@ -1,5 +1,5 @@
- /*
-- * sst_match_apci.c - SST (LPE) match for ACPI enumeration.
+@@ -0,0 +1,173 @@
++/*
 + * soc-apci.c - support for ACPI enumeration.
-  *
-  * Copyright (c) 2013-15, Intel Corporation.
-  *
-@@ -14,9 +14,9 @@
-  * more details.
-  */
- 
--#include "sst-acpi.h"
++ *
++ * Copyright (c) 2013-15, Intel Corporation.
++ *
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ */
++
 +#include <sound/soc-acpi.h>
- 
--static acpi_status sst_acpi_find_name(acpi_handle handle, u32 level,
++
 +static acpi_status snd_soc_acpi_find_name(acpi_handle handle, u32 level,
- 				      void *context, void **ret)
- {
- 	struct acpi_device *adev;
-@@ -34,12 +34,12 @@ static acpi_status sst_acpi_find_name(acpi_handle handle, u32 level,
- 	return AE_OK;
- }
- 
--const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
++				      void *context, void **ret)
++{
++	struct acpi_device *adev;
++	const char *name = NULL;
++
++	if (acpi_bus_get_device(handle, &adev))
++		return AE_OK;
++
++	if (adev->status.present && adev->status.functional) {
++		name = acpi_dev_name(adev);
++		*(const char **)ret = name;
++		return AE_CTRL_TERMINATE;
++	}
++
++	return AE_OK;
++}
++
 +const char *snd_soc_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
- {
- 	const char *name = NULL;
- 	acpi_status status;
- 
--	status = acpi_get_devices(hid, sst_acpi_find_name, NULL,
++{
++	const char *name = NULL;
++	acpi_status status;
++
 +	status = acpi_get_devices(hid, snd_soc_acpi_find_name, NULL,
- 				  (void **)&name);
- 
- 	if (ACPI_FAILURE(status) || name[0] == '\0')
-@@ -47,9 +47,9 @@ const char *sst_acpi_find_name_from_hid(const u8 hid[ACPI_ID_LEN])
- 
- 	return name;
- }
--EXPORT_SYMBOL_GPL(sst_acpi_find_name_from_hid);
++				  (void **)&name);
++
++	if (ACPI_FAILURE(status) || name[0] == '\0')
++		return NULL;
++
++	return name;
++}
 +EXPORT_SYMBOL_GPL(snd_soc_acpi_find_name_from_hid);
- 
--static acpi_status sst_acpi_mach_match(acpi_handle handle, u32 level,
++
 +static acpi_status snd_soc_acpi_mach_match(acpi_handle handle, u32 level,
- 				       void *context, void **ret)
- {
- 	unsigned long long sta;
-@@ -63,26 +63,27 @@ static acpi_status sst_acpi_mach_match(acpi_handle handle, u32 level,
- 	return AE_OK;
- }
- 
--bool sst_acpi_check_hid(const u8 hid[ACPI_ID_LEN])
++				       void *context, void **ret)
++{
++	unsigned long long sta;
++	acpi_status status;
++
++	*(bool *)context = true;
++	status = acpi_evaluate_integer(handle, "_STA", NULL, &sta);
++	if (ACPI_FAILURE(status) || !(sta & ACPI_STA_DEVICE_PRESENT))
++		*(bool *)context = false;
++
++	return AE_OK;
++}
++
 +bool snd_soc_acpi_check_hid(const u8 hid[ACPI_ID_LEN])
- {
- 	acpi_status status;
- 	bool found = false;
- 
--	status = acpi_get_devices(hid, sst_acpi_mach_match, &found, NULL);
++{
++	acpi_status status;
++	bool found = false;
++
 +	status = acpi_get_devices(hid, snd_soc_acpi_mach_match, &found, NULL);
- 
- 	if (ACPI_FAILURE(status))
- 		return false;
- 
- 	return found;
- }
--EXPORT_SYMBOL_GPL(sst_acpi_check_hid);
++
++	if (ACPI_FAILURE(status))
++		return false;
++
++	return found;
++}
 +EXPORT_SYMBOL_GPL(snd_soc_acpi_check_hid);
- 
--struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines)
++
 +struct snd_soc_acpi_mach *
 +snd_soc_acpi_find_machine(struct snd_soc_acpi_mach *machines)
- {
--	struct sst_acpi_mach *mach;
++{
 +	struct snd_soc_acpi_mach *mach;
- 
- 	for (mach = machines; mach->id[0]; mach++) {
--		if (sst_acpi_check_hid(mach->id) == true) {
++
++	for (mach = machines; mach->id[0]; mach++) {
 +		if (sst_soc_acpi_check_hid(mach->id) == true) {
- 			if (mach->machine_quirk)
- 				mach = mach->machine_quirk(mach);
- 			return mach;
-@@ -90,14 +91,14 @@ struct sst_acpi_mach *sst_acpi_find_machine(struct sst_acpi_mach *machines)
- 	}
- 	return NULL;
- }
--EXPORT_SYMBOL_GPL(sst_acpi_find_machine);
++			if (mach->machine_quirk)
++				mach = mach->machine_quirk(mach);
++			return mach;
++		}
++	}
++	return NULL;
++}
 +EXPORT_SYMBOL_GPL(snd_soc_acpi_find_machine);
- 
--static acpi_status sst_acpi_find_package(acpi_handle handle, u32 level,
--					void *context, void **ret)
++
 +static acpi_status snd_soc_acpi_find_package(acpi_handle handle, u32 level,
 +					     void *context, void **ret)
- {
- 	struct acpi_device *adev;
- 	acpi_status status = AE_OK;
--	struct sst_acpi_package_context *pkg_ctx = context;
++{
++	struct acpi_device *adev;
++	acpi_status status = AE_OK;
 +	struct snd_soc_acpi_package_context *pkg_ctx = context;
- 
- 	pkg_ctx->data_valid = false;
- 
-@@ -135,37 +136,38 @@ static acpi_status sst_acpi_find_package(acpi_handle handle, u32 level,
- 	return AE_OK;
- }
- 
--bool sst_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
--				struct sst_acpi_package_context *ctx)
++
++	pkg_ctx->data_valid = false;
++
++	if (acpi_bus_get_device(handle, &adev))
++		return AE_OK;
++
++	if (adev->status.present && adev->status.functional) {
++		struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
++		union acpi_object  *myobj = NULL;
++
++		status = acpi_evaluate_object_typed(handle, pkg_ctx->name,
++						NULL, &buffer,
++						ACPI_TYPE_PACKAGE);
++		if (ACPI_FAILURE(status))
++			return AE_OK;
++
++		myobj = buffer.pointer;
++		if (!myobj || myobj->package.count != pkg_ctx->length) {
++			kfree(buffer.pointer);
++			return AE_OK;
++		}
++
++		status = acpi_extract_package(myobj,
++					pkg_ctx->format, pkg_ctx->state);
++		if (ACPI_FAILURE(status)) {
++			kfree(buffer.pointer);
++			return AE_OK;
++		}
++
++		kfree(buffer.pointer);
++		pkg_ctx->data_valid = true;
++		return AE_CTRL_TERMINATE;
++	}
++
++	return AE_OK;
++}
++
 +bool snd_soc_acpi_find_package_from_hid(const u8 hid[ACPI_ID_LEN],
 +				struct snd_soc_acpi_package_context *ctx)
- {
- 	acpi_status status;
- 
--	status = acpi_get_devices(hid, sst_acpi_find_package, ctx, NULL);
++{
++	acpi_status status;
++
 +	status = acpi_get_devices(hid, snd_soc_acpi_find_package, ctx, NULL);
- 
- 	if (ACPI_FAILURE(status) || !ctx->data_valid)
- 		return false;
- 
- 	return true;
- }
--EXPORT_SYMBOL_GPL(sst_acpi_find_package_from_hid);
++
++	if (ACPI_FAILURE(status) || !ctx->data_valid)
++		return false;
++
++	return true;
++}
 +EXPORT_SYMBOL_GPL(snd_soc_acpi_find_package_from_hid);
- 
--struct sst_acpi_mach *sst_acpi_codec_list(void *arg)
++
 +struct snd_soc_acpi_mach *snd_soc_acpi_codec_list(void *arg)
- {
--	struct sst_acpi_mach *mach = arg;
--	struct sst_codecs *codec_list = (struct sst_codecs *) mach->quirk_data;
++{
 +	struct snd_soc_acpi_mach *mach = arg;
 +	struct snd_soc_acpi_codecs *codec_list =
 +		(struct snd_soc_acpi_codecs *) mach->quirk_data;
- 	int i;
- 
- 	if (mach->quirk_data == NULL)
- 		return mach;
- 
- 	for (i = 0; i < codec_list->num_codecs; i++) {
--		if (sst_acpi_check_hid(codec_list->codecs[i]) != true)
++	int i;
++
++	if (mach->quirk_data == NULL)
++		return mach;
++
++	for (i = 0; i < codec_list->num_codecs; i++) {
 +		if (snd_soc_acpi_check_hid(codec_list->codecs[i]) != true)
- 			return NULL;
- 	}
- 
- 	return mach;
- }
--EXPORT_SYMBOL_GPL(sst_acpi_codec_list);
++			return NULL;
++	}
++
++	return mach;
++}
 +EXPORT_SYMBOL_GPL(snd_soc_acpi_codec_list);
- 
- MODULE_LICENSE("GPL v2");
--MODULE_DESCRIPTION("Intel Common ACPI Match module");
++
++MODULE_LICENSE("GPL v2");
 +MODULE_DESCRIPTION("ALSA SoC ACPI module");
 -- 
 2.7.4
