@@ -1,0 +1,472 @@
+From 731afffd7b708f014d199c14ec31d205e7bede3d Mon Sep 17 00:00:00 2001
+From: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Date: Thu, 8 Mar 2018 15:10:34 -0800
+Subject: [PATCH 0899/1582] INTERNAL [IOTG] drm/i915: Decouple pipe and crtc
+ index dependencies
+
+i915 driver had assumptions that pipe and the crtc index always
+matched, but with plane restrictions feature, this assuumption is no
+longer true.
+In virualized environment guest Oses may have pipes with no planes
+attached and no crtc should be created for that pipe (but for
+service OS, CRTC still needs to be created to do the initial modeset).
+In cases were no CRTC was created for some pipes, the index and pipe
+won't
+match and was causing issues. These changes are to decouple the pipe and
+index dependencies in the driver.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Signed-off-by: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Change-Id: Iccf6b54c254e2b3d7053620c1b64ad8dda7632b8
+---
+ drivers/gpu/drm/i915/gvt/handlers.c        |  9 +++-
+ drivers/gpu/drm/i915/i915_drv.h            | 10 ++---
+ drivers/gpu/drm/i915/i915_irq.c            | 46 ++++++++++++++------
+ drivers/gpu/drm/i915/i915_trace.h          |  2 +-
+ drivers/gpu/drm/i915/intel_display.c       | 70 +++++++++++++++++++++---------
+ drivers/gpu/drm/i915/intel_dpll_mgr.c      |  5 ++-
+ drivers/gpu/drm/i915/intel_drv.h           | 10 ++++-
+ drivers/gpu/drm/i915/intel_fifo_underrun.c | 11 ++++-
+ drivers/gpu/drm/i915/intel_pm.c            |  6 ++-
+ 9 files changed, 121 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 7897a9e..ac570ae 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -391,13 +391,20 @@ static int pipeconf_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	u32 data;
+ 	struct drm_device *dev = &vgpu->gvt->dev_priv->drm;
+ 	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
++	struct intel_crtc *crtc;
++
++	crtc = intel_get_crtc_for_pipe(vgpu->gvt->dev_priv, pipe);
++	if (!crtc) {
++		DRM_ERROR("No CRTC for pipe=%d\n", pipe);
++		return 0;
++	}
+ 
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	data = vgpu_vreg(vgpu, offset);
+ 
+ 	if (data & PIPECONF_ENABLE) {
+ 		vgpu_vreg(vgpu, offset) |= I965_PIPECONF_ACTIVE;
+-		dev->driver->enable_vblank(dev, pipe);
++		dev->driver->enable_vblank(dev, drm_crtc_index(&crtc->base));
+ 	} else {
+ 		vgpu_vreg(vgpu, offset) &= ~I965_PIPECONF_ACTIVE;
+ 	}
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 82f8e84..6be1a7d 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -3288,18 +3288,18 @@ ilk_disable_display_irq(struct drm_i915_private *dev_priv, uint32_t bits)
+ 	ilk_update_display_irq(dev_priv, bits, 0);
+ }
+ void bdw_update_pipe_irq(struct drm_i915_private *dev_priv,
+-			 enum pipe pipe,
++			 unsigned int crtc_index,
+ 			 uint32_t interrupt_mask,
+ 			 uint32_t enabled_irq_mask);
+ static inline void bdw_enable_pipe_irq(struct drm_i915_private *dev_priv,
+-				       enum pipe pipe, uint32_t bits)
++				       unsigned int crtc_index, uint32_t bits)
+ {
+-	bdw_update_pipe_irq(dev_priv, pipe, bits, bits);
++	bdw_update_pipe_irq(dev_priv, crtc_index, bits, bits);
+ }
+ static inline void bdw_disable_pipe_irq(struct drm_i915_private *dev_priv,
+-					enum pipe pipe, uint32_t bits)
++					unsigned int crtc_index, uint32_t bits)
+ {
+-	bdw_update_pipe_irq(dev_priv, pipe, bits, 0);
++	bdw_update_pipe_irq(dev_priv, crtc_index, bits, 0);
+ }
+ void ibx_display_interrupt_update(struct drm_i915_private *dev_priv,
+ 				  uint32_t interrupt_mask,
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 302b2e8..23447fe 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -489,11 +489,12 @@ static void bdw_update_port_irq(struct drm_i915_private *dev_priv,
+  * @enabled_irq_mask: mask of interrupt bits to enable
+  */
+ void bdw_update_pipe_irq(struct drm_i915_private *dev_priv,
+-			 enum pipe pipe,
++			 unsigned int crtc_index,
+ 			 uint32_t interrupt_mask,
+ 			 uint32_t enabled_irq_mask)
+ {
+ 	uint32_t new_val;
++	enum pipe pipe;
+ 
+ 	lockdep_assert_held(&dev_priv->irq_lock);
+ 
+@@ -502,6 +503,9 @@ void bdw_update_pipe_irq(struct drm_i915_private *dev_priv,
+ 	if (WARN_ON(!intel_irqs_enabled(dev_priv)))
+ 		return;
+ 
++	if(get_pipe_from_crtc_index(&dev_priv->drm, crtc_index, &pipe))
++		return;
++
+ 	new_val = dev_priv->de_irq_mask[pipe];
+ 	new_val &= ~interrupt_mask;
+ 	new_val |= (~enabled_irq_mask & interrupt_mask);
+@@ -769,9 +773,14 @@ static u32 i915_get_vblank_counter(struct drm_device *dev, unsigned int pipe)
+ 	return (((high1 << 8) | low) + (pixel >= vbl_start)) & 0xffffff;
+ }
+ 
+-static u32 g4x_get_vblank_counter(struct drm_device *dev, unsigned int pipe)
++static u32 g4x_get_vblank_counter(struct drm_device *dev,
++		unsigned int crtc_index)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
++	enum pipe pipe;
++
++	if(get_pipe_from_crtc_index(dev, crtc_index, &pipe))
++		return 0;
+ 
+ 	return I915_READ(PIPE_FRMCOUNT_G4X(pipe));
+ }
+@@ -833,18 +842,21 @@ static int __intel_get_crtc_scanline(struct intel_crtc *crtc)
+ 	return (position + crtc->scanline_offset) % vtotal;
+ }
+ 
+-static bool i915_get_crtc_scanoutpos(struct drm_device *dev, unsigned int pipe,
+-				     bool in_vblank_irq, int *vpos, int *hpos,
+-				     ktime_t *stime, ktime_t *etime,
+-				     const struct drm_display_mode *mode)
++static bool i915_get_crtc_scanoutpos(struct drm_device *dev, unsigned int crtc_index,
++				    bool in_vblank_irq, int *vpos, int *hpos,
++				    ktime_t *stime, ktime_t *etime,
++				    const struct drm_display_mode *mode)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
+-	struct intel_crtc *intel_crtc = intel_get_crtc_for_pipe(dev_priv,
+-								pipe);
++	struct intel_crtc *intel_crtc;
++	enum pipe pipe;
+ 	int position;
+ 	int vbl_start, vbl_end, hsync_start, htotal, vtotal;
+ 	unsigned long irqflags;
+ 
++	intel_crtc = get_intel_crtc_from_index(dev, crtc_index);
++	pipe = intel_crtc->pipe;
++
+ 	if (WARN_ON(!mode->crtc_clock)) {
+ 		DRM_DEBUG_DRIVER("trying to get scanoutpos for disabled "
+ 				 "pipe %c\n", pipe_name(pipe));
+@@ -1553,7 +1565,12 @@ static void display_pipe_crc_irq_handler(struct drm_i915_private *dev_priv,
+ 	struct drm_driver *driver = dev_priv->drm.driver;
+ 	uint32_t crcs[5];
+ 	int head, tail;
++	u32 frame;
+ 
++	if (!crtc) {
++		DRM_DEBUG_KMS("No CRTC available for pipe %d\n", pipe);
++		return;
++	}
+ 	spin_lock(&pipe_crc->lock);
+ 	if (pipe_crc->source) {
+ 		if (!pipe_crc->entries) {
+@@ -1573,7 +1590,8 @@ static void display_pipe_crc_irq_handler(struct drm_i915_private *dev_priv,
+ 
+ 		entry = &pipe_crc->entries[head];
+ 
+-		entry->frame = driver->get_vblank_counter(&dev_priv->drm, pipe);
++		entry->frame = driver->get_vblank_counter(&dev_priv->drm,
++				drm_crtc_index(&crtc->base));
+ 		entry->crc[0] = crc0;
+ 		entry->crc[1] = crc1;
+ 		entry->crc[2] = crc2;
+@@ -1607,9 +1625,9 @@ static void display_pipe_crc_irq_handler(struct drm_i915_private *dev_priv,
+ 		crcs[2] = crc2;
+ 		crcs[3] = crc3;
+ 		crcs[4] = crc4;
+-		drm_crtc_add_crc_entry(&crtc->base, true,
+-				       drm_crtc_accurate_vblank_count(&crtc->base),
+-				       crcs);
++		frame = driver->get_vblank_counter(&dev_priv->drm,
++				drm_crtc_index(&crtc->base));
++		drm_crtc_add_crc_entry(&crtc->base, true, frame, crcs);
+ 	}
+ }
+ #else
+@@ -2445,6 +2463,7 @@ gen8_de_irq_handler(struct drm_i915_private *dev_priv, u32 master_ctl)
+ 	irqreturn_t ret = IRQ_NONE;
+ 	u32 iir;
+ 	enum pipe pipe;
++	struct intel_crtc *crtc;
+ 
+ 	if (master_ctl & GEN8_DE_MISC_IRQ) {
+ 		iir = I915_READ(GEN8_DE_MISC_IIR);
+@@ -2523,8 +2542,9 @@ gen8_de_irq_handler(struct drm_i915_private *dev_priv, u32 master_ctl)
+ 		ret = IRQ_HANDLED;
+ 		I915_WRITE(GEN8_DE_PIPE_IIR(pipe), iir);
+ 
++		crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
+ 		if (iir & GEN8_PIPE_VBLANK) {
+-			drm_handle_vblank(&dev_priv->drm, pipe);
++			drm_handle_vblank(&dev_priv->drm, drm_crtc_index(&crtc->base));
+ #if IS_ENABLED(CONFIG_DRM_I915_GVT)
+ 			gvt_notify_vblank(dev_priv, pipe);
+ #endif
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index 281521f..13cfbab 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -281,7 +281,7 @@ TRACE_EVENT(i915_pipe_update_start,
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+ 			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++									drm_crtc_index(&crtc->base));
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   __entry->min = crtc->debug.min_vbl;
+ 			   __entry->max = crtc->debug.max_vbl;
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index b35aa8c..09192b7 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11750,11 +11750,13 @@ verify_single_dpll_state(struct drm_i915_private *dev_priv,
+ 	if (new_state->active)
+ 		I915_STATE_WARN(!(pll->active_mask & crtc_mask),
+ 				"pll active mismatch (expected pipe %c in active mask 0x%02x)\n",
+-				pipe_name(drm_crtc_index(crtc)), pll->active_mask);
++				pipe_name(to_intel_crtc(crtc)->pipe),
++				pll->active_mask);
+ 	else
+ 		I915_STATE_WARN(pll->active_mask & crtc_mask,
+ 				"pll active mismatch (didn't expect pipe %c in active mask 0x%02x)\n",
+-				pipe_name(drm_crtc_index(crtc)), pll->active_mask);
++				pipe_name(to_intel_crtc(crtc)->pipe),
++				pll->active_mask);
+ 
+ 	I915_STATE_WARN(!(pll->state.crtc_mask & crtc_mask),
+ 			"pll enabled crtcs mismatch (expected 0x%x in 0x%02x)\n",
+@@ -11785,10 +11787,10 @@ verify_shared_dpll_state(struct drm_device *dev, struct drm_crtc *crtc,
+ 
+ 		I915_STATE_WARN(pll->active_mask & crtc_mask,
+ 				"pll active mismatch (didn't expect pipe %c in active mask)\n",
+-				pipe_name(drm_crtc_index(crtc)));
++				pipe_name(to_intel_crtc(crtc)->pipe));
+ 		I915_STATE_WARN(pll->state.crtc_mask & crtc_mask,
+ 				"pll enabled crtcs mismatch (found %x in enabled mask)\n",
+-				pipe_name(drm_crtc_index(crtc)));
++				pipe_name(to_intel_crtc(crtc)->pipe));
+ 	}
+ }
+ 
+@@ -12207,7 +12209,8 @@ u32 intel_crtc_get_vblank_counter(struct intel_crtc *crtc)
+ 	if (!dev->max_vblank_count)
+ 		return drm_crtc_accurate_vblank_count(&crtc->base);
+ 
+-	return dev->driver->get_vblank_counter(dev, crtc->pipe);
++	return dev->driver->get_vblank_counter(dev,
++					       drm_crtc_index(&crtc->base));
+ }
+ 
+ static void intel_atomic_wait_for_vblanks(struct drm_device *dev,
+@@ -12217,42 +12220,44 @@ static void intel_atomic_wait_for_vblanks(struct drm_device *dev,
+ 	unsigned last_vblank_count[I915_MAX_PIPES];
+ 	enum pipe pipe;
+ 	int ret;
++	struct drm_crtc *c;
+ 
+ 	if (!crtc_mask)
+ 		return;
++	for_each_crtc(dev, c) {
++		struct intel_crtc *crtc = to_intel_crtc(c);
+ 
+-	for_each_pipe(dev_priv, pipe) {
+-		struct intel_crtc *crtc = intel_get_crtc_for_pipe(dev_priv,
+-								  pipe);
++		pipe = crtc->pipe;
+ 
+-		if (!((1 << pipe) & crtc_mask))
++		if (!((1 << c->index) & crtc_mask))
+ 			continue;
+ 
+ 		ret = drm_crtc_vblank_get(&crtc->base);
+ 		if (WARN_ON(ret != 0)) {
+-			crtc_mask &= ~(1 << pipe);
++			crtc_mask &= ~(1 << (c->index));
+ 			continue;
+ 		}
+-
+-		last_vblank_count[pipe] = drm_crtc_vblank_count(&crtc->base);
++		last_vblank_count[pipe] = drm_crtc_vblank_count(c);
+ 	}
+ 
+-	for_each_pipe(dev_priv, pipe) {
+-		struct intel_crtc *crtc = intel_get_crtc_for_pipe(dev_priv,
+-								  pipe);
++	for_each_crtc(dev, c) {
++		struct intel_crtc *crtc = to_intel_crtc(c);
+ 		long lret;
+ 
+-		if (!((1 << pipe) & crtc_mask))
++		pipe = crtc->pipe;
++
++		if (!((1 << c->index) & crtc_mask))
+ 			continue;
+ 
+-		lret = wait_event_timeout(dev->vblank[pipe].queue,
++		lret = wait_event_timeout(dev->vblank[c->index].queue,
+ 				last_vblank_count[pipe] !=
+-					drm_crtc_vblank_count(&crtc->base),
++					drm_crtc_vblank_count(c),
+ 				msecs_to_jiffies(50));
+ 
+ 		WARN(!lret, "pipe %c vblank wait timed out\n", pipe_name(pipe));
+ 
+-		drm_crtc_vblank_put(&crtc->base);
++		drm_crtc_vblank_put(c);
++
+ 	}
+ }
+ 
+@@ -13594,6 +13599,27 @@ int intel_get_pipe_from_crtc_id(struct drm_device *dev, void *data,
+ 	return 0;
+ }
+ 
++int get_pipe_from_crtc_index(struct drm_device *dev, unsigned int index, enum pipe *pipe)
++{
++	struct drm_crtc *c = drm_crtc_from_index(dev, index);
++
++	if (WARN_ON(!c))
++		return -ENOENT;
++
++	*pipe =  (to_intel_crtc(c)->pipe);
++	return 0;
++}
++
++struct intel_crtc *get_intel_crtc_from_index(struct drm_device *dev,
++		unsigned int index)
++{
++	struct drm_crtc *c = drm_crtc_from_index(dev, index);
++
++	WARN_ON(!c);
++	return to_intel_crtc(c);
++}
++
++
+ static int intel_encoder_clones(struct intel_encoder *encoder)
+ {
+ 	struct drm_device *dev = encoder->base.dev;
+@@ -15036,7 +15062,8 @@ static void intel_modeset_readout_hw_state(struct drm_device *dev)
+ 		crtc->active = crtc_state->base.active;
+ 
+ 		if (crtc_state->base.active)
+-			dev_priv->active_crtcs |= 1 << crtc->pipe;
++			dev_priv->active_crtcs |=
++				1 << drm_crtc_index(&crtc->base);
+ 
+ 		readout_plane_state(crtc);
+ 
+@@ -15057,7 +15084,8 @@ static void intel_modeset_readout_hw_state(struct drm_device *dev)
+ 
+ 			if (crtc_state->base.active &&
+ 			    crtc_state->shared_dpll == pll)
+-				pll->state.crtc_mask |= 1 << crtc->pipe;
++				pll->state.crtc_mask |=
++					1 << drm_crtc_index(&crtc->base);
+ 		}
+ 		pll->active_mask = pll->state.crtc_mask;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_dpll_mgr.c b/drivers/gpu/drm/i915/intel_dpll_mgr.c
+index df808a9..49a6963 100644
+--- a/drivers/gpu/drm/i915/intel_dpll_mgr.c
++++ b/drivers/gpu/drm/i915/intel_dpll_mgr.c
+@@ -301,7 +301,7 @@ intel_reference_shared_dpll(struct intel_shared_dpll *pll,
+ 	DRM_DEBUG_DRIVER("using %s for pipe %c\n", pll->name,
+ 			 pipe_name(crtc->pipe));
+ 
+-	shared_dpll[pll->id].crtc_mask |= 1 << crtc->pipe;
++	shared_dpll[pll->id].crtc_mask |= 1 << (drm_crtc_index(&crtc->base));
+ }
+ 
+ /**
+@@ -2504,7 +2504,8 @@ void intel_release_shared_dpll(struct intel_shared_dpll *dpll,
+ 	struct intel_shared_dpll_state *shared_dpll_state;
+ 
+ 	shared_dpll_state = intel_atomic_get_shared_dpll_state(state);
+-	shared_dpll_state[dpll->id].crtc_mask &= ~(1 << crtc->pipe);
++	shared_dpll_state[dpll->id].crtc_mask &=
++		~(1 << drm_crtc_index(&crtc->base));
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index d3b01ba..c7db0be 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -1426,6 +1426,9 @@ struct drm_display_mode *intel_crtc_mode_get(struct drm_device *dev,
+ enum pipe intel_get_pipe_from_connector(struct intel_connector *connector);
+ int intel_get_pipe_from_crtc_id(struct drm_device *dev, void *data,
+ 				struct drm_file *file_priv);
++int get_pipe_from_crtc_index(struct drm_device *dev, unsigned int index, enum pipe *pipe);
++struct intel_crtc *get_intel_crtc_from_index(struct drm_device *dev,
++					     unsigned int index);
+ enum transcoder intel_pipe_to_cpu_transcoder(struct drm_i915_private *dev_priv,
+ 					     enum pipe pipe);
+ static inline bool
+@@ -1445,7 +1448,12 @@ intel_crtc_has_dp_encoder(const struct intel_crtc_state *crtc_state)
+ static inline void
+ intel_wait_for_vblank(struct drm_i915_private *dev_priv, enum pipe pipe)
+ {
+-	drm_wait_one_vblank(&dev_priv->drm, pipe);
++	struct intel_crtc *crtc;
++
++	crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
++	if (crtc)
++		drm_wait_one_vblank(&dev_priv->drm,
++				    drm_crtc_index(&crtc->base));
+ }
+ static inline void
+ intel_wait_for_vblank_if_active(struct drm_i915_private *dev_priv, int pipe)
+diff --git a/drivers/gpu/drm/i915/intel_fifo_underrun.c b/drivers/gpu/drm/i915/intel_fifo_underrun.c
+index 0468960..aeed15a 100644
+--- a/drivers/gpu/drm/i915/intel_fifo_underrun.c
++++ b/drivers/gpu/drm/i915/intel_fifo_underrun.c
+@@ -179,11 +179,18 @@ static void broadwell_set_fifo_underrun_reporting(struct drm_device *dev,
+ 						  enum pipe pipe, bool enable)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
++	struct intel_crtc *crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
+ 
++	if (!crtc) {
++		DRM_DEBUG("No crtc for pipe=%d\n", pipe);
++		return;
++	}
+ 	if (enable)
+-		bdw_enable_pipe_irq(dev_priv, pipe, GEN8_PIPE_FIFO_UNDERRUN);
++		bdw_enable_pipe_irq(dev_priv, drm_crtc_index(&crtc->base),
++				    GEN8_PIPE_FIFO_UNDERRUN);
+ 	else
+-		bdw_disable_pipe_irq(dev_priv, pipe, GEN8_PIPE_FIFO_UNDERRUN);
++		bdw_disable_pipe_irq(dev_priv, drm_crtc_index(&crtc->base),
++				     GEN8_PIPE_FIFO_UNDERRUN);
+ }
+ 
+ static void ibx_set_fifo_underrun_reporting(struct drm_device *dev,
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 90fe568..3bb89e3b 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -3687,8 +3687,10 @@ bool intel_can_enable_sagv(struct drm_atomic_state *state)
+ 		return false;
+ 
+ 	/* Since we're now guaranteed to only have one active CRTC... */
+-	pipe = ffs(intel_state->active_crtcs) - 1;
+-	crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
++	crtc = get_intel_crtc_from_index(dev,
++			ffs(intel_state->active_crtcs) - 1);
++	if (!crtc)
++		return false;
+ 	cstate = to_intel_crtc_state(crtc->base.state);
+ 
+ 	if (crtc->base.state->adjusted_mode.flags & DRM_MODE_FLAG_INTERLACE)
+-- 
+2.7.4
+

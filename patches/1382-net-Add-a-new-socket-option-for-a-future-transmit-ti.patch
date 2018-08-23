@@ -1,0 +1,285 @@
+From 949d54b1bf1fa945d16c487866487a51551ddd91 Mon Sep 17 00:00:00 2001
+From: Richard Cochran <rcochran@linutronix.de>
+Date: Tue, 3 Jul 2018 15:42:48 -0700
+Subject: [PATCH 1382/1582] net: Add a new socket option for a future transmit
+ time.
+
+This patch introduces SO_TXTIME. User space enables this option in
+order to pass a desired future transmit time in a CMSG when calling
+sendmsg(2). The argument to this socket option is a 8-bytes long struct
+provided by the uapi header net_tstamp.h defined as:
+
+struct sock_txtime {
+	clockid_t 	clockid;
+	u32		flags;
+};
+
+Note that new fields were added to struct sock by filling a 2-bytes
+hole found in the struct. For that reason, neither the struct size or
+number of cachelines were altered.
+
+Signed-off-by: Richard Cochran <rcochran@linutronix.de>
+Signed-off-by: Jesus Sanchez-Palencia <jesus.sanchez-palencia@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ arch/alpha/include/uapi/asm/socket.h  |  3 +++
+ arch/ia64/include/uapi/asm/socket.h   |  3 +++
+ arch/mips/include/uapi/asm/socket.h   |  3 +++
+ arch/parisc/include/uapi/asm/socket.h |  3 +++
+ arch/s390/include/uapi/asm/socket.h   |  3 +++
+ arch/sparc/include/uapi/asm/socket.h  |  3 +++
+ arch/xtensa/include/uapi/asm/socket.h |  3 +++
+ include/net/sock.h                    | 10 ++++++++++
+ include/uapi/asm-generic/socket.h     |  3 +++
+ include/uapi/linux/net_tstamp.h       | 15 +++++++++++++++
+ net/core/sock.c                       | 35 +++++++++++++++++++++++++++++++++++
+ 11 files changed, 84 insertions(+)
+
+diff --git a/arch/alpha/include/uapi/asm/socket.h b/arch/alpha/include/uapi/asm/socket.h
+index be14f16..065fb37 100644
+--- a/arch/alpha/include/uapi/asm/socket.h
++++ b/arch/alpha/include/uapi/asm/socket.h
+@@ -112,4 +112,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* _UAPI_ASM_SOCKET_H */
+diff --git a/arch/ia64/include/uapi/asm/socket.h b/arch/ia64/include/uapi/asm/socket.h
+index 3efba40..c872c4e 100644
+--- a/arch/ia64/include/uapi/asm/socket.h
++++ b/arch/ia64/include/uapi/asm/socket.h
+@@ -114,4 +114,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* _ASM_IA64_SOCKET_H */
+diff --git a/arch/mips/include/uapi/asm/socket.h b/arch/mips/include/uapi/asm/socket.h
+index 49c3d47..71370fb 100644
+--- a/arch/mips/include/uapi/asm/socket.h
++++ b/arch/mips/include/uapi/asm/socket.h
+@@ -123,4 +123,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* _UAPI_ASM_SOCKET_H */
+diff --git a/arch/parisc/include/uapi/asm/socket.h b/arch/parisc/include/uapi/asm/socket.h
+index 1d0fdc3..061b9cf 100644
+--- a/arch/parisc/include/uapi/asm/socket.h
++++ b/arch/parisc/include/uapi/asm/socket.h
+@@ -104,4 +104,7 @@
+ 
+ #define SO_ZEROCOPY		0x4035
+ 
++#define SO_TXTIME		0x4036
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* _UAPI_ASM_SOCKET_H */
+diff --git a/arch/s390/include/uapi/asm/socket.h b/arch/s390/include/uapi/asm/socket.h
+index 3510c0f..39d9014 100644
+--- a/arch/s390/include/uapi/asm/socket.h
++++ b/arch/s390/include/uapi/asm/socket.h
+@@ -111,4 +111,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* _ASM_SOCKET_H */
+diff --git a/arch/sparc/include/uapi/asm/socket.h b/arch/sparc/include/uapi/asm/socket.h
+index d58520c..7ea35e5 100644
+--- a/arch/sparc/include/uapi/asm/socket.h
++++ b/arch/sparc/include/uapi/asm/socket.h
+@@ -101,6 +101,9 @@
+ 
+ #define SO_ZEROCOPY		0x003e
+ 
++#define SO_TXTIME		0x003f
++#define SCM_TXTIME		SO_TXTIME
++
+ /* Security levels - as per NRL IPv6 - don't actually do anything */
+ #define SO_SECURITY_AUTHENTICATION		0x5001
+ #define SO_SECURITY_ENCRYPTION_TRANSPORT	0x5002
+diff --git a/arch/xtensa/include/uapi/asm/socket.h b/arch/xtensa/include/uapi/asm/socket.h
+index 75a07b8..1de07a7 100644
+--- a/arch/xtensa/include/uapi/asm/socket.h
++++ b/arch/xtensa/include/uapi/asm/socket.h
+@@ -116,4 +116,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif	/* _XTENSA_SOCKET_H */
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 9bd5d68..f383aeb 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -313,6 +313,9 @@ struct sock_common {
+   *	@sk_destruct: called at sock freeing time, i.e. when all refcnt == 0
+   *	@sk_reuseport_cb: reuseport group container
+   *	@sk_rcu: used during RCU grace period
++  *	@sk_clockid: clockid used by time-based scheduling (SO_TXTIME)
++  *	@sk_txtime_deadline_mode: set deadline mode for SO_TXTIME
++  *	@sk_txtime_unused: unused txtime flags
+   */
+ struct sock {
+ 	/*
+@@ -461,6 +464,11 @@ struct sock {
+ 	u8			sk_shutdown;
+ 	u32			sk_tskey;
+ 	atomic_t		sk_zckey;
++
++	u8			sk_clockid;
++	u8			sk_txtime_deadline_mode : 1,
++				sk_txtime_unused : 7;
++
+ 	struct socket		*sk_socket;
+ 	void			*sk_user_data;
+ #ifdef CONFIG_SECURITY
+@@ -771,6 +779,7 @@ enum sock_flags {
+ 	SOCK_FILTER_LOCKED, /* Filter cannot be changed anymore */
+ 	SOCK_SELECT_ERR_QUEUE, /* Wake select on error queue */
+ 	SOCK_RCU_FREE, /* wait rcu grace period in sk_destruct() */
++	SOCK_TXTIME,
+ };
+ 
+ #define SK_FLAGS_TIMESTAMP ((1UL << SOCK_TIMESTAMP) | (1UL << SOCK_TIMESTAMPING_RX_SOFTWARE))
+@@ -1551,6 +1560,7 @@ void sock_kzfree_s(struct sock *sk, void *mem, int size);
+ void sk_send_sigurg(struct sock *sk);
+ 
+ struct sockcm_cookie {
++	u64 transmit_time;
+ 	u32 mark;
+ 	u16 tsflags;
+ };
+diff --git a/include/uapi/asm-generic/socket.h b/include/uapi/asm-generic/socket.h
+index 0ae758c..a12692e 100644
+--- a/include/uapi/asm-generic/socket.h
++++ b/include/uapi/asm-generic/socket.h
+@@ -107,4 +107,7 @@
+ 
+ #define SO_ZEROCOPY		60
+ 
++#define SO_TXTIME		61
++#define SCM_TXTIME		SO_TXTIME
++
+ #endif /* __ASM_GENERIC_SOCKET_H */
+diff --git a/include/uapi/linux/net_tstamp.h b/include/uapi/linux/net_tstamp.h
+index 4fe104b..c9a77c3 100644
+--- a/include/uapi/linux/net_tstamp.h
++++ b/include/uapi/linux/net_tstamp.h
+@@ -141,4 +141,19 @@ struct scm_ts_pktinfo {
+ 	__u32 reserved[2];
+ };
+ 
++/*
++ * SO_TXTIME gets a struct sock_txtime with flags being an integer bit
++ * field comprised of these values.
++ */
++enum txtime_flags {
++	SOF_TXTIME_DEADLINE_MODE = (1 << 0),
++
++	SOF_TXTIME_FLAGS_MASK = (SOF_TXTIME_DEADLINE_MODE)
++};
++
++struct sock_txtime {
++	clockid_t       clockid;        /* reference clockid */
++	u32             flags;          /* flags defined by enum txtime_flags */
++};
++
+ #endif /* _NET_TIMESTAMPING_H */
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 68d08ed..1bfa41e 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -91,6 +91,7 @@
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
++#include <asm/unaligned.h>
+ #include <linux/capability.h>
+ #include <linux/errno.h>
+ #include <linux/errqueue.h>
+@@ -691,6 +692,7 @@ EXPORT_SYMBOL(sk_mc_loop);
+ int sock_setsockopt(struct socket *sock, int level, int optname,
+ 		    char __user *optval, unsigned int optlen)
+ {
++	struct sock_txtime sk_txtime;
+ 	struct sock *sk = sock->sk;
+ 	int val;
+ 	int valbool;
+@@ -1059,6 +1061,24 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
+ 			sock_valbool_flag(sk, SOCK_ZEROCOPY, valbool);
+ 		break;
+ 
++	case SO_TXTIME:
++		if (!ns_capable(sock_net(sk)->user_ns, CAP_NET_ADMIN)) {
++			ret = -EPERM;
++		} else if (optlen != sizeof(struct sock_txtime)) {
++			ret = -EINVAL;
++		} else if (copy_from_user(&sk_txtime, optval,
++			   sizeof(struct sock_txtime))) {
++			ret = -EFAULT;
++		} else if (sk_txtime.flags & ~SOF_TXTIME_FLAGS_MASK) {
++			ret = -EINVAL;
++		} else {
++			sock_valbool_flag(sk, SOCK_TXTIME, true);
++			sk->sk_clockid = sk_txtime.clockid;
++			sk->sk_txtime_deadline_mode =
++				!!(sk_txtime.flags & SOF_TXTIME_DEADLINE_MODE);
++		}
++		break;
++
+ 	default:
+ 		ret = -ENOPROTOOPT;
+ 		break;
+@@ -1104,6 +1124,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
+ 		u64 val64;
+ 		struct linger ling;
+ 		struct timeval tm;
++		struct sock_txtime txtime;
+ 	} v;
+ 
+ 	int lv = sizeof(int);
+@@ -1391,6 +1412,13 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
+ 		v.val = sock_flag(sk, SOCK_ZEROCOPY);
+ 		break;
+ 
++	case SO_TXTIME:
++		lv = sizeof(v.txtime);
++		v.txtime.clockid = sk->sk_clockid;
++		v.txtime.flags |= sk->sk_txtime_deadline_mode ?
++				  SOF_TXTIME_DEADLINE_MODE : 0;
++		break;
++
+ 	default:
+ 		/* We implement the SO_SNDLOWAT etc to not be settable
+ 		 * (1003.1g 7).
+@@ -2117,6 +2145,13 @@ int __sock_cmsg_send(struct sock *sk, struct msghdr *msg, struct cmsghdr *cmsg,
+ 		sockc->tsflags &= ~SOF_TIMESTAMPING_TX_RECORD_MASK;
+ 		sockc->tsflags |= tsflags;
+ 		break;
++	case SCM_TXTIME:
++		if (!sock_flag(sk, SOCK_TXTIME))
++			return -EINVAL;
++		if (cmsg->cmsg_len != CMSG_LEN(sizeof(u64)))
++			return -EINVAL;
++		sockc->transmit_time = get_unaligned((u64 *)CMSG_DATA(cmsg));
++		break;
+ 	/* SCM_RIGHTS and SCM_CREDENTIALS are semantically in SOL_UNIX. */
+ 	case SCM_RIGHTS:
+ 	case SCM_CREDENTIALS:
+-- 
+2.7.4
+

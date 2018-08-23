@@ -1,0 +1,46 @@
+From d8eeb9b26032e20ac041f1215e7353549f753bd8 Mon Sep 17 00:00:00 2001
+From: Rander Wang <rander.wang@linux.intel.com>
+Date: Thu, 12 Jul 2018 15:40:05 +0800
+Subject: [PATCH 1354/1582] ASoC: SOF: refine write_block function
+
+The original function makes a mistake. It changes the value
+of dest data to zero but these data are out of write range
+
+Signed-off-by: Rander Wang <rander.wang@linux.intel.com>
+---
+ sound/soc/sof/intel/hda.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/sof/intel/hda.c b/sound/soc/sof/intel/hda.c
+index 4d6b420..4f13431 100644
+--- a/sound/soc/sof/intel/hda.c
++++ b/sound/soc/sof/intel/hda.c
+@@ -72,6 +72,7 @@ void hda_dsp_block_write(struct snd_sof_dev *sdev, u32 offset, void *src,
+ 	u32 tmp = 0;
+ 	int i, m, n;
+ 	const u8 *src_byte = src;
++	u8 *dst_byte;
+ 
+ 	m = size / 4;
+ 	n = size % 4;
+@@ -80,8 +81,16 @@ void hda_dsp_block_write(struct snd_sof_dev *sdev, u32 offset, void *src,
+ 	__iowrite32_copy(dest, src, m);
+ 
+ 	if (n) {
++		/* first read the 32bit data of dest, then change affected
++		 * bytes, and write back to dest. For unaffected bytes, it
++		 * should not be changed
++		 */
++		__ioread32_copy(&tmp, dest + m * 4, 1);
++
++		dst_byte = (u8 *)&tmp;
+ 		for (i = 0; i < n; i++)
+-			tmp |= (u32)*(src_byte + m * 4 + i) << (i * 8);
++			dst_byte[i] = src_byte[m * 4 + i];
++
+ 		__iowrite32_copy(dest + m * 4, &tmp, 1);
+ 	}
+ }
+-- 
+2.7.4
+

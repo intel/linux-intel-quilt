@@ -1,0 +1,106 @@
+From 1b9b1ab61a232f4c47ceb2bdc668cca732c67180 Mon Sep 17 00:00:00 2001
+From: wu xia <xia.wu@intel.com>
+Date: Thu, 28 Apr 2016 18:08:53 +0300
+Subject: [PATCH 0946/1582] media: Add media_device_request_complete() to mark
+ requests comp
+
+Once the request has been queued and later on completed, a driver will
+mark the request complete by calling media_device_request_complete().
+
+Signed-off-by: Sakari Ailus <sakari.ailus@linux.intel.com>
+Signed-off-by: wu xia <xia.wu@intel.com>
+---
+ drivers/media/media-device.c | 49 ++++++++++++++++++++++++++++++++++++++++++++
+ include/media/media-device.h |  3 +++
+ 2 files changed, 52 insertions(+)
+
+diff --git a/drivers/media/media-device.c b/drivers/media/media-device.c
+index 9154ea6..3c3af13 100644
+--- a/drivers/media/media-device.c
++++ b/drivers/media/media-device.c
+@@ -39,6 +39,7 @@ static char *__request_state[] = {
+ 	"IDLE",
+ 	"QUEUED",
+ 	"DELETED",
++	"COMPLETED",
+ };
+ 
+ #define request_state(i)			\
+@@ -201,6 +202,54 @@ static int media_device_request_delete(struct media_device *mdev,
+ 	return 0;
+ }
+ 
++void media_device_request_complete(struct media_device *mdev,
++				   struct media_device_request *req)
++{
++	struct file *filp;
++	unsigned long flags;
++
++	spin_lock_irqsave(&mdev->req_lock, flags);
++
++	if (req->state == MEDIA_DEVICE_REQUEST_STATE_IDLE) {
++		dev_dbg(mdev->dev,
++			"request: not completing an idle request %u\n",
++			req->id);
++		spin_unlock_irqrestore(&mdev->req_lock, flags);
++		return;
++	}
++
++	if (WARN_ON(req->state != MEDIA_DEVICE_REQUEST_STATE_QUEUED)) {
++		dev_dbg(mdev->dev, "request: can't delete %u, state %s\n",
++			req->id, request_state(req->state));
++		spin_unlock_irqrestore(&mdev->req_lock, flags);
++		return;
++	}
++
++	req->state = MEDIA_DEVICE_REQUEST_STATE_COMPLETE;
++	filp = req->filp;
++	if (filp) {
++		/*
++		 * If the file handle is still around we remove if
++		 * from the lists here. Otherwise it has been removed
++		 * when the file handle closed.
++		 */
++		list_del(&req->list);
++		list_del(&req->fh_list);
++		req->filp = NULL;
++	}
++
++	spin_unlock_irqrestore(&mdev->req_lock, flags);
++
++	/*
++	 * The driver holds a reference to a request if the filp
++	 * pointer is non-NULL: the file handle associated to the
++	 * request may have been released by now, i.e. filp is NULL.
++	 */
++	if (filp)
++		media_device_request_put(req);
++}
++EXPORT_SYMBOL_GPL(media_device_request_complete);
++
+ static int media_device_request_queue_apply(
+ 	struct media_device *mdev, struct media_device_request *req,
+ 	int (*fn)(struct media_device *mdev,
+diff --git a/include/media/media-device.h b/include/media/media-device.h
+index 4e9b1db..c34a87e 100644
+--- a/include/media/media-device.h
++++ b/include/media/media-device.h
+@@ -35,6 +35,7 @@ enum media_device_request_state {
+ 	MEDIA_DEVICE_REQUEST_STATE_IDLE,
+ 	MEDIA_DEVICE_REQUEST_STATE_QUEUED,
+ 	MEDIA_DEVICE_REQUEST_STATE_DELETED,
++	MEDIA_DEVICE_REQUEST_STATE_COMPLETE,
+ };
+ 
+ /**
+@@ -526,5 +527,7 @@ struct media_device_request *
+ media_device_request_find(struct media_device *mdev, u16 reqid);
+ void media_device_request_get(struct media_device_request *req);
+ void media_device_request_put(struct media_device_request *req);
++void media_device_request_complete(struct media_device *mdev,
++				   struct media_device_request *req);
+ 
+ #endif
+-- 
+2.7.4
+
