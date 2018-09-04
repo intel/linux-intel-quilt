@@ -1,0 +1,105 @@
+From 74f1657c579182ecd12470367c940d1d8e02a45d Mon Sep 17 00:00:00 2001
+From: Rusaimi Amira Ruslan <rusaimi.amira.ruslan@intel.com>
+Date: Fri, 27 Jul 2018 14:52:21 +0800
+Subject: [PATCH 53/58] net: stmmac: add ethtool support for get/set channel
+
+The number of available channels and queues are assumed to be the same.
+Channels here is also referred to queues as each channel
+is assumed tied to a queue for both tx and rx.
+
+Change-Id: I7da1278970310cf8caba96ddc2b62e7de3bb3bba
+Signed-off-by: Rusaimi Amira Ruslan <rusaimi.amira.ruslan@intel.com>
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_ethtool.c   | 34 ++++++++++++++++++++++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c  |  2 --
+ drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c   |  1 -
+ 3 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index 262d7c5..e7ddc61 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -1146,6 +1146,38 @@ static int stmmac_set_coalesce(struct net_device *dev,
+ 	return 0;
+ }
+ 
++static void stmmac_get_channels(struct net_device *dev,
++				struct ethtool_channels *chan)
++{
++	struct stmmac_priv *priv = netdev_priv(dev);
++
++	chan->rx_count = priv->plat->rx_queues_to_use;
++	chan->tx_count = priv->plat->tx_queues_to_use;
++	chan->max_rx = priv->dma_cap.number_rx_queues;
++	chan->max_tx = priv->dma_cap.number_tx_queues;
++}
++
++static int stmmac_set_channels(struct net_device *dev,
++			       struct ethtool_channels *chan)
++{
++	struct stmmac_priv *priv = netdev_priv(dev);
++	int ret = 0;
++
++	if (chan->rx_count > priv->dma_cap.number_rx_queues ||
++	    chan->tx_count > priv->dma_cap.number_tx_queues ||
++	    !chan->rx_count || !chan->tx_count)
++		return -EINVAL;
++
++	ret = dev->netdev_ops->ndo_stop(dev);
++	if (ret == 0) {
++		priv->plat->rx_queues_to_use = chan->rx_count;
++		priv->plat->tx_queues_to_use = chan->tx_count;
++		ret = dev->netdev_ops->ndo_open(dev);
++	}
++
++	return ret;
++}
++
+ static int stmmac_get_ts_info(struct net_device *dev,
+ 			      struct ethtool_ts_info *info)
+ {
+@@ -1736,6 +1768,8 @@ static const struct ethtool_ops stmmac_ethtool_ops = {
+ 	.get_ts_info = stmmac_get_ts_info,
+ 	.get_coalesce = stmmac_get_coalesce,
+ 	.set_coalesce = stmmac_set_coalesce,
++	.get_channels = stmmac_get_channels,
++	.set_channels = stmmac_set_channels,
+ 	.get_tunable = stmmac_get_tunable,
+ 	.set_tunable = stmmac_set_tunable,
+ 	.get_link_ksettings = stmmac_ethtool_get_link_ksettings,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 806aaa0..896bf89d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1813,7 +1813,6 @@ static void stmmac_dma_operation_mode(struct stmmac_priv *priv)
+ 	/* configure all channels */
+ 	for (chan = 0; chan < rx_channels_count; chan++) {
+ 		qmode = priv->plat->rx_queues_cfg[chan].mode_to_use;
+-
+ 		stmmac_dma_rx_mode(priv, priv->ioaddr, rxmode, chan,
+ 				rxfifosz, qmode);
+ 		stmmac_set_dma_bfsize(priv, priv->ioaddr, priv->dma_buf_sz,
+@@ -1822,7 +1821,6 @@ static void stmmac_dma_operation_mode(struct stmmac_priv *priv)
+ 
+ 	for (chan = 0; chan < tx_channels_count; chan++) {
+ 		qmode = priv->plat->tx_queues_cfg[chan].mode_to_use;
+-
+ 		stmmac_dma_tx_mode(priv, priv->ioaddr, txmode, chan,
+ 				txfifosz, qmode);
+ 	}
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 03b6912..03b25f7 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -241,7 +241,6 @@ static int synp_haps_default_data(struct pci_dev *pdev,
+ 
+ 	plat->rx_queues_to_use = 6;
+ 	plat->tx_queues_to_use = 4;
+-
+ 	plat->rx_sched_algorithm = MTL_RX_ALGORITHM_SP;
+ 
+ 	plat->rx_queues_cfg[0].mode_to_use = MTL_QUEUE_DCB;
+-- 
+2.7.4
+

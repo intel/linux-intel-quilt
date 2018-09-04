@@ -1,0 +1,50 @@
+From 77dac7fae077fb65388ba8b4f6d518bf009615e3 Mon Sep 17 00:00:00 2001
+From: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+Date: Wed, 18 Jul 2018 14:51:59 -0700
+Subject: [PATCH 36/39] cpufreq: intel_pstate: Show different max frequency
+ with turbo 3 and HWP
+
+On HWP platforms with Turbo 3.0, the HWP capability max ratio shows the
+maximum ratio of that core, which can be different than other cores. If
+we show the correct maximum frequency in cpufreq sysfs via
+cpuinfo_max_freq and scaling_max_freq then, user can know which cores
+can run faster for pinning some high priority tasks.
+
+Currently the max turbo frequency is shown as max frequency, which is
+the max of all cores, even if some cores can't reach that frequency
+even for single threaded workload.
+
+But it is possible that max ratio in HWP capabilities is set as 0xFF or
+some high invalid value (E.g. One KBL NUC). Since the actual performance
+can never exceed 1 core turbo frequency from MSR TURBO_RATIO_LIMIT, we
+use this as a bound check.
+
+Signed-off-by: Srinivas Pandruvada <srinivas.pandruvada@linux.intel.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+---
+ drivers/cpufreq/intel_pstate.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/cpufreq/intel_pstate.c b/drivers/cpufreq/intel_pstate.c
+index 6a62ece..7bfb983 100644
+--- a/drivers/cpufreq/intel_pstate.c
++++ b/drivers/cpufreq/intel_pstate.c
+@@ -2082,6 +2082,15 @@ static int __intel_pstate_cpu_init(struct cpufreq_policy *policy)
+ 			cpu->pstate.max_pstate : cpu->pstate.turbo_pstate;
+ 	policy->cpuinfo.max_freq *= cpu->pstate.scaling;
+ 
++	if (hwp_active) {
++		unsigned int max_freq;
++
++		max_freq = global.turbo_disabled ?
++			cpu->pstate.max_freq : cpu->pstate.turbo_freq;
++		if (max_freq < policy->cpuinfo.max_freq)
++			policy->cpuinfo.max_freq = max_freq;
++	}
++
+ 	intel_pstate_init_acpi_perf_limits(policy);
+ 
+ 	policy->fast_switch_possible = true;
+-- 
+2.7.4
+

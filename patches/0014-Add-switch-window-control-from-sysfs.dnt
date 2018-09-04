@@ -1,0 +1,409 @@
+From 259b1404a339a8eb4ce64f3cdcddd69300308291 Mon Sep 17 00:00:00 2001
+From: Laurent FERT <laurent.fert@intel.com>
+Date: Thu, 2 Apr 2015 11:06:34 +0200
+Subject: [PATCH 14/62] Add switch window control from sysfs
+
+Sequence to get the MSC to switch window is to
+  * assert a trigger
+  * de-assert storeEn
+  * re-assert storeEn
+
+Signed-off-by: Laurent FERT <laurent.fert@intel.com>
+---
+ drivers/hwtracing/intel_th/core.c     |  21 ++++++
+ drivers/hwtracing/intel_th/gth.c      | 122 +++++++++++++++++++++++++++-------
+ drivers/hwtracing/intel_th/gth.h      |   7 ++
+ drivers/hwtracing/intel_th/intel_th.h |   9 ++-
+ drivers/hwtracing/intel_th/msu.c      |  51 +++++++++++---
+ 5 files changed, 176 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/hwtracing/intel_th/core.c b/drivers/hwtracing/intel_th/core.c
+index da962aa..99d24cd 100644
+--- a/drivers/hwtracing/intel_th/core.c
++++ b/drivers/hwtracing/intel_th/core.c
+@@ -914,6 +914,27 @@ int intel_th_trace_enable(struct intel_th_device *thdev)
+ EXPORT_SYMBOL_GPL(intel_th_trace_enable);
+ 
+ /**
++ * intel_th_trace_switch() - execute a switch sequence
++ * @thdev:	output device that requests tracing switch
++ */
++int intel_th_trace_switch(struct intel_th_device *thdev)
++{
++	struct intel_th_device *hub = to_intel_th_device(thdev->dev.parent);
++	struct intel_th_driver *hubdrv = to_intel_th_driver(hub->dev.driver);
++
++	if (WARN_ON_ONCE(hub->type != INTEL_TH_SWITCH))
++		return -EINVAL;
++
++	if (WARN_ON_ONCE(thdev->type != INTEL_TH_OUTPUT))
++		return -EINVAL;
++
++	hubdrv->trig_switch(hub, &thdev->output);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(intel_th_trace_switch);
++
++/**
+  * intel_th_trace_disable() - disable tracing for an output device
+  * @thdev:	output device that requests tracing be disabled
+  */
+diff --git a/drivers/hwtracing/intel_th/gth.c b/drivers/hwtracing/intel_th/gth.c
+index 2683f0e..7d1c2e9 100644
+--- a/drivers/hwtracing/intel_th/gth.c
++++ b/drivers/hwtracing/intel_th/gth.c
+@@ -300,6 +300,10 @@ static void intel_th_gth_reset(struct gth_device *gth)
+ 	/* sources */
+ 	iowrite32(0, gth->base + REG_GTH_SCR);
+ 	iowrite32(0xfc, gth->base + REG_GTH_SCR2);
++
++	/* setup CTS for single trigger */
++	iowrite32(0x80000000, gth->base + REG_CTS_C0S0_EN);
++	iowrite32(0x40000010, gth->base + REG_CTS_C0S0_ACT);
+ }
+ 
+ /*
+@@ -448,6 +452,66 @@ static int intel_th_output_attributes(struct gth_device *gth)
+ }
+ 
+ /**
++ * intel_th_gth_stop() - stop tracing to an output device
++ * @gth:		GTH device
++ * @output:		output device's descriptor
++ * @capture_done:	set when no more traces will be captured
++ *
++ * This will stop tracing using force storeEn off signal and wait for the
++ * pipelines to be empty for the corresponding output port.
++ */
++static void intel_th_gth_stop(struct gth_device *gth,
++			      struct intel_th_output *output,
++			      bool capture_done)
++{
++	struct intel_th_device *outdev =
++		container_of(output, struct intel_th_device, output);
++	unsigned long count;
++	u32 reg;
++	u32 scr2 = 0xfc | (capture_done ? 1 : 0);
++
++	iowrite32(0, gth->base + REG_GTH_SCR);
++	iowrite32(scr2, gth->base + REG_GTH_SCR2);
++
++	/* wait on pipeline empty for the given port */
++	for (reg = 0, count = GTH_PLE_WAITLOOP_DEPTH;
++	     count && !(reg & BIT(output->port)); count--) {
++		reg = ioread32(gth->base + REG_GTH_STAT);
++		cpu_relax();
++	}
++
++	if (!count)
++		dev_dbg(gth->dev, "timeout waiting for GTH[%d] PLE\n",
++			output->port);
++
++	/* wait on output piepline empty */
++	if (output->wait_empty)
++		output->wait_empty(outdev);
++
++	/* clear force capture done for next captures */
++	iowrite32(0xfc, gth->base + REG_GTH_SCR2);
++}
++
++/**
++ * intel_th_gth_start() - start tracing to an output device
++ * @gth:	GTH device
++ * @output:	output device's descriptor
++ *
++ * This will start tracing using force storeEn signal.
++ */
++static void intel_th_gth_start(struct gth_device *gth,
++			       struct intel_th_output *output)
++{
++	u32 scr = 0xfc0000;
++
++	if (output->multiblock)
++		scr |= 0xff;
++
++	iowrite32(scr, gth->base + REG_GTH_SCR);
++	iowrite32(0, gth->base + REG_GTH_SCR2);
++}
++
++/**
+  * intel_th_gth_disable() - disable tracing to an output device
+  * @thdev:	GTH device
+  * @output:	output device's descriptor
+@@ -460,7 +524,6 @@ static void intel_th_gth_disable(struct intel_th_device *thdev,
+ 				 struct intel_th_output *output)
+ {
+ 	struct gth_device *gth = dev_get_drvdata(&thdev->dev);
+-	unsigned long count;
+ 	int master;
+ 	u32 reg;
+ 
+@@ -473,22 +536,7 @@ static void intel_th_gth_disable(struct intel_th_device *thdev,
+ 	}
+ 	spin_unlock(&gth->gth_lock);
+ 
+-	iowrite32(0, gth->base + REG_GTH_SCR);
+-	iowrite32(0xfd, gth->base + REG_GTH_SCR2);
+-
+-	/* wait on pipeline empty for the given port */
+-	for (reg = 0, count = GTH_PLE_WAITLOOP_DEPTH;
+-	     count && !(reg & BIT(output->port)); count--) {
+-		reg = ioread32(gth->base + REG_GTH_STAT);
+-		cpu_relax();
+-	}
+-
+-	/* clear force capture done for next captures */
+-	iowrite32(0xfc, gth->base + REG_GTH_SCR2);
+-
+-	if (!count)
+-		dev_dbg(&thdev->dev, "timeout waiting for GTH[%d] PLE\n",
+-			output->port);
++	intel_th_gth_stop(gth, output, true);
+ 
+ 	reg = ioread32(gth->base + REG_GTH_SCRPD0);
+ 	reg &= ~output->scratchpad;
+@@ -517,7 +565,7 @@ static void intel_th_gth_enable(struct intel_th_device *thdev,
+ {
+ 	struct gth_device *gth = dev_get_drvdata(&thdev->dev);
+ 	struct intel_th *th = to_intel_th(thdev);
+-	u32 scr = 0xfc0000, scrpd;
++	u32 scrpd;
+ 	int master;
+ 
+ 	spin_lock(&gth->gth_lock);
+@@ -528,9 +576,6 @@ static void intel_th_gth_enable(struct intel_th_device *thdev,
+ 		gth_master_set(gth, master, output->port);
+ 	}
+ 
+-	if (output->multiblock)
+-		scr |= 0xff;
+-
+ 	output->active = true;
+ 	spin_unlock(&gth->gth_lock);
+ 
+@@ -541,8 +586,38 @@ static void intel_th_gth_enable(struct intel_th_device *thdev,
+ 	scrpd |= output->scratchpad;
+ 	iowrite32(scrpd, gth->base + REG_GTH_SCRPD0);
+ 
+-	iowrite32(scr, gth->base + REG_GTH_SCR);
+-	iowrite32(0, gth->base + REG_GTH_SCR2);
++	intel_th_gth_start(gth, output);
++}
++
++/**
++ * intel_th_gth_switch() - execute a switch sequence
++ * @thdev:	GTH device
++ * @output:	output device's descriptor
++ *
++ * This will execute a switch sequence that will trigger a switch window
++ * when tracing to MSC in multi-block mode.
++ */
++static void intel_th_gth_switch(struct intel_th_device *thdev,
++				struct intel_th_output *output)
++{
++	struct gth_device *gth = dev_get_drvdata(&thdev->dev);
++	unsigned long count;
++	u32 reg;
++
++	/* trigger */
++	iowrite32(0, gth->base + REG_CTS_CTL);
++	iowrite32(1, gth->base + REG_CTS_CTL);
++	/* wait on trigger status */
++	for (reg = 0, count = CTS_TRIG_WAITLOOP_DEPTH;
++	     count && !(reg & BIT(4)); count--) {
++		reg = ioread32(gth->base + REG_CTS_STAT);
++		cpu_relax();
++	}
++	if (!count)
++		dev_dbg(&thdev->dev, "timeout waiting for CTS Trigger\n");
++
++	intel_th_gth_stop(gth, output, false);
++	intel_th_gth_start(gth, output);
+ }
+ 
+ /**
+@@ -719,6 +794,7 @@ static struct intel_th_driver intel_th_gth_driver = {
+ 	.unassign	= intel_th_gth_unassign,
+ 	.set_output	= intel_th_gth_set_output,
+ 	.enable		= intel_th_gth_enable,
++	.trig_switch	= intel_th_gth_switch,
+ 	.disable	= intel_th_gth_disable,
+ 	.driver	= {
+ 		.name	= "gth",
+diff --git a/drivers/hwtracing/intel_th/gth.h b/drivers/hwtracing/intel_th/gth.h
+index 6f2b0b9..1f7d0d8 100644
+--- a/drivers/hwtracing/intel_th/gth.h
++++ b/drivers/hwtracing/intel_th/gth.h
+@@ -49,6 +49,11 @@ enum {
+ 	REG_GTH_SCRPD3		= 0xec, /* ScratchPad[3] */
+ 	REG_TSCU_TSUCTRL	= 0x2000, /* TSCU control register */
+ 	REG_TSCU_TSCUSTAT	= 0x2004, /* TSCU status register */
++	/* Common Capture Sequencer (CTS) registers */
++	REG_CTS_C0S0_EN		= 0x30c0, /* clause_event_enable_c0s0 */
++	REG_CTS_C0S0_ACT	= 0x3180, /* clause_action_control_c0s0 */
++	REG_CTS_STAT		= 0x32a0, /* cts_status */
++	REG_CTS_CTL		= 0x32a4, /* cts_control */
+ };
+ 
+ /* waiting for Pipeline Empty bit(s) to assert for GTH */
+@@ -56,5 +61,7 @@ enum {
+ 
+ #define TSUCTRL_CTCRESYNC	BIT(0)
+ #define TSCUSTAT_CTCSYNCING	BIT(1)
++/* waiting for Trigger status to assert for CTS */
++#define CTS_TRIG_WAITLOOP_DEPTH	10000
+ 
+ #endif /* __INTEL_TH_GTH_H__ */
+diff --git a/drivers/hwtracing/intel_th/intel_th.h b/drivers/hwtracing/intel_th/intel_th.h
+index 780206d..4f55d53 100644
+--- a/drivers/hwtracing/intel_th/intel_th.h
++++ b/drivers/hwtracing/intel_th/intel_th.h
+@@ -18,6 +18,8 @@ enum {
+ 	INTEL_TH_SWITCH,
+ };
+ 
++struct intel_th_device;
++
+ /**
+  * struct intel_th_output - descriptor INTEL_TH_OUTPUT type devices
+  * @port:	output port number, assigned by the switch
+@@ -25,6 +27,7 @@ enum {
+  * @scratchpad:	scratchpad bits to flag when this output is enabled
+  * @multiblock:	true for multiblock output configuration
+  * @active:	true when this output is enabled
++ * @wait_empty:	wait for device pipeline to be empty
+  *
+  * Output port descriptor, used by switch driver to tell which output
+  * port this output device corresponds to. Filled in at output device's
+@@ -37,6 +40,7 @@ struct intel_th_output {
+ 	unsigned int	scratchpad;
+ 	bool		multiblock;
+ 	bool		active;
++	void		(*wait_empty)(struct intel_th_device *);
+ };
+ 
+ /**
+@@ -157,6 +161,8 @@ struct intel_th_driver {
+ 					    struct intel_th_device *othdev);
+ 	void			(*enable)(struct intel_th_device *thdev,
+ 					  struct intel_th_output *output);
++	void			(*trig_switch)(struct intel_th_device *thdev,
++					       struct intel_th_output *output);
+ 	void			(*disable)(struct intel_th_device *thdev,
+ 					   struct intel_th_output *output);
+ 	/* output ops */
+@@ -220,6 +226,7 @@ int intel_th_driver_register(struct intel_th_driver *thdrv);
+ void intel_th_driver_unregister(struct intel_th_driver *thdrv);
+ 
+ int intel_th_trace_enable(struct intel_th_device *thdev);
++int intel_th_trace_switch(struct intel_th_device *thdev);
+ int intel_th_trace_disable(struct intel_th_device *thdev);
+ int intel_th_set_output(struct intel_th_device *thdev,
+ 			unsigned int master);
+@@ -290,7 +297,7 @@ to_intel_th_hub(struct intel_th_device *thdev)
+ enum {
+ 	/* Global Trace Hub (GTH) */
+ 	REG_GTH_OFFSET		= 0x0000,
+-	REG_GTH_LENGTH		= 0x2000,
++	REG_GTH_LENGTH		= 0x4000,
+ 
+ 	/* Timestamp counter unit (TSCU) */
+ 	REG_TSCU_OFFSET		= 0x2000,
+diff --git a/drivers/hwtracing/intel_th/msu.c b/drivers/hwtracing/intel_th/msu.c
+index 634f580..f9cdf5b 100644
+--- a/drivers/hwtracing/intel_th/msu.c
++++ b/drivers/hwtracing/intel_th/msu.c
+@@ -531,23 +531,14 @@ static int msc_configure(struct msc *msc)
+  */
+ static void msc_disable(struct msc *msc)
+ {
+-	unsigned long count;
+ 	u32 reg;
+ 
+ 	lockdep_assert_held(&msc->buf_mutex);
+ 
+ 	intel_th_trace_disable(msc->thdev);
+ 
+-	for (reg = 0, count = MSC_PLE_WAITLOOP_DEPTH;
+-	     count && !(reg & MSCSTS_PLE); count--) {
+-		reg = ioread32(msc->reg_base + REG_MSU_MSC0STS);
+-		cpu_relax();
+-	}
+-
+-	if (!count)
+-		dev_dbg(msc_dev(msc), "timeout waiting for MSC0 PLE\n");
+-
+ 	if (msc->mode == MSC_MODE_SINGLE) {
++		reg = ioread32(msc->reg_base + REG_MSU_MSC0STS);
+ 		msc->single_wrap = !!(reg & MSCSTS_WRAPSTAT);
+ 
+ 		reg = ioread32(msc->reg_base + REG_MSU_MSC0MWP);
+@@ -1250,6 +1241,22 @@ static const struct file_operations intel_th_msc_fops = {
+ 	.owner		= THIS_MODULE,
+ };
+ 
++static void msc_wait_ple(struct intel_th_device *thdev)
++{
++	struct msc *msc = dev_get_drvdata(&thdev->dev);
++	unsigned long count;
++	u32 reg;
++
++	for (reg = 0, count = MSC_PLE_WAITLOOP_DEPTH;
++	     count && !(reg & MSCSTS_PLE); count--) {
++		reg = ioread32(msc->reg_base + REG_MSU_MSC0STS);
++		cpu_relax();
++	}
++
++	if (!count)
++		dev_dbg(msc_dev(msc), "timeout waiting for MSC0 PLE\n");
++}
++
+ static int intel_th_msc_init(struct msc *msc)
+ {
+ 	atomic_set(&msc->user_count, -1);
+@@ -1263,6 +1270,8 @@ static int intel_th_msc_init(struct msc *msc)
+ 		(ioread32(msc->reg_base + REG_MSU_MSC0CTL) & MSC_LEN) >>
+ 		__ffs(MSC_LEN);
+ 
++	msc->thdev->output.wait_empty = msc_wait_ple;
++
+ 	return 0;
+ }
+ 
+@@ -1439,10 +1448,32 @@ nr_pages_store(struct device *dev, struct device_attribute *attr,
+ 
+ static DEVICE_ATTR_RW(nr_pages);
+ 
++static ssize_t
++win_switch_store(struct device *dev, struct device_attribute *attr,
++		 const char *buf, size_t size)
++{
++	struct msc *msc = dev_get_drvdata(dev);
++	unsigned long val;
++	int ret;
++
++	ret = kstrtoul(buf, 10, &val);
++	if (ret)
++		return ret;
++
++	if (val != 1)
++		return -EINVAL;
++
++	intel_th_trace_switch(msc->thdev);
++	return size;
++}
++
++static DEVICE_ATTR_WO(win_switch);
++
+ static struct attribute *msc_output_attrs[] = {
+ 	&dev_attr_wrap.attr,
+ 	&dev_attr_mode.attr,
+ 	&dev_attr_nr_pages.attr,
++	&dev_attr_win_switch.attr,
+ 	NULL,
+ };
+ 
+-- 
+2.7.4
+

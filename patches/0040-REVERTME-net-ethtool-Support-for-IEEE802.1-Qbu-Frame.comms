@@ -1,0 +1,210 @@
+From 80c24aa989ec02a305e9d889148fdfcc9814c35e Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Sat, 14 Jul 2018 04:10:03 +0800
+Subject: [PATCH 40/58] REVERTME: net: ethtool: Support for IEEE802.1 Qbu Frame
+ Preemption
+
+This patch is kept here for IP validation purpose. It will be dropped
+once Linux mainline traffic-control TSN framework has matured.
+
+IEEE802.1 Qbu Frame Preemption (FPE) defines the technology in Ethernet
+MAC controller that allow Ethernet frames from express queue to be
+interpersed within an Ethernet frame from preemptable queue. MAC Merge
+Sublayer inside Ethernet MAC controller merges these Ethernet frames
+from preemptable MAC (pMAC) and express MAC (eMAC) in transparent
+fashion to PHY layer. , i.e. PHY layer only see a normal Ethernet frame.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ include/linux/ethtool.h      |  6 ++++
+ include/uapi/linux/ethtool.h | 65 ++++++++++++++++++++++++++++++++++++++++++++
+ net/core/ethtool.c           | 43 +++++++++++++++++++++++++++++
+ 3 files changed, 114 insertions(+)
+
+diff --git a/include/linux/ethtool.h b/include/linux/ethtool.h
+index 9eb68f9..7ced10f 100644
+--- a/include/linux/ethtool.h
++++ b/include/linux/ethtool.h
+@@ -324,6 +324,8 @@ bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
+  * @get_est_info: Get IEEE802.1 Qbv EST info, e.g. base time, cycle time
+  *	& cycle time extension.
+  * @set_est_info: Set IEEE802.1 Qbv EST info.
++ * @get_fpe_info: Get IEEE 802.1Qbu FPE info.
++ * @set_fpe_info: Set IEEE 802.1Qbu FPE info.
+  *
+  * All operations are optional (i.e. the function pointer may be set
+  * to %NULL) and callers must take this into account.  Callers must
+@@ -433,5 +435,9 @@ struct ethtool_ops {
+ 				struct ethtool_est_info *);
+ 	int	(*set_est_info)(struct net_device *,
+ 				struct ethtool_est_info *);
++	int	(*get_fpe_info)(struct net_device *,
++				struct ethtool_fpe_info *);
++	int	(*set_fpe_info)(struct net_device *,
++				struct ethtool_fpe_info *);
+ };
+ #endif /* _LINUX_ETHTOOL_H */
+diff --git a/include/uapi/linux/ethtool.h b/include/uapi/linux/ethtool.h
+index 8d441e3..61adb85 100644
+--- a/include/uapi/linux/ethtool.h
++++ b/include/uapi/linux/ethtool.h
+@@ -1312,9 +1312,17 @@ enum ethtool_fec_config_bits {
+ /*
+  * enum ethtool_gate_op - gate operation ID
+  * @ETH_GATEOP_SET_GATE_STATES: Set gate states only.
++ * @ETH_GATEOP_SET_N_HOLD_MAC: Set gate states and port associated with
++ *                             pMAC stops transmitting preemptable
++ *                             frames.
++ * @ETH_GATEOP_SET_N_RELS_MAC: Set gate states and port associated with
++ *                             pMAC resumes transmitting preemptable
++ *                             frames.
+  */
+ enum ethtool_gate_op {
+ 	ETH_GATEOP_SET_GATE_STATES	= 0,
++	ETH_GATEOP_SET_N_HOLD_MAC,
++	ETH_GATEOP_SET_N_RELS_MAC,
+ };
+ 
+ /**
+@@ -1434,6 +1442,60 @@ struct ethtool_est_info {
+ 	__u32	btrl;
+ };
+ 
++/**
++ * struct ethtool_fpe_info - configuring IEEE802.1 Qbu Frame Preemption
++ * (FPE).
++ * @cmd: Command number - %ETHTOOL_{G,S}FPEINFO.
++ * @sts_map: On entry, bitmap of FPE status for each priority.
++ *           Value of each bit:- 0: Express & 1: Preemptable.
++ *           Least significant bit of sts_map field is for priority-0.
++ *           For example: sts_map = 0x65 (0110_0101b) means frames from
++ *           following priority list (0, 2, 5 & 6) are sent through pMAC.
++ *           On successful return, FPE status bitmap value actually read/
++ *           written.
++ *           In case of error for write operation, a bit with value '0'
++ *           indicates that frames from the associated priority is always
++ *           sent through Express MAC (eMAC). Bit value '1' means the
++ *           associated priority may be configured to be preemptable.
++ *           User is expected to reconfigure the bitmap again.
++ *           In case of error for read operation, the value of this field
++ *           should not be trusted.
++ * @hold_adv_ns: On entry, the value of hold advance in nano-seconds read/
++ *               written to/from hardware.
++ *               On successful return, hold advance value actually read/
++ *               written.
++ *               In case of error for write operation, the value indicates
++ *               the maximum value allowable for hold advance.
++ *               In case of error for read operation, the value should not
++ *               be trusted.
++ * @rels_adv_ns: On entry, the value of release advance in nano-seconds
++ *               read/written to/from hardware.
++ *               On successful return, release advance value actually read/
++ *               written.
++ *               In case of error for write operation, the value indicates
++ *               the maximum value allowable for release advance.
++ *               In case of error for read operation, the value should not
++ *               be trusted.
++ * @hold_req: Current state of pMAC [Read Only]:
++ *             0: release.
++ *             1: hold.
++ *            The value is ignored for write operation. In case of error
++ *            for read operation, the value should not be trusted.
++ * @lp_fpe: Frame preemption support in link partner [Read Only]:
++ *           0: no.
++ *           1: yes.
++ *          The value is ignored for write operation. In case of error for
++ *          read operation, the value should not be trusted.
++ */
++struct ethtool_fpe_info {
++	__u32	cmd;
++	__u32	sts_map;
++	__u32	hold_adv_ns;
++	__u32	rels_adv_ns;
++	__u32	hold_req;
++	__u32	lp_fpe;
++};
++
+ /* CMDs currently supported */
+ #define ETHTOOL_GSET		0x00000001 /* DEPRECATED, Get settings.
+ 					    * Please use ETHTOOL_GLINKSETTINGS
+@@ -1536,6 +1598,9 @@ struct ethtool_est_info {
+ #define ETHTOOL_SGCE		0x00000056 /* Set EST Gate Control Entry */
+ #define ETHTOOL_GESTINFO	0x00000057 /* Get EST Info */
+ #define ETHTOOL_SESTINFO	0x00000058 /* Set EST Info */
++#define ETHTOOL_GFPEINFO	0x00000059 /* Get FPE Info */
++#define ETHTOOL_SFPEINFO	0x0000005a /* Set FPE Info */
++
+ 
+ /* compatibility with older code */
+ #define SPARC_ETH_GSET		ETHTOOL_GSET
+diff --git a/net/core/ethtool.c b/net/core/ethtool.c
+index 2c1d589..d8d6b9d 100644
+--- a/net/core/ethtool.c
++++ b/net/core/ethtool.c
+@@ -2789,6 +2789,42 @@ static int ethtool_set_est_info(struct net_device *dev, void __user *useraddr)
+ 	return ops->set_est_info(dev, &est_info);
+ }
+ 
++static int ethtool_get_fpe_info(struct net_device *dev, void __user *useraddr)
++{
++	int ret;
++	struct ethtool_fpe_info fpe_info;
++	const struct ethtool_ops *ops = dev->ethtool_ops;
++
++	if (!ops->get_fpe_info)
++		return -EOPNOTSUPP;
++
++	if (copy_from_user(&fpe_info, useraddr, sizeof(fpe_info)))
++		return -EFAULT;
++
++	ret = ops->get_fpe_info(dev, &fpe_info);
++	if (ret)
++		return ret;
++
++	if (copy_to_user(useraddr, &fpe_info, sizeof(fpe_info)))
++		return -EFAULT;
++
++	return 0;
++}
++
++static int ethtool_set_fpe_info(struct net_device *dev, void __user *useraddr)
++{
++	struct ethtool_fpe_info fpe_info;
++	const struct ethtool_ops *ops = dev->ethtool_ops;
++
++	if (!ops->set_fpe_info)
++		return -EOPNOTSUPP;
++
++	if (copy_from_user(&fpe_info, useraddr, sizeof(fpe_info)))
++		return -EFAULT;
++
++	return ops->set_fpe_info(dev, &fpe_info);
++}
++
+ /* The main entry point in this file.  Called from net/core/dev_ioctl.c */
+ 
+ int dev_ethtool(struct net *net, struct ifreq *ifr)
+@@ -2852,6 +2888,7 @@ int dev_ethtool(struct net *net, struct ifreq *ifr)
+ 	case ETHTOOL_GGCL:
+ 	case ETHTOOL_GGCE:
+ 	case ETHTOOL_GESTINFO:
++	case ETHTOOL_GFPEINFO:
+ 		break;
+ 	default:
+ 		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
+@@ -3088,6 +3125,12 @@ int dev_ethtool(struct net *net, struct ifreq *ifr)
+ 	case ETHTOOL_SESTINFO:
+ 		rc = ethtool_set_est_info(dev, useraddr);
+ 		break;
++	case ETHTOOL_GFPEINFO:
++		rc = ethtool_get_fpe_info(dev, useraddr);
++		break;
++	case ETHTOOL_SFPEINFO:
++		rc = ethtool_set_fpe_info(dev, useraddr);
++		break;
+ 	default:
+ 		rc = -EOPNOTSUPP;
+ 	}
+-- 
+2.7.4
+

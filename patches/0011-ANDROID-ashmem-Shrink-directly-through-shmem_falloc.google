@@ -1,0 +1,45 @@
+From 9a49618a3c4a622e282a34b9d3cb955891add201 Mon Sep 17 00:00:00 2001
+From: Tobias Lindskog <tobias.lindskog@sonymobile.com>
+Date: Mon, 9 Feb 2015 08:10:39 +0100
+Subject: [PATCH 011/431] ANDROID: ashmem: Shrink directly through
+ shmem_fallocate
+
+When ashmem_shrink is called from direct reclaim on a user thread, a
+call to do_fallocate will check for permissions against the security
+policy of that user thread.  It can thus fail by chance if called on a
+thread that isn't permitted to modify the relevant ashmem areas.
+
+Because we know that we have a shmem file underneath, call the shmem
+implementation of fallocate directly instead of going through the
+user-space interface for fallocate.
+
+FIX=DMS06243560
+Area: Kernel/Linux Kernel
+
+Bug: 21951515
+Change-Id: Ie98fff18a2bdeb535cd24d4fbdd13677e12681a7
+Signed-off-by: Jeff Vander Stoep <jeffv@google.com>
+---
+ drivers/staging/android/ashmem.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/staging/android/ashmem.c b/drivers/staging/android/ashmem.c
+index d5d33e1..075337b 100644
+--- a/drivers/staging/android/ashmem.c
++++ b/drivers/staging/android/ashmem.c
+@@ -446,9 +446,9 @@ ashmem_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
+ 		loff_t start = range->pgstart * PAGE_SIZE;
+ 		loff_t end = (range->pgend + 1) * PAGE_SIZE;
+ 
+-		vfs_fallocate(range->asma->file,
+-			      FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+-			      start, end - start);
++		range->asma->file->f_op->fallocate(range->asma->file,
++				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
++				start, end - start);
+ 		range->purged = ASHMEM_WAS_PURGED;
+ 		lru_del(range);
+ 
+-- 
+2.7.4
+

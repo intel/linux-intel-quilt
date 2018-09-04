@@ -1,0 +1,210 @@
+From 2e0f580b252e0abb86b849d9e159ee4450046d73 Mon Sep 17 00:00:00 2001
+From: Dietmar Eggemann <dietmar.eggemann@arm.com>
+Date: Sat, 26 Sep 2015 18:19:54 +0100
+Subject: [PATCH 397/431] ANDROID: sched: Update max cpu capacity in case of
+ max frequency constraints
+
+Wakeup balancing uses cpu capacity awareness and needs to know the
+system-wide maximum cpu capacity.
+
+Patch "sched: Store system-wide maximum cpu capacity in root domain"
+finds the system-wide maximum cpu capacity during scheduler domain
+hierarchy setup. This is sufficient as long as maximum frequency
+invariance is not enabled.
+
+If it is enabled, the system-wide maximum cpu capacity can change
+between scheduler domain hierarchy setups due to frequency capping.
+
+The cpu capacity is changed in update_cpu_capacity() which is called in
+load balance on the lowest scheduler domain hierarchy level. To be able
+to know if a change in cpu capacity for a certain cpu also has an effect
+on the system-wide maximum cpu capacity it is normally necessary to
+iterate over all cpus. This would be way too costly. That's why this
+patch follows a different approach.
+
+The unsigned long max_cpu_capacity value in struct root_domain is
+replaced with a struct max_cpu_capacity, containing value (the
+max_cpu_capacity) and cpu (the cpu index of the cpu providing the
+maximum cpu_capacity).
+
+Changes to the system-wide maximum cpu capacity and the cpu index are
+made if:
+
+ 1 System-wide maximum cpu capacity < cpu capacity
+ 2 System-wide maximum cpu capacity > cpu capacity and cpu index == cpu
+
+There are no changes to the system-wide maximum cpu capacity in all
+other cases.
+
+Atomic read and write access to the pair (max_cpu_capacity.val,
+max_cpu_capacity.cpu) is enforced by max_cpu_capacity.lock.
+
+The access to max_cpu_capacity.val in task_fits_max() is still performed
+without taking the max_cpu_capacity.lock.
+
+The code to set max cpu capacity in build_sched_domains() has been
+removed because the whole functionality is now provided by
+update_cpu_capacity() instead.
+
+This approach can introduce errors temporarily, e.g. in case the cpu
+currently providing the max cpu capacity has its cpu capacity lowered
+due to frequency capping and calls update_cpu_capacity() before any cpu
+which might provide the max cpu now.
+
+Signed-off-by: Ionela Voinescu <ionela.voinescu@arm.com>*
+Signed-off-by: Dietmar Eggemann <dietmar.eggemann@arm.com>
+[ - Fixed cherry-pick issues
+  - Fix CONFIG_SMP=n build ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: Idaa7a16723001e222e476de34df332558e48dd13
+---
+ kernel/sched/fair.c     | 31 ++++++++++++++++++++++++++++++-
+ kernel/sched/sched.h    | 10 +++++++++-
+ kernel/sched/topology.c | 15 +++------------
+ 3 files changed, 42 insertions(+), 14 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 4f08a34..61fd37b 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -7079,7 +7079,7 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
+ 		return 0;
+ 
+ 	min_cap = min(capacity_orig_of(prev_cpu), capacity_orig_of(cpu));
+-	max_cap = cpu_rq(cpu)->rd->max_cpu_capacity;
++	max_cap = cpu_rq(cpu)->rd->max_cpu_capacity.val;
+ 
+ 	/* Minimum capacity is close to max, no need to abort wake_affine */
+ 	if (max_cap - min_cap < max_cap >> 3)
+@@ -8606,16 +8606,45 @@ static unsigned long scale_rt_capacity(int cpu)
+ 	return 1;
+ }
+ 
++void init_max_cpu_capacity(struct max_cpu_capacity *mcc) {
++	raw_spin_lock_init(&mcc->lock);
++	mcc->val = 0;
++	mcc->cpu = -1;
++}
++
+ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
+ {
+ 	unsigned long capacity = arch_scale_cpu_capacity(sd, cpu);
+ 	struct sched_group *sdg = sd->groups;
++	struct max_cpu_capacity *mcc;
++	unsigned long max_capacity;
++	int max_cap_cpu;
++	unsigned long flags;
+ 
+ 	cpu_rq(cpu)->cpu_capacity_orig = capacity;
+ 
+ 	capacity *= arch_scale_max_freq_capacity(sd, cpu);
+ 	capacity >>= SCHED_CAPACITY_SHIFT;
+ 
++	mcc = &cpu_rq(cpu)->rd->max_cpu_capacity;
++
++	raw_spin_lock_irqsave(&mcc->lock, flags);
++	max_capacity = mcc->val;
++	max_cap_cpu = mcc->cpu;
++
++	if ((max_capacity > capacity && max_cap_cpu == cpu) ||
++	    (max_capacity < capacity)) {
++		mcc->val = capacity;
++		mcc->cpu = cpu;
++#ifdef CONFIG_SCHED_DEBUG
++		raw_spin_unlock_irqrestore(&mcc->lock, flags);
++		pr_info("CPU%d: update max cpu_capacity %lu\n", cpu, capacity);
++		goto skip_unlock;
++#endif
++	}
++	raw_spin_unlock_irqrestore(&mcc->lock, flags);
++
++skip_unlock: __attribute__ ((unused));
+ 	capacity *= scale_rt_capacity(cpu);
+ 	capacity >>= SCHED_CAPACITY_SHIFT;
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 21f0428..60c8020 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -689,6 +689,12 @@ struct freq_domain {
+ 	struct rcu_head rcu;
+ };
+ 
++struct max_cpu_capacity {
++	raw_spinlock_t lock;
++	unsigned long val;
++	int cpu;
++};
++
+ /*
+  * We add the notion of a root-domain which will be used to define per-domain
+  * variables. Each exclusive cpuset essentially defines an island domain by
+@@ -743,7 +749,8 @@ struct root_domain {
+ 	cpumask_var_t		rto_mask;
+ 	struct cpupri		cpupri;
+ 
+-	unsigned long		max_cpu_capacity;
++	/* Maximum cpu capacity in the system. */
++	struct max_cpu_capacity max_cpu_capacity;
+ 
+ #ifdef CONFIG_ENERGY_MODEL
+ 	/*
+@@ -758,6 +765,7 @@ extern struct root_domain def_root_domain;
+ extern struct mutex sched_domains_mutex;
+ 
+ extern void init_defrootdomain(void);
++extern void init_max_cpu_capacity(struct max_cpu_capacity *mcc);
+ extern int sched_init_domains(const struct cpumask *cpu_map);
+ extern void rq_attach_root(struct rq *rq, struct root_domain *rd);
+ extern void sched_get_rd(struct root_domain *rd);
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 044f860..f64cf81 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -303,6 +303,9 @@ static int init_rootdomain(struct root_domain *rd)
+ 
+ 	if (cpupri_init(&rd->cpupri) != 0)
+ 		goto free_cpudl;
++
++	init_max_cpu_capacity(&rd->max_cpu_capacity);
++
+ 	return 0;
+ 
+ free_cpudl:
+@@ -1874,7 +1877,6 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	enum s_alloc alloc_state;
+ 	struct sched_domain *sd;
+ 	struct s_data d;
+-	struct rq *rq = NULL;
+ 	int i, ret = -ENOMEM;
+ 
+ 	alloc_state = __visit_domain_allocation_hell(&d, cpu_map);
+@@ -1925,13 +1927,7 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	/* Attach the domains */
+ 	rcu_read_lock();
+ 	for_each_cpu(i, cpu_map) {
+-		rq = cpu_rq(i);
+ 		sd = *per_cpu_ptr(d.sd, i);
+-
+-		/* Use READ_ONCE()/WRITE_ONCE() to avoid load/store tearing: */
+-		if (rq->cpu_capacity_orig > READ_ONCE(d.rd->max_cpu_capacity))
+-			WRITE_ONCE(d.rd->max_cpu_capacity, rq->cpu_capacity_orig);
+-
+ 		cpu_attach_domain(sd, d.rd, i);
+ 	}
+ 	rcu_read_unlock();
+@@ -1939,11 +1935,6 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	if (!cpumask_empty(cpu_map))
+ 		update_asym_cpucapacity(cpumask_first(cpu_map));
+ 
+-	if (rq && sched_debug_enabled) {
+-		pr_info("root domain span: %*pbl (max cpu_capacity = %lu)\n",
+-			cpumask_pr_args(cpu_map), rq->rd->max_cpu_capacity);
+-	}
+-
+ 	ret = 0;
+ error:
+ 	__free_domain_allocs(&d, alloc_state, cpu_map);
+-- 
+2.7.4
+

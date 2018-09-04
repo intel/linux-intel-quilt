@@ -1,0 +1,92 @@
+From 8a9cf624ee04a1aea3e35e932ec81757ec8577b3 Mon Sep 17 00:00:00 2001
+From: Quentin Perret <quentin.perret@arm.com>
+Date: Fri, 18 May 2018 11:09:40 +0100
+Subject: [PATCH 416/431] FROMLIST: firmware: arm_scmi: add a getter for power
+ of performance states
+
+The SCMI protocol can be used to get power estimates from firmware
+corresponding to each performance state of a device. Although these power
+costs are already managed by the SCMI firmware driver, they are not
+exposed to any external subsystem yet.
+
+Fix this by adding a new get_power() interface to the exisiting perf_ops
+defined for the SCMI protocol.
+
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I2ba654a59e9633dcb2ce4128dbd99f2317d0ece8
+---
+ drivers/firmware/arm_scmi/perf.c | 28 ++++++++++++++++++++++++++++
+ include/linux/scmi_protocol.h    |  4 ++++
+ 2 files changed, 32 insertions(+)
+
+diff --git a/drivers/firmware/arm_scmi/perf.c b/drivers/firmware/arm_scmi/perf.c
+index 2a219b1..f4d58d0 100644
+--- a/drivers/firmware/arm_scmi/perf.c
++++ b/drivers/firmware/arm_scmi/perf.c
+@@ -426,6 +426,33 @@ static int scmi_dvfs_freq_get(const struct scmi_handle *handle, u32 domain,
+ 	return ret;
+ }
+ 
++static int scmi_dvfs_power_get(const struct scmi_handle *handle, u32 domain,
++			       unsigned long *freq, unsigned long *power)
++{
++	struct scmi_perf_info *pi = handle->perf_priv;
++	struct perf_dom_info *dom;
++	unsigned long opp_freq;
++	int idx, ret = -EINVAL;
++	struct scmi_opp *opp;
++
++	dom = pi->dom_info + domain;
++	if (!dom)
++		return -EIO;
++
++	for (opp = dom->opp, idx = 0; idx < dom->opp_count; idx++, opp++) {
++		opp_freq = opp->perf * dom->mult_factor;
++		if (opp_freq < *freq)
++			continue;
++
++		*freq = opp_freq;
++		*power = opp->power;
++		ret = 0;
++		break;
++	}
++
++	return ret;
++}
++
+ static struct scmi_perf_ops perf_ops = {
+ 	.limits_set = scmi_perf_limits_set,
+ 	.limits_get = scmi_perf_limits_get,
+@@ -436,6 +463,7 @@ static struct scmi_perf_ops perf_ops = {
+ 	.device_opps_add = scmi_dvfs_device_opps_add,
+ 	.freq_set = scmi_dvfs_freq_set,
+ 	.freq_get = scmi_dvfs_freq_get,
++	.power_get = scmi_dvfs_power_get,
+ };
+ 
+ static int scmi_perf_protocol_init(struct scmi_handle *handle)
+diff --git a/include/linux/scmi_protocol.h b/include/linux/scmi_protocol.h
+index f4c9fc0..2ecbd2c 100644
+--- a/include/linux/scmi_protocol.h
++++ b/include/linux/scmi_protocol.h
+@@ -91,6 +91,8 @@ struct scmi_clk_ops {
+  *	to sustained performance level mapping
+  * @freq_get: gets the frequency for a given device using sustained frequency
+  *	to sustained performance level mapping
++ * @power_get: gets the power dissipated for a given performance domain at a
++ *      given frequency
+  */
+ struct scmi_perf_ops {
+ 	int (*limits_set)(const struct scmi_handle *handle, u32 domain,
+@@ -110,6 +112,8 @@ struct scmi_perf_ops {
+ 			unsigned long rate, bool poll);
+ 	int (*freq_get)(const struct scmi_handle *handle, u32 domain,
+ 			unsigned long *rate, bool poll);
++	int (*power_get)(const struct scmi_handle *handle, u32 domain,
++			 unsigned long *rate, unsigned long *power);
+ };
+ 
+ /**
+-- 
+2.7.4
+
