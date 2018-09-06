@@ -1,0 +1,60 @@
+From 1fe8a286f5ccb9d8a2a55e044d26bae0b8b1ed72 Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Wed, 5 Sep 2018 15:52:06 +0800
+Subject: [PATCH 1619/1619] drm/i915/gvt: Check the state of PVMMIO gtt table
+ to avoid incorrect calling for hypervisor
+
+Now hypervisor adds strict checks when the sos tries to add/delete the mapping
+between gfn and mfn. In such case it should check the state of PVMMIO gtt
+table to avoid the incorrect hyper call. If the mapping between gfn and mfn
+is not setup for PVMMIO GTT, it should not remove the mapping. Otherwise
+the hypervisor will report that the mapping doesn't exist.
+
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cfg_space.c | 7 +++++++
+ drivers/gpu/drm/i915/gvt/gtt.h       | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index fa61bff..d822b6b 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -155,6 +155,11 @@ int map_gttmmio(struct intel_vgpu *vgpu, bool map)
+ 	u64 start, end;
+ 	int ret = 0;
+ 
++	if (vgpu->gtt.ggtt_pv_mapped == map) {
++		/* If it is already set as the target state, skip it */
++		return ret;
++	}
++
+ 	start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0);
+ 	start &= ~GENMASK(3, 0);
+ 	start += vgpu->cfg_space.bar[INTEL_GVT_PCI_BAR_GTTMMIO].size >> 1;
+@@ -179,6 +184,8 @@ int map_gttmmio(struct intel_vgpu *vgpu, bool map)
+ 		start += sg->length >> PAGE_SHIFT;
+ 	}
+ 
++	vgpu->gtt.ggtt_pv_mapped = map;
++
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.h b/drivers/gpu/drm/i915/gvt/gtt.h
+index 2939bf7..7b0d7e1 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.h
++++ b/drivers/gpu/drm/i915/gvt/gtt.h
+@@ -206,6 +206,8 @@ struct intel_vgpu_gtt {
+ 	struct list_head post_shadow_list_head;
+ 	struct intel_vgpu_scratch_pt scratch_pt[GTT_TYPE_MAX];
+ 
++	/* indicate whether the PV mapped is enabled for ggtt */
++	bool ggtt_pv_mapped;
+ };
+ 
+ extern int intel_vgpu_init_gtt(struct intel_vgpu *vgpu);
+-- 
+2.7.4
+
