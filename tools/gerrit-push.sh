@@ -10,12 +10,14 @@
 rc=$1
 manifest=$2
 
+git push codereview $rc:master
+
 for b in `cat $manifest`; do 
 	echo $b
 	git checkout $rc
-	git push -f gerrit $rc:dev/staging/$b
+	git push -f codereview $rc:dev/staging/$b
 	git checkout $b
-	git push gerrit HEAD:refs/for/dev/staging/$b
+	git push codereview HEAD:refs/for/dev/staging/$b 2>$b.gerritURLs
 	read -n 1 -p "Do you want to continue (y/n)?" answer
 	case $answer in
 		[Yy]) continue;;

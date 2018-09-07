@@ -13,7 +13,7 @@ git checkout $rc
 
 for b in `cat $manifest`; do 
 	git branch -D $b
-	git checkout -b $b origin/dev/staging/$b
+	git checkout -b $b origin/dev/4.19/staging/$b
 	head Makefile
 done
 

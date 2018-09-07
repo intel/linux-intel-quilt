@@ -1,4 +1,4 @@
-From fbf5982aca8b13ceff8c53370ae8d1b9a3a28537 Mon Sep 17 00:00:00 2001
+From 7cf7daa5d78ba32e2170435123d8c9c5a753b8f6 Mon Sep 17 00:00:00 2001
 From: "Chuah, Kim Tatt" <kim.tatt.chuah@intel.com>
 Date: Tue, 26 Jun 2018 06:14:17 +0800
 Subject: [PATCH 02/58] net: stmmac: Add support for HW-accelerated VLAN
@@ -14,6 +14,8 @@ Signed-off-by: Chuah, Kim Tatt <kim.tatt.chuah@intel.com>
 [Fixed Fix missing netdev->features assignment in stmmac_set_features.
  Ported changes to generic HW Interface helpers design. - OBL]
 Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+
+Change-Id: I759d7eb848d85b589e11fe3b0b80b8e771ee0df6
 ---
  drivers/net/ethernet/stmicro/stmmac/dwmac4.h       | 11 ++++++
  drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c  | 40 ++++++++++++++++++++++
@@ -162,7 +164,7 @@ index 80a4648..c17d1ab 100644
  	.enable_tx_timestamp = dwmac4_rd_enable_tx_timestamp,
  	.get_tx_timestamp_status = dwmac4_wrback_get_tx_timestamp_status,
 diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
-index fe8b536..d8f68f0 100644
+index 92b8944..672cd5b 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
 @@ -53,6 +53,10 @@ struct stmmac_desc_ops {
@@ -187,7 +189,7 @@ index fe8b536..d8f68f0 100644
  #define stmmac_tx_status(__priv, __args...) \
  	stmmac_do_callback(__priv, desc, tx_status, __args)
  #define stmmac_get_tx_len(__priv, __args...) \
-@@ -307,6 +315,11 @@ struct stmmac_ops {
+@@ -310,6 +318,11 @@ struct stmmac_ops {
  			     bool loopback);
  	void (*pcs_rane)(void __iomem *ioaddr, bool restart);
  	void (*pcs_get_adv_lp)(void __iomem *ioaddr, struct rgmii_adv *adv);
@@ -199,7 +201,7 @@ index fe8b536..d8f68f0 100644
  	/* Safety Features */
  	int (*safety_feat_config)(void __iomem *ioaddr, unsigned int asp);
  	int (*safety_feat_irq_status)(struct net_device *ndev,
-@@ -379,6 +392,10 @@ struct stmmac_ops {
+@@ -382,6 +395,10 @@ struct stmmac_ops {
  	stmmac_do_void_callback(__priv, mac, pcs_rane, __args)
  #define stmmac_pcs_get_adv_lp(__priv, __args...) \
  	stmmac_do_void_callback(__priv, mac, pcs_get_adv_lp, __args)
@@ -211,12 +213,12 @@ index fe8b536..d8f68f0 100644
  	stmmac_do_callback(__priv, mac, safety_feat_config, __args)
  #define stmmac_safety_feat_irq_status(__priv, __args...) \
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index ef6a8d3..c27fca4 100644
+index ff1ffb4..8eb0355 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-@@ -2549,6 +2549,9 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
- 			stmmac_enable_tso(priv, priv->ioaddr, 1, chan);
- 	}
+@@ -2570,6 +2570,9 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp)
+ 	/* Start the ball rolling... */
+ 	stmmac_start_all_dma(priv);
  
 +	/* Set HW VLAN stripping mode */
 +	stmmac_set_hw_vlan_mode(priv, priv->ioaddr, dev->features);
@@ -224,7 +226,7 @@ index ef6a8d3..c27fca4 100644
  	return 0;
  }
  
-@@ -3368,6 +3371,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -3392,6 +3395,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  			struct sk_buff *skb;
  			int frame_len;
  			unsigned int des;
@@ -232,7 +234,7 @@ index ef6a8d3..c27fca4 100644
  
  			stmmac_get_desc_addr(priv, p, &des);
  			frame_len = stmmac_get_rx_frame_len(priv, p, coe);
-@@ -3461,7 +3465,13 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -3485,7 +3489,13 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  
  			stmmac_get_rx_hwtstamp(priv, p, np, skb);
  
@@ -247,7 +249,7 @@ index ef6a8d3..c27fca4 100644
  
  			skb->protocol = eth_type_trans(skb, priv->dev);
  
-@@ -3609,6 +3619,7 @@ static int stmmac_set_features(struct net_device *netdev,
+@@ -3633,6 +3643,7 @@ static int stmmac_set_features(struct net_device *netdev,
  			       netdev_features_t features)
  {
  	struct stmmac_priv *priv = netdev_priv(netdev);
@@ -255,7 +257,7 @@ index ef6a8d3..c27fca4 100644
  
  	/* Keep the COE Type in case of csum is supporting */
  	if (features & NETIF_F_RXCSUM)
-@@ -3620,6 +3631,11 @@ static int stmmac_set_features(struct net_device *netdev,
+@@ -3644,6 +3655,11 @@ static int stmmac_set_features(struct net_device *netdev,
  	 */
  	stmmac_rx_ipc(priv, priv->hw);
  
@@ -267,7 +269,7 @@ index ef6a8d3..c27fca4 100644
  	return 0;
  }
  
-@@ -4255,12 +4271,13 @@ int stmmac_dvr_probe(struct device *device,
+@@ -4283,12 +4299,13 @@ int stmmac_dvr_probe(struct device *device,
  		priv->tso = true;
  		dev_info(priv->device, "TSO feature enabled\n");
  	}

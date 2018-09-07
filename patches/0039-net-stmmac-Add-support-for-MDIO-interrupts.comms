@@ -1,4 +1,4 @@
-From f113861a59e319a044ac861d1b9e426792241352 Mon Sep 17 00:00:00 2001
+From e438c51a8d22766f1f30b9c54698a44379835703 Mon Sep 17 00:00:00 2001
 From: "Chuah, Kim Tatt" <kim.tatt.chuah@intel.com>
 Date: Wed, 18 Jul 2018 08:55:08 +0800
 Subject: [PATCH 39/58] net: stmmac: Add support for MDIO interrupts
@@ -18,20 +18,22 @@ Signed-off-by: Chuah, Kim Tatt <kim.tatt.chuah@intel.com>
 [ Fixes missing MII_BUSY handling in both stmmac_mdio_read() &
   stmmac_mdio_write() - OBL ]
 Signed-off-by: Ong, Boon Leong <boon.leong.ong@intel.com>
+
+Change-Id: I6b2c85750f4f9c1bc38c85a0a06a85446c709c08
 ---
  drivers/net/ethernet/stmicro/stmmac/common.h      |  2 +
  drivers/net/ethernet/stmicro/stmmac/dwmac4.h      |  1 +
- drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c |  6 +++
- drivers/net/ethernet/stmicro/stmmac/dwmac5.h      |  3 ++
- drivers/net/ethernet/stmicro/stmmac/hwif.c        | 10 +++++
- drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c | 48 +++++++++++++++++++----
- 6 files changed, 62 insertions(+), 8 deletions(-)
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c |  6 ++
+ drivers/net/ethernet/stmicro/stmmac/dwmac5.h      |  3 +
+ drivers/net/ethernet/stmicro/stmmac/hwif.c        | 10 +++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c | 74 ++++++++++++++++-------
+ 6 files changed, 75 insertions(+), 21 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
-index 5675bd5..0c059fc 100644
+index 54eb581..a487390 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/common.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/common.h
-@@ -463,6 +463,8 @@ struct mac_device_info {
+@@ -467,6 +467,8 @@ struct mac_device_info {
  	u32 tsn_cap;
  	bool vlan_fail_q_en;
  	u8 vlan_fail_q;
@@ -91,74 +93,74 @@ index 383c014..dc7e09c 100644
  int dwmac5_safety_feat_irq_status(struct net_device *ndev,
  		void __iomem *ioaddr, unsigned int asp,
 diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.c b/drivers/net/ethernet/stmicro/stmmac/hwif.c
-index 7c7e1b2..8d6a9bb 100644
+index f5b2615..4c74ff5 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/hwif.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/hwif.c
-@@ -73,6 +73,7 @@ static const struct stmmac_hwif_entry {
- 	bool gmac;
+@@ -74,6 +74,7 @@ static const struct stmmac_hwif_entry {
  	bool gmac4;
+ 	bool xgmac;
  	bool xpcs;
 +	bool mdio_intr_en;
  	u32 min_id;
  	const struct stmmac_regs_off regs;
  	const void *desc;
-@@ -89,6 +90,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -91,6 +92,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = false,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = false,
  		.min_id = 0,
  		.regs = {
  			.ptp_off = PTP_GMAC3_X_OFFSET,
-@@ -106,6 +108,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = true,
+@@ -109,6 +111,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = false,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = false,
  		.min_id = 0,
  		.regs = {
  			.ptp_off = PTP_GMAC3_X_OFFSET,
-@@ -123,6 +126,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -127,6 +130,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = true,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = false,
  		.min_id = 0,
  		.regs = {
  			.ptp_off = PTP_GMAC4_OFFSET,
-@@ -140,6 +144,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -145,6 +149,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = true,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = false,
  		.min_id = DWMAC_CORE_4_00,
  		.regs = {
  			.ptp_off = PTP_GMAC4_OFFSET,
-@@ -157,6 +162,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -163,6 +168,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = true,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = false,
  		.min_id = DWMAC_CORE_4_10,
  		.regs = {
  			.ptp_off = PTP_GMAC4_OFFSET,
-@@ -174,6 +180,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -181,6 +187,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = true,
+ 		.xgmac = false,
  		.xpcs = false,
 +		.mdio_intr_en = true,
  		.min_id = DWMAC_CORE_5_10,
  		.regs = {
  			.ptp_off = PTP_GMAC4_OFFSET,
-@@ -191,6 +198,7 @@ static const struct stmmac_hwif_entry {
- 		.gmac = false,
+@@ -216,6 +223,7 @@ static const struct stmmac_hwif_entry {
  		.gmac4 = true,
+ 		.xgmac = false,
  		.xpcs = true,
 +		.mdio_intr_en = true,
  		.min_id = DWMAC_CORE_5_10,
  		.regs = {
  			.ptp_off = PTP_GMAC4_OFFSET,
-@@ -267,6 +275,8 @@ int stmmac_hwif_init(struct stmmac_priv *priv)
+@@ -295,6 +303,8 @@ int stmmac_hwif_init(struct stmmac_priv *priv)
  		mac->ptp = mac->ptp ? : entry->hwtimestamp;
  		mac->mode = mac->mode ? : entry->mode;
  		mac->tc = mac->tc ? : entry->tc;
@@ -168,13 +170,46 @@ index 7c7e1b2..8d6a9bb 100644
  		priv->hw = mac;
  		priv->ptpaddr = priv->ioaddr + entry->regs.ptp_off;
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
-index c00617a..66ede9a 100644
+index 96bc542..fdb97bd 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
-@@ -55,6 +55,15 @@ static void stmmac_mdio_c45_setup(struct stmmac_priv *priv, int phyreg,
- 	*data |= (phyreg & MII_REGADDR_C45_MASK) << MII_GMAC4_REG_ADDR_SHIFT;
+@@ -43,19 +43,6 @@
+ #define MII_GMAC4_READ			(3 << MII_GMAC4_GOC_SHIFT)
+ #define MII_GMAC4_C45E			BIT(1)
+ 
+-static void stmmac_mdio_c45_setup(struct stmmac_priv *priv, int phyreg,
+-				  u32 *val, u32 *data)
+-{
+-	unsigned int reg_mask = priv->hw->mii.reg_mask;
+-	unsigned int reg_shift = priv->hw->mii.reg_shift;
+-
+-	*val |= MII_GMAC4_C45E;
+-	*val &= ~reg_mask;
+-	*val |= ((phyreg >> MII_DEVADDR_C45_SHIFT) << reg_shift) & reg_mask;
+-
+-	*data |= (phyreg & MII_REGADDR_C45_MASK) << MII_GMAC4_REG_ADDR_SHIFT;
+-}
+-
+ /* XGMAC defines */
+ #define MII_XGMAC_SADDR			BIT(18)
+ #define MII_XGMAC_CMD_SHIFT		16
+@@ -165,6 +152,28 @@ static int stmmac_xgmac2_mdio_write(struct mii_bus *bus, int phyaddr,
+ 				  !(tmp & MII_XGMAC_BUSY), 100, 10000);
  }
  
++static void stmmac_mdio_c45_setup(struct stmmac_priv *priv, int phyreg,
++				  u32 *val, u32 *data)
++{
++	unsigned int reg_mask = priv->hw->mii.reg_mask;
++	unsigned int reg_shift = priv->hw->mii.reg_shift;
++
++	*val |= MII_GMAC4_C45E;
++	*val &= ~reg_mask;
++	*val |= ((phyreg >> MII_DEVADDR_C45_SHIFT) << reg_shift) & reg_mask;
++
++	*data |= (phyreg & MII_REGADDR_C45_MASK) << MII_GMAC4_REG_ADDR_SHIFT;
++}
++
 +static bool stmmac_mdio_done(struct mii_bus *bus)
 +{
 +	struct net_device *ndev = bus->priv;
@@ -187,7 +222,7 @@ index c00617a..66ede9a 100644
  /**
   * stmmac_mdio_read
   * @bus: points to the mii_bus structure
-@@ -86,16 +95,26 @@ static int stmmac_mdio_read(struct mii_bus *bus, int phyaddr, int phyreg)
+@@ -196,16 +205,26 @@ static int stmmac_mdio_read(struct mii_bus *bus, int phyaddr, int phyreg)
  			stmmac_mdio_c45_setup(priv, phyreg, &value, &data);
  	}
  
@@ -218,7 +253,7 @@ index c00617a..66ede9a 100644
  
  	/* Read the data from the MII data register */
  	data = (int)readl(priv->ioaddr + mii_data) & MII_DATA_MASK;
-@@ -137,17 +156,30 @@ static int stmmac_mdio_write(struct mii_bus *bus, int phyaddr, int phyreg,
+@@ -247,17 +266,30 @@ static int stmmac_mdio_write(struct mii_bus *bus, int phyaddr, int phyreg,
  	}
  
  	/* Wait until any existing MII operation is complete */

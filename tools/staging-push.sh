@@ -7,6 +7,6 @@
 manifest=$1
 
 for b in `cat $manifest`; do 
-	git push -f origin $b:sandbox/mgross/$b
+	git push -f origin $b:sandbox/mgross/4.19/$b
 done
 
