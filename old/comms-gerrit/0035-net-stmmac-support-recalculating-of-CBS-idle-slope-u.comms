@@ -1,0 +1,208 @@
+From 572ae6f631ecd18acea914ae5db50097b289cc70 Mon Sep 17 00:00:00 2001
+From: Weifeng Voon <weifeng.voon@intel.com>
+Date: Wed, 18 Jul 2018 03:11:03 +0800
+Subject: [PATCH 35/58] net: stmmac: support recalculating of CBS idle slope
+ under EST
+
+When EST enabled, credit is accumulated only when then gate is open.
+Hence, the effective data rate of the idleSlope must be increased to
+reflect the duty cycle of the transmission gate associated with the
+queue. The new idleSlope is calculated using the equation below:
+
+idleSlope = (operIdleSlope(N) * OperCycle/GateOpenTime)
+
+operIdleSlope = calculated idle slope before EST enabled
+N             = queue number
+OperCycle     = Cycle time for queue N
+GateOpenTime  = Total gate open time for queue N
+
+Change-Id: I811056a07925f7b73a7126463e4abcfddc38c84d
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c  | 83 +++++++++++++++++++++++
+ drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h  |  7 ++
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c |  2 +
+ drivers/net/ethernet/stmicro/stmmac/hwif.h        |  4 ++
+ 4 files changed, 96 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
+index 75bde7c..1ad159e 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
+@@ -63,6 +63,8 @@ static struct est_gc_config dw_est_gc_config;
+ static struct tsn_err_stat dw_err_stat;
+ static struct fpe_config dw_fpe_config;
+ 
++#define ONE_SEC_IN_NANOSEC 1000000000ULL
++
+ static unsigned int est_get_gcl_depth(unsigned int hw_cap)
+ {
+ 	unsigned int depth;
+@@ -370,6 +372,44 @@ static int fpe_set_hr_adv(void *ioaddr,
+ 	return 0;
+ }
+ 
++static unsigned long long est_get_all_open_time(unsigned int bank,
++						unsigned long long cycle_ns,
++						unsigned int queue)
++{
++	int row;
++	unsigned int gcl_len = dw_est_gc_config.gcb[bank].gcrr.llr;
++	struct est_gc_entry *gcl = dw_est_gc_config.gcb[bank].gcl;
++	unsigned long long total = 0;
++	unsigned long long tti_ns = 0;
++	unsigned int gate = 0x1 << queue;
++
++	/* GCL which exceeds the cycle time will be truncated.
++	 * So, time interval that exceeds the cycle time will not be
++	 * included.
++	 */
++	for (row = 0; row < gcl_len; row++) {
++		tti_ns += gcl->ti_nsec;
++
++		if (gcl->gates & gate) {
++			if (tti_ns <= cycle_ns)
++				total += gcl->ti_nsec;
++			else
++				total += gcl->ti_nsec -
++					 (tti_ns - cycle_ns);
++		}
++
++		gcl++;
++	}
++
++	/* The gates wihtout any setting of open/close within
++	 * the cycle time are considered as open.
++	 */
++	if (tti_ns < cycle_ns)
++		total += cycle_ns - tti_ns;
++
++	return total;
++}
++
+ void dwmac_tsn_init(void *ioaddr)
+ {
+ 	unsigned int gcl_depth;
+@@ -1212,3 +1252,46 @@ int dwmac_fpe_send_mpacket(void *ioaddr, enum mpacket_type type)
+ 
+ 	return 0;
+ }
++
++int dwmac_cbs_recal_idleslope(void *ioaddr,
++			      unsigned int queue,
++			      unsigned int *idle_slope)
++{
++	unsigned int open_time;
++	unsigned int hw_bank = dwmac_get_est_bank(ioaddr, 1);
++	unsigned long long new_idle_slope;
++	unsigned long long scaling = 0;
++	unsigned long long cycle_time_ns =
++			(dw_est_gc_config.gcb[hw_bank].gcrr.cycle_sec *
++			 ONE_SEC_IN_NANOSEC) +
++			dw_est_gc_config.gcb[hw_bank].gcrr.cycle_nsec;
++
++	if (!cycle_time_ns) {
++		TSN_WARN_NA("EST: Cycle time is 0.\n");
++		TSN_WARN_NA("CBS idle slope will not be reconfigured.\n");
++
++		return -EINVAL;
++	}
++
++	open_time = est_get_all_open_time(hw_bank,
++					  cycle_time_ns,
++					  queue);
++
++	if (!open_time) {
++		TSN_WARN("EST: Total gate open time for queue %d is 0\n",
++			 queue);
++
++		return -EINVAL;
++	}
++
++	scaling = cycle_time_ns;
++	_DO_DIV_(scaling, open_time);
++
++	new_idle_slope = *idle_slope * scaling;
++	if (new_idle_slope > CBS_IDLESLOPE_MAX)
++		new_idle_slope = CBS_IDLESLOPE_MAX;
++
++	*idle_slope = new_idle_slope;
++
++	return 0;
++}
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
+index d8b17d3..6eaa4fc 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
+@@ -24,6 +24,8 @@
+ 
+ #include "linux/printk.h"
+ 
++#define _DO_DIV_(x, y)	do_div(x, y)
++
+ /* DWMAC v5.xx supports the following Time Sensitive Networking protocols:
+  * 1) IEEE 802.1Qbv Enhancements for Scheduled Traffic (EST)
+  * 2) IEEE 802.1Qbu Frame Preemption (FPE)
+@@ -139,6 +141,9 @@
+ #define EST_TIWID_TO_EXTMAX(ti_wid)	((1 << (ti_wid + 7)) - 1)
+ #define EST_GCL_BANK_MAX	(2)
+ 
++/* CBS Global defines */
++#define CBS_IDLESLOPE_MAX		0x1fffff
++
+ /* FPE Global defines */
+ #define FPE_AFSZ_MAX			0x3	/* Max AFSZ */
+ #define FPE_ADV_MAX			0xFFFF	/* Max Release/Hold advance */
+@@ -303,4 +308,6 @@ int dwmac_get_fpe_config(void *ioaddr, struct fpe_config **fpec,
+ int dwmac_get_fpe_pmac_sts(void *ioaddr, unsigned int *hrs);
+ int dwmac_fpe_irq_status(void *ioaddr);
+ int dwmac_fpe_send_mpacket(void *ioaddr, enum mpacket_type type);
++int dwmac_cbs_recal_idleslope(void *ioaddr, unsigned int queue,
++			      unsigned int *idle_slope);
+ #endif /* __DW_TSN_LIB_H__ */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+index f0674dc..4fc156d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+@@ -1110,6 +1110,7 @@ const struct stmmac_ops dwmac510_ops = {
+ 	.get_fpe_pmac_sts = dwmac_get_fpe_pmac_sts,
+ 	.fpe_irq_status = dwmac_fpe_irq_status,
+ 	.fpe_send_mpacket = dwmac_fpe_send_mpacket,
++	.cbs_recal_idleslope = dwmac_cbs_recal_idleslope,
+ 	.safety_feat_config = dwmac5_safety_feat_config,
+ 	.safety_feat_irq_status = dwmac5_safety_feat_irq_status,
+ 	.safety_feat_dump = dwmac5_safety_feat_dump,
+@@ -1176,6 +1177,7 @@ const struct stmmac_ops dwmac510_xpcs_ops = {
+ 	.get_fpe_pmac_sts = dwmac_get_fpe_pmac_sts,
+ 	.fpe_irq_status = dwmac_fpe_irq_status,
+ 	.fpe_send_mpacket = dwmac_fpe_send_mpacket,
++	.cbs_recal_idleslope = dwmac_cbs_recal_idleslope,
+ 	.safety_feat_config = dwmac5_safety_feat_config,
+ 	.safety_feat_irq_status = dwmac5_safety_feat_irq_status,
+ 	.safety_feat_dump = dwmac5_safety_feat_dump,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+index afe47cc..8324e2e 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
++++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+@@ -378,6 +378,8 @@ struct stmmac_ops {
+ 	int (*fpe_irq_status)(void __iomem *ioaddr);
+ 	int (*fpe_send_mpacket)(void __iomem *ioaddr,
+ 				enum mpacket_type type);
++	int (*cbs_recal_idleslope)(void __iomem *ioaddr, u32 queue,
++				   u32 *idle_slope);
+ 	/* Safety Features */
+ 	int (*safety_feat_config)(void __iomem *ioaddr, unsigned int asp);
+ 	int (*safety_feat_irq_status)(struct net_device *ndev,
+@@ -516,6 +518,8 @@ struct stmmac_ops {
+ 	stmmac_do_callback(__priv, mac, fpe_irq_status, __args)
+ #define stmmac_fpe_send_mpacket(__priv, __args...) \
+ 	stmmac_do_callback(__priv, mac, fpe_send_mpacket, __args)
++#define stmmac_cbs_recal_idleslope(__priv, __args...) \
++	stmmac_do_callback(__priv, mac, cbs_recal_idleslope, __args)
+ #define stmmac_safety_feat_config(__priv, __args...) \
+ 	stmmac_do_callback(__priv, mac, safety_feat_config, __args)
+ #define stmmac_safety_feat_irq_status(__priv, __args...) \
+-- 
+2.7.4
+

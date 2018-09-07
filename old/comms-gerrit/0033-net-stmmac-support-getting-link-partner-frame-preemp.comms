@@ -1,0 +1,295 @@
+From 25e7e9072762f6d1b9fdf00c2c1f6727803b5719 Mon Sep 17 00:00:00 2001
+From: Weifeng Voon <weifeng.voon@intel.com>
+Date: Wed, 11 Jul 2018 07:28:04 +0800
+Subject: [PATCH 33/58] net: stmmac: support getting link partner frame
+ preemption capability
+
+In order to discover whether remote station supports frame preemption, a
+local station sends verify mPacket and expects response mPacket in
+return from the remote station. This patch added the capability to send
+and receive both verify mPacket and response mPacket.
+
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+[Refactor the interrupt routine to make it cleaner by introducing a new
+function to send mPacket - BL]
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+
+Change-Id: I35f08cc45de08f345530c2285217782387ce66cc
+---
+ drivers/net/ethernet/stmicro/stmmac/common.h      |  1 +
+ drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c  | 56 +++++++++++++++++++++++
+ drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h  | 24 ++++++++++
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c |  7 +++
+ drivers/net/ethernet/stmicro/stmmac/hwif.h        |  7 +++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 26 ++++++++++-
+ 6 files changed, 119 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
+index b7e9ffe..f60088f 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/common.h
++++ b/drivers/net/ethernet/stmicro/stmmac/common.h
+@@ -418,6 +418,7 @@ struct mii_regs {
+ 
+ /* tsn capability,  meant for mac_device_info->tsn_cap */
+ #define TSN_CAP_EST			BIT(0)
++#define TSN_CAP_FPE			BIT(1)
+ 
+ struct mac_device_info {
+ 	const struct stmmac_ops *mac;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
+index 464369b..75bde7c 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.c
+@@ -1100,6 +1100,7 @@ int dwmac_set_fpe_enable(void *ioaddr, bool enable)
+ 		return -ENOTSUPP;
+ 
+ 	dw_fpe_config.enable = enable & MAC_FPE_CTRL_STS_EFPE;
++
+ 	TSN_WR32((unsigned int)dw_fpe_config.enable,
+ 		 ioaddr + MAC_FPE_CTRL_STS);
+ 
+@@ -1156,3 +1157,58 @@ int dwmac_get_fpe_pmac_sts(void *ioaddr, unsigned int *hrs)
+ 
+ 	return 0;
+ }
++
++int dwmac_fpe_irq_status(void *ioaddr)
++{
++	unsigned int status;
++	int fpe_state = FPE_STATE_UNKNOWN;
++
++	status = TSN_RD32(ioaddr + MAC_FPE_CTRL_STS);
++
++	if (status & MAC_FPE_CTRL_STS_TRSP) {
++		TSN_INFO_NA("Respond mPacket is transmitted\n");
++		fpe_state |= FPE_STATE_TRSP;
++	}
++
++	if (status & MAC_FPE_CTRL_STS_TVER) {
++		TSN_INFO_NA("Verify mPacket is transmitted\n");
++		fpe_state |= FPE_STATE_TVER;
++	}
++
++	if (status & MAC_FPE_CTRL_STS_RRSP) {
++		dw_fpe_config.lp_fpe_support = 1;
++		TSN_INFO_NA("Respond mPacket is received\n");
++		fpe_state |= FPE_STATE_RRSP;
++	}
++
++	if (status & MAC_FPE_CTRL_STS_RVER) {
++		TSN_INFO_NA("Verify mPacket is received\n");
++		fpe_state |= FPE_STATE_RVER;
++	}
++
++	return fpe_state;
++}
++
++int dwmac_fpe_send_mpacket(void *ioaddr, enum mpacket_type type)
++{
++	unsigned int value;
++
++	value = TSN_RD32(ioaddr + MAC_FPE_CTRL_STS);
++
++	switch (type) {
++	case MPACKET_VERIFY:
++		dw_fpe_config.lp_fpe_support = 0;
++		value &= ~MAC_FPE_CTRL_STS_SRSP;
++		value |= MAC_FPE_CTRL_STS_SVER;
++		break;
++	case MPACKET_RESPONSE:
++		value &= ~MAC_FPE_CTRL_STS_SVER;
++		value |= MAC_FPE_CTRL_STS_SRSP;
++		break;
++	default:
++		return -ENOTSUPP;
++	}
++	TSN_WR32(value, ioaddr + MAC_FPE_CTRL_STS);
++
++	return 0;
++}
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
+index ccb85d6..d8b17d3 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dw_tsn_lib.h
+@@ -29,6 +29,8 @@
+  * 2) IEEE 802.1Qbu Frame Preemption (FPE)
+  */
+ 
++#define GMAC_INT_FPE_EN			BIT(17)
++
+ /* FPRQ only available in EQoS ver5.00 MAC_RxQ_Ctrl1 */
+ #define GMAC_RXQCTRL_FPRQ_MASK		GENMASK(26, 24)	/* FPE Residue Queue */
+ #define GMAC_RXQCTRL_FPRQ_SHIFT		24
+@@ -45,6 +47,12 @@
+ 
+ /* MAC FPE control status */
+ #define MAC_FPE_CTRL_STS		0x00000234
++#define MAC_FPE_CTRL_STS_TRSP		BIT(19)
++#define MAC_FPE_CTRL_STS_TVER		BIT(18)
++#define MAC_FPE_CTRL_STS_RRSP		BIT(17)
++#define MAC_FPE_CTRL_STS_RVER		BIT(16)
++#define MAC_FPE_CTRL_STS_SRSP		BIT(2)
++#define MAC_FPE_CTRL_STS_SVER		BIT(1)
+ #define MAC_FPE_CTRL_STS_EFPE		BIT(0)
+ 
+ /* MTL EST control register */
+@@ -162,6 +170,19 @@ enum tsn_feat_id {
+ 	TSN_FEAT_ID_MAX,
+ };
+ 
++enum tsn_fpe_irq_state {
++	FPE_STATE_TRSP = 1,
++	FPE_STATE_TVER = 2,
++	FPE_STATE_RRSP = 4,
++	FPE_STATE_RVER = 8,
++	FPE_STATE_UNKNOWN = 16,
++};
++
++enum mpacket_type {
++	MPACKET_VERIFY = 0,
++	MPACKET_RESPONSE = 1,
++};
++
+ /* HW register read & write macros */
+ #define TSN_RD32(__addr)		readl(__addr)
+ #define TSN_WR32(__val, __addr)		writel(__val, __addr)
+@@ -246,6 +267,7 @@ struct est_gc_config {
+ struct fpe_config {
+ 	unsigned int txqpec;		/* TxQ Preemption Classification */
+ 	bool enable;			/* 1: enabled */
++	bool lp_fpe_support;		/* 1: link partner fpe supported */
+ };
+ 
+ /* TSN functions */
+@@ -279,4 +301,6 @@ int dwmac_set_fpe_enable(void *ioaddr, bool enable);
+ int dwmac_get_fpe_config(void *ioaddr, struct fpe_config **fpec,
+ 			 bool frmdrv);
+ int dwmac_get_fpe_pmac_sts(void *ioaddr, unsigned int *hrs);
++int dwmac_fpe_irq_status(void *ioaddr);
++int dwmac_fpe_send_mpacket(void *ioaddr, enum mpacket_type type);
+ #endif /* __DW_TSN_LIB_H__ */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+index ac8fbc1..f0674dc 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+@@ -64,6 +64,9 @@ static void dwmac4_core_init(struct mac_device_info *hw,
+ 	if (hw->pcs)
+ 		value |= GMAC_PCS_IRQ_DEFAULT;
+ 
++	if (hw->tsn_cap & TSN_CAP_FPE)
++		value |= GMAC_INT_FPE_EN;
++
+ 	writel(value, ioaddr + GMAC_INT_EN);
+ }
+ 
+@@ -1105,6 +1108,8 @@ const struct stmmac_ops dwmac510_ops = {
+ 	.set_fpe_enable = dwmac_set_fpe_enable,
+ 	.get_fpe_config = dwmac_get_fpe_config,
+ 	.get_fpe_pmac_sts = dwmac_get_fpe_pmac_sts,
++	.fpe_irq_status = dwmac_fpe_irq_status,
++	.fpe_send_mpacket = dwmac_fpe_send_mpacket,
+ 	.safety_feat_config = dwmac5_safety_feat_config,
+ 	.safety_feat_irq_status = dwmac5_safety_feat_irq_status,
+ 	.safety_feat_dump = dwmac5_safety_feat_dump,
+@@ -1169,6 +1174,8 @@ const struct stmmac_ops dwmac510_xpcs_ops = {
+ 	.set_fpe_enable = dwmac_set_fpe_enable,
+ 	.get_fpe_config = dwmac_get_fpe_config,
+ 	.get_fpe_pmac_sts = dwmac_get_fpe_pmac_sts,
++	.fpe_irq_status = dwmac_fpe_irq_status,
++	.fpe_send_mpacket = dwmac_fpe_send_mpacket,
+ 	.safety_feat_config = dwmac5_safety_feat_config,
+ 	.safety_feat_irq_status = dwmac5_safety_feat_irq_status,
+ 	.safety_feat_dump = dwmac5_safety_feat_dump,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+index a58ed69..afe47cc 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
++++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+@@ -375,6 +375,9 @@ struct stmmac_ops {
+ 	int (*get_fpe_config)(void __iomem *ioaddr,
+ 			      struct fpe_config **fpec, bool frmdrv);
+ 	int (*get_fpe_pmac_sts)(void __iomem *ioaddr, u32 *hrs);
++	int (*fpe_irq_status)(void __iomem *ioaddr);
++	int (*fpe_send_mpacket)(void __iomem *ioaddr,
++				enum mpacket_type type);
+ 	/* Safety Features */
+ 	int (*safety_feat_config)(void __iomem *ioaddr, unsigned int asp);
+ 	int (*safety_feat_irq_status)(struct net_device *ndev,
+@@ -509,6 +512,10 @@ struct stmmac_ops {
+ 	stmmac_do_callback(__priv, mac, get_fpe_config, __args)
+ #define stmmac_get_fpe_pmac_sts(__priv, __args...) \
+ 	stmmac_do_callback(__priv, mac, get_fpe_pmac_sts, __args)
++#define stmmac_fpe_irq_status(__priv, __args...) \
++	stmmac_do_callback(__priv, mac, fpe_irq_status, __args)
++#define stmmac_fpe_send_mpacket(__priv, __args...) \
++	stmmac_do_callback(__priv, mac, fpe_send_mpacket, __args)
+ #define stmmac_safety_feat_config(__priv, __args...) \
+ 	stmmac_do_callback(__priv, mac, safety_feat_config, __args)
+ #define stmmac_safety_feat_irq_status(__priv, __args...) \
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index a15e126..c103fe7 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -882,11 +882,21 @@ static void stmmac_adjust_link(struct net_device *dev)
+ 			new_state = true;
+ 			priv->oldlink = true;
+ 		}
++
++		if (dev->features & NETIF_F_HW_FPE) {
++			stmmac_set_fpe_enable(priv, priv->ioaddr, 1);
++			stmmac_fpe_send_mpacket(priv, priv->ioaddr,
++						MPACKET_VERIFY);
++		}
++
+ 	} else if (priv->oldlink) {
+ 		new_state = true;
+ 		priv->oldlink = false;
+ 		priv->speed = SPEED_UNKNOWN;
+ 		priv->oldduplex = DUPLEX_UNKNOWN;
++
++		if (dev->features & NETIF_F_HW_FPE)
++			stmmac_set_fpe_enable(priv, priv->ioaddr, 0);
+ 	}
+ 
+ 	if (new_state && netif_msg_link(priv))
+@@ -3690,10 +3700,13 @@ static int stmmac_set_features(struct net_device *netdev,
+ 			stmmac_set_est_enable(priv, priv->ioaddr, 0);
+ 	}
+ 	if (changed & NETIF_F_HW_FPE) {
+-		if (features & NETIF_F_HW_FPE)
++		if (features & NETIF_F_HW_FPE) {
+ 			stmmac_set_fpe_enable(priv, priv->ioaddr, 1);
+-		else
++			stmmac_fpe_send_mpacket(priv, priv->ioaddr,
++						MPACKET_VERIFY);
++		} else {
+ 			stmmac_set_fpe_enable(priv, priv->ioaddr, 0);
++		}
+ 	}
+ 
+ 	netdev->features = features;
+@@ -3770,6 +3783,14 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
+ 		if (priv->hw->tsn_cap & TSN_CAP_EST)
+ 			stmmac_est_irq_status(priv, priv->ioaddr);
+ 
++		if (priv->hw->tsn_cap & TSN_CAP_FPE) {
++			int fpe_state =
++				stmmac_fpe_irq_status(priv, priv->ioaddr);
++			if ((fpe_state & FPE_STATE_RVER) == FPE_STATE_RVER)
++				stmmac_fpe_send_mpacket(priv, priv->ioaddr,
++							MPACKET_RESPONSE);
++		}
++
+ 		/* PCS link status */
+ 		if (priv->hw->pcs) {
+ 			if (priv->xstats.pcs_link)
+@@ -4439,6 +4460,7 @@ int stmmac_dvr_probe(struct device *device,
+ 	if (tsn_hwcap && tsn_hwcap->fpe_support && priv->plat->tsn_fpe_en) {
+ 		ndev->hw_features |= NETIF_F_HW_FPE;
+ 		stmmac_set_tsn_feat(priv, TSN_FEAT_ID_FPE, true);
++		priv->hw->tsn_cap |= TSN_CAP_FPE;
+ 		dev_info(priv->device, "FPE feature enabled\n");
+ 	}
+ 
+-- 
+2.7.4
+

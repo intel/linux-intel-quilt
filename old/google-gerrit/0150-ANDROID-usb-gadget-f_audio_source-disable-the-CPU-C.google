@@ -1,0 +1,63 @@
+From 5e505285b2fb94d6a1deef48f5e982895bff294c Mon Sep 17 00:00:00 2001
+From: Konrad Leszczynski <konrad.leszczynski@intel.com>
+Date: Wed, 24 Feb 2016 10:47:12 +0000
+Subject: [PATCH 150/352] ANDROID: usb: gadget: f_audio_source: disable the CPU
+ C-states upon playback
+
+Due to the issue with the isoc transfers being interrupted
+by the CPU going into the idle state, the C-states will be
+disabled for the playback time.
+
+Change-Id: If4e52673606923d7e33a1d1dbe0192b8ad24f78c
+Signed-off-by: Konrad Leszczynski <konrad.leszczynski@intel.com>
+Signed-off-by: Russ Weight <russell.h.weight@intel.com>
+---
+ drivers/usb/gadget/function/f_audio_source.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/usb/gadget/function/f_audio_source.c b/drivers/usb/gadget/function/f_audio_source.c
+index 61b47b8..3cf6060 100644
+--- a/drivers/usb/gadget/function/f_audio_source.c
++++ b/drivers/usb/gadget/function/f_audio_source.c
+@@ -17,6 +17,7 @@
+ #include <linux/device.h>
+ #include <linux/usb/audio.h>
+ #include <linux/wait.h>
++#include <linux/pm_qos.h>
+ #include <sound/core.h>
+ #include <sound/initval.h>
+ #include <sound/pcm.h>
+@@ -268,6 +269,8 @@ struct audio_dev {
+ 	/* number of frames sent since start_time */
+ 	s64				frames_sent;
+ 	struct audio_source_config	*config;
++	/* for creating and issuing QoS requests */
++	struct pm_qos_request pm_qos;
+ };
+ 
+ static inline struct audio_dev *func_to_audio(struct usb_function *f)
+@@ -735,6 +738,10 @@ static int audio_pcm_open(struct snd_pcm_substream *substream)
+ 	runtime->hw.channels_max = 2;
+ 
+ 	audio->substream = substream;
++
++	/* Add the QoS request and set the latency to 0 */
++	pm_qos_add_request(&audio->pm_qos, PM_QOS_CPU_DMA_LATENCY, 0);
++
+ 	return 0;
+ }
+ 
+@@ -744,6 +751,10 @@ static int audio_pcm_close(struct snd_pcm_substream *substream)
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&audio->lock, flags);
++
++	/* Remove the QoS request */
++	pm_qos_remove_request(&audio->pm_qos);
++
+ 	audio->substream = NULL;
+ 	spin_unlock_irqrestore(&audio->lock, flags);
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,71 @@
+From 079f4d71681a44e96f3708818e5e677a38064d5f Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Fri, 24 Feb 2017 15:41:48 -0800
+Subject: [PATCH 228/357] ANDROID: sdcardfs: implement vm_ops->page_mkwrite
+
+This comes from wrapfs
+commit 3dfec0ffe5e2 ("Wrapfs: implement vm_ops->page_mkwrite")
+
+Some file systems (e.g., ext4) require it.  Reported by Ted Ts'o.
+
+Signed-off-by: Erez Zadok <ezk@cs.sunysb.edu>
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Bug: 34133558
+Change-Id: I1a389b2422c654a6d3046bb8ec3e20511aebfa8e
+---
+ fs/sdcardfs/mmap.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/fs/sdcardfs/mmap.c b/fs/sdcardfs/mmap.c
+index ac5f3de..28db1d1 100644
+--- a/fs/sdcardfs/mmap.c
++++ b/fs/sdcardfs/mmap.c
+@@ -48,6 +48,39 @@ static int sdcardfs_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 	return err;
+ }
+ 
++static int sdcardfs_page_mkwrite(struct vm_area_struct *vma,
++			       struct vm_fault *vmf)
++{
++	int err = 0;
++	struct file *file, *lower_file;
++	const struct vm_operations_struct *lower_vm_ops;
++	struct vm_area_struct lower_vma;
++
++	memcpy(&lower_vma, vma, sizeof(struct vm_area_struct));
++	file = lower_vma.vm_file;
++	lower_vm_ops = SDCARDFS_F(file)->lower_vm_ops;
++	BUG_ON(!lower_vm_ops);
++	if (!lower_vm_ops->page_mkwrite)
++		goto out;
++
++	lower_file = sdcardfs_lower_file(file);
++	/*
++	 * XXX: vm_ops->page_mkwrite may be called in parallel.
++	 * Because we have to resort to temporarily changing the
++	 * vma->vm_file to point to the lower file, a concurrent
++	 * invocation of sdcardfs_page_mkwrite could see a different
++	 * value.  In this workaround, we keep a different copy of the
++	 * vma structure in our stack, so we never expose a different
++	 * value of the vma->vm_file called to us, even temporarily.
++	 * A better fix would be to change the calling semantics of
++	 * ->page_mkwrite to take an explicit file pointer.
++	 */
++	lower_vma.vm_file = lower_file;
++	err = lower_vm_ops->page_mkwrite(&lower_vma, vmf);
++out:
++	return err;
++}
++
+ static ssize_t sdcardfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+ {
+ 	/*
+@@ -77,4 +110,5 @@ const struct address_space_operations sdcardfs_aops = {
+ 
+ const struct vm_operations_struct sdcardfs_vm_ops = {
+ 	.fault		= sdcardfs_fault,
++	.page_mkwrite	= sdcardfs_page_mkwrite,
+ };
+-- 
+2.7.4
+

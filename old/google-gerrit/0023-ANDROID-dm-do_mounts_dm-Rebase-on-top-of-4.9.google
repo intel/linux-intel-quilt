@@ -1,0 +1,107 @@
+From 338e3a2d0619bc7afbabf088c5a540c5b72053c8 Mon Sep 17 00:00:00 2001
+From: Badhri Jagan Sridharan <Badhri@google.com>
+Date: Mon, 8 Feb 2016 16:47:41 -0800
+Subject: [PATCH 023/352] ANDROID: dm: do_mounts_dm: Rebase on top of 4.9
+
+1. "dm: optimize use SRCU and RCU" removes the use of dm_table_put.
+2. "dm: remove request-based logic from make_request_fn wrapper" necessitates
+    calling dm_setup_md_queue or else the request_queue's make_request_fn
+    pointer ends being unset.
+
+[    7.711600] Internal error: Oops - bad mode: 0 [#1] PREEMPT SMP
+[    7.717519] CPU: 1 PID: 1 Comm: swapper/0 Tainted: G        W       4.1.15-02273-gb057d16-dirty #33
+[    7.726559] Hardware name: HiKey Development Board (DT)
+[    7.731779] task: ffffffc005f8acc0 ti: ffffffc005f8c000 task.ti: ffffffc005f8c000
+[    7.739257] PC is at 0x0
+[    7.741787] LR is at generic_make_request+0x8c/0x108
+....
+[    9.082931] Call trace:
+[    9.085372] [<          (null)>]           (null)
+[    9.090074] [<ffffffc0003f4ac0>] submit_bio+0x98/0x1e0
+[    9.095212] [<ffffffc0001e2618>] _submit_bh+0x120/0x1f0
+[    9.096165] cfg80211: Calling CRDA to update world regulatory domain
+[    9.106781] [<ffffffc0001e5450>] __bread_gfp+0x94/0x114
+[    9.112004] [<ffffffc00024a748>] ext4_fill_super+0x18c/0x2d64
+[    9.117750] [<ffffffc0001b275c>] mount_bdev+0x194/0x1c0
+[    9.122973] [<ffffffc0002450dc>] ext4_mount+0x14/0x1c
+[    9.128021] [<ffffffc0001b29a0>] mount_fs+0x3c/0x194
+[    9.132985] [<ffffffc0001d059c>] vfs_kern_mount+0x4c/0x134
+[    9.138467] [<ffffffc0001d2168>] do_mount+0x204/0xbbc
+[    9.143514] [<ffffffc0001d2ec4>] SyS_mount+0x94/0xe8
+[    9.148479] [<ffffffc000c54074>] mount_block_root+0x120/0x24c
+[    9.154222] [<ffffffc000c543e8>] mount_root+0x110/0x12c
+[    9.159443] [<ffffffc000c54574>] prepare_namespace+0x170/0x1b8
+[    9.165273] [<ffffffc000c53d98>] kernel_init_freeable+0x23c/0x260
+[    9.171365] [<ffffffc0009b1748>] kernel_init+0x10/0x118
+[    9.176589] Code: bad PC value
+[    9.179807] ---[ end trace 75e1bc52ba364d13 ]---
+
+Bug: 27175947
+
+Signed-off-by: Badhri Jagan Sridharan <Badhri@google.com>
+Change-Id: I952d86fd1475f0825f9be1386e3497b36127abd0
+---
+ init/do_mounts_dm.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/init/do_mounts_dm.c b/init/do_mounts_dm.c
+index 0fd3411..0fe9c5f 100644
+--- a/init/do_mounts_dm.c
++++ b/init/do_mounts_dm.c
+@@ -10,6 +10,7 @@
+ #include <linux/string.h>
+ 
+ #include "do_mounts.h"
++#include "../drivers/md/dm.h"
+ 
+ #define DM_MAX_NAME 32
+ #define DM_MAX_UUID 129
+@@ -333,6 +334,7 @@ static void __init dm_setup_drive(void)
+ 		goto dm_table_create_fail;
+ 	}
+ 
++	dm_lock_md_type(md);
+ 	target = dm_setup_args.target;
+ 	while (target) {
+ 		DMINFO("adding target '%llu %llu %s %s'",
+@@ -352,6 +354,17 @@ static void __init dm_setup_drive(void)
+ 		goto table_complete_fail;
+ 	}
+ 
++	if (dm_get_md_type(md) == DM_TYPE_NONE) {
++		dm_set_md_type(md, dm_table_get_type(table));
++		if (dm_setup_md_queue(md, table)) {
++			DMWARN("unable to set up device queue for new table.");
++			goto setup_md_queue_fail;
++		}
++	} else if (dm_get_md_type(md) != dm_table_get_type(table)) {
++		DMWARN("can't change device type after initial table load.");
++		goto setup_md_queue_fail;
++        }
++
+ 	/* Suspend the device so that we can bind it to the table. */
+ 	if (dm_suspend(md, 0)) {
+ 		DMDEBUG("failed to suspend the device pre-bind");
+@@ -380,6 +393,7 @@ static void __init dm_setup_drive(void)
+ 	}
+ 	printk(KERN_INFO "dm: dm-%d is ready\n", dm_setup_args.minor);
+ 
++	dm_unlock_md_type(md);
+ 	dm_setup_cleanup();
+ 	return;
+ 
+@@ -387,9 +401,10 @@ static void __init dm_setup_drive(void)
+ resume_fail:
+ table_bind_fail:
+ suspend_fail:
++setup_md_queue_fail:
+ table_complete_fail:
+ add_target_fail:
+-	dm_table_put(table);
++	dm_unlock_md_type(md);
+ dm_table_create_fail:
+ 	dm_put(md);
+ dm_create_fail:
+-- 
+2.7.4
+

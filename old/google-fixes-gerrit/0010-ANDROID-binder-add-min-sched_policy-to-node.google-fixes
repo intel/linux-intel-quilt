@@ -1,0 +1,153 @@
+From 88494d51ac6865f79fb83ddab42f4f58153e592e Mon Sep 17 00:00:00 2001
+From: Martijn Coenen <maco@google.com>
+Date: Wed, 7 Jun 2017 09:29:14 -0700
+Subject: [PATCH 010/357] ANDROID: binder: add min sched_policy to node.
+
+This change adds flags to flat_binder_object.flags
+to allow indicating a minimum scheduling policy for
+the node. It also clarifies the valid value range
+for the priority bits in the flags.
+
+Internally, we use the priority map that the kernel
+uses, e.g. [0..99] for real-time policies and [100..139]
+for the SCHED_NORMAL/SCHED_BATCH policies.
+
+Bug: 34461621
+Bug: 37293077
+Change-Id: I12438deecb53df432da18c6fc77460768ae726d2
+Signed-off-by: Martijn Coenen <maco@google.com>
+---
+ drivers/android/binder.c            | 26 ++++++++++++++++++-----
+ include/uapi/linux/android/binder.h | 41 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index fe2d92e..446d5b3 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -351,6 +351,8 @@ struct binder_error {
+  *                        and by @lock)
+  * @has_async_transaction: async transaction to node in progress
+  *                        (protected by @lock)
++ * @sched_policy:         minimum scheduling policy for node
++ *                        (invariant after initialized)
+  * @accept_fds:           file descriptor operations supported for node
+  *                        (invariant after initialized)
+  * @min_priority:         minimum scheduling priority
+@@ -390,6 +392,7 @@ struct binder_node {
+ 		/*
+ 		 * invariant after initialization
+ 		 */
++		u8 sched_policy:2;
+ 		u8 accept_fds:1;
+ 		u8 min_priority;
+ 	};
+@@ -1263,6 +1266,7 @@ static struct binder_node *binder_init_node_ilocked(
+ 	binder_uintptr_t ptr = fp ? fp->binder : 0;
+ 	binder_uintptr_t cookie = fp ? fp->cookie : 0;
+ 	__u32 flags = fp ? fp->flags : 0;
++	s8 priority;
+ 
+ 	assert_spin_locked(&proc->inner_lock);
+ 
+@@ -1295,8 +1299,10 @@ static struct binder_node *binder_init_node_ilocked(
+ 	node->ptr = ptr;
+ 	node->cookie = cookie;
+ 	node->work.type = BINDER_WORK_NODE;
+-	node->min_priority = NICE_TO_PRIO(
+-			flags & FLAT_BINDER_FLAG_PRIORITY_MASK);
++	priority = flags & FLAT_BINDER_FLAG_PRIORITY_MASK;
++	node->sched_policy = (flags & FLAT_BINDER_FLAG_PRIORITY_MASK) >>
++		FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT;
++	node->min_priority = to_kernel_prio(node->sched_policy, priority);
+ 	node->accept_fds = !!(flags & FLAT_BINDER_FLAG_ACCEPTS_FDS);
+ 	spin_lock_init(&node->lock);
+ 	INIT_LIST_HEAD(&node->work.entry);
+@@ -4183,8 +4189,17 @@ static int binder_thread_read(struct binder_proc *proc,
+ 			tr.cookie =  target_node->cookie;
+ 			t->saved_priority.sched_policy = current->policy;
+ 			t->saved_priority.prio = current->normal_prio;
+-			if (target_node->min_priority < t->priority.prio) {
+-				prio.sched_policy = SCHED_NORMAL;
++			if (target_node->min_priority < t->priority.prio ||
++			    (target_node->min_priority == t->priority.prio &&
++			     target_node->sched_policy == SCHED_FIFO)) {
++				/*
++				 * In case the minimum priority on the node is
++				 * higher (lower value), use that priority. If
++				 * the priority is the same, but the node uses
++				 * SCHED_FIFO, prefer SCHED_FIFO, since it can
++				 * run unbounded, unlike SCHED_RR.
++				 */
++				prio.sched_policy = target_node->sched_policy;
+ 				prio.prio = target_node->min_priority;
+ 			}
+ 			binder_set_priority(current, prio);
+@@ -5291,8 +5306,9 @@ static void print_binder_node_nilocked(struct seq_file *m,
+ 	hlist_for_each_entry(ref, &node->refs, node_entry)
+ 		count++;
+ 
+-	seq_printf(m, "  node %d: u%016llx c%016llx hs %d hw %d ls %d lw %d is %d iw %d tr %d",
++	seq_printf(m, "  node %d: u%016llx c%016llx pri %d:%d hs %d hw %d ls %d lw %d is %d iw %d tr %d",
+ 		   node->debug_id, (u64)node->ptr, (u64)node->cookie,
++		   node->sched_policy, node->min_priority,
+ 		   node->has_strong_ref, node->has_weak_ref,
+ 		   node->local_strong_refs, node->local_weak_refs,
+ 		   node->internal_strong_refs, count, node->tmp_refs);
+diff --git a/include/uapi/linux/android/binder.h b/include/uapi/linux/android/binder.h
+index bfaec69..3fe1094 100644
+--- a/include/uapi/linux/android/binder.h
++++ b/include/uapi/linux/android/binder.h
+@@ -38,9 +38,48 @@ enum {
+ 	BINDER_TYPE_PTR		= B_PACK_CHARS('p', 't', '*', B_TYPE_LARGE),
+ };
+ 
+-enum {
++/**
++ * enum flat_binder_object_shifts: shift values for flat_binder_object_flags
++ * @FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT: shift for getting scheduler policy.
++ *
++ */
++enum flat_binder_object_shifts {
++	FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT = 9,
++};
++
++/**
++ * enum flat_binder_object_flags - flags for use in flat_binder_object.flags
++ */
++enum flat_binder_object_flags {
++	/**
++	 * @FLAT_BINDER_FLAG_PRIORITY_MASK: bit-mask for min scheduler priority
++	 *
++	 * These bits can be used to set the minimum scheduler priority
++	 * at which transactions into this node should run. Valid values
++	 * in these bits depend on the scheduler policy encoded in
++	 * @FLAT_BINDER_FLAG_SCHED_POLICY_MASK.
++	 *
++	 * For SCHED_NORMAL/SCHED_BATCH, the valid range is between [-20..19]
++	 * For SCHED_FIFO/SCHED_RR, the value can run between [1..99]
++	 */
+ 	FLAT_BINDER_FLAG_PRIORITY_MASK = 0xff,
++	/**
++	 * @FLAT_BINDER_FLAG_ACCEPTS_FDS: whether the node accepts fds.
++	 */
+ 	FLAT_BINDER_FLAG_ACCEPTS_FDS = 0x100,
++	/**
++	 * @FLAT_BINDER_FLAG_SCHED_POLICY_MASK: bit-mask for scheduling policy
++	 *
++	 * These two bits can be used to set the min scheduling policy at which
++	 * transactions on this node should run. These match the UAPI
++	 * scheduler policy values, eg:
++	 * 00b: SCHED_NORMAL
++	 * 01b: SCHED_FIFO
++	 * 10b: SCHED_RR
++	 * 11b: SCHED_BATCH
++	 */
++	FLAT_BINDER_FLAG_SCHED_POLICY_MASK =
++		3U << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT,
+ };
+ 
+ #ifdef BINDER_IPC_32BIT
+-- 
+2.7.4
+

@@ -1,0 +1,191 @@
+From e5c155b811d97d7fed4b63c5352cd9a60a636861 Mon Sep 17 00:00:00 2001
+From: Weifeng Voon <weifeng.voon@intel.com>
+Date: Wed, 11 Jul 2018 09:06:00 +0800
+Subject: [PATCH 34/58] net: stmmac: Support reporting Frame Preemption MMC
+ counters
+
+Added support for ethtool to report frame preemption MMC counters.
+This MMC counter statistic can be shown by using command:
+$ ethtool -S|--statistic devname
+
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+[Ported to newer kernel version - OBL]
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+
+Change-Id: I16848bcf6dfcc523cc663e00d38284ea69fb761f
+---
+ drivers/net/ethernet/stmicro/stmmac/mmc.h          | 11 ++++++-
+ drivers/net/ethernet/stmicro/stmmac/mmc_core.c     | 37 ++++++++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_ethtool.c   | 36 +++++++++++++++++++++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c  |  3 ++
+ 4 files changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/mmc.h b/drivers/net/ethernet/stmicro/stmmac/mmc.h
+index c037326..a2cf3ba 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/mmc.h
++++ b/drivers/net/ethernet/stmicro/stmmac/mmc.h
+@@ -126,10 +126,19 @@ struct stmmac_counters {
+ 	unsigned int mmc_rx_tcp_err_octets;
+ 	unsigned int mmc_rx_icmp_gd_octets;
+ 	unsigned int mmc_rx_icmp_err_octets;
++
++	/* frame preemption */
++	unsigned int mmc_tx_fpe_fragment;
++	unsigned int mmc_tx_hold_req;
++	unsigned int mmc_rx_packet_assembly_err;
++	unsigned int mmc_rx_packet_smd_err;
++	unsigned int mmc_rx_packet_assembly_ok;
++	unsigned int mmc_rx_fpe_fragment;
+ };
+ 
+ void dwmac_mmc_ctrl(void __iomem *ioaddr, unsigned int mode);
+ void dwmac_mmc_intr_all_mask(void __iomem *ioaddr);
+ void dwmac_mmc_read(void __iomem *ioaddr, struct stmmac_counters *mmc);
+-
++void dwmac_mmc_fpe_intr_all_mask(void __iomem *ioaddr);
++void dwmac_mmc_tsn_read(void __iomem *ioaddr, struct stmmac_counters *mmc);
+ #endif /* __MMC_H__ */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/mmc_core.c b/drivers/net/ethernet/stmicro/stmmac/mmc_core.c
+index e9b04c2..02fab17 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/mmc_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/mmc_core.c
+@@ -29,6 +29,10 @@
+ #define MMC_TX_INTR		0x08	/* MMC TX Interrupt */
+ #define MMC_RX_INTR_MASK	0x0c	/* MMC Interrupt Mask */
+ #define MMC_TX_INTR_MASK	0x10	/* MMC Interrupt Mask */
++#define MMC_FPE_TX_INTR		0x8a0	/* MMC FPE Tx Intr */
++#define MMC_FPE_TX_INTR_MASK	0x8a4	/* MMC FPE Tx Intr Mask */
++#define MMC_FPE_RX_INTR		0x8c0	/* MMC FPE Rx Intr */
++#define MMC_FPE_RX_INTR_MASK	0x8c4	/* MMC FPE Rx Intr Mask */
+ #define MMC_DEFAULT_MASK	0xffffffff
+ 
+ /* MMC TX counter registers */
+@@ -128,6 +132,14 @@
+ #define MMC_RX_ICMP_GD_OCTETS		0x180
+ #define MMC_RX_ICMP_ERR_OCTETS		0x184
+ 
++/* Frame Preemption */
++#define MMC_TX_FPE_FRAGMENT		0x8a8
++#define MMC_TX_HOLD_REQ			0x8ac
++#define MMC_RX_PACKET_ASSEMBLY_ERR	0x8c8
++#define MMC_RX_PACKET_SMD_ERR		0x8cc
++#define MMC_RX_PACKET_ASSEMBLY_OK	0x8d0
++#define MMC_RX_FPE_FRAGMENT		0x8d4
++
+ void dwmac_mmc_ctrl(void __iomem *mmcaddr, unsigned int mode)
+ {
+ 	u32 value = readl(mmcaddr + MMC_CNTRL);
+@@ -266,3 +278,28 @@ void dwmac_mmc_read(void __iomem *mmcaddr, struct stmmac_counters *mmc)
+ 	mmc->mmc_rx_icmp_gd_octets += readl(mmcaddr + MMC_RX_ICMP_GD_OCTETS);
+ 	mmc->mmc_rx_icmp_err_octets += readl(mmcaddr + MMC_RX_ICMP_ERR_OCTETS);
+ }
++
++/* To mask all fpe interrupts.*/
++void dwmac_mmc_fpe_intr_all_mask(void __iomem *mmcaddr)
++{
++	writel(MMC_DEFAULT_MASK, mmcaddr + MMC_FPE_TX_INTR_MASK);
++	writel(MMC_DEFAULT_MASK, mmcaddr + MMC_FPE_RX_INTR_MASK);
++}
++
++/* This reads the MAC core counters for tsn (if actually supported).
++ * By default the MMC core is programmed to reset each
++ * counter after a read. So all the field of the mmc struct
++ * have to be incremented.
++ */
++void dwmac_mmc_tsn_read(void __iomem *mmcaddr, struct stmmac_counters *mmc)
++{
++	/* Frame Preemption */
++	mmc->mmc_tx_fpe_fragment += readl(mmcaddr + MMC_TX_FPE_FRAGMENT);
++	mmc->mmc_tx_hold_req += readl(mmcaddr + MMC_TX_HOLD_REQ);
++	mmc->mmc_rx_packet_assembly_err +=
++	    readl(mmcaddr + MMC_RX_PACKET_ASSEMBLY_ERR);
++	mmc->mmc_rx_packet_smd_err += readl(mmcaddr + MMC_RX_PACKET_SMD_ERR);
++	mmc->mmc_rx_packet_assembly_ok += readl(mmcaddr +
++	    MMC_RX_PACKET_ASSEMBLY_OK);
++	mmc->mmc_rx_fpe_fragment += readl(mmcaddr + MMC_RX_FPE_FRAGMENT);
++}
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index efe39b6a..ee34f86 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -260,6 +260,17 @@ static const struct stmmac_stats stmmac_mmc[] = {
+ };
+ #define STMMAC_MMC_STATS_LEN ARRAY_SIZE(stmmac_mmc)
+ 
++static const struct stmmac_stats stmmac_mmc_tsn[] = {
++	STMMAC_MMC_STAT(mmc_tx_fpe_fragment),
++	STMMAC_MMC_STAT(mmc_tx_hold_req),
++	STMMAC_MMC_STAT(mmc_rx_packet_assembly_err),
++	STMMAC_MMC_STAT(mmc_rx_packet_smd_err),
++	STMMAC_MMC_STAT(mmc_rx_packet_assembly_ok),
++	STMMAC_MMC_STAT(mmc_rx_fpe_fragment),
++};
++
++#define STMMAC_MMC_TSN_STATS_LEN ARRAY_SIZE(stmmac_mmc_tsn)
++
+ /* All test entries will be added before MAX_TEST_CASES */
+ enum stmmac_diagnostics_cases {
+ 	TEST_MAC_LOOP,
+@@ -795,6 +806,21 @@ static void stmmac_get_ethtool_stats(struct net_device *dev,
+ 					     (*(u32 *)p);
+ 			}
+ 		}
++		if ((priv->hw->tsn_cap & TSN_CAP_FPE) == TSN_CAP_FPE) {
++			dwmac_mmc_tsn_read(priv->mmcaddr, &priv->mmc);
++
++			for (i = 0; i < STMMAC_MMC_TSN_STATS_LEN; i++) {
++				char *p;
++				int ss = stmmac_mmc_tsn[i].sizeof_stat;
++
++				p = (char *)priv +
++				    stmmac_mmc_tsn[i].stat_offset;
++
++				data[j++] = (ss ==
++					    sizeof(u64)) ?
++					    (*(u64 *)p) : (*(u32 *)p);
++			}
++		}
+ 		if (priv->eee_enabled) {
+ 			int val = phy_get_eee_err(dev->phydev);
+ 			if (val)
+@@ -835,6 +861,9 @@ static int stmmac_get_sset_count(struct net_device *netdev, int sset)
+ 			len += safety_len;
+ 		}
+ 
++		if ((priv->hw->tsn_cap & TSN_CAP_FPE) == TSN_CAP_FPE)
++			len += STMMAC_MMC_TSN_STATS_LEN;
++
+ 		return len;
+ 	case ETH_SS_TEST:
+ 		return STMMAC_TEST_LEN;
+@@ -868,6 +897,13 @@ static void stmmac_get_strings(struct net_device *dev, u32 stringset, u8 *data)
+ 				       ETH_GSTRING_LEN);
+ 				p += ETH_GSTRING_LEN;
+ 			}
++		if ((priv->hw->tsn_cap & TSN_CAP_FPE) == TSN_CAP_FPE) {
++			for (i = 0; i < STMMAC_MMC_TSN_STATS_LEN; i++) {
++				memcpy(p, stmmac_mmc_tsn[i].stat_string,
++				       ETH_GSTRING_LEN);
++				p += ETH_GSTRING_LEN;
++			}
++		}
+ 		for (i = 0; i < STMMAC_STATS_LEN; i++) {
+ 			memcpy(p, stmmac_gstrings_stats[i].stat_string,
+ 				ETH_GSTRING_LEN);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index c103fe7..105a679 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2125,6 +2125,9 @@ static void stmmac_mmc_setup(struct stmmac_priv *priv)
+ 
+ 	dwmac_mmc_intr_all_mask(priv->mmcaddr);
+ 
++	if ((priv->hw->tsn_cap & TSN_CAP_FPE) == TSN_CAP_FPE)
++		dwmac_mmc_fpe_intr_all_mask(priv->mmcaddr);
++
+ 	if (priv->dma_cap.rmon) {
+ 		dwmac_mmc_ctrl(priv->mmcaddr, mode);
+ 		memset(&priv->mmc, 0, sizeof(struct stmmac_counters));
+-- 
+2.7.4
+

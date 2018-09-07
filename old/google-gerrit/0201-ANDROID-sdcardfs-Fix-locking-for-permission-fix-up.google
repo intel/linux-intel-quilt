@@ -1,0 +1,90 @@
+From cf6ec998b05da41e603131d8e3b11e4a6fa919d6 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Tue, 16 Aug 2016 15:19:26 -0700
+Subject: [PATCH 201/352] ANDROID: sdcardfs: Fix locking for permission fix up
+
+Iterating over d_subdirs requires taking d_lock.
+Removed several unneeded locks.
+
+Change-Id: I5b1588e54c7e6ee19b756d6705171c7f829e2650
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+---
+ fs/sdcardfs/derived_perm.c | 6 ++----
+ fs/sdcardfs/inode.c        | 2 --
+ fs/sdcardfs/lookup.c       | 4 +---
+ 3 files changed, 3 insertions(+), 9 deletions(-)
+
+diff --git a/fs/sdcardfs/derived_perm.c b/fs/sdcardfs/derived_perm.c
+index 41e0e11..bfe402b 100644
+--- a/fs/sdcardfs/derived_perm.c
++++ b/fs/sdcardfs/derived_perm.c
+@@ -111,15 +111,15 @@ void get_derived_permission(struct dentry *parent, struct dentry *dentry)
+ 
+ void get_derive_permissions_recursive(struct dentry *parent) {
+ 	struct dentry *dentry;
++	spin_lock(&parent->d_lock);
+ 	list_for_each_entry(dentry, &parent->d_subdirs, d_child) {
+ 		if (dentry->d_inode) {
+-			mutex_lock(&dentry->d_inode->i_mutex);
+ 			get_derived_permission(parent, dentry);
+ 			fix_derived_permission(dentry->d_inode);
+ 			get_derive_permissions_recursive(dentry);
+-			mutex_unlock(&dentry->d_inode->i_mutex);
+ 		}
+ 	}
++	spin_unlock(&parent->d_lock);
+ }
+ 
+ /* main function for updating derived permission */
+@@ -135,7 +135,6 @@ inline void update_derived_permission_lock(struct dentry *dentry)
+ 	 * 1. need to check whether the dentry is updated or not
+ 	 * 2. remove the root dentry update
+ 	 */
+-	mutex_lock(&dentry->d_inode->i_mutex);
+ 	if(IS_ROOT(dentry)) {
+ 		//setup_default_pre_root_state(dentry->d_inode);
+ 	} else {
+@@ -146,7 +145,6 @@ inline void update_derived_permission_lock(struct dentry *dentry)
+ 		}
+ 	}
+ 	fix_derived_permission(dentry->d_inode);
+-	mutex_unlock(&dentry->d_inode->i_mutex);
+ }
+ 
+ int need_graft_path(struct dentry *dentry)
+diff --git a/fs/sdcardfs/inode.c b/fs/sdcardfs/inode.c
+index 4b140ba..1a23c0c 100644
+--- a/fs/sdcardfs/inode.c
++++ b/fs/sdcardfs/inode.c
+@@ -513,11 +513,9 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+ 	}
+ 	/* At this point, not all dentry information has been moved, so
+ 	 * we pass along new_dentry for the name.*/
+-	mutex_lock(&d_inode(old_dentry)->i_mutex);
+ 	get_derived_permission_new(new_dentry->d_parent, old_dentry, new_dentry);
+ 	fix_derived_permission(d_inode(old_dentry));
+ 	get_derive_permissions_recursive(old_dentry);
+-	mutex_unlock(&d_inode(old_dentry)->i_mutex);
+ out:
+ 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
+ 	dput(lower_old_dir_dentry);
+diff --git a/fs/sdcardfs/lookup.c b/fs/sdcardfs/lookup.c
+index a127d05..c74a7d1 100644
+--- a/fs/sdcardfs/lookup.c
++++ b/fs/sdcardfs/lookup.c
+@@ -387,11 +387,9 @@ struct dentry *sdcardfs_lookup(struct inode *dir, struct dentry *dentry,
+ 	if (dentry->d_inode) {
+ 		fsstack_copy_attr_times(dentry->d_inode,
+ 					sdcardfs_lower_inode(dentry->d_inode));
+-		/* get drived permission */
+-		mutex_lock(&dentry->d_inode->i_mutex);
++		/* get derived permission */
+ 		get_derived_permission(parent, dentry);
+ 		fix_derived_permission(dentry->d_inode);
+-		mutex_unlock(&dentry->d_inode->i_mutex);
+ 	}
+ 	/* update parent directory's atime */
+ 	fsstack_copy_attr_atime(parent->d_inode,
+-- 
+2.7.4
+
