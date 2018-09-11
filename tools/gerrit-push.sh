@@ -17,12 +17,7 @@ for b in `cat $manifest`; do
 	git checkout $rc
 	git push -f codereview $rc:dev/staging/$b
 	git checkout $b
-	git push codereview HEAD:refs/for/dev/staging/$b 2>$b.gerritURLs
-	read -n 1 -p "Do you want to continue (y/n)?" answer
-	case $answer in
-		[Yy]) continue;;
-		[Nn]) echo "exit program"; exit;;
-	esac
+	git push codereview HEAD:refs/for/dev/staging/$b 2>$b.gerrit
 done
 
 
