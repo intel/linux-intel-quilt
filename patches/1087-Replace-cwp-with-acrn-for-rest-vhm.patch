@@ -1,0 +1,118 @@
+From 74f4cbb9f41817ce6b0f75e88e10a8bfacce3eba Mon Sep 17 00:00:00 2001
+From: "Li, Fei1" <fei1.li@intel.com>
+Date: Sun, 25 Feb 2018 00:40:36 +0800
+Subject: [PATCH 1087/2104] Replace cwp with acrn for rest vhm
+
+Change-Id: I61ac0e05ba78b270a12953644b8870e3fa63a3b6
+Signed-off-by: Li, Fei1 <fei1.li@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c |  2 +-
+ drivers/vhm/vhm_ioreq.c    | 12 ++++++------
+ drivers/vhm/vhm_msi.c      |  6 +++---
+ 3 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index ff4df52..e4e6dd7 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -284,7 +284,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 	case IC_CREATE_IOREQ_CLIENT: {
+ 		int client_id;
+ 
+-		client_id = acrn_ioreq_create_fallback_client(vm->vmid, "cwpdm");
++		client_id = acrn_ioreq_create_fallback_client(vm->vmid, "acrndm");
+ 		if (client_id < 0)
+ 			return -EFAULT;
+ 		return client_id;
+diff --git a/drivers/vhm/vhm_ioreq.c b/drivers/vhm/vhm_ioreq.c
+index 5ce1e44..08826c5 100644
+--- a/drivers/vhm/vhm_ioreq.c
++++ b/drivers/vhm/vhm_ioreq.c
+@@ -128,7 +128,7 @@ struct ioreq_client {
+ static struct ioreq_client *clients[MAX_CLIENT];
+ static DECLARE_BITMAP(client_bitmap, MAX_CLIENT);
+ 
+-static void cwp_ioreq_notify_client(struct ioreq_client *client);
++static void acrn_ioreq_notify_client(struct ioreq_client *client);
+ 
+ static inline bool is_range_type(uint32_t type)
+ {
+@@ -267,7 +267,7 @@ static void acrn_ioreq_destroy_client_pervm(struct ioreq_client *client,
+ 	while (!waitqueue_active(&client->wq) && !client->kthread_exit)
+ 		msleep(10);
+ 	client->destroying = true;
+-	cwp_ioreq_notify_client(client);
++	acrn_ioreq_notify_client(client);
+ 
+ 	spin_lock_irqsave(&client->range_lock, flags);
+ 	list_for_each_safe(pos, tmp, &client->range_list) {
+@@ -588,7 +588,7 @@ void acrn_ioreq_unintercept_bdf(int client_id)
+ 	client->pci_func = -1;
+ }
+ 
+-static void cwp_ioreq_notify_client(struct ioreq_client *client)
++static void acrn_ioreq_notify_client(struct ioreq_client *client)
+ {
+ 	/* if client thread is in waitqueue, wake up it */
+ 	if (waitqueue_active(&client->wq))
+@@ -718,7 +718,7 @@ static bool bdf_match(struct ioreq_client *client)
+ 		client->pci_func == cached_func);
+ }
+ 
+-static struct ioreq_client *cwp_ioreq_find_client_by_request(struct vhm_vm *vm,
++static struct ioreq_client *acrn_ioreq_find_client_by_request(struct vhm_vm *vm,
+ 	struct vhm_request *req)
+ {
+ 	struct list_head *pos, *range_pos;
+@@ -783,7 +783,7 @@ int acrn_ioreq_distribute_request(struct vhm_vm *vm)
+ 		if (req->valid && (req->processed == REQ_STATE_PENDING)) {
+ 			if (handle_cf8cfc(vm, req, i))
+ 				continue;
+-			client = cwp_ioreq_find_client_by_request(vm, req);
++			client = acrn_ioreq_find_client_by_request(vm, req);
+ 			if (client == NULL) {
+ 				pr_err("vhm-ioreq: failed to "
+ 						"find ioreq client -> "
+@@ -801,7 +801,7 @@ int acrn_ioreq_distribute_request(struct vhm_vm *vm)
+ 	list_for_each(pos, &vm->ioreq_client_list) {
+ 		client = container_of(pos, struct ioreq_client, list);
+ 		if (has_pending_request(client))
+-			cwp_ioreq_notify_client(client);
++			acrn_ioreq_notify_client(client);
+ 	}
+ 	spin_unlock(&vm->ioreq_client_lock);
+ 
+diff --git a/drivers/vhm/vhm_msi.c b/drivers/vhm/vhm_msi.c
+index 53233ec..73affd6 100644
+--- a/drivers/vhm/vhm_msi.c
++++ b/drivers/vhm/vhm_msi.c
+@@ -58,7 +58,7 @@
+ 
+ #include "../pci/pci.h"
+ 
+-static struct msi_msg cwp_notify_msix_remap(struct msi_desc *entry,
++static struct msi_msg acrn_notify_msix_remap(struct msi_desc *entry,
+ 				struct msi_msg *msg)
+ {
+ 	volatile struct acrn_vm_pci_msix_remap notify;
+@@ -103,7 +103,7 @@ void acrn_write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
+ 	} else if (entry->msi_attrib.is_msix) {
+ 		void __iomem *base = pci_msix_desc_addr(entry);
+ 
+-		fmsg = cwp_notify_msix_remap(entry, msg);
++		fmsg = acrn_notify_msix_remap(entry, msg);
+ 
+ 		writel(fmsg.address_lo, base + PCI_MSIX_ENTRY_LOWER_ADDR);
+ 		writel(fmsg.address_hi, base + PCI_MSIX_ENTRY_UPPER_ADDR);
+@@ -112,7 +112,7 @@ void acrn_write_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
+ 		int pos = dev->msi_cap;
+ 		u16 msgctl;
+ 
+-		fmsg = cwp_notify_msix_remap(entry, msg);
++		fmsg = acrn_notify_msix_remap(entry, msg);
+ 
+ 		pci_read_config_word(dev, pos + PCI_MSI_FLAGS, &msgctl);
+ 		msgctl &= ~PCI_MSI_FLAGS_QSIZE;
+-- 
+2.7.4
+

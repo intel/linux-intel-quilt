@@ -1,0 +1,115 @@
+From a5dcbef88afc1977608e416258c2d20586e2a120 Mon Sep 17 00:00:00 2001
+From: Pei Zhang <pei.zhang@intel.com>
+Date: Thu, 22 Jun 2017 18:45:21 +0800
+Subject: [PATCH 0906/2104] drm/i915/gvt: add module parameter enable_gvt_oos
+
+This parameter is used to control gvt's out of sync feature.
+After enabling oos page sync, the loading time of GVT-g guest workload
+will be reduced.
+
+Change-Id: Ifc2393fc23b99bf804e4c9a504443fc883589710
+Signed-off-by: Pei Zhang <pei.zhang@intel.com>
+Reviewed-by: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gtt.c     | 11 +++++------
+ drivers/gpu/drm/i915/i915_params.c |  4 ++++
+ drivers/gpu/drm/i915/i915_params.h |  3 ++-
+ 3 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index 0cb4716..3edc116 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -39,7 +39,6 @@
+ #include "i915_pvinfo.h"
+ #include "trace.h"
+ 
+-static bool enable_out_of_sync = false;
+ static int preallocated_oos_pages = 8192;
+ 
+ /*
+@@ -1299,7 +1298,7 @@ int intel_vgpu_sync_oos_pages(struct intel_vgpu *vgpu)
+ 	struct intel_vgpu_oos_page *oos_page;
+ 	int ret;
+ 
+-	if (!enable_out_of_sync)
++	if (!i915.enable_gvt_oos)
+ 		return 0;
+ 
+ 	list_for_each_safe(pos, n, &vgpu->gtt.oos_page_list_head) {
+@@ -1361,7 +1360,7 @@ static int ppgtt_handle_guest_write_page_table(
+ 
+ static inline bool can_do_out_of_sync(struct intel_vgpu_guest_page *gpt)
+ {
+-	return enable_out_of_sync
++	return i915.enable_gvt_oos
+ 		&& gtt_type_is_pte_pt(
+ 			guest_page_to_ppgtt_spt(gpt)->guest_page_type)
+ 		&& gpt->write_cnt >= 2;
+@@ -1453,7 +1452,7 @@ static int ppgtt_handle_guest_write_page_table_bytes(void *gp,
+ 		ppgtt_set_post_shadow(spt, index);
+ 	}
+ 
+-	if (!enable_out_of_sync)
++	if (!i915.enable_gvt_oos)
+ 		return 0;
+ 
+ 	gpt->write_cnt++;
+@@ -2374,7 +2373,7 @@ int intel_gvt_init_gtt(struct intel_gvt *gvt)
+ 	gvt->gtt.scratch_ggtt_page = virt_to_page(page);
+ 	gvt->gtt.scratch_ggtt_mfn = (unsigned long)(daddr >> GTT_PAGE_SHIFT);
+ 
+-	if (enable_out_of_sync) {
++	if (i915.enable_gvt_oos) {
+ 		ret = setup_spt_oos(gvt);
+ 		if (ret) {
+ 			gvt_err("fail to initialize SPT oos\n");
+@@ -2405,7 +2404,7 @@ void intel_gvt_clean_gtt(struct intel_gvt *gvt)
+ 
+ 	__free_page(gvt->gtt.scratch_ggtt_page);
+ 
+-	if (enable_out_of_sync)
++	if (i915.enable_gvt_oos)
+ 		clean_spt_oos(gvt);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/i915_params.c b/drivers/gpu/drm/i915/i915_params.c
+index 0802054..d7b0c6a 100644
+--- a/drivers/gpu/drm/i915/i915_params.c
++++ b/drivers/gpu/drm/i915/i915_params.c
+@@ -66,6 +66,7 @@ struct i915_params i915 __read_mostly = {
+ 	.enable_dpcd_backlight = false,
+ 	.enable_gvt = false,
+ 	.enable_pvmmio = 1,
++	.enable_gvt_oos = 1,
+ };
+ 
+ module_param_named(modeset, i915.modeset, int, 0400);
+@@ -263,3 +264,6 @@ module_param_named(enable_pvmmio, i915.enable_pvmmio, bool, 0400);
+ MODULE_PARM_DESC(enable_pvmmio,
+ 	"Enable pv mmio feature, default TRUE. This parameter "
+ 	"could only set from host, guest value is set through vgt_if");
++
++module_param_named(enable_gvt_oos, i915.enable_gvt_oos, bool, 0400);
++MODULE_PARM_DESC(enable_gvt_oos, "To toggle the gvt ppgtt page table OOS (Out of Sync) feature.");
+diff --git a/drivers/gpu/drm/i915/i915_params.h b/drivers/gpu/drm/i915/i915_params.h
+index 0b9e507..712a27c 100644
+--- a/drivers/gpu/drm/i915/i915_params.h
++++ b/drivers/gpu/drm/i915/i915_params.h
+@@ -69,7 +69,8 @@
+ 	func(bool, enable_dp_mst); \
+ 	func(bool, enable_dpcd_backlight); \
+ 	func(bool, enable_gvt); \
+-	func(bool, enable_pvmmio)
++	func(bool, enable_pvmmio); \
++	func(bool, enable_gvt_oos)
+ 
+ #define MEMBER(T, member) T member
+ struct i915_params {
+-- 
+2.7.4
+

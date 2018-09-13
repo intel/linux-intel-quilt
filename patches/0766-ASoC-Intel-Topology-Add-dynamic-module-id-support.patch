@@ -1,0 +1,148 @@
+From 90251971d8dba58b07d2bff92807aefe52e53eba Mon Sep 17 00:00:00 2001
+From: "Periyasamy, SriramX" <sriramx.periyasamy@intel.com>
+Date: Mon, 18 Sep 2017 18:49:51 +0530
+Subject: [PATCH 0766/2104] ASoC: Intel: Topology: Add dynamic module id
+ support
+
+Module id is a property of fw manifest and can vary between platforms.
+So use the uuid instead of module id for pins.
+
+With this patch, skl_tplg_get_uuid() is rearranged, so that it can be
+used during skl_tplg_fill_pin() and arguments to skl_tplg_fill_pin() are
+modified to take the snd_soc_tplg_vendor_value_elem as argument so that
+both value and uuid can be referred to to fill the pin information.
+
+Change-Id: Ic7ca9c367fa63d5eacc5476fef7ede3c3c975446
+Signed-off-by: Periyasamy, SriramX <sriramx.periyasamy@intel.com>
+Reviewed-by: Prusty, Subhransu S <subhransu.s.prusty@intel.com>
+Reviewed-by: Sm, Bhadur A <bhadur.a.sm@intel.com>
+Tested-by: Sm, Bhadur A <bhadur.a.sm@intel.com>
+---
+ sound/soc/intel/skylake/skl-topology.c | 67 +++++++++++++++++++++++-----------
+ 1 file changed, 45 insertions(+), 22 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index 96c24fe..6f0c95e 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -3333,21 +3333,47 @@ static int skl_tplg_add_pipe(struct device *dev,
+ 	return 0;
+ }
+ 
+-static int skl_tplg_fill_pin(struct device *dev, u32 tkn,
++static int skl_tplg_get_uuid(struct device *dev, u8 *guid,
++	      struct snd_soc_tplg_vendor_uuid_elem *uuid_tkn)
++{
++	if (uuid_tkn->token == SKL_TKN_UUID)
++		memcpy(guid, &uuid_tkn->uuid, 16);
++	else {
++		dev_err(dev, "Not an UUID token tkn %d\n", uuid_tkn->token);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int skl_tplg_fill_pin(struct device *dev,
++			struct snd_soc_tplg_vendor_value_elem *tkn_elem,
+ 			struct skl_module_pin *m_pin,
+-			int pin_index, u32 value)
++			int pin_index)
+ {
+-	switch (tkn) {
++	int ret;
++
++	switch (tkn_elem->token) {
+ 	case SKL_TKN_U32_PIN_MOD_ID:
+-		m_pin[pin_index].id.module_id = value;
++		m_pin[pin_index].id.module_id = tkn_elem->value;
+ 		break;
+ 
+ 	case SKL_TKN_U32_PIN_INST_ID:
+-		m_pin[pin_index].id.instance_id = value;
++		m_pin[pin_index].id.instance_id = tkn_elem->value;
++		break;
++
++	case SKL_TKN_UUID:
++		ret = skl_tplg_get_uuid(dev,
++			m_pin[pin_index].id.mod_uuid.b,
++			(struct snd_soc_tplg_vendor_uuid_elem *) tkn_elem);
++
++		if (ret < 0)
++			return ret;
++
+ 		break;
+ 
+ 	default:
+-		dev_err(dev, "%d Not a pin token\n", value);
++		dev_err(dev, "%d Not a pin token\n", tkn_elem->token);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -3380,8 +3406,8 @@ static int skl_tplg_fill_pins_info(struct device *dev,
+ 		return -EINVAL;
+ 	}
+ 
+-	ret = skl_tplg_fill_pin(dev, tkn_elem->token,
+-			m_pin, pin_count, tkn_elem->value);
++	ret = skl_tplg_fill_pin(dev, tkn_elem,
++			m_pin, pin_count);
+ 
+ 	if (ret < 0)
+ 		return ret;
+@@ -3467,19 +3493,6 @@ static int skl_tplg_widget_fill_fmt(struct device *dev,
+ 	return skl_tplg_fill_fmt(dev, dst_fmt, tkn, val);
+ }
+ 
+-static int skl_tplg_get_uuid(struct device *dev, struct skl_module_cfg *mconfig,
+-	      struct snd_soc_tplg_vendor_uuid_elem *uuid_tkn)
+-{
+-	if (uuid_tkn->token == SKL_TKN_UUID)
+-		memcpy(&mconfig->guid, &uuid_tkn->uuid, 16);
+-	else {
+-		dev_err(dev, "Not an UUID token tkn %d\n", uuid_tkn->token);
+-		return -EINVAL;
+-	}
+-
+-	return 0;
+-}
+-
+ static void skl_tplg_fill_pin_dynamic_val(
+ 		struct skl_module_pin *mpin, u32 pin_count, u32 value)
+ {
+@@ -3786,6 +3799,7 @@ static int skl_tplg_get_token(struct device *dev,
+ 
+ 	case SKL_TKN_U32_PIN_MOD_ID:
+ 	case SKL_TKN_U32_PIN_INST_ID:
++	case SKL_TKN_UUID:
+ 		ret = skl_tplg_fill_pins_info(dev,
+ 				mconfig, tkn_elem, dir,
+ 				pin_index);
+@@ -3865,6 +3879,7 @@ static int skl_tplg_get_tokens(struct device *dev,
+ 	struct snd_soc_tplg_vendor_value_elem *tkn_elem;
+ 	int tkn_count = 0, ret;
+ 	int off = 0, tuple_size = 0;
++	bool is_mod_guid = true;
+ 
+ 	if (block_size <= 0)
+ 		return -EINVAL;
+@@ -3880,7 +3895,15 @@ static int skl_tplg_get_tokens(struct device *dev,
+ 			continue;
+ 
+ 		case SND_SOC_TPLG_TUPLE_TYPE_UUID:
+-			ret = skl_tplg_get_uuid(dev, mconfig, array->uuid);
++			if (is_mod_guid) {
++				ret = skl_tplg_get_uuid(dev, mconfig->guid,
++					array->uuid);
++				is_mod_guid = false;
++			} else
++				ret = skl_tplg_get_token(dev,
++					array->value,
++					skl, mconfig);
++
+ 			if (ret < 0)
+ 				return ret;
+ 
+-- 
+2.7.4
+

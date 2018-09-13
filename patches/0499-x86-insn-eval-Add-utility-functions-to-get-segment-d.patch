@@ -1,0 +1,205 @@
+From c3fc4968207b58236cd18ad0b12fe8eb32781f49 Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Thu, 1 Jun 2017 12:29:23 -0700
+Subject: [PATCH 0499/2104] x86/insn-eval: Add utility functions to get segment
+ descriptor base address and limit
+
+With segmentation, the base address of the segment is needed to compute a
+linear address. This base address is obtained from the applicable segment
+descriptor. Such segment descriptor is referenced from a segment selector.
+The segment selector is stored in the segment register associated with
+operands in the instruction being executed or indicated in the instruction
+prefixes. Thus, both a structure containing such instruction and its
+prefixes as well as the register operand (specified as the offset from the
+base of pt_regs) are given as inputs to the new function
+insn_get_seg_base() that retrieves the base address indicated in the
+segment descriptor.
+
+The logic to obtain the segment selector is wrapped in the function
+get_seg_selector() with the inputs described above. Once the selector is
+known, the base address is determined. In protected mode, the selector is
+used to obtain the segment descriptor and then its base address. In 64-bit
+user mode, the segment base address is zero except when FS or GS are used.
+In virtual-8086 mode, the base address is computed as the value of the
+segment selector shifted 4 positions to the left.
+
+In protected mode, segment limits are enforced. Thus, a function to
+determine the limit of the segment is added. Segment limits are not
+enforced in long or virtual-8086. For the latter, addresses are limited
+to 20 bits; address size will be handled when computing the linear
+address.
+
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Adam Buchbinder <adam.buchbinder@gmail.com>
+Cc: Colin Ian King <colin.king@canonical.com>
+Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+Cc: Qiaowei Ren <qiaowei.ren@intel.com>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Masami Hiramatsu <mhiramat@kernel.org>
+Cc: Adrian Hunter <adrian.hunter@intel.com>
+Cc: Kees Cook <keescook@chromium.org>
+Cc: Thomas Garnier <thgarnie@google.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Dmitry Vyukov <dvyukov@google.com>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: x86@kernel.org
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/include/asm/insn-eval.h |   2 +
+ arch/x86/lib/insn-eval.c         | 127 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 129 insertions(+)
+
+diff --git a/arch/x86/include/asm/insn-eval.h b/arch/x86/include/asm/insn-eval.h
+index 7e8c963..7f3c7fe 100644
+--- a/arch/x86/include/asm/insn-eval.h
++++ b/arch/x86/include/asm/insn-eval.h
+@@ -13,5 +13,7 @@
+ 
+ void __user *insn_get_addr_ref(struct insn *insn, struct pt_regs *regs);
+ int insn_get_modrm_rm_off(struct insn *insn, struct pt_regs *regs);
++unsigned long insn_get_seg_base(struct pt_regs *regs, struct insn *insn,
++				int regoff);
+ 
+ #endif /* _ASM_X86_INSN_EVAL_H */
+diff --git a/arch/x86/lib/insn-eval.c b/arch/x86/lib/insn-eval.c
+index 11a5d77..a048bad 100644
+--- a/arch/x86/lib/insn-eval.c
++++ b/arch/x86/lib/insn-eval.c
+@@ -460,6 +460,133 @@ static struct desc_struct *get_desc(unsigned short sel)
+ }
+ 
+ /**
++ * insn_get_seg_base() - Obtain base address of segment descriptor.
++ * @regs:	Structure with register values as seen when entering kernel mode
++ * @insn:	Instruction structure with selector override prefixes
++ * @regoff:	Operand offset, in pt_regs, of which the selector is needed
++ *
++ * Obtain the base address of the segment descriptor as indicated by either
++ * any segment override prefixes contained in insn or the default segment
++ * applicable to the register indicated by regoff. regoff is specified as the
++ * offset in bytes from the base of pt_regs.
++ *
++ * Return: In protected mode, base address of the segment. Zero in long mode,
++ * except when FS or GS are used. In virtual-8086 mode, the segment
++ * selector shifted 4 positions to the right. -1L in case of
++ * error.
++ */
++unsigned long insn_get_seg_base(struct pt_regs *regs, struct insn *insn,
++				int regoff)
++{
++	struct desc_struct *desc;
++	int seg_reg;
++	short sel;
++
++	seg_reg = resolve_seg_register(insn, regs, regoff);
++	if (seg_reg < 0)
++		return -1L;
++
++	sel = get_segment_selector(regs, seg_reg);
++	if (sel < 0)
++		return -1L;
++
++	if (v8086_mode(regs))
++		/*
++		 * Base is simply the segment selector shifted 4
++		 * positions to the right.
++		 */
++		return (unsigned long)(sel << 4);
++
++	if (user_64bit_mode(regs)) {
++		/*
++		 * Only FS or GS will have a base address, the rest of
++		 * the segments' bases are forced to 0.
++		 */
++		unsigned long base;
++
++		if (seg_reg == INAT_SEG_REG_FS)
++			rdmsrl(MSR_FS_BASE, base);
++		else if (seg_reg == INAT_SEG_REG_GS)
++			/*
++			 * swapgs was called at the kernel entry point. Thus,
++			 * MSR_KERNEL_GS_BASE will have the user-space GS base.
++			 */
++			rdmsrl(MSR_KERNEL_GS_BASE, base);
++		else if (seg_reg != INAT_SEG_REG_IGNORE)
++			/* We should ignore the rest of segment registers. */
++			base = -1L;
++		else
++			base = 0;
++		return base;
++	}
++
++	/* In protected mode the segment selector cannot be null. */
++	if (!sel)
++		return -1L;
++
++	desc = get_desc(sel);
++	if (!desc)
++		return -1L;
++
++	return get_desc_base(desc);
++}
++
++/**
++ * get_seg_limit() - Obtain the limit of a segment descriptor
++ * @regs:	Structure with register values as seen when entering kernel mode
++ * @insn:	Instruction structure with selector override prefixes
++ * @regoff:	Operand offset, in pt_regs, of which the selector is needed
++ *
++ * Obtain the limit of the segment descriptor. The segment selector is obtained
++ * from the relevant segment register determined by inspecting any segment
++ * override prefixes or the default segment register associated with regoff.
++ * regoff is specified as the offset in bytes from the base * of pt_regs.
++ *
++ * Return: In protected mode, the limit of the segment descriptor in bytes.
++ * In long mode and virtual-8086 mode, segment limits are not enforced. Thus,
++ * limit is returned as -1L to imply a limit-less segment. Zero is returned on
++ * error.
++ */
++static unsigned long get_seg_limit(struct pt_regs *regs, struct insn *insn,
++				   int regoff)
++{
++	struct desc_struct *desc;
++	unsigned long limit;
++	int seg_reg;
++	short sel;
++
++	seg_reg = resolve_seg_register(insn, regs, regoff);
++	if (seg_reg < 0)
++		return 0;
++
++	sel = get_segment_selector(regs, seg_reg);
++	if (sel < 0)
++		return 0;
++
++	if (user_64bit_mode(regs) || v8086_mode(regs))
++		return -1L;
++
++	if (!sel)
++		return 0;
++
++	desc = get_desc(sel);
++	if (!desc)
++		return 0;
++
++	/*
++	 * If the granularity bit is set, the limit is given in multiples
++	 * of 4096. This also means that the 12 least significant bits are
++	 * not tested when checking the segment limits. In practice,
++	 * this means that the segment ends in (limit << 12) + 0xfff.
++	 */
++	limit = get_desc_limit(desc);
++	if (desc->g)
++		limit = (limit << 12) + 0xfff;
++
++	return limit;
++}
++
++/**
+  * insn_get_modrm_rm_off() - Obtain register in r/m part of ModRM byte
+  * @insn:	Instruction structure containing the ModRM byte
+  * @regs:	Structure with register values as seen when entering kernel mode
+-- 
+2.7.4
+

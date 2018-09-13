@@ -1,0 +1,127 @@
+From 99796356a583cb75c0c2dd18c95489b3f465e690 Mon Sep 17 00:00:00 2001
+From: Ping Gao <ping.a.gao@intel.com>
+Date: Wed, 6 Sep 2017 16:13:40 +0800
+Subject: [PATCH 0925/2104] drm/i915/gvt: Simply the conformance check
+
+The overall comparison for non-context MMIOs only need once, then
+it's enough for conformance check that audit these MMIOs during
+runtime to make sure the value written to them are the same with
+the host cache. The way could void frequently overall comparion.
+
+Change-Id: Ib3b3c29f3e63303b06847fc8b45d4d501eb871b4
+Signed-off-by: Ping Gao <ping.a.gao@intel.com>
+Reviewed-by: Kevin Tian <kevin.tian@intel.com>
+Reviewed-by: Singh, Satyeshwar <satyeshwar.singh@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cmd_parser.c | 28 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h        |  2 ++
+ drivers/gpu/drm/i915/gvt/mmio.c       | 12 ++++++++++++
+ drivers/gpu/drm/i915/gvt/render.c     |  6 ++++++
+ 4 files changed, 48 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.c b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+index 827a5af..ab1f58e 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.c
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+@@ -910,6 +910,34 @@ static int cmd_handler_lri(struct parser_exec_state *s)
+ 		if (ret)
+ 			break;
+ 		ret |= cmd_reg_handler(s, cmd_reg(s, i), i, "lri");
++
++		if (s->vgpu->entire_nonctxmmio_checked
++			&& intel_gvt_mmio_is_non_context(s->vgpu->gvt, cmd_reg(s, i))) {
++			int offset = cmd_reg(s, i);
++			int value = cmd_val(s, i + 1);
++			u32 *host_cache = s->vgpu->gvt->mmio.mmio_host_cache;
++
++			if (intel_gvt_mmio_has_mode_mask(s->vgpu->gvt, offset)) {
++				u32 mask = value >> 16;
++
++				vgpu_vreg(s->vgpu, offset) =
++					(vgpu_vreg(s->vgpu, offset) & ~mask)
++					| (value & mask);
++			} else {
++				vgpu_vreg(s->vgpu, offset) = value;
++			}
++
++			if (host_cache[cmd_reg(s, i) >> 2] !=
++				vgpu_vreg(s->vgpu, offset)) {
++
++				gvt_err("vgpu%d unexpected non-context MMIOs"
++					"access by cmd 0x%x:0x%x,0x%x\n",
++					s->vgpu->id,
++					(u32)cmd_reg(s, i),
++					cmd_val(s, i + 1),
++					host_cache[cmd_reg(s, i) >> 2]);
++			}
++		}
+ 	}
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 9be1ab1..be8bdb6 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -188,6 +188,8 @@ struct intel_vgpu {
+ 		atomic_t released;
+ 	} vdev;
+ #endif
++
++	bool entire_nonctxmmio_checked;
+ };
+ 
+ struct intel_gvt_gm {
+diff --git a/drivers/gpu/drm/i915/gvt/mmio.c b/drivers/gpu/drm/i915/gvt/mmio.c
+index cfc533d..6f4a97d 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio.c
++++ b/drivers/gpu/drm/i915/gvt/mmio.c
+@@ -271,6 +271,15 @@ int intel_vgpu_emulate_mmio_write_locked(struct intel_vgpu *vgpu, uint64_t pa,
+ 	if (ret < 0)
+ 		goto err;
+ 
++	if (vgpu->entire_nonctxmmio_checked
++		&& intel_gvt_mmio_is_non_context(vgpu->gvt, offset)
++		&& vgpu_vreg(vgpu, offset)
++			!= *(u32 *)(vgpu->gvt->mmio.mmio_host_cache + offset)) {
++		gvt_err("vgpu%d unexpected non-context MMIO change at 0x%x:0x%x,0x%x\n",
++			vgpu->id, offset, vgpu_vreg(vgpu, offset),
++			*(u32 *)(vgpu->gvt->mmio.mmio_host_cache + offset));
++	}
++
+ 	intel_gvt_mmio_set_accessed(gvt, offset);
+ 	return 0;
+ err:
+@@ -331,6 +340,9 @@ void intel_vgpu_reset_mmio(struct intel_vgpu *vgpu, bool dmlr)
+ 	vgpu_vreg(vgpu, 0xe681c) = 1 << 17;
+ 	vgpu_vreg(vgpu, 0xe6c04) = 3;
+ 	vgpu_vreg(vgpu, 0xe6e1c) = 0x2f << 16;
++
++	/* Non-context MMIOs need entire check again if mmio/vgpu reset */
++	vgpu->entire_nonctxmmio_checked = false;
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/gvt/render.c b/drivers/gpu/drm/i915/gvt/render.c
+index 559706a..029af24 100644
+--- a/drivers/gpu/drm/i915/gvt/render.c
++++ b/drivers/gpu/drm/i915/gvt/render.c
+@@ -516,6 +516,12 @@ int intel_gvt_vgpu_conformance_check(struct intel_vgpu *vgpu, int ring_id)
+ 
+ 	int ret;
+ 
++	/* Entire non-context MMIOs check only need once */
++	if (!vgpu->entire_nonctxmmio_checked)
++		vgpu->entire_nonctxmmio_checked = true;
++	else
++		return 0;
++
+ 	get_host_mmio_snapshot(vgpu->gvt);
+ 
+ 	ret = noncontext_mmio_compare(vgpu, ring_id);
+-- 
+2.7.4
+

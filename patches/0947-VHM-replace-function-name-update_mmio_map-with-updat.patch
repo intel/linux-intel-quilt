@@ -1,0 +1,109 @@
+From 2a132238a58913dfff483c983c563f7bec2486e0 Mon Sep 17 00:00:00 2001
+From: Jason Chen CJ <jason.cj.chen@intel.com>
+Date: Tue, 23 Jan 2018 22:27:08 +0800
+Subject: [PATCH 0947/2104] VHM: replace function name update_mmio_map with
+ update_memmap_attr
+
+Change-Id: Ia4e4c621d4a8bc6738042cede93b9b145af291f9
+Signed-off-by: Jason Chen CJ <jason.cj.chen@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cwpgt.c | 17 +++++++++--------
+ drivers/vhm/vhm_mm.c             |  4 ++--
+ include/linux/vhm/cwp_vhm_mm.h   |  2 +-
+ 3 files changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cwpgt.c b/drivers/gpu/drm/i915/gvt/cwpgt.c
+index 8936425..5dcc2df 100644
+--- a/drivers/gpu/drm/i915/gvt/cwpgt.c
++++ b/drivers/gpu/drm/i915/gvt/cwpgt.c
+@@ -669,10 +669,10 @@ static int cwpgt_set_wp_page(unsigned long handle, u64 gfn)
+ 		gvt_err("failed cwp_ioreq_add_iorange for gfn 0x%llx\n", gfn);
+ 		return ret;
+ 	}
+-	ret = update_mmio_map(info->vm_id, gfn << PAGE_SHIFT,
++	ret = update_memmap_attr(info->vm_id, gfn << PAGE_SHIFT,
+ 				cwp_hpa2gpa(hpa), 0x1000, MEM_ATTR_WRITE_PROT);
+ 	if (ret)
+-		gvt_err("failed update_mmio_map set for gfn 0x%llx\n", gfn);
++		gvt_err("failed update_memmap_attr set for gfn 0x%llx\n", gfn);
+ 	return ret;
+ }
+ 
+@@ -685,10 +685,11 @@ static int cwpgt_unset_wp_page(unsigned long handle, u64 gfn)
+ 
+ 	hpa = vhm_vm_gpa2hpa(info->vm_id, gfn << PAGE_SHIFT);
+ 
+-	ret = update_mmio_map(info->vm_id, gfn << PAGE_SHIFT,
++	ret = update_memmap_attr(info->vm_id, gfn << PAGE_SHIFT,
+ 			cwp_hpa2gpa(hpa), 0x1000, MEM_ATTR_ALL);
+ 	if (ret) {
+-		gvt_err("failed update_mmio_map unset for gfn 0x%llx\n", gfn);
++		gvt_err("failed update_memmap_attr unset for gfn 0x%llx\n",
++			gfn);
+ 		return ret;
+ 	}
+ 	ret = cwp_ioreq_del_iorange(info->client, REQ_WP, gfn << PAGE_SHIFT,
+@@ -848,12 +849,12 @@ static int cwpgt_set_pvmmio(unsigned long handle, u64 start, u64 end, bool map)
+ 			gvt_err("failed cwp_ioreq_add_iorange for pfn 0x%lx\n", pfn);
+ 			return rc;
+ 		}
+-		rc = update_mmio_map(info->vm_id, pfn << PAGE_SHIFT,
++		rc = update_memmap_attr(info->vm_id, pfn << PAGE_SHIFT,
+ 					mfn << PAGE_SHIFT,
+ 					mmio_size_fn << PAGE_SHIFT,
+ 					MEM_ATTR_WRITE_PROT);
+ 		if (rc)
+-			gvt_err("failed update_mmio_map set for pfn 0x%lx\n", pfn);
++			gvt_err("failed update_memmap_attr set for pfn 0x%lx\n", pfn);
+ 
+ 		/* scratch reg access is trapped like mmio access, 1 page */
+ 		rc = cwpgt_map_gfn_to_mfn(handle, pfn + (VGT_PVINFO_PAGE >> PAGE_SHIFT),
+@@ -874,12 +875,12 @@ static int cwpgt_set_pvmmio(unsigned long handle, u64 start, u64 end, bool map)
+ 
+ 		/* shared page is not trapped, directly pass through */
+ 		//todo: MEM_ATTR_ALL_WB or MEM_ATTR_ALL?
+-		rc = update_mmio_map(info->vm_id,
++		rc = update_memmap_attr(info->vm_id,
+ 				(pfn + mmio_size_fn) << PAGE_SHIFT,
+ 				shared_mfn << PAGE_SHIFT,
+ 				0x1000, MEM_ATTR_ALL);
+ 		if (rc)
+-			gvt_err("failed update_mmio_map set for gfn 0x%lx\n",
++			gvt_err("failed update_memmap_attr set for gfn 0x%lx\n",
+ 				pfn + mmio_size_fn);
+ 	} else {
+ 		mfn = cwpgt_virt_to_mfn(info->vgpu->mmio.vreg);
+diff --git a/drivers/vhm/vhm_mm.c b/drivers/vhm/vhm_mm.c
+index b9ba1a7..2e4d487 100644
+--- a/drivers/vhm/vhm_mm.c
++++ b/drivers/vhm/vhm_mm.c
+@@ -191,11 +191,11 @@ int unset_mmio_map(unsigned long vmid, unsigned long guest_gpa,
+ 		prot, MAP_UNMAP);
+ }
+ 
+-int update_mmio_map(unsigned long vmid, unsigned long guest_gpa,
++int update_memmap_attr(unsigned long vmid, unsigned long guest_gpa,
+ 	unsigned long host_gpa, unsigned long len, unsigned int prot)
+ {
+ 	return _mem_set_memmap(vmid, guest_gpa, host_gpa, len,
+-		prot, MAP_MMIO);
++		prot, MAP_MEM);
+ }
+ 
+ int map_guest_memseg(struct vhm_vm *vm, struct vm_memmap *memmap)
+diff --git a/include/linux/vhm/cwp_vhm_mm.h b/include/linux/vhm/cwp_vhm_mm.h
+index 391aa56..3c3ee6e 100644
+--- a/include/linux/vhm/cwp_vhm_mm.h
++++ b/include/linux/vhm/cwp_vhm_mm.h
+@@ -69,7 +69,7 @@ int set_mmio_map(unsigned long vmid, unsigned long guest_gpa,
+ 	unsigned long host_gpa, unsigned long len, unsigned int prot);
+ int unset_mmio_map(unsigned long vmid, unsigned long guest_gpa,
+ 	unsigned long host_gpa, unsigned long len, unsigned int prot);
+-int update_mmio_map(unsigned long vmid, unsigned long guest_gpa,
++int update_memmap_attr(unsigned long vmid, unsigned long guest_gpa,
+ 	unsigned long host_gpa, unsigned long len, unsigned int prot);
+ 
+ int vhm_dev_mmap(struct file *file, struct vm_area_struct *vma);
+-- 
+2.7.4
+

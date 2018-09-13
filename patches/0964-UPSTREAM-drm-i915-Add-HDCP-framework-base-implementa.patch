@@ -1,0 +1,1073 @@
+From 4572039d458bc787541696e22e42653344a3ba5a Mon Sep 17 00:00:00 2001
+From: Sean Paul <seanpaul@chromium.org>
+Date: Mon, 8 Jan 2018 14:55:39 -0500
+Subject: [PATCH 0964/2104] UPSTREAM: drm/i915: Add HDCP framework + base
+ implementation
+
+This patch adds the framework required to add HDCP support to intel
+connectors. It implements Aksv loading from fuse, and parts 1/2/3
+of the HDCP authentication scheme.
+
+Note that without shim implementations, this does not actually implement
+HDCP. That will come in subsequent patches.
+
+Changes in v2:
+- Don't open code wait_fors (Chris)
+- drm_hdcp.c under MIT license (Daniel)
+- Move intel_hdcp_disable() call above ddi_disable (Ram)
+- Fix // comments (I wore a cone of shame for 12 hours to atone) (Daniel)
+- Justify intel_hdcp_shim with comments (Daniel)
+- Fixed async locking issues by adding hdcp_mutex (Daniel)
+- Don't alter connector_state in enable/disable (Daniel)
+Changes in v3:
+- Added hdcp_mutex/hdcp_value to make async reasonable
+- Added hdcp_prop_work to separate link checking & property setting
+- Added new helper for atomic_check state tracking (Daniel)
+- Moved enable/disable into atomic_commit with matching helpers
+- Moved intel_hdcp_check_link out of all locks when called from dp
+- Bumped up ksv_fifo timeout (noticed failure on one of my dongles)
+Changes in v4:
+- Remove SKL_ prefix from most register names (Daniel)
+- Move enable/disable back to modeset path (Daniel)
+- s/get_random_long/get_random_u32/ (Daniel)
+- Remove mode_config.mutex lock in prop_work (Daniel)
+- Add intel_hdcp_init to handle init of conn components (Daniel)
+- Actually check return value of attach_property
+- Check Bksv is valid before trying to authenticate (Ram)
+Changes in v5:
+- checkpatch whitespace changes
+- s/DRM_MODE_CONTENT_PROTECTION_OFF/DRM_MODE_CONTENT_PROTECTION_UNDESIRED/
+- Fix ksv list wait timeout (actually wait 5s)
+- Increase the R0 timeout to 300ms (Ram)
+Changes in v6:
+- SPDX license
+
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Ramalingam C <ramalingm.c@intel.com>
+Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Signed-off-by: Sean Paul <seanpaul@chromium.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20180108195545.218615-6-seanpaul@chromium.org
+(cherry picked from commit 1f5539ef71ecd895b737ef6504702a6ab9f12fce)
+
+Change-Id: I6ef95896bfa616b071c19079a1fa211d831719a0
+---
+ drivers/gpu/drm/i915/Makefile        |   1 +
+ drivers/gpu/drm/i915/i915_reg.h      |  83 ++++
+ drivers/gpu/drm/i915/intel_atomic.c  |   2 +
+ drivers/gpu/drm/i915/intel_ddi.c     |   8 +
+ drivers/gpu/drm/i915/intel_display.c |   4 +
+ drivers/gpu/drm/i915/intel_drv.h     |  86 +++++
+ drivers/gpu/drm/i915/intel_hdcp.c    | 723 +++++++++++++++++++++++++++++++++++
+ 7 files changed, 907 insertions(+)
+ create mode 100644 drivers/gpu/drm/i915/intel_hdcp.c
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index 71438659f..9153fad 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -86,6 +86,7 @@ i915-y += intel_audio.o \
+ 	  intel_fbc.o \
+ 	  intel_fifo_underrun.o \
+ 	  intel_frontbuffer.o \
++	  intel_hdcp.o \
+ 	  intel_hotplug.o \
+ 	  intel_modes.o \
+ 	  intel_overlay.o \
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 4e9e9e5..f9dfa30 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -7968,6 +7968,7 @@ enum {
+ #define     GEN9_MEM_LATENCY_LEVEL_1_5_SHIFT	8
+ #define     GEN9_MEM_LATENCY_LEVEL_2_6_SHIFT	16
+ #define     GEN9_MEM_LATENCY_LEVEL_3_7_SHIFT	24
++#define   SKL_PCODE_LOAD_HDCP_KEYS		0x5
+ #define   SKL_PCODE_CDCLK_CONTROL		0x7
+ #define     SKL_CDCLK_PREPARE_FOR_CHANGE	0x3
+ #define     SKL_CDCLK_READY_FOR_CHANGE		0x1
+@@ -8256,6 +8257,88 @@ enum skl_power_gate {
+ #define  SKL_PW_TO_PG(pw)			((pw) - SKL_DISP_PW_1 + SKL_PG1)
+ #define  SKL_FUSE_PG_DIST_STATUS(pg)		(1 << (27 - (pg)))
+ 
++
++/* HDCP Key Registers */
++#define HDCP_KEY_CONF		_MMIO(0x66c00)
++#define  HDCP_AKSV_SEND_TRIGGER		BIT(31)
++#define  HDCP_CLEAR_KEYS_TRIGGER	BIT(30)
++#define HDCP_KEY_STATUS		_MMIO(0x66c04)
++#define  HDCP_FUSE_IN_PROGRESS	BIT(7)
++#define  HDCP_FUSE_ERROR		BIT(6)
++#define  HDCP_FUSE_DONE		BIT(5)
++#define  HDCP_KEY_LOAD_STATUS	BIT(1)
++#define  HDCP_KEY_LOAD_DONE		BIT(0)
++#define HDCP_AKSV_LO		_MMIO(0x66c10)
++#define HDCP_AKSV_HI		_MMIO(0x66c14)
++
++/* HDCP Repeater Registers */
++#define HDCP_REP_CTL		_MMIO(0x66d00)
++#define  HDCP_DDIB_REP_PRESENT	BIT(30)
++#define  HDCP_DDIA_REP_PRESENT	BIT(29)
++#define  HDCP_DDIC_REP_PRESENT	BIT(28)
++#define  HDCP_DDID_REP_PRESENT	BIT(27)
++#define  HDCP_DDIF_REP_PRESENT	BIT(26)
++#define  HDCP_DDIE_REP_PRESENT	BIT(25)
++#define  HDCP_DDIB_SHA1_M0		(1 << 20)
++#define  HDCP_DDIA_SHA1_M0		(2 << 20)
++#define  HDCP_DDIC_SHA1_M0		(3 << 20)
++#define  HDCP_DDID_SHA1_M0		(4 << 20)
++#define  HDCP_DDIF_SHA1_M0		(5 << 20)
++#define  HDCP_DDIE_SHA1_M0		(6 << 20) /* Bspec says 5? */
++#define  HDCP_SHA1_BUSY		BIT(16)
++#define  HDCP_SHA1_READY		BIT(17)
++#define  HDCP_SHA1_COMPLETE		BIT(18)
++#define  HDCP_SHA1_V_MATCH		BIT(19)
++#define  HDCP_SHA1_TEXT_32		(1 << 1)
++#define  HDCP_SHA1_COMPLETE_HASH	(2 << 1)
++#define  HDCP_SHA1_TEXT_24		(4 << 1)
++#define  HDCP_SHA1_TEXT_16		(5 << 1)
++#define  HDCP_SHA1_TEXT_8		(6 << 1)
++#define  HDCP_SHA1_TEXT_0		(7 << 1)
++#define HDCP_SHA_V_PRIME_H0		_MMIO(0x66d04)
++#define HDCP_SHA_V_PRIME_H1		_MMIO(0x66d08)
++#define HDCP_SHA_V_PRIME_H2		_MMIO(0x66d0C)
++#define HDCP_SHA_V_PRIME_H3		_MMIO(0x66d10)
++#define HDCP_SHA_V_PRIME_H4		_MMIO(0x66d14)
++#define HDCP_SHA_V_PRIME(h)		_MMIO((0x66d04 + h * 4))
++#define HDCP_SHA_TEXT		_MMIO(0x66d18)
++
++/* HDCP Auth Registers */
++#define _PORTA_HDCP_AUTHENC		0x66800
++#define _PORTB_HDCP_AUTHENC		0x66500
++#define _PORTC_HDCP_AUTHENC		0x66600
++#define _PORTD_HDCP_AUTHENC		0x66700
++#define _PORTE_HDCP_AUTHENC		0x66A00
++#define _PORTF_HDCP_AUTHENC		0x66900
++#define _PORT_HDCP_AUTHENC(port, x)	_MMIO(_PICK(port, \
++					  _PORTA_HDCP_AUTHENC, \
++					  _PORTB_HDCP_AUTHENC, \
++					  _PORTC_HDCP_AUTHENC, \
++					  _PORTD_HDCP_AUTHENC, \
++					  _PORTE_HDCP_AUTHENC, \
++					  _PORTF_HDCP_AUTHENC) + x)
++#define PORT_HDCP_CONF(port)	_PORT_HDCP_AUTHENC(port, 0x0)
++#define  HDCP_CONF_CAPTURE_AN	BIT(0)
++#define  HDCP_CONF_AUTH_AND_ENC	(BIT(1) | BIT(0))
++#define PORT_HDCP_ANINIT(port)	_PORT_HDCP_AUTHENC(port, 0x4)
++#define PORT_HDCP_ANLO(port)	_PORT_HDCP_AUTHENC(port, 0x8)
++#define PORT_HDCP_ANHI(port)	_PORT_HDCP_AUTHENC(port, 0xC)
++#define PORT_HDCP_BKSVLO(port)	_PORT_HDCP_AUTHENC(port, 0x10)
++#define PORT_HDCP_BKSVHI(port)	_PORT_HDCP_AUTHENC(port, 0x14)
++#define PORT_HDCP_RPRIME(port)	_PORT_HDCP_AUTHENC(port, 0x18)
++#define PORT_HDCP_STATUS(port)	_PORT_HDCP_AUTHENC(port, 0x1C)
++#define  HDCP_STATUS_STREAM_A_ENC	BIT(31)
++#define  HDCP_STATUS_STREAM_B_ENC	BIT(30)
++#define  HDCP_STATUS_STREAM_C_ENC	BIT(29)
++#define  HDCP_STATUS_STREAM_D_ENC	BIT(28)
++#define  HDCP_STATUS_AUTH		BIT(21)
++#define  HDCP_STATUS_ENC		BIT(20)
++#define  HDCP_STATUS_RI_MATCH	BIT(19)
++#define  HDCP_STATUS_R0_READY	BIT(18)
++#define  HDCP_STATUS_AN_READY	BIT(17)
++#define  HDCP_STATUS_CIPHER		BIT(16)
++#define  HDCP_STATUS_FRAME_CNT(x)	((x >> 8) & 0xff)
++
+ /* Per-pipe DDI Function Control */
+ #define _TRANS_DDI_FUNC_CTL_A		0x60400
+ #define _TRANS_DDI_FUNC_CTL_B		0x61400
+diff --git a/drivers/gpu/drm/i915/intel_atomic.c b/drivers/gpu/drm/i915/intel_atomic.c
+index 36d4e63..d452c32 100644
+--- a/drivers/gpu/drm/i915/intel_atomic.c
++++ b/drivers/gpu/drm/i915/intel_atomic.c
+@@ -110,6 +110,8 @@ int intel_digital_connector_atomic_check(struct drm_connector *conn,
+ 		to_intel_digital_connector_state(old_state);
+ 	struct drm_crtc_state *crtc_state;
+ 
++	intel_hdcp_atomic_check(conn, old_state, new_state);
++
+ 	if (!new_state->crtc)
+ 		return 0;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_ddi.c b/drivers/gpu/drm/i915/intel_ddi.c
+index 328227c..2275cdb 100644
+--- a/drivers/gpu/drm/i915/intel_ddi.c
++++ b/drivers/gpu/drm/i915/intel_ddi.c
+@@ -2338,6 +2338,12 @@ static void intel_enable_ddi(struct intel_encoder *intel_encoder,
+ 
+ 	if (pipe_config->has_audio)
+ 		intel_audio_codec_enable(intel_encoder, pipe_config, conn_state);
++
++
++	/* Enable hdcp if it's desired */
++	if (conn_state->content_protection ==
++	    DRM_MODE_CONTENT_PROTECTION_DESIRED)
++		intel_hdcp_enable(to_intel_connector(conn_state->connector));
+ }
+ 
+ static void intel_disable_ddi(struct intel_encoder *intel_encoder,
+@@ -2347,6 +2353,8 @@ static void intel_disable_ddi(struct intel_encoder *intel_encoder,
+ 	struct drm_encoder *encoder = &intel_encoder->base;
+ 	int type = intel_encoder->type;
+ 
++	intel_hdcp_disable(to_intel_connector(old_conn_state->connector));
++
+ 	if (old_crtc_state->has_audio)
+ 		intel_audio_codec_disable(intel_encoder);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 7b3534b..9f2ec1d 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -15342,6 +15342,10 @@ static void intel_hpd_poll_fini(struct drm_device *dev)
+ 	for_each_intel_connector_iter(connector, &conn_iter) {
+ 		if (connector->modeset_retry_work.func)
+ 			cancel_work_sync(&connector->modeset_retry_work);
++		if (connector->hdcp_shim) {
++			cancel_delayed_work_sync(&connector->hdcp_check_work);
++			cancel_work_sync(&connector->hdcp_prop_work);
++		}
+ 	}
+ 	drm_connector_list_iter_end(&conn_iter);
+ }
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index cc55f40..9abf7f4 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -298,6 +298,76 @@ struct intel_panel {
+ 	} backlight;
+ };
+ 
++/*
++ * This structure serves as a translation layer between the generic HDCP code
++ * and the bus-specific code. What that means is that HDCP over HDMI differs
++ * from HDCP over DP, so to account for these differences, we need to
++ * communicate with the receiver through this shim.
++ *
++ * For completeness, the 2 buses differ in the following ways:
++ *	- DP AUX vs. DDC
++ *		HDCP registers on the receiver are set via DP AUX for DP, and
++ *		they are set via DDC for HDMI.
++ *	- Receiver register offsets
++ *		The offsets of the registers are different for DP vs. HDMI
++ *	- Receiver register masks/offsets
++ *		For instance, the ready bit for the KSV fifo is in a different
++ *		place on DP vs HDMI
++ *	- Receiver register names
++ *		Seriously. In the DP spec, the 16-bit register containing
++ *		downstream information is called BINFO, on HDMI it's called
++ *		BSTATUS. To confuse matters further, DP has a BSTATUS register
++ *		with a completely different definition.
++ *	- KSV FIFO
++ *		On HDMI, the ksv fifo is read all at once, whereas on DP it must
++ *		be read 3 keys at a time
++ *	- Aksv output
++ *		Since Aksv is hidden in hardware, there's different procedures
++ *		to send it over DP AUX vs DDC
++ */
++struct intel_hdcp_shim {
++	/* Outputs the transmitter's An and Aksv values to the receiver. */
++	int (*write_an_aksv)(struct intel_digital_port *intel_dig_port, u8 *an);
++
++	/* Reads the receiver's key selection vector */
++	int (*read_bksv)(struct intel_digital_port *intel_dig_port, u8 *bksv);
++
++	/*
++	 * Reads BINFO from DP receivers and BSTATUS from HDMI receivers. The
++	 * definitions are the same in the respective specs, but the names are
++	 * different. Call it BSTATUS since that's the name the HDMI spec
++	 * uses and it was there first.
++	 */
++	int (*read_bstatus)(struct intel_digital_port *intel_dig_port,
++			    u8 *bstatus);
++
++	/* Determines whether a repeater is present downstream */
++	int (*repeater_present)(struct intel_digital_port *intel_dig_port,
++				bool *repeater_present);
++
++	/* Reads the receiver's Ri' value */
++	int (*read_ri_prime)(struct intel_digital_port *intel_dig_port, u8 *ri);
++
++	/* Determines if the receiver's KSV FIFO is ready for consumption */
++	int (*read_ksv_ready)(struct intel_digital_port *intel_dig_port,
++			      bool *ksv_ready);
++
++	/* Reads the ksv fifo for num_downstream devices */
++	int (*read_ksv_fifo)(struct intel_digital_port *intel_dig_port,
++			     int num_downstream, u8 *ksv_fifo);
++
++	/* Reads a 32-bit part of V' from the receiver */
++	int (*read_v_prime_part)(struct intel_digital_port *intel_dig_port,
++				 int i, u32 *part);
++
++	/* Enables HDCP signalling on the port */
++	int (*toggle_signalling)(struct intel_digital_port *intel_dig_port,
++				 bool enable);
++
++	/* Ensures the link is still protected */
++	bool (*check_link)(struct intel_digital_port *intel_dig_port);
++};
++
+ struct intel_connector {
+ 	struct drm_connector base;
+ 	/*
+@@ -329,6 +399,12 @@ struct intel_connector {
+ 
+ 	/* Work struct to schedule a uevent on link train failure */
+ 	struct work_struct modeset_retry_work;
++
++	const struct intel_hdcp_shim *hdcp_shim;
++	struct mutex hdcp_mutex;
++	uint64_t hdcp_value; /* protected by hdcp_mutex */
++	struct delayed_work hdcp_check_work;
++	struct work_struct hdcp_prop_work;
+ };
+ 
+ struct intel_digital_connector_state {
+@@ -1722,6 +1798,16 @@ static inline void intel_backlight_device_unregister(struct intel_connector *con
+ }
+ #endif /* CONFIG_BACKLIGHT_CLASS_DEVICE */
+ 
++/* intel_hdcp.c */
++void intel_hdcp_atomic_check(struct drm_connector *connector,
++			     struct drm_connector_state *old_state,
++			     struct drm_connector_state *new_state);
++int intel_hdcp_init(struct intel_connector *connector,
++		    const struct intel_hdcp_shim *hdcp_shim);
++int intel_hdcp_enable(struct intel_connector *connector);
++int intel_hdcp_disable(struct intel_connector *connector);
++int intel_hdcp_check_link(struct intel_connector *connector);
++
+ 
+ /* intel_psr.c */
+ void intel_psr_enable(struct intel_dp *intel_dp);
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+new file mode 100644
+index 0000000..3c164a2
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -0,0 +1,723 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright (C) 2017 Google, Inc.
++ *
++ * Authors:
++ * Sean Paul <seanpaul@chromium.org>
++ */
++
++#include <drm/drmP.h>
++#include <drm/drm_hdcp.h>
++#include <linux/i2c.h>
++#include <linux/random.h>
++
++#include "intel_drv.h"
++#include "i915_reg.h"
++
++#define KEY_LOAD_TRIES	5
++
++static int intel_hdcp_poll_ksv_fifo(struct intel_digital_port *intel_dig_port,
++				    const struct intel_hdcp_shim *shim)
++{
++	int ret, read_ret;
++	bool ksv_ready;
++
++	/* Poll for ksv list ready (spec says max time allowed is 5s) */
++	ret = __wait_for(read_ret = shim->read_ksv_ready(intel_dig_port,
++							 &ksv_ready),
++			 read_ret || ksv_ready, 5 * 1000 * 1000, 1000,
++			 100 * 1000);
++	if (ret)
++		return ret;
++	if (read_ret)
++		return read_ret;
++	if (!ksv_ready)
++		return -ETIMEDOUT;
++
++	return 0;
++}
++
++static void intel_hdcp_clear_keys(struct drm_i915_private *dev_priv)
++{
++	I915_WRITE(HDCP_KEY_CONF, HDCP_CLEAR_KEYS_TRIGGER);
++	I915_WRITE(HDCP_KEY_STATUS, HDCP_KEY_LOAD_DONE | HDCP_KEY_LOAD_STATUS |
++		   HDCP_FUSE_IN_PROGRESS | HDCP_FUSE_ERROR | HDCP_FUSE_DONE);
++}
++
++static int intel_hdcp_load_keys(struct drm_i915_private *dev_priv)
++{
++	int ret;
++	u32 val;
++
++	/* Initiate loading the HDCP key from fuses */
++	mutex_lock(&dev_priv->pcu_lock);
++	ret = sandybridge_pcode_write(dev_priv, SKL_PCODE_LOAD_HDCP_KEYS, 1);
++	mutex_unlock(&dev_priv->pcu_lock);
++	if (ret) {
++		DRM_ERROR("Failed to initiate HDCP key load (%d)\n", ret);
++		return ret;
++	}
++
++	/* Wait for the keys to load (500us) */
++	ret = __intel_wait_for_register(dev_priv, HDCP_KEY_STATUS,
++					HDCP_KEY_LOAD_DONE, HDCP_KEY_LOAD_DONE,
++					10, 1, &val);
++	if (ret)
++		return ret;
++	else if (!(val & HDCP_KEY_LOAD_STATUS))
++		return -ENXIO;
++
++	/* Send Aksv over to PCH display for use in authentication */
++	I915_WRITE(HDCP_KEY_CONF, HDCP_AKSV_SEND_TRIGGER);
++
++	return 0;
++}
++
++/* Returns updated SHA-1 index */
++static int intel_write_sha_text(struct drm_i915_private *dev_priv, u32 sha_text)
++{
++	I915_WRITE(HDCP_SHA_TEXT, sha_text);
++	if (intel_wait_for_register(dev_priv, HDCP_REP_CTL,
++				    HDCP_SHA1_READY, HDCP_SHA1_READY, 1)) {
++		DRM_ERROR("Timed out waiting for SHA1 ready\n");
++		return -ETIMEDOUT;
++	}
++	return 0;
++}
++
++static
++u32 intel_hdcp_get_repeater_ctl(struct intel_digital_port *intel_dig_port)
++{
++	enum port port = intel_dig_port->base.port;
++	switch (port) {
++	case PORT_A:
++		return HDCP_DDIA_REP_PRESENT | HDCP_DDIA_SHA1_M0;
++	case PORT_B:
++		return HDCP_DDIB_REP_PRESENT | HDCP_DDIB_SHA1_M0;
++	case PORT_C:
++		return HDCP_DDIC_REP_PRESENT | HDCP_DDIC_SHA1_M0;
++	case PORT_D:
++		return HDCP_DDID_REP_PRESENT | HDCP_DDID_SHA1_M0;
++	case PORT_E:
++		return HDCP_DDIE_REP_PRESENT | HDCP_DDIE_SHA1_M0;
++	default:
++		break;
++	}
++	DRM_ERROR("Unknown port %d\n", port);
++	return -EINVAL;
++}
++
++static
++bool intel_hdcp_is_ksv_valid(u8 *ksv)
++{
++	int i, ones = 0;
++	/* KSV has 20 1's and 20 0's */
++	for (i = 0; i < DRM_HDCP_KSV_LEN; i++)
++		ones += hweight8(ksv[i]);
++	if (ones != 20)
++		return false;
++	return true;
++}
++
++/* Implements Part 2 of the HDCP authorization procedure */
++static
++int intel_hdcp_auth_downstream(struct intel_digital_port *intel_dig_port,
++			       const struct intel_hdcp_shim *shim)
++{
++	struct drm_i915_private *dev_priv;
++	u32 vprime, sha_text, sha_leftovers, rep_ctl;
++	u8 bstatus[2], num_downstream, *ksv_fifo;
++	int ret, i, j, sha_idx;
++
++	dev_priv = intel_dig_port->base.base.dev->dev_private;
++
++	ret = shim->read_bstatus(intel_dig_port, bstatus);
++	if (ret)
++		return ret;
++
++	/* If there are no downstream devices, we're all done. */
++	num_downstream = DRM_HDCP_NUM_DOWNSTREAM(bstatus[0]);
++	if (num_downstream == 0) {
++		DRM_INFO("HDCP is enabled (no downstream devices)\n");
++		return 0;
++	}
++
++	ret = intel_hdcp_poll_ksv_fifo(intel_dig_port, shim);
++	if (ret) {
++		DRM_ERROR("KSV list failed to become ready (%d)\n", ret);
++		return ret;
++	}
++
++	ksv_fifo = kzalloc(num_downstream * DRM_HDCP_KSV_LEN, GFP_KERNEL);
++	if (!ksv_fifo)
++		return -ENOMEM;
++
++	ret = shim->read_ksv_fifo(intel_dig_port, num_downstream, ksv_fifo);
++	if (ret)
++		return ret;
++
++	/* Process V' values from the receiver */
++	for (i = 0; i < DRM_HDCP_V_PRIME_NUM_PARTS; i++) {
++		ret = shim->read_v_prime_part(intel_dig_port, i, &vprime);
++		if (ret)
++			return ret;
++		I915_WRITE(HDCP_SHA_V_PRIME(i), vprime);
++	}
++
++	/*
++	 * We need to write the concatenation of all device KSVs, BINFO (DP) ||
++	 * BSTATUS (HDMI), and M0 (which is added via HDCP_REP_CTL). This byte
++	 * stream is written via the HDCP_SHA_TEXT register in 32-bit
++	 * increments. Every 64 bytes, we need to write HDCP_REP_CTL again. This
++	 * index will keep track of our progress through the 64 bytes as well as
++	 * helping us work the 40-bit KSVs through our 32-bit register.
++	 *
++	 * NOTE: data passed via HDCP_SHA_TEXT should be big-endian
++	 */
++	sha_idx = 0;
++	sha_text = 0;
++	sha_leftovers = 0;
++	rep_ctl = intel_hdcp_get_repeater_ctl(intel_dig_port);
++	I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_32);
++	for (i = 0; i < num_downstream; i++) {
++		unsigned int sha_empty;
++		u8 *ksv = &ksv_fifo[i * DRM_HDCP_KSV_LEN];
++
++		/* Fill up the empty slots in sha_text and write it out */
++		sha_empty = sizeof(sha_text) - sha_leftovers;
++		for (j = 0; j < sha_empty; j++)
++			sha_text |= ksv[j] << ((sizeof(sha_text) - j - 1) * 8);
++
++		ret = intel_write_sha_text(dev_priv, sha_text);
++		if (ret < 0)
++			return ret;
++
++		/* Programming guide writes this every 64 bytes */
++		sha_idx += sizeof(sha_text);
++		if (!(sha_idx % 64))
++			I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_32);
++
++		/* Store the leftover bytes from the ksv in sha_text */
++		sha_leftovers = DRM_HDCP_KSV_LEN - sha_empty;
++		sha_text = 0;
++		for (j = 0; j < sha_leftovers; j++)
++			sha_text |= ksv[sha_empty + j] <<
++					((sizeof(sha_text) - j - 1) * 8);
++
++		/*
++		 * If we still have room in sha_text for more data, continue.
++		 * Otherwise, write it out immediately.
++		 */
++		if (sizeof(sha_text) > sha_leftovers)
++			continue;
++
++		ret = intel_write_sha_text(dev_priv, sha_text);
++		if (ret < 0)
++			return ret;
++		sha_leftovers = 0;
++		sha_text = 0;
++		sha_idx += sizeof(sha_text);
++	}
++
++	/*
++	 * We need to write BINFO/BSTATUS, and M0 now. Depending on how many
++	 * bytes are leftover from the last ksv, we might be able to fit them
++	 * all in sha_text (first 2 cases), or we might need to split them up
++	 * into 2 writes (last 2 cases).
++	 */
++	if (sha_leftovers == 0) {
++		/* Write 16 bits of text, 16 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_16);
++		ret = intel_write_sha_text(dev_priv,
++					   bstatus[0] << 8 | bstatus[1]);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 32 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 16 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_16);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++	} else if (sha_leftovers == 1) {
++		/* Write 24 bits of text, 8 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_24);
++		sha_text |= bstatus[0] << 16 | bstatus[1] << 8;
++		/* Only 24-bits of data, must be in the LSB */
++		sha_text = (sha_text & 0xffffff00) >> 8;
++		ret = intel_write_sha_text(dev_priv, sha_text);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 32 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 24 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_8);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++	} else if (sha_leftovers == 2) {
++		/* Write 32 bits of text */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_32);
++		sha_text |= bstatus[0] << 24 | bstatus[1] << 16;
++		ret = intel_write_sha_text(dev_priv, sha_text);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 64 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
++		for (i = 0; i < 2; i++) {
++			ret = intel_write_sha_text(dev_priv, 0);
++			if (ret < 0)
++				return ret;
++			sha_idx += sizeof(sha_text);
++		}
++	} else if (sha_leftovers == 3) {
++		/* Write 32 bits of text */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_32);
++		sha_text |= bstatus[0] << 24;
++		ret = intel_write_sha_text(dev_priv, sha_text);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 8 bits of text, 24 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_8);
++		ret = intel_write_sha_text(dev_priv, bstatus[1]);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 32 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_0);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++
++		/* Write 8 bits of M0 */
++		I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_24);
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++	} else {
++		DRM_ERROR("Invalid number of leftovers %d\n", sha_leftovers);
++		return -EINVAL;
++	}
++
++	I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_TEXT_32);
++	/* Fill up to 64-4 bytes with zeros (leave the last write for length) */
++	while ((sha_idx % 64) < (64 - sizeof(sha_text))) {
++		ret = intel_write_sha_text(dev_priv, 0);
++		if (ret < 0)
++			return ret;
++		sha_idx += sizeof(sha_text);
++	}
++
++	/*
++	 * Last write gets the length of the concatenation in bits. That is:
++	 *  - 5 bytes per device
++	 *  - 10 bytes for BINFO/BSTATUS(2), M0(8)
++	 */
++	sha_text = (num_downstream * 5 + 10) * 8;
++	ret = intel_write_sha_text(dev_priv, sha_text);
++	if (ret < 0)
++		return ret;
++
++	/* Tell the HW we're done with the hash and wait for it to ACK */
++	I915_WRITE(HDCP_REP_CTL, rep_ctl | HDCP_SHA1_COMPLETE_HASH);
++	if (intel_wait_for_register(dev_priv, HDCP_REP_CTL,
++				    HDCP_SHA1_COMPLETE,
++				    HDCP_SHA1_COMPLETE, 1)) {
++		DRM_ERROR("Timed out waiting for SHA1 complete\n");
++		return -ETIMEDOUT;
++	}
++	if (!(I915_READ(HDCP_REP_CTL) & HDCP_SHA1_V_MATCH)) {
++		DRM_ERROR("SHA-1 mismatch, HDCP failed\n");
++		return -ENXIO;
++	}
++
++	DRM_INFO("HDCP is enabled (%d downstream devices)\n", num_downstream);
++	return 0;
++}
++
++/* Implements Part 1 of the HDCP authorization procedure */
++static int intel_hdcp_auth(struct intel_digital_port *intel_dig_port,
++			   const struct intel_hdcp_shim *shim)
++{
++	struct drm_i915_private *dev_priv;
++	enum port port;
++	unsigned long r0_prime_gen_start;
++	int ret, i;
++	union {
++		u32 reg[2];
++		u8 shim[DRM_HDCP_AN_LEN];
++	} an;
++	union {
++		u32 reg[2];
++		u8 shim[DRM_HDCP_KSV_LEN];
++	} bksv;
++	union {
++		u32 reg;
++		u8 shim[DRM_HDCP_RI_LEN];
++	} ri;
++	bool repeater_present;
++
++	dev_priv = intel_dig_port->base.base.dev->dev_private;
++
++	port = intel_dig_port->base.port;
++
++	/* Initialize An with 2 random values and acquire it */
++	for (i = 0; i < 2; i++)
++		I915_WRITE(PORT_HDCP_ANINIT(port), get_random_u32());
++	I915_WRITE(PORT_HDCP_CONF(port), HDCP_CONF_CAPTURE_AN);
++
++	/* Wait for An to be acquired */
++	if (intel_wait_for_register(dev_priv, PORT_HDCP_STATUS(port),
++				    HDCP_STATUS_AN_READY,
++				    HDCP_STATUS_AN_READY, 1)) {
++		DRM_ERROR("Timed out waiting for An\n");
++		return -ETIMEDOUT;
++	}
++
++	an.reg[0] = I915_READ(PORT_HDCP_ANLO(port));
++	an.reg[1] = I915_READ(PORT_HDCP_ANHI(port));
++	ret = shim->write_an_aksv(intel_dig_port, an.shim);
++	if (ret)
++		return ret;
++
++	r0_prime_gen_start = jiffies;
++
++	memset(&bksv, 0, sizeof(bksv));
++	ret = shim->read_bksv(intel_dig_port, bksv.shim);
++	if (ret)
++		return ret;
++	else if (!intel_hdcp_is_ksv_valid(bksv.shim))
++		return -ENODEV;
++
++	I915_WRITE(PORT_HDCP_BKSVLO(port), bksv.reg[0]);
++	I915_WRITE(PORT_HDCP_BKSVHI(port), bksv.reg[1]);
++
++	ret = shim->repeater_present(intel_dig_port, &repeater_present);
++	if (ret)
++		return ret;
++	if (repeater_present)
++		I915_WRITE(HDCP_REP_CTL,
++			   intel_hdcp_get_repeater_ctl(intel_dig_port));
++
++	ret = shim->toggle_signalling(intel_dig_port, true);
++	if (ret)
++		return ret;
++
++	I915_WRITE(PORT_HDCP_CONF(port), HDCP_CONF_AUTH_AND_ENC);
++
++	/* Wait for R0 ready */
++	if (wait_for(I915_READ(PORT_HDCP_STATUS(port)) &
++		     (HDCP_STATUS_R0_READY | HDCP_STATUS_ENC), 1)) {
++		DRM_ERROR("Timed out waiting for R0 ready\n");
++		return -ETIMEDOUT;
++	}
++
++	/*
++	 * Wait for R0' to become available. The spec says 100ms from Aksv, but
++	 * some monitors can take longer than this. We'll set the timeout at
++	 * 300ms just to be sure.
++	 *
++	 * On DP, there's an R0_READY bit available but no such bit
++	 * exists on HDMI. Since the upper-bound is the same, we'll just do
++	 * the stupid thing instead of polling on one and not the other.
++	 */
++	wait_remaining_ms_from_jiffies(r0_prime_gen_start, 300);
++
++	ri.reg = 0;
++	ret = shim->read_ri_prime(intel_dig_port, ri.shim);
++	if (ret)
++		return ret;
++	I915_WRITE(PORT_HDCP_RPRIME(port), ri.reg);
++
++	/* Wait for Ri prime match */
++	if (wait_for(I915_READ(PORT_HDCP_STATUS(port)) &
++		     (HDCP_STATUS_RI_MATCH | HDCP_STATUS_ENC), 1)) {
++		DRM_ERROR("Timed out waiting for Ri prime match (%x)\n",
++			  I915_READ(PORT_HDCP_STATUS(port)));
++		return -ETIMEDOUT;
++	}
++
++	/* Wait for encryption confirmation */
++	if (intel_wait_for_register(dev_priv, PORT_HDCP_STATUS(port),
++				    HDCP_STATUS_ENC, HDCP_STATUS_ENC, 20)) {
++		DRM_ERROR("Timed out waiting for encryption\n");
++		return -ETIMEDOUT;
++	}
++
++	/*
++	 * XXX: If we have MST-connected devices, we need to enable encryption
++	 * on those as well.
++	 */
++
++	return intel_hdcp_auth_downstream(intel_dig_port, shim);
++}
++
++static
++struct intel_digital_port *conn_to_dig_port(struct intel_connector *connector)
++{
++	return enc_to_dig_port(&intel_attached_encoder(&connector->base)->base);
++}
++
++static int _intel_hdcp_disable(struct intel_connector *connector)
++{
++	struct drm_i915_private *dev_priv = connector->base.dev->dev_private;
++	struct intel_digital_port *intel_dig_port = conn_to_dig_port(connector);
++	enum port port = intel_dig_port->base.port;
++	int ret;
++
++	I915_WRITE(PORT_HDCP_CONF(port), 0);
++	if (intel_wait_for_register(dev_priv, PORT_HDCP_STATUS(port), ~0, 0,
++				    20)) {
++		DRM_ERROR("Failed to disable HDCP, timeout clearing status\n");
++		return -ETIMEDOUT;
++	}
++
++	intel_hdcp_clear_keys(dev_priv);
++
++	ret = connector->hdcp_shim->toggle_signalling(intel_dig_port, false);
++	if (ret) {
++		DRM_ERROR("Failed to disable HDCP signalling\n");
++		return ret;
++	}
++
++	DRM_INFO("HDCP is disabled\n");
++	return 0;
++}
++
++static int _intel_hdcp_enable(struct intel_connector *connector)
++{
++	struct drm_i915_private *dev_priv = connector->base.dev->dev_private;
++	int i, ret;
++
++	if (!(I915_READ(SKL_FUSE_STATUS) & SKL_FUSE_PG_DIST_STATUS(1))) {
++		DRM_ERROR("PG1 is disabled, cannot load keys\n");
++		return -ENXIO;
++	}
++
++	for (i = 0; i < KEY_LOAD_TRIES; i++) {
++		ret = intel_hdcp_load_keys(dev_priv);
++		if (!ret)
++			break;
++		intel_hdcp_clear_keys(dev_priv);
++	}
++	if (ret) {
++		DRM_ERROR("Could not load HDCP keys, (%d)\n", ret);
++		return ret;
++	}
++
++	ret = intel_hdcp_auth(conn_to_dig_port(connector),
++			      connector->hdcp_shim);
++	if (ret) {
++		DRM_ERROR("Failed to authenticate HDCP (%d)\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void intel_hdcp_check_work(struct work_struct *work)
++{
++	struct intel_connector *connector = container_of(to_delayed_work(work),
++							 struct intel_connector,
++							 hdcp_check_work);
++	if (!intel_hdcp_check_link(connector))
++		schedule_delayed_work(&connector->hdcp_check_work,
++				      DRM_HDCP_CHECK_PERIOD_MS);
++}
++
++static void intel_hdcp_prop_work(struct work_struct *work)
++{
++	struct intel_connector *connector = container_of(work,
++							 struct intel_connector,
++							 hdcp_prop_work);
++	struct drm_device *dev = connector->base.dev;
++	struct drm_connector_state *state;
++
++	drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
++	mutex_lock(&connector->hdcp_mutex);
++
++	/*
++	 * This worker is only used to flip between ENABLED/DESIRED. Either of
++	 * those to UNDESIRED is handled by core. If hdcp_value == UNDESIRED,
++	 * we're running just after hdcp has been disabled, so just exit
++	 */
++	if (connector->hdcp_value != DRM_MODE_CONTENT_PROTECTION_UNDESIRED) {
++		state = connector->base.state;
++		state->content_protection = connector->hdcp_value;
++	}
++
++	mutex_unlock(&connector->hdcp_mutex);
++	drm_modeset_unlock(&dev->mode_config.connection_mutex);
++}
++
++int intel_hdcp_init(struct intel_connector *connector,
++		    const struct intel_hdcp_shim *hdcp_shim)
++{
++	int ret;
++
++	ret = drm_connector_attach_content_protection_property(
++			&connector->base);
++	if (ret)
++		return ret;
++
++	connector->hdcp_shim = hdcp_shim;
++	mutex_init(&connector->hdcp_mutex);
++	INIT_DELAYED_WORK(&connector->hdcp_check_work, intel_hdcp_check_work);
++	INIT_WORK(&connector->hdcp_prop_work, intel_hdcp_prop_work);
++	return 0;
++}
++
++int intel_hdcp_enable(struct intel_connector *connector)
++{
++	int ret;
++
++	if (!connector->hdcp_shim)
++		return -ENOENT;
++
++	mutex_lock(&connector->hdcp_mutex);
++
++	ret = _intel_hdcp_enable(connector);
++	if (ret)
++		goto out;
++
++	connector->hdcp_value = DRM_MODE_CONTENT_PROTECTION_ENABLED;
++	schedule_work(&connector->hdcp_prop_work);
++	schedule_delayed_work(&connector->hdcp_check_work,
++			      DRM_HDCP_CHECK_PERIOD_MS);
++out:
++	mutex_unlock(&connector->hdcp_mutex);
++	return ret;
++}
++
++int intel_hdcp_disable(struct intel_connector *connector)
++{
++	int ret;
++
++	if (!connector->hdcp_shim)
++		return -ENOENT;
++
++	mutex_lock(&connector->hdcp_mutex);
++
++	connector->hdcp_value = DRM_MODE_CONTENT_PROTECTION_UNDESIRED;
++	ret = _intel_hdcp_disable(connector);
++
++	mutex_unlock(&connector->hdcp_mutex);
++	cancel_delayed_work_sync(&connector->hdcp_check_work);
++	return ret;
++}
++
++void intel_hdcp_atomic_check(struct drm_connector *connector,
++			     struct drm_connector_state *old_state,
++			     struct drm_connector_state *new_state)
++{
++	uint64_t old_cp = old_state->content_protection;
++	uint64_t new_cp = new_state->content_protection;
++	struct drm_crtc_state *crtc_state;
++
++	if (!new_state->crtc) {
++		/*
++		 * If the connector is being disabled with CP enabled, mark it
++		 * desired so it's re-enabled when the connector is brought back
++		 */
++		if (old_cp == DRM_MODE_CONTENT_PROTECTION_ENABLED)
++			new_state->content_protection =
++				DRM_MODE_CONTENT_PROTECTION_DESIRED;
++		return;
++	}
++
++	/*
++	 * Nothing to do if the state didn't change, or HDCP was activated since
++	 * the last commit
++	 */
++	if (old_cp == new_cp ||
++	    (old_cp == DRM_MODE_CONTENT_PROTECTION_DESIRED &&
++	     new_cp == DRM_MODE_CONTENT_PROTECTION_ENABLED))
++		return;
++
++	crtc_state = drm_atomic_get_new_crtc_state(new_state->state,
++						   new_state->crtc);
++	crtc_state->mode_changed = true;
++}
++
++/* Implements Part 3 of the HDCP authorization procedure */
++int intel_hdcp_check_link(struct intel_connector *connector)
++{
++	struct drm_i915_private *dev_priv = connector->base.dev->dev_private;
++	struct intel_digital_port *intel_dig_port = conn_to_dig_port(connector);
++	enum port port = intel_dig_port->base.port;
++	int ret = 0;
++
++	if (!connector->hdcp_shim)
++		return -ENOENT;
++
++	mutex_lock(&connector->hdcp_mutex);
++
++	if (connector->hdcp_value == DRM_MODE_CONTENT_PROTECTION_UNDESIRED)
++		goto out;
++
++	if (!(I915_READ(PORT_HDCP_STATUS(port)) & HDCP_STATUS_ENC)) {
++		DRM_ERROR("HDCP check failed: link is not encrypted, %x\n",
++			   I915_READ(PORT_HDCP_STATUS(port)));
++		ret = -ENXIO;
++		connector->hdcp_value = DRM_MODE_CONTENT_PROTECTION_DESIRED;
++		schedule_work(&connector->hdcp_prop_work);
++		goto out;
++	}
++
++	if (connector->hdcp_shim->check_link(intel_dig_port)) {
++		if (connector->hdcp_value !=
++		    DRM_MODE_CONTENT_PROTECTION_UNDESIRED) {
++			connector->hdcp_value =
++				DRM_MODE_CONTENT_PROTECTION_ENABLED;
++			schedule_work(&connector->hdcp_prop_work);
++		}
++		goto out;
++	}
++
++	DRM_INFO("HDCP link failed, retrying authentication\n");
++
++	ret = _intel_hdcp_disable(connector);
++	if (ret) {
++		DRM_ERROR("Failed to disable hdcp (%d)\n", ret);
++		connector->hdcp_value = DRM_MODE_CONTENT_PROTECTION_DESIRED;
++		schedule_work(&connector->hdcp_prop_work);
++		goto out;
++	}
++
++	ret = _intel_hdcp_enable(connector);
++	if (ret) {
++		DRM_ERROR("Failed to enable hdcp (%d)\n", ret);
++		connector->hdcp_value = DRM_MODE_CONTENT_PROTECTION_DESIRED;
++		schedule_work(&connector->hdcp_prop_work);
++		goto out;
++	}
++
++out:
++	mutex_unlock(&connector->hdcp_mutex);
++	return ret;
++}
+-- 
+2.7.4
+

@@ -1,0 +1,74 @@
+From 5e17000019ef1ed7653a5726c7b0fb81f350de3b Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Mon, 19 Dec 2016 15:29:11 -0800
+Subject: [PATCH 0511/2104] x86/traps: Fixup general protection faults caused
+ by UMIP
+
+If the User-Mode Instruction Prevention CPU feature is available and
+enabled, a general protection fault will be issued if the instructions
+sgdt, sldt, sidt, str or smsw are executed from user-mode context
+(CPL > 0). If the fault was caused by any of the instructions protected
+by UMIP, fixup_umip_exception() will emulate dummy results for these
+instructions as follows: if running a 32-bit process, sgdt, sidt and smsw
+are emulated; str and sldt are not emulated. No emulation is done for
+64-bit processes.
+
+If emulation is successful, the result is passed to the user space program
+and no SIGSEGV signal is emitted.
+
+Please note that fixup_umip_exception() also caters for the case when
+the fault originated while running in virtual-8086 mode.
+
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Chen Yucong <slaoub@gmail.com>
+Cc: Chris Metcalf <cmetcalf@mellanox.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Huang Rui <ray.huang@amd.com>
+Cc: Jiri Slaby <jslaby@suse.cz>
+Cc: Jonathan Corbet <corbet@lwn.net>
+Cc: Michael S. Tsirkin <mst@redhat.com>
+Cc: Paul Gortmaker <paul.gortmaker@windriver.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: Shuah Khan <shuah@kernel.org>
+Cc: Vlastimil Babka <vbabka@suse.cz>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: x86@kernel.org
+Reviewed-by: Andy Lutomirski <luto@kernel.org>
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/kernel/traps.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index ed8d78f..36cf8e9 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -60,6 +60,7 @@
+ #include <asm/trace/mpx.h>
+ #include <asm/mpx.h>
+ #include <asm/vm86.h>
++#include <asm/umip.h>
+ 
+ #ifdef CONFIG_X86_64
+ #include <asm/x86_init.h>
+@@ -536,6 +537,10 @@ do_general_protection(struct pt_regs *regs, long error_code)
+ 	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
+ 	cond_local_irq_enable(regs);
+ 
++	if (static_cpu_has(X86_FEATURE_UMIP))
++		if (user_mode(regs) && fixup_umip_exception(regs))
++			return;
++
+ 	if (v8086_mode(regs)) {
+ 		local_irq_enable();
+ 		handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
+-- 
+2.7.4
+

@@ -1,0 +1,74 @@
+From fa769200c061fcdacec238cb65f1e63cdd54909d Mon Sep 17 00:00:00 2001
+From: "Liu, Xinwu" <xinwu.liu@intel.com>
+Date: Wed, 22 Mar 2017 07:52:26 +0000
+Subject: [PATCH 0441/2104] thermal/intel_powerclamp: Fix sched_setscheduler
+ fail
+
+The schedule policy of thread "kidle_inject" is SCHED_NORMAL:
+[  772.796284] intel_powerclamp: Start idle injection to reduce power
+[  772.825757] ------------[ cut here ]------------
+[  772.825877] WARNING: CPU: 0 PID: 2140 at ../../../../../../kernel/glv/kernel/sched/idle.c:298 play_idle+0x16f/0x230
+[  772.826096] Modules linked in: ip6table_raw iptable_raw hci_uart bluetooth rfkill_gpio cfg80211 imc_ipc(O)
+[  772.826194] CPU: 0 PID: 2140 Comm: kidle_inject/0 Tainted: G          IO    4.9.0-ge701680f3a17 #1
+[  772.826373]  ffffc90001103d58 ffffffff813ba085 0000000000000000 0000000000000000
+[  772.826552]  ffffc90001103d98 ffffffff810953e1 0000012a691441c0 0000000000000006
+[  772.826731]  0000000000000002 ffff88006a39d708 ffff8800691441c0 ffffe8ffffc0dab8
+[  772.826794] Call Trace:
+[  772.826903]  [<ffffffff813ba085>] dump_stack+0x67/0x92
+[  772.827007]  [<ffffffff810953e1>] __warn+0xd1/0xf0
+[  772.827124]  [<ffffffff810954cd>] warn_slowpath_null+0x1d/0x20
+[  772.827234]  [<ffffffff810d6c6f>] play_idle+0x16f/0x230
+[  772.827365]  [<ffffffff81a9b4b7>] ? __schedule+0x217/0x6f0
+[  772.827485]  [<ffffffff81856c9a>] clamp_idle_injection_func+0x6a/0x1f0
+[  772.827612]  [<ffffffff810b568d>] kthread_worker_fn+0xdd/0x200
+[  772.827741]  [<ffffffff810b55b0>] ? __kthread_init_worker+0x50/0x50
+[  772.827860]  [<ffffffff810b5542>] kthread+0x102/0x120
+[  772.828004]  [<ffffffff810b5440>] ? kthread_park+0x60/0x60
+[  772.828118]  [<ffffffff81aa2517>] ret_from_fork+0x27/0x40
+[  772.828228] ---[ end trace bb738d5d79381554 ]---
+
+Normaly, the user thread does not have the capability "CAP_SYS_NICE"
+(and they shouldn't), it will fail to change the schedule policy.
+So, fix it by changing by themselves.
+
+Change-Id: Ide324bc43adf6401d0f48dd2979c46706fb8969d
+Signed-off-by: Liu, Xinwu <xinwu.liu@intel.com>
+Signed-off-by: Zhang, Di <di.zhang@intel.com>
+---
+ drivers/thermal/intel_powerclamp.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/thermal/intel_powerclamp.c b/drivers/thermal/intel_powerclamp.c
+index d718cd1..e83d505 100644
+--- a/drivers/thermal/intel_powerclamp.c
++++ b/drivers/thermal/intel_powerclamp.c
+@@ -99,6 +99,7 @@ struct powerclamp_worker_data {
+ 	unsigned int target_ratio;
+ 	unsigned int duration_jiffies;
+ 	bool clamping;
++	bool setscheduler_done;
+ };
+ 
+ static struct powerclamp_worker_data * __percpu worker_data;
+@@ -388,6 +389,10 @@ static void clamp_balancing_func(struct kthread_work *work)
+ 	w_data = container_of(work, struct powerclamp_worker_data,
+ 			      balancing_work);
+ 
++	if (unlikely(w_data->setscheduler_done == false)) {
++		sched_setscheduler(current, SCHED_FIFO, &sparam);
++		w_data->setscheduler_done = true;
++	}
+ 	/*
+ 	 * make sure user selected ratio does not take effect until
+ 	 * the next round. adjust target_ratio if user has changed
+@@ -503,7 +508,6 @@ static void start_power_clamp_worker(unsigned long cpu)
+ 	w_data->cpu = cpu;
+ 	w_data->clamping = true;
+ 	set_bit(cpu, cpu_clamping_mask);
+-	sched_setscheduler(worker->task, SCHED_FIFO, &sparam);
+ 	kthread_init_work(&w_data->balancing_work, clamp_balancing_func);
+ 	kthread_init_delayed_work(&w_data->idle_injection_work,
+ 				  clamp_idle_injection_func);
+-- 
+2.7.4
+

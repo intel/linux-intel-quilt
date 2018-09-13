@@ -1,0 +1,242 @@
+From 80ed9a9a15048d8749a30eb9077fba5c529eff78 Mon Sep 17 00:00:00 2001
+From: Pei Zhang <pei.zhang@intel.com>
+Date: Sat, 10 Jun 2017 01:09:32 +0800
+Subject: [PATCH 0905/2104] drm/i915/gvt: implement pvmmio in GVTg
+
+If pvmmio is enabled in i915 host driver, guest i915 will read most MMIO
+register directly, which won't be trapped to host GVT. A small range
+MMIOs still need trap. They are filtered in a static function, and this
+patch is to implement the handler of these registers in GVTg.
+Also, when pvmmio is enabled, we will optimize ELSP port writing, to
+reduce the mmio trap numbers from 4 to 1, which can improve the guest GPU
+performance.
+
+Change-Id: Ic72a87499baabe9b3b2fbb5ad827e6ae062ff959
+Signed-off-by: Pei Zhang <pei.zhang@intel.com>
+Acknowledged-by: Singh, Satyeshwar <satyeshwar.singh@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/handlers.c  | 73 ++++++++++++++++++++++++++++++++----
+ drivers/gpu/drm/i915/gvt/hypercall.h |  2 +
+ drivers/gpu/drm/i915/gvt/mpt.h       | 21 +++++++++++
+ drivers/gpu/drm/i915/gvt/vgpu.c      |  6 +++
+ 4 files changed, 94 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 41df257..fa1e19b 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1134,6 +1134,7 @@ static int pvinfo_mmio_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+ 	bool invalid_read = false;
++	int ret = 0;
+ 
+ 	read_vreg(vgpu, offset, p_data, bytes);
+ 
+@@ -1148,6 +1149,23 @@ static int pvinfo_mmio_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 			_vgtif_reg(avail_rs.fence_num) + 4)
+ 			invalid_read = true;
+ 		break;
++	case _vgtif_reg(pv_mmio):
++	/* a remap happens from guest mmio read operation, the target reg offset
++	 * is in the first DWORD of shared_page.
++	 */
++	{
++		u32 reg = vgpu->mmio.shared_page->reg_addr;
++		struct intel_gvt_mmio_info *mmio;
++
++		mmio = find_mmio_info(vgpu->gvt, rounddown(reg, 4));
++		if (mmio)
++			ret = mmio->read(vgpu, reg, p_data, bytes);
++		else
++			ret = intel_vgpu_default_mmio_read(vgpu, reg, p_data,
++					bytes);
++		break;
++	}
++
+ 	case 0x78010:	/* vgt_caps */
+ 	case 0x7881c:
+ 		break;
+@@ -1159,7 +1177,7 @@ static int pvinfo_mmio_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 		gvt_vgpu_err("invalid pvinfo read: [%x:%x] = %x\n",
+ 				offset, bytes, *(u32 *)p_data);
+ 	vgpu->pv_notified = true;
+-	return 0;
++	return ret;
+ }
+ 
+ static int handle_g2v_notification(struct intel_vgpu *vgpu, int notification)
+@@ -1206,6 +1224,26 @@ static int send_display_ready_uevent(struct intel_vgpu *vgpu, int ready)
+ 	return kobject_uevent_env(kobj, KOBJ_ADD, env);
+ }
+ 
++#define INTEL_GVT_PCI_BAR_GTTMMIO 0
++static int set_pvmmio(struct intel_vgpu *vgpu, bool map)
++{
++	u64 start, end;
++	u64 val;
++	int ret;
++
++	val = vgpu_cfg_space(vgpu)[PCI_BASE_ADDRESS_0];
++	if (val & PCI_BASE_ADDRESS_MEM_TYPE_64)
++		start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0);
++	else
++		start = *(u32 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0);
++
++	start &= ~GENMASK(3, 0);
++	end = start + vgpu->cfg_space.bar[INTEL_GVT_PCI_BAR_GTTMMIO].size - 1;
++
++	ret = intel_gvt_hypervisor_set_pvmmio(vgpu, start, end, map);
++	return ret;
++}
++
+ static int pvinfo_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+@@ -1222,6 +1260,17 @@ static int pvinfo_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	case _vgtif_reg(g2v_notify):
+ 		ret = handle_g2v_notification(vgpu, data);
+ 		break;
++	case _vgtif_reg(enable_pvmmio):
++		if (i915.enable_pvmmio) {
++			if (set_pvmmio(vgpu, !!data)) {
++				vgpu_vreg(vgpu, offset) = 0;
++				break;
++			}
++			vgpu_vreg(vgpu, offset) = !!data;
++		} else {
++			vgpu_vreg(vgpu, offset) = 0;
++		}
++		break;
+ 	/* add xhot and yhot to handled list to avoid error log */
+ 	case 0x78830:
+ 	case 0x78834:
+@@ -1605,6 +1654,7 @@ static int elsp_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	int ring_id = render_mmio_to_ring_id(vgpu->gvt, offset);
+ 	struct intel_vgpu_execlist *execlist;
+ 	u32 data = *(u32 *)p_data;
++	u32 *elsp_data = vgpu->mmio.shared_page->elsp_data;
+ 	int ret = 0;
+ 
+ 	if (WARN_ON(ring_id < 0 || ring_id > I915_NUM_ENGINES - 1))
+@@ -1612,16 +1662,23 @@ static int elsp_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 
+ 	execlist = &vgpu->execlist[ring_id];
+ 
+-	execlist->elsp_dwords.data[execlist->elsp_dwords.index] = data;
+-	if (execlist->elsp_dwords.index == 3) {
++	if (VGPU_PVMMIO(vgpu)) {
++		execlist->elsp_dwords.data[0] = elsp_data[0];
++		execlist->elsp_dwords.data[1] = elsp_data[1];
++		execlist->elsp_dwords.data[2] = elsp_data[2];
++		execlist->elsp_dwords.data[3] = data;
+ 		ret = intel_vgpu_submit_execlist(vgpu, ring_id);
+-		if(ret)
+-			gvt_vgpu_err("fail submit workload on ring %d\n",
+-				ring_id);
++	} else {
++		execlist->elsp_dwords.data[execlist->elsp_dwords.index] = data;
++		if (execlist->elsp_dwords.index == 3)
++			ret = intel_vgpu_submit_execlist(vgpu, ring_id);
++		++execlist->elsp_dwords.index;
++		execlist->elsp_dwords.index &= 0x3;
+ 	}
+ 
+-	++execlist->elsp_dwords.index;
+-	execlist->elsp_dwords.index &= 0x3;
++	if (ret)
++		gvt_vgpu_err("fail submit workload on ring %d\n", ring_id);
++
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/hypercall.h b/drivers/gpu/drm/i915/gvt/hypercall.h
+index 8f300be..ab41206 100644
+--- a/drivers/gpu/drm/i915/gvt/hypercall.h
++++ b/drivers/gpu/drm/i915/gvt/hypercall.h
+@@ -55,6 +55,8 @@ struct intel_gvt_mpt {
+ 			      unsigned long mfn, unsigned int nr, bool map);
+ 	int (*set_trap_area)(unsigned long handle, u64 start, u64 end,
+ 			     bool map);
++	int (*set_pvmmio)(unsigned long handle, u64 start, u64 end,
++			     bool map);
+ 	int (*pause_domain)(unsigned long handle);
+ 	int (*unpause_domain)(unsigned long handle);
+ };
+diff --git a/drivers/gpu/drm/i915/gvt/mpt.h b/drivers/gpu/drm/i915/gvt/mpt.h
+index b775d90..2068ab8 100644
+--- a/drivers/gpu/drm/i915/gvt/mpt.h
++++ b/drivers/gpu/drm/i915/gvt/mpt.h
+@@ -292,6 +292,27 @@ static inline int intel_gvt_hypervisor_set_trap_area(
+ 	return intel_gvt_host.mpt->set_trap_area(vgpu->handle, start, end, map);
+ }
+ 
++/**
++ * intel_gvt_hypervisor_set_pvmmio - Set the pvmmio area
++ * @vgpu: a vGPU
++ * @start: the beginning of the guest physical address region
++ * @end: the end of the guest physical address region
++ * @map: map or unmap
++ *
++ * Returns:
++ * Zero on success, negative error code if failed.
++ */
++static inline int intel_gvt_hypervisor_set_pvmmio(
++		struct intel_vgpu *vgpu, u64 start, u64 end, bool map)
++{
++	/* a MPT implementation could have MMIO trapped elsewhere */
++	if (!intel_gvt_host.mpt->set_pvmmio)
++		return -ENOENT;
++
++	return intel_gvt_host.mpt->set_pvmmio(vgpu->handle, start, end, map);
++}
++
++
+ static inline int intel_gvt_hypervisor_pause_domain(struct intel_vgpu *vgpu)
+ {
+ 	if (!intel_gvt_host.mpt || !intel_gvt_host.mpt->pause_domain)
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 69f3f892..6e74c94 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -55,6 +55,8 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
+ 
+ 	vgpu_vreg(vgpu, vgtif_reg(avail_rs.fence_num)) = vgpu_fence_sz(vgpu);
+ 
++	vgpu_vreg(vgpu, vgtif_reg(enable_pvmmio)) = 0;
++
+ 	gvt_dbg_core("Populate PVINFO PAGE for vGPU %d\n", vgpu->id);
+ 	gvt_dbg_core("aperture base [GMADR] 0x%llx size 0x%llx\n",
+ 		vgpu_aperture_gmadr_base(vgpu), vgpu_aperture_sz(vgpu));
+@@ -456,6 +458,8 @@ struct intel_vgpu *intel_gvt_create_vgpu(struct intel_gvt *gvt,
+ 	return vgpu;
+ }
+ 
++#define _vgtif_reg(x) \
++	(VGT_PVINFO_PAGE + offsetof(struct vgt_if, x))
+ /**
+  * intel_gvt_reset_vgpu_locked - reset a virtual GPU by DMLR or GT reset
+  * @vgpu: virtual GPU
+@@ -490,6 +494,7 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 	struct intel_gvt *gvt = vgpu->gvt;
+ 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
+ 	unsigned int resetting_eng = dmlr ? ALL_ENGINES : engine_mask;
++	bool enable_pvmmio = vgpu_vreg(vgpu, _vgtif_reg(enable_pvmmio));
+ 
+ 	gvt_dbg_core("------------------------------------------\n");
+ 	gvt_dbg_core("resseting vgpu%d, dmlr %d, engine_mask %08x\n",
+@@ -523,6 +528,7 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 
+ 		intel_vgpu_reset_mmio(vgpu, dmlr);
+ 		populate_pvinfo_page(vgpu);
++		vgpu_vreg(vgpu, _vgtif_reg(enable_pvmmio)) = enable_pvmmio;
+ 		intel_vgpu_reset_display(vgpu);
+ 
+ 		if (dmlr) {
+-- 
+2.7.4
+

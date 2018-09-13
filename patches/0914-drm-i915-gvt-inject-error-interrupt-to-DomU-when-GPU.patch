@@ -1,0 +1,164 @@
+From bd3fc3091391fc3a9b34d1d58c7a70290bd90742 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Thu, 24 Aug 2017 06:55:26 +0800
+Subject: [PATCH 0914/2104] drm/i915/gvt: inject error interrupt to DomU when
+ GPU hang
+
+When GVT finds a request from DomU causes GPU hang, it will trigger
+an error interrupt to guest, so that DomU can trigger a virtual GPU
+reset.
+
+Change-Id: I49d9339e99ebfdbe9b158ba311655ab356562bae
+Signed-off-by: Min He <min.he@intel.com>
+Signed-off-by: Satyeshwar Singh <satyeshwar.singh@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/interrupt.c |  7 +++++++
+ drivers/gpu/drm/i915/gvt/interrupt.h |  2 ++
+ drivers/gpu/drm/i915/gvt/scheduler.c | 27 +++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/gvt/scheduler.h |  1 +
+ 4 files changed, 37 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/interrupt.c b/drivers/gpu/drm/i915/gvt/interrupt.c
+index 9d0ab9e..0918d91 100644
+--- a/drivers/gpu/drm/i915/gvt/interrupt.c
++++ b/drivers/gpu/drm/i915/gvt/interrupt.c
+@@ -69,6 +69,7 @@ static const char * const irq_name[INTEL_GVT_EVENT_MAX] = {
+ 	[VCS_PAGE_DIRECTORY_FAULT] = "Video page directory faults",
+ 	[VCS_AS_CONTEXT_SWITCH] = "Video AS Context Switch Interrupt",
+ 	[VCS2_MI_USER_INTERRUPT] = "VCS2 Video CS MI USER INTERRUPT",
++	[VCS2_CMD_STREAMER_ERR] = "VCS2 Video CS error interrupt",
+ 	[VCS2_MI_FLUSH_DW] = "VCS2 Video MI FLUSH DW notify",
+ 	[VCS2_AS_CONTEXT_SWITCH] = "VCS2 Context Switch Interrupt",
+ 
+@@ -523,21 +524,26 @@ static void gen8_init_irq(
+ 
+ 	/* GEN8 interrupt GT0 events */
+ 	SET_BIT_INFO(irq, 0, RCS_MI_USER_INTERRUPT, INTEL_GVT_IRQ_INFO_GT0);
++	SET_BIT_INFO(irq, 3, RCS_CMD_STREAMER_ERR, INTEL_GVT_IRQ_INFO_GT0);
+ 	SET_BIT_INFO(irq, 4, RCS_PIPE_CONTROL, INTEL_GVT_IRQ_INFO_GT0);
+ 	SET_BIT_INFO(irq, 8, RCS_AS_CONTEXT_SWITCH, INTEL_GVT_IRQ_INFO_GT0);
+ 
+ 	SET_BIT_INFO(irq, 16, BCS_MI_USER_INTERRUPT, INTEL_GVT_IRQ_INFO_GT0);
++	SET_BIT_INFO(irq, 19, BCS_CMD_STREAMER_ERR, INTEL_GVT_IRQ_INFO_GT0);
+ 	SET_BIT_INFO(irq, 20, BCS_MI_FLUSH_DW, INTEL_GVT_IRQ_INFO_GT0);
+ 	SET_BIT_INFO(irq, 24, BCS_AS_CONTEXT_SWITCH, INTEL_GVT_IRQ_INFO_GT0);
+ 
+ 	/* GEN8 interrupt GT1 events */
+ 	SET_BIT_INFO(irq, 0, VCS_MI_USER_INTERRUPT, INTEL_GVT_IRQ_INFO_GT1);
++	SET_BIT_INFO(irq, 3, VCS_CMD_STREAMER_ERR, INTEL_GVT_IRQ_INFO_GT1);
+ 	SET_BIT_INFO(irq, 4, VCS_MI_FLUSH_DW, INTEL_GVT_IRQ_INFO_GT1);
+ 	SET_BIT_INFO(irq, 8, VCS_AS_CONTEXT_SWITCH, INTEL_GVT_IRQ_INFO_GT1);
+ 
+ 	if (HAS_BSD2(gvt->dev_priv)) {
+ 		SET_BIT_INFO(irq, 16, VCS2_MI_USER_INTERRUPT,
+ 			INTEL_GVT_IRQ_INFO_GT1);
++		SET_BIT_INFO(irq, 19, VCS2_CMD_STREAMER_ERR,
++				INTEL_GVT_IRQ_INFO_GT1);
+ 		SET_BIT_INFO(irq, 20, VCS2_MI_FLUSH_DW,
+ 			INTEL_GVT_IRQ_INFO_GT1);
+ 		SET_BIT_INFO(irq, 24, VCS2_AS_CONTEXT_SWITCH,
+@@ -546,6 +552,7 @@ static void gen8_init_irq(
+ 
+ 	/* GEN8 interrupt GT3 events */
+ 	SET_BIT_INFO(irq, 0, VECS_MI_USER_INTERRUPT, INTEL_GVT_IRQ_INFO_GT3);
++	SET_BIT_INFO(irq, 3, VECS_CMD_STREAMER_ERR, INTEL_GVT_IRQ_INFO_GT3);
+ 	SET_BIT_INFO(irq, 4, VECS_MI_FLUSH_DW, INTEL_GVT_IRQ_INFO_GT3);
+ 	SET_BIT_INFO(irq, 8, VECS_AS_CONTEXT_SWITCH, INTEL_GVT_IRQ_INFO_GT3);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/interrupt.h b/drivers/gpu/drm/i915/gvt/interrupt.h
+index f7d7ade..6ec761a 100644
+--- a/drivers/gpu/drm/i915/gvt/interrupt.h
++++ b/drivers/gpu/drm/i915/gvt/interrupt.h
+@@ -53,6 +53,7 @@ enum intel_gvt_event_type {
+ 	VCS_AS_CONTEXT_SWITCH,
+ 
+ 	VCS2_MI_USER_INTERRUPT,
++	VCS2_CMD_STREAMER_ERR,
+ 	VCS2_MI_FLUSH_DW,
+ 	VCS2_AS_CONTEXT_SWITCH,
+ 
+@@ -64,6 +65,7 @@ enum intel_gvt_event_type {
+ 	BCS_AS_CONTEXT_SWITCH,
+ 
+ 	VECS_MI_USER_INTERRUPT,
++	VECS_CMD_STREAMER_ERR,
+ 	VECS_MI_FLUSH_DW,
+ 	VECS_AS_CONTEXT_SWITCH,
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index d576d15..e31486e 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -292,6 +292,7 @@ static int dispatch_workload(struct intel_vgpu_workload *workload)
+ 		goto out;
+ 	}
+ 
++	workload->guilty_count = atomic_read(&workload->req->ctx->guilty_count);
+ out:
+ 	if (ret)
+ 		workload->status = ret;
+@@ -493,6 +494,9 @@ static void complete_current_workload(struct intel_gvt *gvt, int ring_id)
+ 
+ 	mutex_lock(&gvt->lock);
+ 	list_del_init(&workload->list);
++	if (workload->status == -EIO)
++		intel_vgpu_reset_execlist(vgpu, 1 << ring_id);
++
+ 	workload->complete(workload);
+ 
+ 	atomic_dec(&vgpu->running_workload_num);
+@@ -505,6 +509,18 @@ static void complete_current_workload(struct intel_gvt *gvt, int ring_id)
+ 	mutex_unlock(&gvt->sched_lock);
+ }
+ 
++static void inject_error_cs_irq(struct intel_vgpu *vgpu, int ring_id)
++{
++	enum intel_gvt_event_type events[] = {
++		RCS_CMD_STREAMER_ERR,
++		BCS_CMD_STREAMER_ERR,
++		VCS_CMD_STREAMER_ERR,
++		VCS2_CMD_STREAMER_ERR,
++		VECS_CMD_STREAMER_ERR,
++	};
++	intel_vgpu_trigger_virtual_event(vgpu, events[ring_id]);
++}
++
+ struct workload_thread_param {
+ 	struct intel_gvt *gvt;
+ 	int ring_id;
+@@ -577,6 +593,17 @@ static int workload_thread(void *priv)
+ 		if (lret >= 0 && workload->status == -EINPROGRESS)
+ 			workload->status = 0;
+ 
++		/*
++		 * increased guilty_count means that this request triggerred
++		 * a GPU reset, so we need to notify the guest about the
++		 * hang.
++		 */
++		if (workload->guilty_count <
++				atomic_read(&workload->req->ctx->guilty_count)) {
++			workload->status = -EIO;
++			inject_error_cs_irq(workload->vgpu, ring_id);
++		}
++
+ complete:
+ 		gvt_dbg_sched("will complete workload %p, status: %d\n",
+ 				workload, workload->status);
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.h b/drivers/gpu/drm/i915/gvt/scheduler.h
+index d45c269..3920c54 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.h
++++ b/drivers/gpu/drm/i915/gvt/scheduler.h
+@@ -85,6 +85,7 @@ struct intel_vgpu_workload {
+ 	bool dispatched;
+ 	bool shadowed;
+ 	int status;
++	unsigned int guilty_count;
+ 
+ 	struct intel_vgpu_mm *shadow_mm;
+ 
+-- 
+2.7.4
+

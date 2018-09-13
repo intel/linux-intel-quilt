@@ -1,0 +1,184 @@
+From 3e89bf3cc7411a573c6ec70e20f3520b648361e8 Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Mon, 17 Oct 2016 00:26:36 +0300
+Subject: [PATCH 0516/2104] mei: hbm: introduce dma bit in the message header
+
+Add dma_ring bit in the mei message header for conveying
+that the message data itself are on the dma ring.
+Add optional field for length of the message on the dma ring.
+
+Change-Id: I38971cc13ef91258df9b67db003f7360401c9ddf
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+Signed-off-by: Alexander Usyskin <alexander.usyskin@intel.com>
+---
+ drivers/misc/mei/client.c    |  2 ++
+ drivers/misc/mei/hbm.c       |  1 +
+ drivers/misc/mei/hw.h        | 18 ++++++++++++++----
+ drivers/misc/mei/init.c      |  2 +-
+ drivers/misc/mei/interrupt.c | 16 ++++++++--------
+ drivers/misc/mei/mei_dev.h   |  6 +++---
+ 6 files changed, 29 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/misc/mei/client.c b/drivers/misc/mei/client.c
+index be64969..153fd18 100644
+--- a/drivers/misc/mei/client.c
++++ b/drivers/misc/mei/client.c
+@@ -1560,6 +1560,7 @@ int mei_cl_irq_write(struct mei_cl *cl, struct mei_cl_cb *cb,
+ 	mei_hdr.host_addr = mei_cl_host_addr(cl);
+ 	mei_hdr.me_addr = mei_cl_me_id(cl);
+ 	mei_hdr.reserved = 0;
++	mei_hdr.dma_ring = 0;
+ 	mei_hdr.internal = cb->internal;
+ 
+ 	if (slots >= msg_slots) {
+@@ -1652,6 +1653,7 @@ int mei_cl_write(struct mei_cl *cl, struct mei_cl_cb *cb)
+ 	mei_hdr.me_addr = mei_cl_me_id(cl);
+ 	mei_hdr.reserved = 0;
+ 	mei_hdr.msg_complete = 0;
++	mei_hdr.dma_ring = 0;
+ 	mei_hdr.internal = cb->internal;
+ 
+ 	rets = mei_cl_tx_flow_ctrl_creds(cl);
+diff --git a/drivers/misc/mei/hbm.c b/drivers/misc/mei/hbm.c
+index fe6595f..8c374a9 100644
+--- a/drivers/misc/mei/hbm.c
++++ b/drivers/misc/mei/hbm.c
+@@ -131,6 +131,7 @@ static inline void mei_hbm_hdr(struct mei_msg_hdr *hdr, size_t length)
+ 	hdr->me_addr = 0;
+ 	hdr->length = length;
+ 	hdr->msg_complete = 1;
++	hdr->dma_ring = 0;
+ 	hdr->reserved = 0;
+ 	hdr->internal = 0;
+ }
+diff --git a/drivers/misc/mei/hw.h b/drivers/misc/mei/hw.h
+index 13f971f..55a532b 100644
+--- a/drivers/misc/mei/hw.h
++++ b/drivers/misc/mei/hw.h
+@@ -192,19 +192,29 @@ enum  mei_cl_disconnect_status {
+ 	MEI_CL_DISCONN_SUCCESS = MEI_HBMS_SUCCESS
+ };
+ 
+-/*
+- *  MEI BUS Interface Section
++/**
++ * struct mei_msg_hdr - MEI BUS Interface Section
++ *
++ * @me_addr: device address
++ * @host_addr: host address
++ * @length: message length
++ * @reserved: reserved
++ * @dma_ring: message is on dma ring
++ * @internal: message is internal
++ * @msg_complete: last packet of the message
++ * @dr_length: [OPTIONAL] length of the message on dma ring
+  */
+ struct mei_msg_hdr {
+ 	u32 me_addr:8;
+ 	u32 host_addr:8;
+ 	u32 length:9;
+-	u32 reserved:5;
++	u32 reserved:4;
++	u32 dma_ring:1;
+ 	u32 internal:1;
+ 	u32 msg_complete:1;
++	u32 dr_length[0];
+ } __packed;
+ 
+-
+ struct mei_bus_message {
+ 	u8 hbm_cmd;
+ 	u8 data[0];
+diff --git a/drivers/misc/mei/init.c b/drivers/misc/mei/init.c
+index d2f6914..fe89660 100644
+--- a/drivers/misc/mei/init.c
++++ b/drivers/misc/mei/init.c
+@@ -151,7 +151,7 @@ int mei_reset(struct mei_device *dev)
+ 
+ 	mei_hbm_reset(dev);
+ 
+-	dev->rd_msg_hdr = 0;
++	memset(dev->rd_msg_hdr, 0, sizeof(dev->rd_msg_hdr));
+ 
+ 	if (ret) {
+ 		dev_err(dev->dev, "hw_reset failed ret = %d\n", ret);
+diff --git a/drivers/misc/mei/interrupt.c b/drivers/misc/mei/interrupt.c
+index b0b8f18..a0f608e 100644
+--- a/drivers/misc/mei/interrupt.c
++++ b/drivers/misc/mei/interrupt.c
+@@ -263,20 +263,21 @@ int mei_irq_read_handler(struct mei_device *dev,
+ 	struct mei_cl *cl;
+ 	int ret;
+ 
+-	if (!dev->rd_msg_hdr) {
+-		dev->rd_msg_hdr = mei_read_hdr(dev);
++	if (!dev->rd_msg_hdr[0]) {
++		dev->rd_msg_hdr[0] = mei_read_hdr(dev);
+ 		(*slots)--;
+ 		dev_dbg(dev->dev, "slots =%08x.\n", *slots);
+ 
+-		ret = hdr_is_valid(dev->rd_msg_hdr);
++		ret = hdr_is_valid(dev->rd_msg_hdr[0]);
+ 		if (ret) {
+ 			dev_err(dev->dev, "corrupted message header 0x%08X\n",
+-				dev->rd_msg_hdr);
++				dev->rd_msg_hdr[0]);
+ 			goto end;
+ 		}
++		dev_dbg(dev->dev, "slots = %08x.\n", *slots);
+ 	}
+ 
+-	mei_hdr = (struct mei_msg_hdr *)&dev->rd_msg_hdr;
++	mei_hdr = (struct mei_msg_hdr *)dev->rd_msg_hdr;
+ 	dev_dbg(dev->dev, MEI_HDR_FMT, MEI_HDR_PRM(mei_hdr));
+ 
+ 	if (mei_slots2data(*slots) < mei_hdr->length) {
+@@ -317,7 +318,7 @@ int mei_irq_read_handler(struct mei_device *dev,
+ 			goto reset_slots;
+ 		}
+ 		dev_err(dev->dev, "no destination client found 0x%08X\n",
+-				dev->rd_msg_hdr);
++				dev->rd_msg_hdr[0]);
+ 		ret = -EBADMSG;
+ 		goto end;
+ 	}
+@@ -327,9 +328,8 @@ int mei_irq_read_handler(struct mei_device *dev,
+ 
+ reset_slots:
+ 	/* reset the number of slots and header */
++	memset(dev->rd_msg_hdr, 0, sizeof(dev->rd_msg_hdr));
+ 	*slots = mei_count_full_read_slots(dev);
+-	dev->rd_msg_hdr = 0;
+-
+ 	if (*slots == -EOVERFLOW) {
+ 		/* overflow - reset */
+ 		dev_err(dev->dev, "resetting due to slots overflow.\n");
+diff --git a/drivers/misc/mei/mei_dev.h b/drivers/misc/mei/mei_dev.h
+index ebcd513..b969d8d 100644
+--- a/drivers/misc/mei/mei_dev.h
++++ b/drivers/misc/mei/mei_dev.h
+@@ -457,7 +457,7 @@ struct mei_device {
+ #endif /* CONFIG_PM */
+ 
+ 	unsigned char rd_msg_buf[MEI_RD_MSG_BUF_SIZE];
+-	u32 rd_msg_hdr;
++	u32 rd_msg_hdr[2];
+ 
+ 	/* write buffer */
+ 	u8 hbuf_depth;
+@@ -675,10 +675,10 @@ static inline void mei_dbgfs_deregister(struct mei_device *dev) {}
+ int mei_register(struct mei_device *dev, struct device *parent);
+ void mei_deregister(struct mei_device *dev);
+ 
+-#define MEI_HDR_FMT "hdr:host=%02d me=%02d len=%d internal=%1d comp=%1d"
++#define MEI_HDR_FMT "hdr:host=%02d me=%02d len=%d dma=%1d internal=%1d comp=%1d"
+ #define MEI_HDR_PRM(hdr)                  \
+ 	(hdr)->host_addr, (hdr)->me_addr, \
+-	(hdr)->length, (hdr)->internal, (hdr)->msg_complete
++	(hdr)->length, (hdr)->dma_ring, (hdr)->internal, (hdr)->msg_complete
+ 
+ ssize_t mei_fw_status2str(struct mei_fw_status *fw_sts, char *buf, size_t len);
+ /**
+-- 
+2.7.4
+

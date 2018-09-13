@@ -1,0 +1,107 @@
+From 5d5e5be1493a72f1c9844eb6ce2cd2a840769c87 Mon Sep 17 00:00:00 2001
+From: Satyeshwar Singh <satyeshwar.singh@intel.com>
+Date: Wed, 13 Sep 2017 17:29:57 -0700
+Subject: [PATCH 0909/2104] drm/i915/gvt: Raise a uevent when Dom 0 is ready
+ for Dom U
+
+HV vendors want to know when Dom 0 is ready to start a Dom U
+because they want to start Dom U as early as possible. This
+feature informs XenGT module as soon as Dom 0 is ready. In our
+example, we raise a uevent from XenGT module but the HV vendors
+are free to change the module to do any custom action that they
+want.
+
+Change-Id: Ibfdaca65002825e14e15527c386db00f59b372e5
+Signed-off-by: Satyeshwar Singh <satyeshwar.singh@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gvt.c       | 8 ++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h       | 1 +
+ drivers/gpu/drm/i915/gvt/hypercall.h | 1 +
+ drivers/gpu/drm/i915/gvt/mpt.h       | 8 ++++++++
+ drivers/gpu/drm/i915/intel_display.c | 9 +++++++++
+ 5 files changed, 27 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index 616d450..f29bfb4 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -413,3 +413,11 @@ int gvt_unpause_user_domains(struct drm_i915_private *dev_priv)
+ 
+ 	return ret;
+ }
++
++int gvt_dom0_ready(struct drm_i915_private *dev_priv)
++{
++	if (!intel_gvt_active(dev_priv))
++		return 0;
++
++	return intel_gvt_hypervisor_dom0_ready();
++}
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index a49dae3..5b120e4 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -516,6 +516,7 @@ int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci);
+ void populate_pvinfo_page(struct intel_vgpu *vgpu);
+ int gvt_pause_user_domains(struct drm_i915_private *dev_priv);
+ int gvt_unpause_user_domains(struct drm_i915_private *dev_priv);
++int gvt_dom0_ready(struct drm_i915_private *dev_priv);
+ 
+ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/hypercall.h b/drivers/gpu/drm/i915/gvt/hypercall.h
+index ab41206..59ff545 100644
+--- a/drivers/gpu/drm/i915/gvt/hypercall.h
++++ b/drivers/gpu/drm/i915/gvt/hypercall.h
+@@ -59,6 +59,7 @@ struct intel_gvt_mpt {
+ 			     bool map);
+ 	int (*pause_domain)(unsigned long handle);
+ 	int (*unpause_domain)(unsigned long handle);
++	int (*dom0_ready)(void);
+ };
+ 
+ extern struct intel_gvt_mpt xengt_mpt;
+diff --git a/drivers/gpu/drm/i915/gvt/mpt.h b/drivers/gpu/drm/i915/gvt/mpt.h
+index 2068ab8..95b806c 100644
+--- a/drivers/gpu/drm/i915/gvt/mpt.h
++++ b/drivers/gpu/drm/i915/gvt/mpt.h
+@@ -328,4 +328,12 @@ static inline int intel_gvt_hypervisor_unpause_domain(struct intel_vgpu *vgpu)
+ 
+ 	return intel_gvt_host.mpt->unpause_domain(vgpu->handle);
+ }
++
++static inline int intel_gvt_hypervisor_dom0_ready(void)
++{
++	if (!intel_gvt_host.mpt->dom0_ready)
++		return 0;
++
++	return intel_gvt_host.mpt->dom0_ready();
++}
+ #endif /* _GVT_MPT_H_ */
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 988b0ba..a8a77a2 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -13866,6 +13866,15 @@ static void intel_setup_outputs(struct drm_i915_private *dev_priv)
+ 			intel_encoder_clones(encoder);
+ 	}
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	/*
++	 * Encoders have been initialized. If we are in VGT mode,
++	 * let's inform the HV that it can start Dom U as Dom 0
++	 * is ready to accept new Dom Us.
++	 */
++	gvt_dom0_ready(dev_priv);
++#endif
++
+ 	intel_init_pch_refclk(dev_priv);
+ 
+ 	drm_helper_move_panel_connectors_to_head(&dev_priv->drm);
+-- 
+2.7.4
+

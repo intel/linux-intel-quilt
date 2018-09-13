@@ -1,0 +1,113 @@
+From 8b3314be50b1843e96c2f779c5a032ca7cbc5428 Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Tue, 11 Jul 2017 13:25:34 -0700
+Subject: [PATCH 0510/2104] x86: Enable User-Mode Instruction Prevention
+
+User-Mode Instruction Prevention (UMIP) is enabled by setting/clearing a
+bit in %cr4.
+
+It makes sense to enable UMIP at some point while booting, before user
+spaces come up. Like SMAP and SMEP, is not critical to have it enabled
+very early during boot. This is because UMIP is relevant only when there is
+a userspace to be protected from. Given the similarities in relevance, it
+makes sense to enable UMIP along with SMAP and SMEP.
+
+UMIP is enabled by default. It can be disabled by adding clearcpuid=514
+to the kernel parameters.
+
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Chen Yucong <slaoub@gmail.com>
+Cc: Chris Metcalf <cmetcalf@mellanox.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Huang Rui <ray.huang@amd.com>
+Cc: Jiri Slaby <jslaby@suse.cz>
+Cc: Jonathan Corbet <corbet@lwn.net>
+Cc: Michael S. Tsirkin <mst@redhat.com>
+Cc: Paul Gortmaker <paul.gortmaker@windriver.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: Shuah Khan <shuah@kernel.org>
+Cc: Vlastimil Babka <vbabka@suse.cz>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: x86@kernel.org
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/Kconfig             | 10 ++++++++++
+ arch/x86/kernel/cpu/common.c | 25 ++++++++++++++++++++++++-
+ 2 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 7764f93..886ad05 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -1823,6 +1823,16 @@ config X86_SMAP
+ 
+ 	  If unsure, say Y.
+ 
++config X86_INTEL_UMIP
++	def_bool n
++	depends on CPU_SUP_INTEL
++	prompt "Intel User Mode Instruction Prevention" if EXPERT
++	---help---
++	  The User Mode Instruction Prevention (UMIP) is a security
++	  feature in newer Intel processors. If enabled, a general
++	  protection fault is issued if the instructions SGDT, SLDT,
++	  SIDT, SMSW and STR are executed in user mode.
++
+ config X86_INTEL_MPX
+ 	prompt "Intel MPX (Memory Protection Extensions)"
+ 	def_bool n
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 7d2a789..d0bc256 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -338,6 +338,28 @@ static __always_inline void setup_smap(struct cpuinfo_x86 *c)
+ 	}
+ }
+ 
++static __always_inline void setup_umip(struct cpuinfo_x86 *c)
++{
++	/* Check the boot processor, plus build option for UMIP. */
++	if (!cpu_feature_enabled(X86_FEATURE_UMIP))
++		goto out;
++
++	/* Check the current processor's cpuid bits. */
++	if (!cpu_has(c, X86_FEATURE_UMIP))
++		goto out;
++
++	cr4_set_bits(X86_CR4_UMIP);
++
++	return;
++
++out:
++	/*
++	 * Make sure UMIP is disabled in case it was enabled in a
++	 * previous boot (e.g., via kexec).
++	 */
++	cr4_clear_bits(X86_CR4_UMIP);
++}
++
+ /*
+  * Protection Keys are not available in 32-bit mode.
+  */
+@@ -1275,9 +1297,10 @@ static void identify_cpu(struct cpuinfo_x86 *c)
+ 	/* Disable the PN if appropriate */
+ 	squash_the_stupid_serial_number(c);
+ 
+-	/* Set up SMEP/SMAP */
++	/* Set up SMEP/SMAP/UMIP */
+ 	setup_smep(c);
+ 	setup_smap(c);
++	setup_umip(c);
+ 
+ 	/*
+ 	 * The vendor-specific functions might have changed features.
+-- 
+2.7.4
+

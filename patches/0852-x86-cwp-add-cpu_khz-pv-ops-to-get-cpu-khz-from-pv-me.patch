@@ -1,0 +1,136 @@
+From e16012cf3dcc76b715ce76c57fcfe639e9784db5 Mon Sep 17 00:00:00 2001
+From: Jason Chen CJ <jason.cj.chen@intel.com>
+Date: Tue, 26 Dec 2017 03:22:14 +0800
+Subject: [PATCH 0852/2104] x86:cwp: add cpu_khz pv ops to get cpu khz from pv
+ method
+
+added pv ops cpu_khz into pv_cpu_ops, the function cpu_khz_from_paravirt
+is to get cpu khz from paravirt way.
+for cwp, it gets cpu khz from cpuid 0x40000010.
+
+Change-Id: Ia018d0f1f34127ae3603208894044a7d13fea947
+Signed-off-by: Jason Chen CJ <jason.cj.chen@intel.com>
+Signed-off-by: Shiqing Gao <shiqing.gao@intel.com>
+Reviewed-by: Chi, Mingqiang <mingqiang.chi@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ arch/x86/cwp/cwp.c                    | 13 +++++++++++++
+ arch/x86/include/asm/paravirt.h       |  5 +++++
+ arch/x86/include/asm/paravirt_types.h |  2 ++
+ arch/x86/include/asm/tsc.h            |  9 +++++++++
+ arch/x86/kernel/paravirt.c            |  2 ++
+ arch/x86/kernel/tsc.c                 |  4 ++++
+ 6 files changed, 35 insertions(+)
+
+diff --git a/arch/x86/cwp/cwp.c b/arch/x86/cwp/cwp.c
+index 8083cf6..2bb4ab1 100644
+--- a/arch/x86/cwp/cwp.c
++++ b/arch/x86/cwp/cwp.c
+@@ -34,6 +34,18 @@
+  */
+ #include <asm/hypervisor.h>
+ 
++static unsigned long cpu_khz_from_cwp(void)
++{
++	unsigned int eax, ebx, ecx, edx;
++
++	/* Get TSC frequency from cpuid 0x40000010 */
++	eax = 0x40000010;
++	ebx = ecx = edx = 0;
++	__cpuid(&eax, &ebx, &ecx, &edx);
++
++	return (unsigned long)eax;
++}
++
+ static uint32_t __init cwp_detect(void)
+ {
+ 	return hypervisor_cpuid_base("CWPCWPCWP\0\0", 0);
+@@ -41,6 +53,7 @@ static uint32_t __init cwp_detect(void)
+ 
+ static void __init cwp_init_platform(void)
+ {
++	pv_cpu_ops.cpu_khz = cpu_khz_from_cwp;
+ }
+ 
+ static void cwp_pin_vcpu(int cpu)
+diff --git a/arch/x86/include/asm/paravirt.h b/arch/x86/include/asm/paravirt.h
+index c83a2f4..7634db6 100644
+--- a/arch/x86/include/asm/paravirt.h
++++ b/arch/x86/include/asm/paravirt.h
+@@ -273,6 +273,11 @@ static inline void slow_down_io(void)
+ #endif
+ }
+ 
++static inline unsigned long cpu_khz_from_paravirt(void)
++{
++	return PVOP_CALL0(unsigned long, pv_cpu_ops.cpu_khz);
++}
++
+ static inline void paravirt_activate_mm(struct mm_struct *prev,
+ 					struct mm_struct *next)
+ {
+diff --git a/arch/x86/include/asm/paravirt_types.h b/arch/x86/include/asm/paravirt_types.h
+index 180bc0b..6638843 100644
+--- a/arch/x86/include/asm/paravirt_types.h
++++ b/arch/x86/include/asm/paravirt_types.h
+@@ -175,6 +175,8 @@ struct pv_cpu_ops {
+ 
+ 	void (*start_context_switch)(struct task_struct *prev);
+ 	void (*end_context_switch)(struct task_struct *next);
++
++	unsigned long (*cpu_khz)(void);
+ } __no_randomize_layout;
+ 
+ struct pv_irq_ops {
+diff --git a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
+index 8da0efb..a62413d 100644
+--- a/arch/x86/include/asm/tsc.h
++++ b/arch/x86/include/asm/tsc.h
+@@ -62,6 +62,15 @@ extern int notsc_setup(char *);
+ extern void tsc_save_sched_clock_state(void);
+ extern void tsc_restore_sched_clock_state(void);
+ 
++#ifdef CONFIG_PARAVIRT
++#include <asm/paravirt.h>
++#else
++static inline unsigned long cpu_khz_from_paravirt(void)
++{
++	return 0;
++}
++#endif
++
+ unsigned long cpu_khz_from_msr(void);
+ 
+ #endif /* _ASM_X86_TSC_H */
+diff --git a/arch/x86/kernel/paravirt.c b/arch/x86/kernel/paravirt.c
+index f3559b8..3c33e8f 100644
+--- a/arch/x86/kernel/paravirt.c
++++ b/arch/x86/kernel/paravirt.c
+@@ -373,6 +373,8 @@ __visible struct pv_cpu_ops pv_cpu_ops = {
+ 
+ 	.start_context_switch = paravirt_nop,
+ 	.end_context_switch = paravirt_nop,
++
++	.cpu_khz = paravirt_nop,
+ };
+ 
+ /* At this point, native_get/set_debugreg has real function entries */
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index 0bf06fa..ecebc3c 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -675,6 +675,10 @@ unsigned long native_calibrate_cpu(void)
+ 	unsigned long flags, latch, ms, fast_calibrate;
+ 	int hpet = is_hpet_enabled(), i, loopmin;
+ 
++	fast_calibrate = cpu_khz_from_paravirt();
++	if (fast_calibrate)
++		return fast_calibrate;
++
+ 	fast_calibrate = cpu_khz_from_cpuid();
+ 	if (fast_calibrate)
+ 		return fast_calibrate;
+-- 
+2.7.4
+

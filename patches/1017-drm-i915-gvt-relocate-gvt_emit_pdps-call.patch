@@ -1,0 +1,84 @@
+From 8945aef205413d90dae41a719e6060d76bb539e0 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Sat, 24 Feb 2018 14:05:52 +0800
+Subject: [PATCH 1017/2104] drm/i915/gvt: relocate gvt_emit_pdps call
+
+Because of the patch: "drm/i915/gvt: Separate cmd scan from request
+allocation", the place of calling gvt_emit_pdps() is not suitable any
+more, so relate it to the proper place.
+
+Signed-off-by: Min He <min.he@intel.com>
+Signed-off-by: Fei Jiang <fei.jiang@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cmd_parser.c | 11 +----------
+ drivers/gpu/drm/i915/gvt/cmd_parser.h |  1 +
+ drivers/gpu/drm/i915/gvt/scheduler.c  | 14 ++++++++++++++
+ 3 files changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.c b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+index 4babd20..3fc6672 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.c
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+@@ -2648,7 +2648,7 @@ static int scan_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
+ }
+ 
+ #define GEN8_PDPES    4
+-static int gvt_emit_pdps(struct intel_vgpu_workload *workload)
++int gvt_emit_pdps(struct intel_vgpu_workload *workload)
+ {
+ 	const int num_cmds = GEN8_PDPES * 2;
+ 	struct drm_i915_gem_request *req = workload->req;
+@@ -2682,15 +2682,6 @@ static int shadow_workload_ring_buffer(struct intel_vgpu_workload *workload)
+ 	int ring_id = workload->ring_id;
+ 	int ret;
+ 
+-	/* we consider this as an workaround to avoid the situation that
+-	 * PDP's not updated, and right now we only limit it to BXT platform
+-	 * since it's not reported on the other platforms
+-	 */
+-	if (IS_BROXTON(vgpu->gvt->dev_priv)) {
+-		ret = gvt_emit_pdps(workload);
+-		if (ret)
+-			return ret;
+-	}
+ 	guest_rb_size = _RING_CTL_BUF_SIZE(workload->rb_ctl);
+ 
+ 	/* calculate workload ring buffer size */
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.h b/drivers/gpu/drm/i915/gvt/cmd_parser.h
+index 2867036..1356803 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.h
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.h
+@@ -46,4 +46,5 @@ int intel_gvt_scan_and_shadow_ringbuffer(struct intel_vgpu_workload *workload);
+ 
+ int intel_gvt_scan_and_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx);
+ 
++int gvt_emit_pdps(struct intel_vgpu_workload *workload);
+ #endif
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 00fcc7d..dad38a9 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -295,6 +295,20 @@ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload)
+ 	gvt_dbg_sched("ring id %d get i915 gem request %p\n", ring_id, rq);
+ 
+ 	workload->req = i915_gem_request_get(rq);
++
++	/* we consider this as an workaround to avoid the situation that
++	 * PDP's not updated, and right now we only limit it to BXT platform
++	 * since it's not reported on the other platforms
++	 */
++	if (IS_BROXTON(vgpu->gvt->dev_priv)) {
++		ret = gvt_emit_pdps(workload);
++		if (ret) {
++			i915_gem_request_put(rq);
++			workload->req = NULL;
++			goto err_unpin;
++		}
++	}
++
+ 	ret = copy_workload_to_ring_buffer(workload);
+ 	if (ret)
+ 		goto err_unpin;
+-- 
+2.7.4
+
