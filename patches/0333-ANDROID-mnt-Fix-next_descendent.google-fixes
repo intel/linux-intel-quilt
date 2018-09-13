@@ -1,0 +1,45 @@
+From 8da1c34d76e4ea369f043bc888d52a20f6515491 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Mon, 29 May 2017 16:38:16 -0700
+Subject: [PATCH 333/357] ANDROID: mnt: Fix next_descendent
+
+next_descendent did not properly handle the case
+where the initial mount had no slaves. In this case,
+we would look for the next slave, but since don't
+have a master, the check for wrapping around to the
+start of the list will always fail. Instead, we check
+for this case, and ensure that we end the iteration
+when we come back to the root.
+
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Bug: 62094374
+Change-Id: I43dfcee041aa3730cb4b9a1161418974ef84812e
+---
+ fs/pnode.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/fs/pnode.c b/fs/pnode.c
+index 386884d..56f9a28 100644
+--- a/fs/pnode.c
++++ b/fs/pnode.c
+@@ -616,9 +616,14 @@ static struct mount *next_descendent(struct mount *root, struct mount *cur)
+ 	if (!IS_MNT_NEW(cur) && !list_empty(&cur->mnt_slave_list))
+ 		return first_slave(cur);
+ 	do {
+-		if (cur->mnt_slave.next != &cur->mnt_master->mnt_slave_list)
+-			return next_slave(cur);
+-		cur = cur->mnt_master;
++		struct mount *master = cur->mnt_master;
++
++		if (!master || cur->mnt_slave.next != &master->mnt_slave_list) {
++			struct mount *next = next_slave(cur);
++
++			return (next == root) ? NULL : next;
++		}
++		cur = master;
+ 	} while (cur != root);
+ 	return NULL;
+ }
+-- 
+2.7.4
+

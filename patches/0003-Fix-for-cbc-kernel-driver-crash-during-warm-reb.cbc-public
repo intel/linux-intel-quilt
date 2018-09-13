@@ -1,4 +1,4 @@
-From cbab76bce42deb10718cc3ad9a7b7f49c6706962 Mon Sep 17 00:00:00 2001
+From 37dfec4d4d1d28598d097c4cd6885a37a95f6854 Mon Sep 17 00:00:00 2001
 From: padmarao edapalapati <padmarao.edapalapati@intel.com>
 Date: Thu, 6 Sep 2018 10:38:22 +0530
 Subject: [PATCH 3/3] Fix for cbc kernel driver crash during warm reboot
@@ -7,11 +7,12 @@ Added a Sync mechanism with spinlocks between demuxed_receive
 and cbc_device_open, cbc_device_release
 
 Change-Id: Id5c71eb59bb390a0b39b7bc66d5536d9eecf607f
+Signed-off-by: padmarao edapalapati <padmarao.edapalapati@intel.com>
 ---
  drivers/tty/cbc/cbc_device.c         |  4 +++-
  drivers/tty/cbc/cbc_device.h         |  3 +++
- drivers/tty/cbc/cbc_device_manager.c | 10 ++++++++++
- 3 files changed, 16 insertions(+), 1 deletion(-)
+ drivers/tty/cbc/cbc_device_manager.c | 12 ++++++++++++
+ 3 files changed, 18 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/tty/cbc/cbc_device.c b/drivers/tty/cbc/cbc_device.c
 index 1933a85..23728c0 100644
@@ -51,7 +52,7 @@ index deb0cd92..09c8067 100644
  };
  
 diff --git a/drivers/tty/cbc/cbc_device_manager.c b/drivers/tty/cbc/cbc_device_manager.c
-index 0e74183..4fc671e 100644
+index 0e74183..2c8c1cf 100644
 --- a/drivers/tty/cbc/cbc_device_manager.c
 +++ b/drivers/tty/cbc/cbc_device_manager.c
 @@ -234,6 +234,7 @@ static int cbc_device_open(struct inode *inode, struct file *file)
@@ -72,28 +73,30 @@ index 0e74183..4fc671e 100644
  		file->private_data = file_data;
  	} else {
  		kfree(file_data);
-@@ -285,8 +288,10 @@ static int cbc_device_release(struct inode *inode, struct file *file)
+@@ -285,9 +288,14 @@ static int cbc_device_release(struct inode *inode, struct file *file)
  {
  	u32 dev_idx = MINOR(inode->i_rdev);
  	struct cbc_file_data *file_data = file->private_data;
 +	unsigned long flags;
  
  	if (file_data) {
-+		spin_lock_irqsave(&file_data->cbc_device->cbc_device_lock, flags);
++		spin_lock_irqsave(
++			&file_data->cbc_device->cbc_device_lock, flags);
  		list_del(&file_data->list);
++		spin_unlock_irqrestore(
++			&file_data->cbc_device->cbc_device_lock, flags);
  
  		pr_debug("cbc-core: device_release: %d.%d %s\n",
-@@ -298,7 +303,9 @@ static int cbc_device_release(struct inode *inode, struct file *file)
- 
+ 			MAJOR(inode->i_rdev), dev_idx,
+@@ -299,6 +307,7 @@ static int cbc_device_release(struct inode *inode, struct file *file)
  		kfree(file_data);
  		file->private_data = NULL;
-+		spin_unlock_irqrestore(&file_data->cbc_device->cbc_device_lock, flags);
  	}
 +
  	return 0;
  }
  
-@@ -796,6 +803,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
+@@ -796,6 +805,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
  			(struct cbc_device_data *) void_data;
  	struct list_head *current_item;
  	struct cbc_file_data *current_file_data;
@@ -101,7 +104,7 @@ index 0e74183..4fc671e 100644
  
  	if (device_data && cbc_buffer
  			&& cbc_buffer->frame_length >
-@@ -836,6 +844,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
+@@ -836,6 +846,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
  		/* else, do not touch payload_length in a debug-channel */
  
  		/* Enqueue */
@@ -109,7 +112,7 @@ index 0e74183..4fc671e 100644
  		for (current_item = device_data->open_files_head.next
  		; current_item != &device_data->open_files_head; current_item =
  							current_item->next) {
-@@ -845,6 +854,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
+@@ -845,6 +856,7 @@ static void demuxed_receive(void *void_data, struct cbc_buffer *cbc_buffer)
  			/* File_enqueue increases ref. count. */
  			cbc_file_enqueue(current_file_data, cbc_buffer);
  		}

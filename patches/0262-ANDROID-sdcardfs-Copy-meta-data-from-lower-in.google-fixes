@@ -1,0 +1,50 @@
+From baad8b42499f19d193a47e81e649c873847e683e Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Mon, 24 Apr 2017 16:10:21 -0700
+Subject: [PATCH 262/357] ANDROID: sdcardfs: Copy meta-data from lower inode
+
+From wrapfs commit 3ee9b365e38c ("Wrapfs: properly copy meta-data after
+AIO operations from lower inode")
+
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Bug: 35766959
+Change-Id: I9a789222e27a17b8d85ce61c45397d1839f9a675
+---
+ fs/sdcardfs/file.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/fs/sdcardfs/file.c b/fs/sdcardfs/file.c
+index 1f6921e..6076c34 100644
+--- a/fs/sdcardfs/file.c
++++ b/fs/sdcardfs/file.c
+@@ -358,9 +358,12 @@ ssize_t sdcardfs_read_iter(struct kiocb *iocb, struct iov_iter *iter)
+ 	get_file(lower_file); /* prevent lower_file from being released */
+ 	iocb->ki_filp = lower_file;
+ 	err = lower_file->f_op->read_iter(iocb, iter);
+-	/* ? wait IO finish to update atime as ecryptfs ? */
+ 	iocb->ki_filp = file;
+ 	fput(lower_file);
++	/* update upper inode atime as needed */
++	if (err >= 0 || err == -EIOCBQUEUED)
++		fsstack_copy_attr_atime(file->f_path.dentry->d_inode,
++					file_inode(lower_file));
+ out:
+ 	return err;
+ }
+@@ -384,6 +387,13 @@ ssize_t sdcardfs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
+ 	err = lower_file->f_op->write_iter(iocb, iter);
+ 	iocb->ki_filp = file;
+ 	fput(lower_file);
++	/* update upper inode times/sizes as needed */
++	if (err >= 0 || err == -EIOCBQUEUED) {
++		fsstack_copy_inode_size(file->f_path.dentry->d_inode,
++					file_inode(lower_file));
++		fsstack_copy_attr_times(file->f_path.dentry->d_inode,
++					file_inode(lower_file));
++	}
+ out:
+ 	return err;
+ }
+-- 
+2.7.4
+
