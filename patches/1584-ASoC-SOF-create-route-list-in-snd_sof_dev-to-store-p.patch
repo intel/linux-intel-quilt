@@ -1,0 +1,170 @@
+From c3a7348d0bdc64d6169d8af20ff1ef59878668cf Mon Sep 17 00:00:00 2001
+From: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Date: Mon, 16 Jul 2018 17:21:26 -0700
+Subject: [PATCH 1584/1676] ASoC: SOF: create route list in snd_sof_dev to
+ store pipeline connections
+
+Create an route_list in snd_sof_dev that will be used to store
+the dapm routes while parsing topology. This list will be used
+for restoring the pipeline connections during suspend/resume.
+
+Signed-off-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+---
+ sound/soc/sof/core.c     |  1 +
+ sound/soc/sof/sof-priv.h | 11 +++++++++++
+ sound/soc/sof/topology.c | 51 ++++++++++++++++++++++++++++++++++++------------
+ 3 files changed, 51 insertions(+), 12 deletions(-)
+
+diff --git a/sound/soc/sof/core.c b/sound/soc/sof/core.c
+index fe01044..76169c8 100644
+--- a/sound/soc/sof/core.c
++++ b/sound/soc/sof/core.c
+@@ -249,6 +249,7 @@ static int sof_probe(struct platform_device *pdev)
+ 	INIT_LIST_HEAD(&sdev->kcontrol_list);
+ 	INIT_LIST_HEAD(&sdev->widget_list);
+ 	INIT_LIST_HEAD(&sdev->dai_list);
++	INIT_LIST_HEAD(&sdev->route_list);
+ 	dev_set_drvdata(&pdev->dev, sdev);
+ 	spin_lock_init(&sdev->ipc_lock);
+ 	spin_lock_init(&sdev->hw_lock);
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index 11f3b15..e8aed71 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -261,6 +261,16 @@ struct snd_sof_widget {
+ 	void *private;		/* core does not touch this */
+ };
+ 
++/* ASoC SOF DAPM route */
++struct snd_sof_route {
++	struct snd_sof_dev *sdev;
++
++	struct snd_soc_dapm_route *route;
++	struct list_head list;	/* list in sdev route list */
++
++	void *private;
++};
++
+ /* ASoC DAI device */
+ struct snd_sof_dai {
+ 	struct snd_sof_dev *sdev;
+@@ -324,6 +334,7 @@ struct snd_sof_dev {
+ 	struct list_head kcontrol_list;
+ 	struct list_head widget_list;
+ 	struct list_head dai_list;
++	struct list_head route_list;
+ 	struct snd_soc_component *component;
+ 
+ 	/* FW configuration */
+diff --git a/sound/soc/sof/topology.c b/sound/soc/sof/topology.c
+index a228880..1142b4a 100644
+--- a/sound/soc/sof/topology.c
++++ b/sound/soc/sof/topology.c
+@@ -1808,15 +1808,28 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 			  struct snd_soc_dapm_route *route)
+ {
+ 	struct snd_sof_dev *sdev = snd_soc_component_get_drvdata(scomp);
+-	struct sof_ipc_pipe_comp_connect connect;
++	struct sof_ipc_pipe_comp_connect *connect;
+ 	struct snd_sof_widget *source_swidget, *sink_swidget;
+ 	struct snd_sof_pcm *spcm;
++	struct snd_sof_route *sroute;
+ 	struct sof_ipc_reply reply;
+ 	int ret = 0;
+ 
+-	memset(&connect, 0, sizeof(connect));
+-	connect.hdr.size = sizeof(connect);
+-	connect.hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_COMP_CONNECT;
++	/* allocate memory for sroute and connect */
++	sroute = kzalloc(sizeof(*sroute), GFP_KERNEL);
++	if (!sroute)
++		return -ENOMEM;
++
++	sroute->sdev = sdev;
++
++	connect = kzalloc(sizeof(*connect), GFP_KERNEL);
++	if (!connect) {
++		kfree(sroute);
++		return -ENOMEM;
++	}
++
++	connect->hdr.size = sizeof(*connect);
++	connect->hdr.cmd = SOF_IPC_GLB_TPLG_MSG | SOF_IPC_TPLG_COMP_CONNECT;
+ 
+ 	dev_dbg(sdev->dev, "sink %s control %s source %s\n",
+ 		route->sink, route->control ? route->control : "none",
+@@ -1832,10 +1845,11 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 
+ 		dev_err(sdev->dev, "error: source %s not found\n",
+ 			route->source);
+-		return -EINVAL;
++		ret = -EINVAL;
++		goto err;
+ 	}
+ 
+-	connect.source_id = source_swidget->comp_id;
++	connect->source_id = source_swidget->comp_id;
+ 
+ 	/* sink component */
+ 	sink_swidget = snd_sof_find_swidget(sdev, (char *)route->sink);
+@@ -1847,10 +1861,11 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 
+ 		dev_err(sdev->dev, "error: sink %s not found\n",
+ 			route->sink);
+-		return -EINVAL;
++		ret = -EINVAL;
++		goto err;
+ 	}
+ 
+-	connect.sink_id = sink_swidget->comp_id;
++	connect->sink_id = sink_swidget->comp_id;
+ 
+ 	/* Some virtual routes and widgets may been added in topology for
+ 	 * compatibility. For virtual routes, both sink and source are not
+@@ -1864,8 +1879,8 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 			route->source, route->sink);
+ 	} else {
+ 		ret = sof_ipc_tx_message(sdev->ipc,
+-					 connect.hdr.cmd,
+-					 &connect, sizeof(connect),
++					 connect->hdr.cmd,
++					 connect, sizeof(*connect),
+ 					 &reply, sizeof(reply));
+ 
+ 		/* check IPC return value */
+@@ -1874,7 +1889,7 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 				route->sink,
+ 				route->control ? route->control : "none",
+ 				route->source);
+-			return ret;
++			goto err;
+ 		}
+ 
+ 		/* check IPC reply */
+@@ -1883,10 +1898,22 @@ static int sof_route_load(struct snd_soc_component *scomp, int index,
+ 				route->sink,
+ 				route->control ? route->control : "none",
+ 				route->source, reply.error);
+-			return reply.error;
++			ret = reply.error;
++			goto err;
+ 		}
+ 	}
+ 
++	sroute->route = route;
++	sroute->private = connect;
++
++	/* add route to route list */
++	list_add(&sroute->list, &sdev->route_list);
++
++	return ret;
++
++err:
++	kfree(connect);
++	kfree(sroute);
+ 	return ret;
+ }
+ 
+-- 
+2.7.4
+

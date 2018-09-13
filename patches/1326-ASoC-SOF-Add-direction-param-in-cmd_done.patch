@@ -1,0 +1,183 @@
+From 1462f367d8b52f7202d96a178fa402e1d9b6692c Mon Sep 17 00:00:00 2001
+From: Rander Wang <rander.wang@linux.intel.com>
+Date: Fri, 6 Jul 2018 17:43:35 +0800
+Subject: [PATCH 1326/1676] ASoC: SOF: Add direction param in cmd_done
+
+There are two direction now in cmd_done, one is reply of host to DSP,
+another is reply of DSP to host.The origin cmd_done is for reply of
+host to DSP.
+
+Cmd_done should be called after host has processed the reply msg
+from dsp. This function is for some platforms to do extra steps to
+make the following ipc msgs sent safely. Now the direction supported
+by cmd_done would be host reply to dsp or dsp reply to host.
+
+Signed-off-by: Rander Wang <rander.wang@linux.intel.com>
+---
+ sound/soc/sof/intel/bdw.c     |  2 +-
+ sound/soc/sof/intel/cnl.c     | 14 ++++++++------
+ sound/soc/sof/intel/hda-ipc.c | 15 +++++++++------
+ sound/soc/sof/intel/hda.h     |  2 +-
+ sound/soc/sof/ipc.c           |  4 +++-
+ sound/soc/sof/ops.c           |  2 +-
+ sound/soc/sof/ops.h           |  5 +++--
+ sound/soc/sof/sof-priv.h      |  5 ++++-
+ 8 files changed, 30 insertions(+), 19 deletions(-)
+
+diff --git a/sound/soc/sof/intel/bdw.c b/sound/soc/sof/intel/bdw.c
+index f76463a..7e8fab0 100644
+--- a/sound/soc/sof/intel/bdw.c
++++ b/sound/soc/sof/intel/bdw.c
+@@ -573,7 +573,7 @@ static int bdw_get_reply(struct snd_sof_dev *sdev, struct snd_sof_ipc_msg *msg)
+ 	return ret;
+ }
+ 
+-static int bdw_cmd_done(struct snd_sof_dev *sdev)
++static int bdw_cmd_done(struct snd_sof_dev *sdev, int dir)
+ {
+ 	/* clear BUSY bit and set DONE bit - accept new messages */
+ 	snd_sof_dsp_update_bits_unlocked(sdev, BDW_DSP_BAR, SHIM_IPCD,
+diff --git a/sound/soc/sof/intel/cnl.c b/sound/soc/sof/intel/cnl.c
+index 10c98eb..c1b902f 100644
+--- a/sound/soc/sof/intel/cnl.c
++++ b/sound/soc/sof/intel/cnl.c
+@@ -132,13 +132,15 @@ static irqreturn_t cnl_ipc_irq_thread(int irq, void *context)
+ 	return ret;
+ }
+ 
+-static int cnl_ipc_cmd_done(struct snd_sof_dev *sdev)
++static int cnl_ipc_cmd_done(struct snd_sof_dev *sdev, int dir)
+ {
+-	/* set done bit to ack dsp the msg has been processed */
+-	snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
+-				       CNL_DSP_REG_HIPCTDA,
+-				       CNL_DSP_REG_HIPCTDA_DONE,
+-				       CNL_DSP_REG_HIPCTDA_DONE);
++	if (dir == SOF_IPC_HOST_REPLY) {
++		/* set done bit to ack dsp the msg has been processed */
++		snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
++					       CNL_DSP_REG_HIPCTDA,
++					       CNL_DSP_REG_HIPCTDA_DONE,
++					       CNL_DSP_REG_HIPCTDA_DONE);
++	}
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/sof/intel/hda-ipc.c b/sound/soc/sof/intel/hda-ipc.c
+index 357d909..e3e0c8f 100644
+--- a/sound/soc/sof/intel/hda-ipc.c
++++ b/sound/soc/sof/intel/hda-ipc.c
+@@ -34,13 +34,16 @@
+ #include "../ops.h"
+ #include "hda.h"
+ 
+-int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev)
++int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev, int dir)
+ {
+-	/* tell DSP cmd is done - clear busy interrupt */
+-	snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
+-				       HDA_DSP_REG_HIPCT,
+-				       HDA_DSP_REG_HIPCT_BUSY,
+-				       HDA_DSP_REG_HIPCT_BUSY);
++	if (dir == SOF_IPC_HOST_REPLY) {
++		/* tell DSP cmd is done - clear busy interrupt */
++		snd_sof_dsp_update_bits_forced(sdev, HDA_DSP_BAR,
++					       HDA_DSP_REG_HIPCT,
++					       HDA_DSP_REG_HIPCT_BUSY,
++					       HDA_DSP_REG_HIPCT_BUSY);
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/sound/soc/sof/intel/hda.h b/sound/soc/sof/intel/hda.h
+index 75f5b40..77a2315 100644
+--- a/sound/soc/sof/intel/hda.h
++++ b/sound/soc/sof/intel/hda.h
+@@ -473,7 +473,7 @@ int hda_dsp_ipc_get_reply(struct snd_sof_dev *sdev,
+ int hda_dsp_ipc_fw_ready(struct snd_sof_dev *sdev, u32 msg_id);
+ irqreturn_t hda_dsp_ipc_irq_handler(int irq, void *context);
+ irqreturn_t hda_dsp_ipc_irq_thread(int irq, void *context);
+-int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev);
++int hda_dsp_ipc_cmd_done(struct snd_sof_dev *sdev, int dir);
+ 
+ /*
+  * DSP Code loader.
+diff --git a/sound/soc/sof/ipc.c b/sound/soc/sof/ipc.c
+index 6b2b1d1..52524fb 100644
+--- a/sound/soc/sof/ipc.c
++++ b/sound/soc/sof/ipc.c
+@@ -119,6 +119,8 @@ static int tx_wait_done(struct snd_sof_ipc *ipc, struct snd_sof_ipc_msg *msg,
+ 
+ 	spin_unlock_irqrestore(&sdev->ipc_lock, flags);
+ 
++	snd_sof_dsp_cmd_done(sdev, SOF_IPC_DSP_REPLY);
++
+ 	/* continue to schedule any remaining messages... */
+ 	snd_sof_ipc_msgs_tx(sdev);
+ 
+@@ -321,7 +323,7 @@ static void ipc_msgs_rx(struct work_struct *work)
+ 	dev_dbg(sdev->dev, "ipc rx: 0x%x done\n", hdr.cmd);
+ 
+ 	/* tell DSP we are done */
+-	snd_sof_dsp_cmd_done(sdev);
++	snd_sof_dsp_cmd_done(sdev, SOF_IPC_HOST_REPLY);
+ }
+ 
+ /* schedule work to transmit any IPC in queue */
+diff --git a/sound/soc/sof/ops.c b/sound/soc/sof/ops.c
+index 0668f64..d1ea6a0 100644
+--- a/sound/soc/sof/ops.c
++++ b/sound/soc/sof/ops.c
+@@ -205,6 +205,6 @@ void snd_sof_dsp_panic(struct snd_sof_dev *sdev, u32 offset)
+ 
+ 	snd_sof_dsp_dbg_dump(sdev, SOF_DBG_REGS | SOF_DBG_MBOX);
+ 	snd_sof_trace_notify_for_error(sdev);
+-	snd_sof_dsp_cmd_done(sdev);
++	snd_sof_dsp_cmd_done(sdev, SOF_IPC_HOST_REPLY);
+ }
+ EXPORT_SYMBOL(snd_sof_dsp_panic);
+diff --git a/sound/soc/sof/ops.h b/sound/soc/sof/ops.h
+index 340f1cc..0d6fa6e 100644
+--- a/sound/soc/sof/ops.h
++++ b/sound/soc/sof/ops.h
+@@ -185,10 +185,11 @@ static inline int snd_sof_dsp_is_ready(struct snd_sof_dev *sdev)
+ 		return 0;
+ }
+ 
+-static inline int snd_sof_dsp_cmd_done(struct snd_sof_dev *sdev)
++static inline int snd_sof_dsp_cmd_done(struct snd_sof_dev *sdev,
++				       int dir)
+ {
+ 	if (sdev->ops->cmd_done)
+-		return sdev->ops->cmd_done(sdev);
++		return sdev->ops->cmd_done(sdev, dir);
+ 	else
+ 		return 0;
+ }
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index 72b8870..c4162d3 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -43,6 +43,9 @@
+ /* max number of FE PCMs before BEs */
+ #define SOF_BE_PCM_BASE		16
+ 
++#define SOF_IPC_DSP_REPLY		0
++#define SOF_IPC_HOST_REPLY		1
++
+ /* convenience constructor for DAI driver streams */
+ #define SOF_DAI_STREAM(sname, scmin, scmax, srates, sfmt) \
+ 	{.stream_name = sname, .channels_min = scmin, .channels_max = scmax, \
+@@ -117,7 +120,7 @@ struct snd_sof_dsp_ops {
+ 	int (*get_reply)(struct snd_sof_dev *sof_dev,
+ 			 struct snd_sof_ipc_msg *msg);
+ 	int (*is_ready)(struct snd_sof_dev *sof_dev);
+-	int (*cmd_done)(struct snd_sof_dev *sof_dev);
++	int (*cmd_done)(struct snd_sof_dev *sof_dev, int dir);
+ 
+ 	/* debug */
+ 	const struct snd_sof_debugfs_map *debug_map;
+-- 
+2.7.4
+
