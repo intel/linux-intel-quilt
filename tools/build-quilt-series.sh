@@ -11,7 +11,9 @@ manifest=$2
 for b in `cat $manifest`; do 
 	echo \# $b >> series;
 	git checkout $b; 
+	mkdir patches;
 	git format-patch --suffix=.$b $rc..; 
 	ls *.$b >> series; 
+	mv *.$b patches;
 done
 

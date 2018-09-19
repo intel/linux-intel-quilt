@@ -22,12 +22,13 @@ def readin_patch(filename):
 
 
 def writeout_patch(filename, patch):
-    file = open(filename, 'w')
-    lines = patch.splitlines(keepends=True)
-    for line in lines:
-        file.write(line)
+    if patch != None:
+        file = open(filename, 'w')
+        lines = patch.splitlines(keepends=True)
+        for line in lines:
+            file.write(line)
 
-    file.close()
+        file.close()
 
 
 def make_changeid(patch):
@@ -59,7 +60,6 @@ def insert_changeid(patch, changeid):
         line_num += 1
 
     if line_num == len(lines):
-        print("insert_changeid : not a patch file")
         return None
 
     line_num = 0
@@ -81,11 +81,11 @@ def get_changeid(patch):
         if line == '---\n':
             break
         if line.find("Change-Id") == 0:
-            last_changeid = line_num
+            if len(line.split()) == 2:
+                last_changeid = line_num
         line_num += 1
 
     if line_num == len(lines):
-        print("get_changeid : not a patch file")
         return None
 
     if last_changeid:
@@ -118,7 +118,6 @@ def extract_commit_comment(patch):
             subject_line = True
 
     if len(comment) == len(patch):
-        print("not a patch file")
         return None
 
     return comment
@@ -137,7 +136,6 @@ def extract_hunks(patch):
             hunks += line
 
     if not flag:
-        print("not a patch file")
         return None
 
     return hunks
@@ -197,8 +195,9 @@ def load_patches(path):
         comment = extract_commit_comment(patch)
         hunks = extract_hunks(patch)
         changeid = get_changeid(patch)
-        ret_dict[file] = [file, date, author, subject, changeid,
-                          comment, hunks, patch]
+        if author and date:
+            ret_dict[file] = [file, date, author, subject, changeid,
+                              comment, hunks, patch]
 
     return ret_dict
 
@@ -212,11 +211,16 @@ def match_indexed_field(index, patch, old_patch_dict):
         choices = dict([(f, old_patch_dict[f][index]) for f in
                         old_patch_dict.keys()])
 
-        ratio = process.extractOne(patch[index], choices,
-                                   scorer=fuzz.ratio)
+        try:
+            ratio = process.extractOne(patch[index], choices,
+                                       scorer=fuzz.ratio)
 
-        set_ratio = process.extractOne(patch[index], choices,
-                                       scorer=fuzz.token_set_ratio)
+            set_ratio = process.extractOne(patch[index], choices,
+                                           scorer=fuzz.token_set_ratio)
+        except:
+            print( choices.keys(), len(choices), patch[0])
+            return ((None, 0, None), (None, 0, None))
+
         return (ratio, set_ratio)
     return ((None, 0, None), (None, 0, None))
 
@@ -242,10 +246,16 @@ def match_date(patch, old_patch_dict):
 
 
 def match_changeid(patch, old_patch_dict):
-    if patch and old_patch_dict:
-        for old_patch in old_patch_dict:
-            if patch[4] and patch[4] == old_patch[4]:
-                return old_patch
+    if patch and patch[4] and old_patch_dict:
+        for k in old_patch_dict.keys():
+            old_patch = old_patch_dict[k]
+            if (len(old_patch[4].split())) == 2:  #only check standard Change-Id lines
+                if patch[4].split()[1] == old_patch[4].split()[1]:
+                    return old_patch
+    else:
+        print (patch, patch[4], old_patch_dict.keys())
+    print ("no change-id match found for: ", patch[0], patch[4].split())
+##    import pdb; pdb.set_trace()
     return None
 
 
@@ -267,7 +277,7 @@ def find_matching_commit_dominate(patch, old_patch_dict):
     if rkey and skey and  rkey == skey:
         score = rscore + sscore
         if score > 175:
-            print("comment match", score, rkey)
+            # print("comment match", score, rkey)
             comment_key = rkey
             # optimization if comment matches and ratios look good call it good
             # enough.
@@ -275,7 +285,7 @@ def find_matching_commit_dominate(patch, old_patch_dict):
             set_ratio = fuzz.token_set_ratio(patch[6],
                                              old_patch_dict[comment_key][6])
             if set_ratio + ratio > 160:
-                print("hunk match score : ", set_ratio + ratio)
+                # print("hunk match score : ", set_ratio + ratio)
                 return comment_key
 
     return None
@@ -298,8 +308,8 @@ def find_matching_patch(patch, old_patch_dict):
     # match_hunks can take a long time. 90+ seconds
     if rkey and skey and  rkey == skey:
         score = rscore + sscore
-        if score > 170:
-            print("hunks match", score, rkey)
+        if score > 160:
+            # print("hunks match", score, rkey)
             hunks_key = rkey
 
     if hunks_key:
@@ -326,7 +336,7 @@ def orginal_find_matching_patch(patch, old_patch_dict):
     if rkey and skey and  rkey == skey:
         score = rscore + sscore
         if score > 175:
-            print("comment match", score, rkey)
+            # print("comment match", score, rkey)
             comment_key = rkey
             # optimization if comment matches and ratios look good call it good
             # enough.
@@ -342,7 +352,7 @@ def orginal_find_matching_patch(patch, old_patch_dict):
     if rkey and skey and  rkey == skey:
         score = rscore + sscore
         if score > 170:
-            print("hunks match", score, rkey)
+            # print("hunks match", score, rkey)
             hunks_key = rkey
 
     if hunks_key:
@@ -361,32 +371,31 @@ def check_for_changeid_collisions():
 def main(oldpatches, newpatches):
     old_patch_dic = load_patches(oldpatches)
     new_patch_dic = load_patches(newpatches)
-    print(len(new_patch_dic))
     new_patches = []
     new_matches = []
 
     # need to git rid of changes with existing change-iD's from the slow path
     new_changeids = []
-    for key in new_patch_dic:
+    for key in new_patch_dic.keys():
         if new_patch_dic[key][4]:
             writeout_patch(key, new_patch_dic[key][7])
             new_changeids.append(key)
             match = match_changeid(new_patch_dic[key], old_patch_dic)
             if match:
-                del old_patch_dic[match]
+                del old_patch_dic[match[0]]
 
     #reduce the new_patch_dic to just whats not matched yet:
     for k in new_changeids:
         del new_patch_dic[k]
 
-    print(len(new_patch_dic))
     #match on commit comment with checks on hunks
-    for key in new_patch_dic:
+    for key in new_patch_dic.keys():
         patch = new_patch_dic[key]
         match = find_matching_commit_dominate(patch, old_patch_dic)
         if match:
+            #remove match from new dict as optimization:
+            new_matches.append(key)
             change_id = get_changeid(old_patch_dic[match][7])
-            print(change_id)
             del old_patch_dic[match]
             if change_id:
                 patchstr = insert_changeid(patch[7], change_id)
@@ -394,24 +403,18 @@ def main(oldpatches, newpatches):
             else:
                 patchstr = insert_changeid(patch[7], make_changeid(patch[7]))
                 writeout_patch(key, patchstr)
-            #remove match from old dict as optimization:
-            new_matches.append(key)
 
     #reduce the new_patch_dic to just whats not matched yet:
     for k in new_matches:
         del new_patch_dic[k]
 
-    print(len(new_patch_dic))
-    print(len(old_patch_dic))
-
 
     # finally do it the hard way.  (can be very sloo)
-    for key in new_patch_dic:
+    for key in new_patch_dic.keys():
         patch = new_patch_dic[key]
         match = find_matching_patch(patch, old_patch_dic)
         if match:
             change_id = get_changeid(old_patch_dic[match][7])
-            print(change_id)
             #remove match from old dict as optimization:
             del old_patch_dic[match]
             if change_id:
@@ -422,7 +425,7 @@ def main(oldpatches, newpatches):
                 writeout_patch(key, patchstr)
         else: # no match / new patch
             new_patches.append(key)
-            print("no match for", key)
+            # print("no match for", key)
 
     print("orphined patches", old_patch_dic.keys())
     print("new patches needing new changeId's:", new_patches)
@@ -430,11 +433,6 @@ def main(oldpatches, newpatches):
         patch = new_patch_dic[key]
         patchstr = insert_changeid(patch[7], make_changeid(patch[7]))
         writeout_patch(key, patchstr)
-
-
-def main2(arg1, arg2):
-    print(arg1)
-    print(arg2)
 
 
 if __name__ == "__main__":

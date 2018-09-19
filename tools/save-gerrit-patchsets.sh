@@ -13,10 +13,11 @@ rc=$1
 manifest=$2
 
 for b in `cat $manifest`; do 
+	rm -rf $b-gerrit
 	mkdir $b-gerrit
 
 	echo \# $b >> series;
-	git checkout $b; 
+	git checkout $b-gerrit; 
 	git format-patch --suffix=.$b $rc..; 
 	ls *.$b >> series; 
 	mv *.$b series $b-gerrit
