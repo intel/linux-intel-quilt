@@ -1,0 +1,46 @@
+From 91e5285ffb09bb6bba9e47d20c952d1d13864fa9 Mon Sep 17 00:00:00 2001
+From: Christian Poetzsch <christian.potzsch@imgtec.com>
+Date: Fri, 24 Jul 2015 16:42:58 +0100
+Subject: [PATCH 046/352] ANDROID: fs: Fix for in kernel emergency remount when
+ loop mounts are used
+
+adb reboot calls /proc/sysrq-trigger to force an emergency remount (ro) of all
+mounted disks. This is executed in the order of the time the mount was originally
+done. Because we have a test system which loop mount images from an extra
+partition, we see errors cause the loop mounted partitions gets remounted after
+this physical partition was set to read only already.
+
+Fix this by reversing the order of the emergency remount. This will remount the
+disk first which have been mounted last.
+
+So instead of remounting in this order:
+ /dev/sda1
+ /dev/loop1
+ /dev/loop2
+we now remount in this order:
+ /dev/loop2
+ /dev/loop1
+ /dev/sda1
+
+Change-Id: I68fe7e16cc9400ab5278877af70c9ea1d9b57936
+Signed-off-by: Christian Poetzsch <christian.potzsch@imgtec.com>
+---
+ fs/super.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/fs/super.c b/fs/super.c
+index f3a8c008e164..04178a266607 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -622,7 +622,7 @@ void iterate_supers(void (*f)(struct super_block *, void *), void *arg)
+ 	struct super_block *sb, *p = NULL;
+ 
+ 	spin_lock(&sb_lock);
+-	list_for_each_entry(sb, &super_blocks, s_list) {
++	list_for_each_entry_reverse(sb, &super_blocks, s_list) {
+ 		if (hlist_unhashed(&sb->s_instances))
+ 			continue;
+ 		sb->s_count++;
+-- 
+2.17.1
+
