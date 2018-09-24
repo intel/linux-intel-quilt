@@ -1,0 +1,82 @@
+From 97e24a05839209d50f3d0fcaea0e553b4a1ab772 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Tue, 11 Sep 2018 11:41:41 +0800
+Subject: [PATCH 1659/1667] drm/i915/gvt: add ggtt pv fallback handling
+
+In some scenarios kernel can not alloc 2M contiguous pages for
+ggtt pv and then GVT-g fails to create new intance.
+This patch try to fallback to disable ggtt pv in this case.
+
+v2:
+- correct condition checking in gen8_mm_free_page_table
+
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cfg_space.c |  5 +++++
+ drivers/gpu/drm/i915/gvt/gtt.c       | 19 +++++++++++++++----
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index d822b6b..0012030 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -160,6 +160,11 @@ int map_gttmmio(struct intel_vgpu *vgpu, bool map)
+ 		return ret;
+ 	}
+ 
++	if (!st) {
++		DRM_INFO("no scatter list, fallback to disable ggtt pv\n");
++		return -EINVAL;
++	}
++
+ 	start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0);
+ 	start &= ~GENMASK(3, 0);
+ 	start += vgpu->cfg_space.bar[INTEL_GVT_PCI_BAR_GTTMMIO].size >> 1;
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index b221271..7b8131f 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -1590,6 +1590,7 @@ static void *alloc_ggtt_virtual_page_table(struct intel_vgpu_mm *mm)
+ 	sg_mark_end(sg);
+ 	free_ggtt_virtual_page_table(mm);
+ 	kfree(pages);
++	gm->st = NULL;
+ 	return NULL;
+ }
+ 
+@@ -1624,8 +1625,12 @@ static int gen8_mm_alloc_page_table(struct intel_vgpu_mm *mm)
+ 		mm->page_table_entry_size = mm->page_table_entry_cnt *
+ 			info->gtt_entry_size;
+ 		mem = alloc_ggtt_virtual_page_table(mm);
+-		if (!mem)
+-			return -ENOMEM;
++		if (!mem) {
++			DRM_INFO("fail to alloc contiguous pages, fallback\n");
++			mem = vzalloc(mm->page_table_entry_size);
++			if (!mem)
++				return -ENOMEM;
++		}
+ 		mm->virtual_page_table = mem;
+ 	}
+ 	return 0;
+@@ -1637,8 +1642,14 @@ static void gen8_mm_free_page_table(struct intel_vgpu_mm *mm)
+ 		kfree(mm->virtual_page_table);
+ 	} else if (mm->type == INTEL_GVT_MM_GGTT) {
+ 		if (mm->virtual_page_table) {
+-			map_gttmmio(mm->vgpu, false);
+-			free_ggtt_virtual_page_table(mm);
++			struct intel_vgpu *vgpu = mm->vgpu;
++			struct intel_vgpu_gm *gm = &vgpu->gm;
++
++			if (gm->st) {
++				map_gttmmio(mm->vgpu, false);
++				free_ggtt_virtual_page_table(mm);
++			} else
++				vfree(mm->virtual_page_table);
+ 		}
+ 	}
+ 	mm->virtual_page_table = mm->shadow_page_table = NULL;
+-- 
+2.7.4
+

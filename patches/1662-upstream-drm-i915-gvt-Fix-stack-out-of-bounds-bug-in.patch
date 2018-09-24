@@ -1,0 +1,119 @@
+From f1f0406e5320b60cac1603c5e3bd450178f2f3b3 Mon Sep 17 00:00:00 2001
+From: Changbin Du <changbin.du@intel.com>
+Date: Thu, 21 Dec 2017 10:29:32 +0800
+Subject: [PATCH 1662/1667] [upstream] drm/i915/gvt: Fix stack-out-of-bounds
+ bug in cmd parser
+
+for_each_set_bit() only accepts variable of type unsigned long, and we can
+not cast it from smaller types.
+
+[   16.499365] ==================================================================
+[   16.506655] BUG: KASAN: stack-out-of-bounds in find_first_bit+0x1d/0x70
+[   16.513313] Read of size 8 at addr ffff8803616cf510 by task systemd-udevd/180
+[   16.521998] CPU: 0 PID: 180 Comm: systemd-udevd Tainted: G     U     O     4.15.0-rc3+ #14
+[   16.530317] Hardware name: Dell Inc. OptiPlex 7040/0Y7WYT, BIOS 1.2.8 01/26/2016
+[   16.537760] Call Trace:
+[   16.540230]  dump_stack+0x7c/0xbb
+[   16.543569]  print_address_description+0x6b/0x290
+[   16.548306]  kasan_report+0x28a/0x370
+[   16.551993]  ? find_first_bit+0x1d/0x70
+[   16.555858]  find_first_bit+0x1d/0x70
+[   16.559625]  intel_gvt_init_cmd_parser+0x127/0x3c0 [i915]
+[   16.565060]  ? __lock_is_held+0x8f/0xf0
+[   16.568990]  ? intel_gvt_clean_cmd_parser+0x10/0x10 [i915]
+[   16.574514]  ? __hrtimer_init+0x5d/0xb0
+[   16.578445]  intel_gvt_init_device+0x2c3/0x690 [i915]
+[   16.583537]  ? unregister_module_notifier+0x20/0x20
+[   16.588515]  intel_gvt_init+0x89/0x100 [i915]
+[   16.592962]  i915_driver_load+0x1992/0x1c70 [i915]
+[   16.597846]  ? __i915_printk+0x210/0x210 [i915]
+[   16.602410]  ? wait_for_completion+0x280/0x280
+[   16.606883]  ? lock_downgrade+0x2c0/0x2c0
+[   16.610923]  ? __pm_runtime_resume+0x46/0x90
+[   16.615238]  ? acpi_dev_found+0x76/0x80
+[   16.619162]  ? i915_pci_remove+0x30/0x30 [i915]
+[   16.623733]  local_pci_probe+0x74/0xe0
+[   16.627518]  pci_device_probe+0x208/0x310
+[   16.631561]  ? pci_device_remove+0x100/0x100
+[   16.635871]  ? __list_add_valid+0x29/0xa0
+[   16.639919]  driver_probe_device+0x40b/0x6b0
+[   16.644223]  ? driver_probe_device+0x6b0/0x6b0
+[   16.648696]  __driver_attach+0x11d/0x130
+[   16.652649]  bus_for_each_dev+0xe7/0x160
+[   16.656600]  ? subsys_dev_iter_exit+0x10/0x10
+[   16.660987]  ? __list_add_valid+0x29/0xa0
+[   16.665028]  bus_add_driver+0x31d/0x3a0
+[   16.668893]  driver_register+0xc6/0x170
+[   16.672758]  ? 0xffffffffc0ad8000
+[   16.676108]  do_one_initcall+0x9c/0x206
+[   16.679984]  ? initcall_blacklisted+0x150/0x150
+[   16.684545]  ? do_init_module+0x35/0x33b
+[   16.688494]  ? kasan_unpoison_shadow+0x31/0x40
+[   16.692968]  ? kasan_kmalloc+0xa6/0xd0
+[   16.696743]  ? do_init_module+0x35/0x33b
+[   16.700694]  ? kasan_unpoison_shadow+0x31/0x40
+[   16.705168]  ? __asan_register_globals+0x82/0xa0
+[   16.709819]  do_init_module+0xe7/0x33b
+[   16.713597]  load_module+0x4481/0x4ce0
+[   16.717397]  ? module_frob_arch_sections+0x20/0x20
+[   16.722228]  ? vfs_read+0x13b/0x190
+[   16.725742]  ? kernel_read+0x74/0xa0
+[   16.729351]  ? get_user_arg_ptr.isra.17+0x70/0x70
+[   16.734099]  ? SYSC_finit_module+0x175/0x1b0
+[   16.738399]  SYSC_finit_module+0x175/0x1b0
+[   16.742524]  ? SYSC_init_module+0x1e0/0x1e0
+[   16.746741]  ? __fget+0x157/0x240
+[   16.750090]  ? trace_hardirqs_on_thunk+0x1a/0x1c
+[   16.754747]  entry_SYSCALL_64_fastpath+0x23/0x9a
+[   16.759397] RIP: 0033:0x7f8fbc837499
+[   16.762996] RSP: 002b:00007ffead76c138 EFLAGS: 00000246 ORIG_RAX: 0000000000000139
+[   16.770618] RAX: ffffffffffffffda RBX: 0000000000000012 RCX: 00007f8fbc837499
+[   16.777800] RDX: 0000000000000000 RSI: 000056484e67b080 RDI: 0000000000000012
+[   16.784979] RBP: 00007ffead76b140 R08: 0000000000000000 R09: 0000000000000021
+[   16.792164] R10: 0000000000000012 R11: 0000000000000246 R12: 000056484e67b460
+[   16.799345] R13: 00007ffead76b120 R14: 0000000000000005 R15: 0000000000000000
+[   16.808052] The buggy address belongs to the page:
+[   16.812876] page:00000000dc4b8c1e count:0 mapcount:0 mapping:          (null) index:0x0
+[   16.820934] flags: 0x17ffffc0000000()
+[   16.824621] raw: 0017ffffc0000000 0000000000000000 0000000000000000 00000000ffffffff
+[   16.832416] raw: ffffea000d85b3e0 ffffea000d85b3e0 0000000000000000 0000000000000000
+[   16.840208] page dumped because: kasan: bad access detected
+[   16.847318] Memory state around the buggy address:
+[   16.852143]  ffff8803616cf400: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+[   16.859427]  ffff8803616cf480: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1
+[   16.866708] >ffff8803616cf500: f1 f1 04 f4 f4 f4 f3 f3 f3 f3 00 00 00 00 00 00
+[   16.873988]                          ^
+[   16.877770]  ffff8803616cf580: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+[   16.885042]  ffff8803616cf600: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+[   16.892312] ==================================================================
+
+Signed-off-by: Changbin Du <changbin.du@intel.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Xinyun Liu <xinyun.liu@intel.com>
+Reviewed-by: Min He <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cmd_parser.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.c b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+index d6b792c..025691b 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.c
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+@@ -2858,12 +2858,12 @@ int intel_gvt_scan_and_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
+ }
+ 
+ static struct cmd_info *find_cmd_entry_any_ring(struct intel_gvt *gvt,
+-		unsigned int opcode, int rings)
++		unsigned int opcode, unsigned long rings)
+ {
+ 	struct cmd_info *info = NULL;
+ 	unsigned int ring;
+ 
+-	for_each_set_bit(ring, (unsigned long *)&rings, I915_NUM_ENGINES) {
++	for_each_set_bit(ring, &rings, I915_NUM_ENGINES) {
+ 		info = find_cmd_entry(gvt, opcode, ring);
+ 		if (info)
+ 			break;
+-- 
+2.7.4
+
