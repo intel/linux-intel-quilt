@@ -1,0 +1,64 @@
+From 7270d08f0aac80303fbf513055e7a81c9a9c0e58 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 21 Mar 2018 19:51:39 +0000
+Subject: [PATCH 0923/1666] [FROMLIST] drm/i915: Flush pending interrupt
+ following a GPU reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+After resetting the GPU (or subset of engines), call synchronize_irq()
+to flush any pending irq before proceeding with the cleanup. For a
+device level reset, we disable the interupts around the reset, but when
+resetting just one engine, we have to avoid such global disabling. This
+leaves us open to an interrupt arriving for the engine as we try to
+reset it. We already do try to flush the IIR following the reset, but we
+have to ensure that the in-flight interrupt does not land after we start
+cleaning up after the reset; enter synchronize_irq().
+
+As it current stands, we very rarely, but fatally, see sequences such as:
+
+    2.... 57964564us : execlists_reset_prepare: rcs0
+    2.... 57964613us : execlists_reset: rcs0 seqno=424
+    0d.h1 57964615us : gen8_cs_irq_handler: rcs0 CS active=1
+    2d..1 57964617us : __i915_request_unsubmit: rcs0 fence 29:1056 <- global_seqno 1060
+    2.... 57964703us : execlists_reset_finish: rcs0
+    0..s. 57964705us : execlists_submission_tasklet: rcs0 awake?=1, active=0, irq-posted?=1
+
+v2: Move the sync into the execlists reset handler so that we coordinate
+the flush with disabling the interrupt handling and canceling the
+pending interrupt.
+
+Modification required:
+Dropped what seems like an unrelated GEM_TRACE call that snuck into this
+patch.
+
+Change-Id: I1dae23dd039e1c9360ee95a5875ff3d86ef46f02
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Michel Thierry <michel.thierry@intel.com>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+Cc: Jeff McGee <jeff.mcgee@intel.com>
+Signed-off-by: Jeff McGee <jeff.mcgee@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 8ad346d..491d611 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -791,6 +791,10 @@ static void execlists_cancel_requests(struct intel_engine_cs *engine)
+ 	execlists->first = NULL;
+ 	GEM_BUG_ON(port_isset(execlists->port));
+ 
++	/* Mark all CS interrupts as complete */
++	smp_store_mb(execlists->active, 0);
++	synchronize_irq(engine->i915->drm.irq);
++
+ 	/*
+ 	 * The port is checked prior to scheduling a tasklet, but
+ 	 * just in case we have suspended the tasklet to do the
+-- 
+2.7.4
+

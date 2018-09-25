@@ -1,0 +1,428 @@
+From ff67ccf5eca70796056033a671ca41394ca347e7 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 26 Jul 2018 09:51:11 +0800
+Subject: [PATCH 1615/1666] drm/i915/gvt: handle global gtt update from g2v
+
+This patch handles ggtt update from g2v notification.
+It maps the physical pages behind virtual page table to guest,
+so guest can update its pte entries directly to avoid mmio trap.
+Then guest ggtt pte entries are converted to host pte entries
+and inserted into host gtt table.
+
+The tricky part is that pvmmio parameter detection is later than
+virtual page trable creation and pci bar address update,
+So the map ggtt mmio is done during pvmmio param detection.
+
+This patch is only for sos.
+
+v2:
+- cut invalid range.
+- release gfn to mfn mapping when free gtt.
+
+v3:
+- call ggtt insert_entries function
+- add size check in validate_ggtt_range
+- rename trap to map
+
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cfg_space.c |  36 ++++++
+ drivers/gpu/drm/i915/gvt/gtt.c       | 241 ++++++++++++++++++++++++++++++++++-
+ drivers/gpu/drm/i915/gvt/gtt.h       |   5 +
+ drivers/gpu/drm/i915/gvt/gvt.h       |   3 +
+ drivers/gpu/drm/i915/gvt/handlers.c  |  19 ++-
+ 5 files changed, 299 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index 106b11a..fd227fb 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -146,6 +146,42 @@ static int map_aperture(struct intel_vgpu *vgpu, bool map)
+ 	return 0;
+ }
+ 
++int map_gttmmio(struct intel_vgpu *vgpu, bool map)
++{
++	struct intel_vgpu_gm *gm = &vgpu->gm;
++	unsigned long mfn;
++	struct scatterlist *sg;
++	struct sg_table *st = gm->st;
++	u64 start, end;
++	int ret = 0;
++
++	start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0);
++	start &= ~GENMASK(3, 0);
++	start += vgpu->cfg_space.bar[INTEL_GVT_PCI_BAR_GTTMMIO].size >> 1;
++
++	end = start +
++		(vgpu->cfg_space.bar[INTEL_GVT_PCI_BAR_GTTMMIO].size >> 1);
++
++	WARN_ON((end - start) != vgpu->gtt.ggtt_mm->page_table_entry_size);
++
++	gvt_dbg_mmio("%s start=%llx end=%llx map=%d\n",
++				__func__, start, end, map);
++
++	start >>= PAGE_SHIFT;
++	for (sg = st->sgl; sg; sg = __sg_next(sg)) {
++		mfn = page_to_pfn(sg_page(sg));
++		gvt_dbg_mmio("page=%p mfn=%lx size=%x start=%llx\n",
++			sg_page(sg), mfn, sg->length, start);
++		ret = intel_gvt_hypervisor_map_gfn_to_mfn(vgpu, start,
++				mfn, sg->length >> PAGE_SHIFT, map);
++		if (ret)
++			return ret;
++		start += sg->length >> PAGE_SHIFT;
++	}
++
++	return ret;
++}
++
+ static int trap_gttmmio(struct intel_vgpu *vgpu, bool trap)
+ {
+ 	u64 start, end;
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index f150628..b221271 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -1495,6 +1495,104 @@ static int ppgtt_handle_guest_write_page_table_bytes(void *gp,
+ 	return 0;
+ }
+ 
++static void free_ggtt_virtual_page_table(struct intel_vgpu_mm *mm)
++{
++	struct intel_vgpu_gm *gm = &mm->vgpu->gm;
++	struct sg_table *st = gm->st;
++	struct scatterlist *sg;
++
++	for (sg = st->sgl; sg; sg = __sg_next(sg)) {
++		if (sg_page(sg))
++			__free_pages(sg_page(sg), get_order(sg->length));
++	}
++
++	sg_free_table(st);
++	kfree(st);
++	vunmap(mm->virtual_page_table);
++}
++
++/*
++ * Alloc virtual page table for guest ggtt. If ggtt pv enabled, the
++ * physical pages behind virtual page table is also mapped to guest,
++ * guest can update its pte entries directly to avoid trap.
++ */
++static void *alloc_ggtt_virtual_page_table(struct intel_vgpu_mm *mm)
++{
++	struct intel_vgpu *vgpu = mm->vgpu;
++	unsigned int page_count = mm->page_table_entry_size >> PAGE_SHIFT;
++	struct intel_vgpu_gm *gm = &vgpu->gm;
++	struct page **pages = NULL;
++	struct page *p;
++	unsigned int i;
++	void *vaddr = NULL;
++	int order;
++	struct sg_table *st;
++	struct scatterlist *sg;
++	struct sgt_iter sgt_iter;
++	unsigned int npages = page_count;
++
++	/*
++	 * page_table_entry_size is bigger than the size alloc_pages can
++	 * allocate, We have to split it according to the PMD size (2M).
++	 * Head page is kept in scatter list so that we can free them later.
++	 */
++	order = get_order(1 << PMD_SHIFT);
++
++	st = kmalloc(sizeof(*st), GFP_KERNEL);
++	if (!st)
++		return ERR_PTR(-ENOMEM);
++
++	if (sg_alloc_table(st, page_count, GFP_KERNEL)) {
++		kfree(st);
++		return ERR_PTR(-ENOMEM);
++	}
++
++	sg = st->sgl;
++	st->nents = 0;
++	gm->st = st;
++	do {
++		p = alloc_pages(GFP_KERNEL, order);
++		if (!p)
++			goto fail;
++		gvt_dbg_mm("page=%p size=%ld\n", p, PAGE_SIZE << order);
++		sg_set_page(sg, p, PAGE_SIZE << order, 0);
++		st->nents++;
++		npages -= 1 << order;
++		if (!npages) {
++			sg_mark_end(sg);
++			break;
++		}
++		sg = __sg_next(sg);
++	} while (1);
++
++
++	/* keep all the pages for vmap */
++	pages = kmalloc_array(page_count, sizeof(struct page *), GFP_KERNEL);
++	if (!pages)
++		goto fail;
++
++	i = 0;
++	for_each_sgt_page(p, sgt_iter, st)
++		pages[i++] = p;
++
++	WARN_ON(i != page_count);
++
++	vaddr = vmap(pages, page_count, VM_MAP, PAGE_KERNEL);
++	if (!vaddr) {
++		gvt_vgpu_err("fail to vmap pages");
++		goto fail;
++	}
++	kfree(pages);
++	return vaddr;
++
++fail:
++	sg_set_page(sg, NULL, 0, 0);
++	sg_mark_end(sg);
++	free_ggtt_virtual_page_table(mm);
++	kfree(pages);
++	return NULL;
++}
++
+ /*
+  * mm page table allocation policy for bdw+
+  *  - for ggtt, only virtual page table will be allocated.
+@@ -1525,7 +1623,7 @@ static int gen8_mm_alloc_page_table(struct intel_vgpu_mm *mm)
+ 			(gvt_ggtt_gm_sz(gvt) >> GTT_PAGE_SHIFT);
+ 		mm->page_table_entry_size = mm->page_table_entry_cnt *
+ 			info->gtt_entry_size;
+-		mem = vzalloc(mm->page_table_entry_size);
++		mem = alloc_ggtt_virtual_page_table(mm);
+ 		if (!mem)
+ 			return -ENOMEM;
+ 		mm->virtual_page_table = mem;
+@@ -1538,8 +1636,10 @@ static void gen8_mm_free_page_table(struct intel_vgpu_mm *mm)
+ 	if (mm->type == INTEL_GVT_MM_PPGTT) {
+ 		kfree(mm->virtual_page_table);
+ 	} else if (mm->type == INTEL_GVT_MM_GGTT) {
+-		if (mm->virtual_page_table)
+-			vfree(mm->virtual_page_table);
++		if (mm->virtual_page_table) {
++			map_gttmmio(mm->vgpu, false);
++			free_ggtt_virtual_page_table(mm);
++		}
+ 	}
+ 	mm->virtual_page_table = mm->shadow_page_table = NULL;
+ }
+@@ -2856,3 +2956,138 @@ int intel_vgpu_g2v_pv_ppgtt_insert_4lvl(struct intel_vgpu *vgpu,
+ 
+ 	return ret;
+ }
++
++static void validate_ggtt_range(struct intel_vgpu *vgpu,
++	u64 *start, u64 *length)
++{
++	u64 end;
++
++	if (WARN_ON(*start > vgpu->gvt->dev_priv->ggtt.base.total ||
++	     *length > vgpu->gvt->dev_priv->ggtt.base.total)) {
++		*length = 0;
++		return;
++	}
++
++	end = *start + *length - 1;
++
++	if (*start >= vgpu_aperture_gmadr_base(vgpu) &&
++	     end <= vgpu_aperture_gmadr_end(vgpu))
++		return;
++
++	if (*start >= vgpu_hidden_gmadr_base(vgpu) &&
++	     end <= vgpu_hidden_gmadr_end(vgpu))
++		return;
++
++	/* handle the cases with invalid ranges */
++	WARN_ON(1);
++
++	/* start is in aperture range, end is after apeture range */
++	if (*start >= vgpu_aperture_gmadr_base(vgpu) &&
++	    *start <= vgpu_aperture_gmadr_end(vgpu)) {
++		*length = vgpu_aperture_gmadr_end(vgpu) - *start + 1;
++		return;
++	}
++
++	/* start is before aperture range, end is in apeture range */
++	if (end >= vgpu_aperture_gmadr_base(vgpu) &&
++	    end <= vgpu_aperture_gmadr_end(vgpu)) {
++		*start = vgpu_aperture_gmadr_base(vgpu);
++		return;
++	}
++
++	/* start is in hidden range, end is after hidden range */
++	if (*start >= vgpu_hidden_gmadr_base(vgpu) &&
++	    *start <= vgpu_hidden_gmadr_end(vgpu)) {
++		*length = vgpu_hidden_gmadr_end(vgpu) - *start + 1;
++		return;
++	}
++
++	/* start is before hidden range, end is in hidden range */
++	if (end >= vgpu_hidden_gmadr_base(vgpu) &&
++	    end <= vgpu_hidden_gmadr_end(vgpu)) {
++		*start = vgpu_hidden_gmadr_base(vgpu);
++		return;
++	}
++
++	/* both start and end are not in valid range*/
++	*length = 0;
++
++	return;
++}
++
++int intel_vgpu_g2v_pv_ggtt_insert(struct intel_vgpu *vgpu)
++{
++	struct intel_vgpu_gtt *gtt = &vgpu->gtt;
++	struct gvt_shared_page *shared_page = vgpu->mmio.shared_page;
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	struct i915_ggtt *ggtt = &dev_priv->ggtt;
++	u64 start = shared_page->pv_ggtt.start;
++	u64 num_entries = shared_page->pv_ggtt.length;
++	u32 cache_level = shared_page->pv_ggtt.cache_level;
++	u64 length = num_entries << PAGE_SHIFT;
++	u64 *vaddr = gtt->ggtt_mm->virtual_page_table;
++	u64 gtt_entry_index;
++	u64 gtt_entry;
++	unsigned long mfn;
++	struct i915_vma vma;
++	struct sg_table st;
++	struct scatterlist *sg = NULL;
++	int ret = 0;
++	int i;
++
++	gvt_dbg_mm("ggtt_insert: start=%llx length=%llx cache=%x\n",
++		start, length, cache_level);
++	validate_ggtt_range(vgpu, &start, &length);
++	if (length == 0)
++		return 0;
++
++	num_entries = length >> PAGE_SHIFT;
++
++	if (sg_alloc_table(&st, num_entries, GFP_KERNEL))
++		return -ENOMEM;
++
++	for_each_sg(st.sgl, sg, num_entries, i) {
++		gtt_entry_index = (start >> PAGE_SHIFT) + i;
++		gtt_entry = vaddr[gtt_entry_index];
++		mfn = intel_gvt_hypervisor_gfn_to_mfn(vgpu,
++					gtt_entry >> PAGE_SHIFT);
++		if (mfn == INTEL_GVT_INVALID_ADDR) {
++			gvt_vgpu_err("fail to translate gfn: 0x%llx\n",
++					gtt_entry >> PAGE_SHIFT);
++			ret = -ENXIO;
++			goto fail;
++		}
++		sg->offset = 0;
++		sg->length = PAGE_SIZE;
++		sg_dma_address(sg) = mfn << PAGE_SHIFT;
++		sg_dma_len(sg) = PAGE_SIZE;
++	}
++
++	/* fake vma for insert call*/
++	memset(&vma, 0, sizeof(vma));
++	vma.node.start = start;
++	vma.pages = &st;
++	ggtt->base.insert_entries(&ggtt->base, &vma, cache_level, 0);
++
++fail:
++	sg_free_table(&st);
++	return ret;
++}
++
++int intel_vgpu_g2v_pv_ggtt_clear(struct intel_vgpu *vgpu)
++{
++	struct gvt_shared_page *shared_page = vgpu->mmio.shared_page;
++	u64 start = shared_page->pv_ggtt.start;
++	u64 length = shared_page->pv_ggtt.length;
++	struct i915_ggtt *ggtt = &vgpu->gvt->dev_priv->ggtt;
++
++	gvt_dbg_mm("ggtt_clear: start=%llx length=%llx\n",
++		start, length);
++	validate_ggtt_range(vgpu, &start, &length);
++	if (length == 0)
++		return 0;
++
++	ggtt->base.clear_range(&ggtt->base, start, length);
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.h b/drivers/gpu/drm/i915/gvt/gtt.h
+index d61e1f2..2939bf7 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.h
++++ b/drivers/gpu/drm/i915/gvt/gtt.h
+@@ -321,4 +321,9 @@ int intel_vgpu_g2v_pv_ppgtt_clear_4lvl(struct intel_vgpu *vgpu,
+ 
+ int intel_vgpu_g2v_pv_ppgtt_insert_4lvl(struct intel_vgpu *vgpu,
+ 		int page_table_level);
++
++int intel_vgpu_g2v_pv_ggtt_insert(struct intel_vgpu *vgpu);
++
++int intel_vgpu_g2v_pv_ggtt_clear(struct intel_vgpu *vgpu);
++
+ #endif /* _GVT_GTT_H_ */
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index e76e081..ebc5194 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -82,6 +82,7 @@ struct intel_gvt_device_info {
+ struct intel_vgpu_gm {
+ 	u64 aperture_sz;
+ 	u64 hidden_sz;
++	struct sg_table *st;
+ 	struct drm_mm_node low_gm_node;
+ 	struct drm_mm_node high_gm_node;
+ };
+@@ -525,6 +526,8 @@ int intel_vgpu_emulate_cfg_read(struct intel_vgpu *vgpu, unsigned int offset,
+ int intel_vgpu_emulate_cfg_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes);
+ 
++int map_gttmmio(struct intel_vgpu *vgpu, bool map);
++
+ void intel_gvt_clean_opregion(struct intel_gvt *gvt);
+ int intel_gvt_init_opregion(struct intel_gvt *gvt);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 53ae0c6c..e122d4c 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1341,6 +1341,12 @@ static int handle_g2v_notification(struct intel_vgpu *vgpu, int notification)
+ 	case VGT_G2V_PPGTT_L4_CLEAR:
+ 		ret = intel_vgpu_g2v_pv_ppgtt_clear_4lvl(vgpu, 4);
+ 		break;
++	case VGT_G2V_GGTT_INSERT:
++		ret = intel_vgpu_g2v_pv_ggtt_insert(vgpu);
++		break;
++	case VGT_G2V_GGTT_CLEAR:
++		ret = intel_vgpu_g2v_pv_ggtt_clear(vgpu);
++		break;
+ 	case VGT_G2V_EXECLIST_CONTEXT_CREATE:
+ 	case VGT_G2V_EXECLIST_CONTEXT_DESTROY:
+ 	case 1:	/* Remove this in guest driver. */
+@@ -1411,8 +1417,17 @@ static int pvinfo_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 				break;
+ 			}
+ 			vgpu_vreg(vgpu, offset) = data & i915_modparams.enable_pvmmio;
+-			DRM_INFO("vgpu id=%d pvmmio=0x%x\n",
+-					vgpu->id, VGPU_PVMMIO(vgpu));
++			if (vgpu_vreg(vgpu, offset) & PVMMIO_GGTT_UPDATE) {
++				ret = map_gttmmio(vgpu, true);
++				if (ret) {
++					DRM_INFO("ggtt pv mode is off\n");
++					vgpu_vreg(vgpu, offset) &=
++							~PVMMIO_GGTT_UPDATE;
++				}
++			}
++			DRM_INFO("vgpu id=%d pvmmio=0x%x\n", vgpu->id,
++							VGPU_PVMMIO(vgpu));
++
+ 		} else {
+ 			vgpu_vreg(vgpu, offset) = 0;
+ 		}
+-- 
+2.7.4
+

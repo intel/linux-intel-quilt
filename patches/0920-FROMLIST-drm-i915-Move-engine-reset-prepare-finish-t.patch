@@ -1,0 +1,229 @@
+From 5bb0a755797d447d09e8482c35b016b2fef619ab Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 20 Mar 2018 00:18:46 +0000
+Subject: [PATCH 0920/1666] [FROMLIST] drm/i915: Move engine reset
+ prepare/finish to backends
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In preparation to more carefully handling incomplete preemption during
+reset by execlists, we move the existing code wholesale to the backends
+under a couple of new reset vfuncs.
+
+Change-Id: I11c5389986ec3840ad5ecbf9e9b8681c5fc25391
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+CC: Michel Thierry <michel.thierry@intel.com>
+Cc: Jeff McGee <jeff.mcgee@intel.com>
+Signed-off-by: Jeff McGee <jeff.mcgee@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem.c         | 31 ++++--------------------
+ drivers/gpu/drm/i915/intel_lrc.c        | 42 ++++++++++++++++++++++++++++++---
+ drivers/gpu/drm/i915/intel_ringbuffer.c | 20 +++++++++++++---
+ drivers/gpu/drm/i915/intel_ringbuffer.h |  7 ++++++
+ 4 files changed, 68 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index e494045..30b12e7 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2793,7 +2793,7 @@ static bool engine_stalled(struct intel_engine_cs *engine)
+ struct drm_i915_gem_request *
+ i915_gem_reset_prepare_engine(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_gem_request *request = NULL;
++	struct drm_i915_gem_request *request;
+ 
+ 	/* Prevent the signaler thread from updating the request
+ 	 * state (by calling dma_fence_signal) as we are processing
+@@ -2806,29 +2806,7 @@ i915_gem_reset_prepare_engine(struct intel_engine_cs *engine)
+ 	 */
+ 	kthread_park(engine->breadcrumbs.signaler);
+ 
+-	/* Prevent request submission to the hardware until we have
+-	 * completed the reset in i915_gem_reset_finish(). If a request
+-	 * is completed by one engine, it may then queue a request
+-	 * to a second via its engine->irq_tasklet *just* as we are
+-	 * calling engine->init_hw() and also writing the ELSP.
+-	 * Turning off the engine->irq_tasklet until the reset is over
+-	 * prevents the race.
+-	 *
+-	 * Note that this needs to be a single atomic operation on the
+-	 * tasklet (flush existing tasks, prevent new tasks) to prevent
+-	 * a race between reset and set-wedged. It is not, so we do the best
+-	 * we can atm and make sure we don't lock the machine up in the more
+-	 * common case of recursively being called from set-wedged from inside
+-	 * i915_reset.
+-	 */
+-	if (!atomic_read(&engine->execlists.irq_tasklet.count))
+-		tasklet_kill(&engine->execlists.irq_tasklet);
+-	tasklet_disable(&engine->execlists.irq_tasklet);
+-
+-	if (engine->irq_seqno_barrier)
+-		engine->irq_seqno_barrier(engine);
+-
+-	request = i915_gem_find_active_request(engine);
++	request = engine->reset.prepare(engine);
+ 	if (request && request->fence.error == -EIO)
+ 		request = ERR_PTR(-EIO); /* Previous reset failed! */
+ 
+@@ -2969,7 +2947,7 @@ void i915_gem_reset_engine(struct intel_engine_cs *engine,
+ 	}
+ 
+ 	/* Setup the CS to resume from the breadcrumb of the hung request */
+-	engine->reset_hw(engine, request);
++	engine->reset.reset(engine, request);
+ }
+ 
+ void i915_gem_reset(struct drm_i915_private *dev_priv)
+@@ -3002,7 +2980,8 @@ void i915_gem_reset(struct drm_i915_private *dev_priv)
+ 
+ void i915_gem_reset_finish_engine(struct intel_engine_cs *engine)
+ {
+-	tasklet_enable(&engine->execlists.irq_tasklet);
++	engine->reset.finish(engine);
++
+ 	kthread_unpark(engine->breadcrumbs.signaler);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 726a711..fa9d1fc 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -1554,6 +1554,34 @@ static int gen9_init_render_ring(struct intel_engine_cs *engine)
+ 	return init_workarounds_ring(engine);
+ }
+ 
++static struct drm_i915_gem_request *
++execlists_reset_prepare(struct intel_engine_cs *engine)
++{
++	/* Prevent request submission to the hardware until we have
++	 * completed the reset in i915_gem_reset_finish(). If a request
++	 * is completed by one engine, it may then queue a request
++	 * to a second via its engine->irq_tasklet *just* as we are
++	 * calling engine->init_hw() and also writing the ELSP.
++	 * Turning off the engine->irq_tasklet until the reset is over
++	 * prevents the race.
++	 *
++	 * Note that this needs to be a single atomic operation on the
++	 * tasklet (flush existing tasks, prevent new tasks) to prevent
++	 * a race between reset and set-wedged. It is not, so we do the best
++	 * we can atm and make sure we don't lock the machine up in the more
++	 * common case of recursively being called from set-wedged from inside
++	 * i915_reset.
++	 */
++	if (!atomic_read(&engine->execlists.irq_tasklet.count))
++		tasklet_kill(&engine->execlists.irq_tasklet);
++	tasklet_disable(&engine->execlists.irq_tasklet);
++
++	if (engine->irq_seqno_barrier)
++		engine->irq_seqno_barrier(engine);
++
++	return i915_gem_find_active_request(engine);
++}
++
+ static void reset_irq(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *dev_priv = engine->i915;
+@@ -1577,8 +1605,8 @@ static void reset_irq(struct intel_engine_cs *engine)
+ 	clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
+ }
+ 
+-static void reset_common_ring(struct intel_engine_cs *engine,
+-			      struct drm_i915_gem_request *request)
++static void execlists_reset(struct intel_engine_cs *engine,
++			    struct drm_i915_gem_request *request)
+ {
+ 	struct intel_engine_execlists * const execlists = &engine->execlists;
+ 	struct intel_context *ce;
+@@ -1640,6 +1668,11 @@ static void reset_common_ring(struct intel_engine_cs *engine,
+ 	unwind_wa_tail(request);
+ }
+ 
++static void execlists_reset_finish(struct intel_engine_cs *engine)
++{
++	tasklet_enable(&engine->execlists.irq_tasklet);
++}
++
+ static int intel_logical_ring_emit_pdps(struct drm_i915_gem_request *req)
+ {
+ 	struct i915_hw_ppgtt *ppgtt = req->ctx->ppgtt;
+@@ -1948,7 +1981,10 @@ logical_ring_default_vfuncs(struct intel_engine_cs *engine)
+ {
+ 	/* Default vfuncs which can be overriden by each engine. */
+ 	engine->init_hw = gen8_init_common_ring;
+-	engine->reset_hw = reset_common_ring;
++
++	engine->reset.prepare = execlists_reset_prepare;
++	engine->reset.reset = execlists_reset;
++	engine->reset.finish = execlists_reset_finish;
+ 
+ 	engine->context_pin = execlists_context_pin;
+ 	engine->context_unpin = execlists_context_unpin;
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index d6944d0..0167692 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -572,8 +572,16 @@ static int init_ring_common(struct intel_engine_cs *engine)
+ 	return ret;
+ }
+ 
+-static void reset_ring_common(struct intel_engine_cs *engine,
+-			      struct drm_i915_gem_request *request)
++static struct drm_i915_gem_request *reset_prepare(struct intel_engine_cs *engine)
++{
++	if (engine->irq_seqno_barrier)
++		engine->irq_seqno_barrier(engine);
++
++	return i915_gem_find_active_request(engine);
++}
++
++static void reset_ring(struct intel_engine_cs *engine,
++		       struct drm_i915_gem_request *request)
+ {
+ 	/* Try to restore the logical GPU state to match the continuation
+ 	 * of the request queue. If we skip the context/PD restore, then
+@@ -629,6 +637,10 @@ static void reset_ring_common(struct intel_engine_cs *engine,
+ 	}
+ }
+ 
++static void reset_finish(struct intel_engine_cs *engine)
++{
++}
++
+ static int intel_rcs_ctx_init(struct drm_i915_gem_request *req)
+ {
+ 	int ret;
+@@ -2026,7 +2038,9 @@ static void intel_ring_default_vfuncs(struct drm_i915_private *dev_priv,
+ 	intel_ring_init_semaphores(dev_priv, engine);
+ 
+ 	engine->init_hw = init_ring_common;
+-	engine->reset_hw = reset_ring_common;
++	engine->reset.prepare = reset_prepare;
++	engine->reset.reset = reset_ring;
++	engine->reset.finish = reset_finish;
+ 
+ 	engine->context_pin = intel_ring_context_pin;
+ 	engine->context_unpin = intel_ring_context_unpin;
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index fe28309..ca3c500 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -364,6 +364,13 @@ struct intel_engine_cs {
+ 	void		(*reset_hw)(struct intel_engine_cs *engine,
+ 				    struct drm_i915_gem_request *req);
+ 
++	struct {
++		struct drm_i915_gem_request *(*prepare)(struct intel_engine_cs *engine);
++		void (*reset)(struct intel_engine_cs *engine,
++			      struct drm_i915_gem_request *rq);
++		void (*finish)(struct intel_engine_cs *engine);
++	} reset;
++
+ 	void		(*set_default_submission)(struct intel_engine_cs *engine);
+ 
+ 	struct intel_ring *(*context_pin)(struct intel_engine_cs *engine,
+-- 
+2.7.4
+

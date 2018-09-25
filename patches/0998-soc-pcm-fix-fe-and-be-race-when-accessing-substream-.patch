@@ -1,0 +1,56 @@
+From 6deff86765aa3a262e796026e7c9a5f2ad8110a2 Mon Sep 17 00:00:00 2001
+From: xiao jin <jin.xiao@intel.com>
+Date: Wed, 18 Jan 2017 09:04:06 +0800
+Subject: [PATCH 0998/1666] soc-pcm: fix fe and be race when accessing
+ substream->runtime
+
+After start of fe and be, fe might go to close without triggering
+STOP, and substream->runtime is freed. However, be is still at
+START state and its substream->runtime still points to the
+freed runtime.
+
+Later on, FE is opened/started again, and triggers STOP.
+snd_pcm_do_stop => dpcm_fe_dai_trigger
+                => dpcm_fe_dai_do_trigger
+                => dpcm_be_dai_trigger
+                => dpcm_do_trigger
+                => soc_pcm_trigger
+                => skl_platform_pcm_trigger
+skl_platform_pcm_trigger accesses the freed old runtime data and
+kernel panic.
+
+The patch fixes it by assigning be_substream->runtime in
+dpcm_be_dai_startup when be's state is START.
+
+Change-Id: I124e8a01f2b4bdc54a544064999a382819d2375c
+Signed-off-by: xiao jin <jin.xiao@intel.com>
+Signed-off-by: Zhang Yanmin <yanmin.zhang@intel.com>
+(cherry picked from commit aa5ea37f388051a0595acc9bbbbfdbf0d2810af2)
+---
+ sound/soc/soc-pcm.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+index aac2c9e..477d29c 100644
+--- a/sound/soc/soc-pcm.c
++++ b/sound/soc/soc-pcm.c
+@@ -1535,6 +1535,8 @@ int dpcm_be_dai_startup(struct snd_soc_pcm_runtime *fe, int stream)
+ 		if (be->dpcm[stream].users++ != 0)
+ 			continue;
+ 
++		be_substream->runtime = be->dpcm[stream].runtime;
++
+ 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_NEW) &&
+ 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_CLOSE))
+ 			continue;
+@@ -1542,7 +1544,6 @@ int dpcm_be_dai_startup(struct snd_soc_pcm_runtime *fe, int stream)
+ 		dev_dbg(be->dev, "ASoC: open %s BE %s\n",
+ 			stream ? "capture" : "playback", be->dai_link->name);
+ 
+-		be_substream->runtime = be->dpcm[stream].runtime;
+ 		err = soc_pcm_open(be_substream);
+ 		if (err < 0) {
+ 			dev_err(be->dev, "ASoC: BE open failed %d\n", err);
+-- 
+2.7.4
+
