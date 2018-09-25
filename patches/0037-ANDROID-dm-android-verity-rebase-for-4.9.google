@@ -1,0 +1,146 @@
+From dfedd7d67c7e2948c3d8ce5176ef71c55a95c5b1 Mon Sep 17 00:00:00 2001
+From: Badhri Jagan Sridharan <Badhri@google.com>
+Date: Fri, 13 Jan 2017 11:05:00 -0800
+Subject: [PATCH 037/352] ANDROID: dm: android-verity: rebase for 4.9
+
+Export the direct_access method of dm_linear target for
+dm-android-verity target.
+
+Signed-off-by: Badhri Jagan Sridharan <Badhri@google.com>
+Change-Id: I46556d882305e5194352946264cbc9c06e5038e4
+
+[AmitP: Rebased the changes for v4.14]
+Signed-off-by: Amit Pundir <amit.pundir@linaro.org>
+---
+ drivers/md/dm-android-verity.c |  3 +++
+ drivers/md/dm-android-verity.h | 11 +++++++++++
+ drivers/md/dm-linear.c         | 25 ++++++++++++++-----------
+ 3 files changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/md/dm-android-verity.c b/drivers/md/dm-android-verity.c
+index bb6c1285e499..6f616fdf3b73 100644
+--- a/drivers/md/dm-android-verity.c
++++ b/drivers/md/dm-android-verity.c
+@@ -633,8 +633,11 @@ static int add_as_linear_device(struct dm_target *ti, char *dev)
+ 	android_verity_target.dtr = dm_linear_dtr,
+ 	android_verity_target.map = dm_linear_map,
+ 	android_verity_target.status = dm_linear_status,
++	android_verity_target.end_io = dm_linear_end_io,
+ 	android_verity_target.prepare_ioctl = dm_linear_prepare_ioctl,
+ 	android_verity_target.iterate_devices = dm_linear_iterate_devices,
++        android_verity_target.direct_access = dm_linear_dax_direct_access,
++        android_verity_target.dax_copy_from_iter = dm_linear_dax_copy_from_iter,
+ 	android_verity_target.io_hints = NULL;
+ 
+ 	err = dm_linear_ctr(ti, DM_LINEAR_ARGS, linear_table_args);
+diff --git a/drivers/md/dm-android-verity.h b/drivers/md/dm-android-verity.h
+index 07e22bc8955c..a637accefb5b 100644
+--- a/drivers/md/dm-android-verity.h
++++ b/drivers/md/dm-android-verity.h
+@@ -111,10 +111,21 @@ extern struct target_type linear_target;
+ 
+ extern void dm_linear_dtr(struct dm_target *ti);
+ extern int dm_linear_map(struct dm_target *ti, struct bio *bio);
++extern int dm_linear_end_io(struct dm_target *ti, struct bio *bio,
++			 blk_status_t *error);
+ extern void dm_linear_status(struct dm_target *ti, status_type_t type,
+ 			unsigned status_flags, char *result, unsigned maxlen);
+ extern int dm_linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev);
+ extern int dm_linear_iterate_devices(struct dm_target *ti,
+ 			iterate_devices_callout_fn fn, void *data);
+ extern int dm_linear_ctr(struct dm_target *ti, unsigned int argc, char **argv);
++#if IS_ENABLED(CONFIG_DAX_DRIVER)
++extern long dm_linear_dax_direct_access(struct dm_target *ti, sector_t sector,
++                                 void **kaddr, pfn_t *pfn, long size);
++extern size_t dm_linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
++		void *addr, size_t bytes, struct iov_iter *i);
++#else
++#define dm_linear_dax_direct_access NULL
++#define dm_linear_dax_copy_from_iter NULL
++#endif
+ #endif /* DM_ANDROID_VERITY_H */
+diff --git a/drivers/md/dm-linear.c b/drivers/md/dm-linear.c
+index 5be148922e33..ae9d111f519f 100644
+--- a/drivers/md/dm-linear.c
++++ b/drivers/md/dm-linear.c
+@@ -102,7 +102,7 @@ int dm_linear_map(struct dm_target *ti, struct bio *bio)
+ 	return DM_MAPIO_REMAPPED;
+ }
+ 
+-static int linear_end_io(struct dm_target *ti, struct bio *bio,
++int dm_linear_end_io(struct dm_target *ti, struct bio *bio,
+ 			 blk_status_t *error)
+ {
+ 	struct linear_c *lc = ti->private;
+@@ -112,6 +112,7 @@ static int linear_end_io(struct dm_target *ti, struct bio *bio,
+ 
+ 	return DM_ENDIO_DONE;
+ }
++EXPORT_SYMBOL_GPL(dm_linear_end_io);
+ 
+ void dm_linear_status(struct dm_target *ti, status_type_t type,
+ 			  unsigned status_flags, char *result, unsigned maxlen)
+@@ -155,7 +156,7 @@ int dm_linear_iterate_devices(struct dm_target *ti,
+ }
+ 
+ #if IS_ENABLED(CONFIG_DAX_DRIVER)
+-static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
++long dm_linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+ 		long nr_pages, void **kaddr, pfn_t *pfn)
+ {
+ 	long ret;
+@@ -170,8 +171,9 @@ static long linear_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
+ 		return ret;
+ 	return dax_direct_access(dax_dev, pgoff, nr_pages, kaddr, pfn);
+ }
++EXPORT_SYMBOL_GPL(dm_linear_dax_direct_access);
+ 
+-static size_t linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
++size_t dm_linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
+ 		void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	struct linear_c *lc = ti->private;
+@@ -184,8 +186,9 @@ static size_t linear_dax_copy_from_iter(struct dm_target *ti, pgoff_t pgoff,
+ 		return 0;
+ 	return dax_copy_from_iter(dax_dev, pgoff, addr, bytes, i);
+ }
++EXPORT_SYMBOL_GPL(dm_linear_dax_copy_from_iter);
+ 
+-static size_t linear_dax_copy_to_iter(struct dm_target *ti, pgoff_t pgoff,
++static size_t dm_linear_dax_copy_to_iter(struct dm_target *ti, pgoff_t pgoff,
+ 		void *addr, size_t bytes, struct iov_iter *i)
+ {
+ 	struct linear_c *lc = ti->private;
+@@ -200,9 +203,9 @@ static size_t linear_dax_copy_to_iter(struct dm_target *ti, pgoff_t pgoff,
+ }
+ 
+ #else
+-#define linear_dax_direct_access NULL
+-#define linear_dax_copy_from_iter NULL
+-#define linear_dax_copy_to_iter NULL
++#define dm_linear_dax_direct_access NULL
++#define dm_linear_dax_copy_from_iter NULL
++#define dm_linear_dax_copy_to_iter NULL
+ #endif
+ 
+ static struct target_type linear_target = {
+@@ -214,12 +217,12 @@ static struct target_type linear_target = {
+ 	.dtr    = dm_linear_dtr,
+ 	.map    = dm_linear_map,
+ 	.status = dm_linear_status,
+-	.end_io = linear_end_io,
++	.end_io = dm_linear_end_io,
+ 	.prepare_ioctl = dm_linear_prepare_ioctl,
+ 	.iterate_devices = dm_linear_iterate_devices,
+-	.direct_access = linear_dax_direct_access,
+-	.dax_copy_from_iter = linear_dax_copy_from_iter,
+-	.dax_copy_to_iter = linear_dax_copy_to_iter,
++	.direct_access = dm_linear_dax_direct_access,
++	.dax_copy_from_iter = dm_linear_dax_copy_from_iter,
++	.dax_copy_to_iter = dm_linear_dax_copy_to_iter,
+ };
+ 
+ int __init dm_linear_init(void)
+-- 
+2.17.1
+

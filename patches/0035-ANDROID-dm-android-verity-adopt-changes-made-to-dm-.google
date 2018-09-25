@@ -1,0 +1,137 @@
+From b43d4c8d1857d71bb7632b4fe58cd67e87968f8e Mon Sep 17 00:00:00 2001
+From: Badhri Jagan Sridharan <Badhri@google.com>
+Date: Tue, 9 Aug 2016 12:47:37 -0700
+Subject: [PATCH 035/352] ANDROID: dm: android-verity: adopt changes made to dm
+ callbacks
+
+v4.4 introduced changes to the callbacks used for
+dm-linear and dm-verity-target targets. Move to those headers
+in dm-android-verity.
+
+Verified on hikey while having
+BOARD_USES_RECOVERY_AS_BOOT := true
+BOARD_BUILD_SYSTEM_ROOT_IMAGE := true
+
+BUG: 27339727
+Signed-off-by: Badhri Jagan Sridharan <Badhri@google.com>
+Change-Id: Ic64950c3b55f0a6eaa570bcedc2ace83bbf3005e
+---
+ drivers/md/dm-android-verity.c | 12 +++++-------
+ drivers/md/dm-android-verity.h |  5 +----
+ drivers/md/dm-linear.c         |  2 +-
+ drivers/md/dm-verity-target.c  |  2 +-
+ drivers/md/dm-verity.h         |  5 +----
+ 5 files changed, 9 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/md/dm-android-verity.c b/drivers/md/dm-android-verity.c
+index 1f4eb099209d..15ce2a81c1f4 100644
+--- a/drivers/md/dm-android-verity.c
++++ b/drivers/md/dm-android-verity.c
+@@ -59,8 +59,7 @@ static struct target_type android_verity_target = {
+ 	.dtr                    = verity_dtr,
+ 	.map                    = verity_map,
+ 	.status                 = verity_status,
+-	.ioctl                  = verity_ioctl,
+-	.merge                  = verity_merge,
++	.prepare_ioctl          = verity_prepare_ioctl,
+ 	.iterate_devices        = verity_iterate_devices,
+ 	.io_hints               = verity_io_hints,
+ };
+@@ -637,8 +636,7 @@ static int add_as_linear_device(struct dm_target *ti, char *dev)
+ 	android_verity_target.dtr = dm_linear_dtr,
+ 	android_verity_target.map = dm_linear_map,
+ 	android_verity_target.status = dm_linear_status,
+-	android_verity_target.ioctl = dm_linear_ioctl,
+-	android_verity_target.merge = dm_linear_merge,
++	android_verity_target.prepare_ioctl = dm_linear_prepare_ioctl,
+ 	android_verity_target.iterate_devices = dm_linear_iterate_devices,
+ 	android_verity_target.io_hints = NULL;
+ 
+@@ -676,7 +674,7 @@ static int android_verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+ 	struct fec_ecc_metadata uninitialized_var(ecc);
+ 	char buf[FEC_ARG_LENGTH], *buf_ptr;
+ 	unsigned long long tmpll;
+-	u64 device_size;
++	u64  uninitialized_var(device_size);
+ 
+ 	if (argc == 1) {
+ 		/* Use the default keyid */
+@@ -896,7 +894,7 @@ static int __init dm_android_verity_init(void)
+ 	}
+ 
+ 	file = debugfs_create_bool("target_added", S_IRUGO, debug_dir,
+-				(u32 *)&target_added);
++				&target_added);
+ 
+ 	if (IS_ERR_OR_NULL(file)) {
+ 		DMERR("Cannot create android_verity debugfs directory: %ld",
+@@ -906,7 +904,7 @@ static int __init dm_android_verity_init(void)
+ 	}
+ 
+ 	file = debugfs_create_bool("verity_enabled", S_IRUGO, debug_dir,
+-				(u32 *)&verity_enabled);
++				&verity_enabled);
+ 
+ 	if (IS_ERR_OR_NULL(file)) {
+ 		DMERR("Cannot create android_verity debugfs directory: %ld",
+diff --git a/drivers/md/dm-android-verity.h b/drivers/md/dm-android-verity.h
+index f43b02fbb475..07e22bc8955c 100644
+--- a/drivers/md/dm-android-verity.h
++++ b/drivers/md/dm-android-verity.h
+@@ -113,10 +113,7 @@ extern void dm_linear_dtr(struct dm_target *ti);
+ extern int dm_linear_map(struct dm_target *ti, struct bio *bio);
+ extern void dm_linear_status(struct dm_target *ti, status_type_t type,
+ 			unsigned status_flags, char *result, unsigned maxlen);
+-extern int dm_linear_ioctl(struct dm_target *ti, unsigned int cmd,
+-		unsigned long arg);
+-extern int dm_linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+-		struct bio_vec *biovec, int max_size);
++extern int dm_linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev);
+ extern int dm_linear_iterate_devices(struct dm_target *ti,
+ 			iterate_devices_callout_fn fn, void *data);
+ extern int dm_linear_ctr(struct dm_target *ti, unsigned int argc, char **argv);
+diff --git a/drivers/md/dm-linear.c b/drivers/md/dm-linear.c
+index 187574311a13..5be148922e33 100644
+--- a/drivers/md/dm-linear.c
++++ b/drivers/md/dm-linear.c
+@@ -130,7 +130,7 @@ void dm_linear_status(struct dm_target *ti, status_type_t type,
+ 	}
+ }
+ 
+-static int dm_linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
++int dm_linear_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+ {
+ 	struct linear_c *lc = (struct linear_c *) ti->private;
+ 	struct dm_dev *dev = lc->dev;
+diff --git a/drivers/md/dm-verity-target.c b/drivers/md/dm-verity-target.c
+index fc7895c6dd5d..58fbf52fe38e 100644
+--- a/drivers/md/dm-verity-target.c
++++ b/drivers/md/dm-verity-target.c
+@@ -739,7 +739,7 @@ void verity_status(struct dm_target *ti, status_type_t type,
+ 	}
+ }
+ 
+-static int verity_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
++int verity_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
+ {
+ 	struct dm_verity *v = ti->private;
+ 
+diff --git a/drivers/md/dm-verity.h b/drivers/md/dm-verity.h
+index b07e2e5bd952..0f634e49f63b 100644
+--- a/drivers/md/dm-verity.h
++++ b/drivers/md/dm-verity.h
+@@ -129,10 +129,7 @@ extern int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
+ 
+ extern void verity_status(struct dm_target *ti, status_type_t type,
+ 			unsigned status_flags, char *result, unsigned maxlen);
+-extern int verity_ioctl(struct dm_target *ti, unsigned cmd,
+-			unsigned long arg);
+-extern int verity_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+-			struct bio_vec *biovec, int max_size);
++extern int verity_prepare_ioctl(struct dm_target *ti, struct block_device **bdev);
+ extern int verity_iterate_devices(struct dm_target *ti,
+ 				iterate_devices_callout_fn fn, void *data);
+ extern void verity_io_hints(struct dm_target *ti, struct queue_limits *limits);
+-- 
+2.17.1
+

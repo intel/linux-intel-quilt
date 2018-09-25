@@ -1,0 +1,356 @@
+From 620da30686861c027269b7cad18a9d899a4dbf9e Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Thu, 16 Mar 2017 17:46:13 -0700
+Subject: [PATCH 246/352] ANDROID: sdcardfs: Use pr_[...] instead of printk
+
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Bug: 35331000
+Change-Id: Ibc635ec865750530d32b87067779f681fe58a003
+---
+ fs/sdcardfs/derived_perm.c |  6 ++---
+ fs/sdcardfs/file.c         |  9 ++++----
+ fs/sdcardfs/inode.c        |  8 +++----
+ fs/sdcardfs/lookup.c       |  2 +-
+ fs/sdcardfs/main.c         | 45 +++++++++++++++++---------------------
+ fs/sdcardfs/packagelist.c  | 13 ++++++-----
+ fs/sdcardfs/sdcardfs.h     |  2 +-
+ fs/sdcardfs/super.c        |  5 ++---
+ 8 files changed, 42 insertions(+), 48 deletions(-)
+
+diff --git a/fs/sdcardfs/derived_perm.c b/fs/sdcardfs/derived_perm.c
+index 329e91129808..411a9a9258b6 100644
+--- a/fs/sdcardfs/derived_perm.c
++++ b/fs/sdcardfs/derived_perm.c
+@@ -318,7 +318,7 @@ inline void update_derived_permission_lock(struct dentry *dentry)
+ 	struct dentry *parent;
+ 
+ 	if (!dentry || !d_inode(dentry)) {
+-		printk(KERN_ERR "sdcardfs: %s: invalid dentry\n", __func__);
++		pr_err("sdcardfs: %s: invalid dentry\n", __func__);
+ 		return;
+ 	}
+ 	/* FIXME:
+@@ -379,7 +379,7 @@ int is_obbpath_invalid(struct dentry *dent)
+ 			path_buf = kmalloc(PATH_MAX, GFP_ATOMIC);
+ 			if (!path_buf) {
+ 				ret = 1;
+-				printk(KERN_ERR "sdcardfs: fail to allocate path_buf in %s.\n", __func__);
++				pr_err("sdcardfs: fail to allocate path_buf in %s.\n", __func__);
+ 			} else {
+ 				obbpath_s = d_path(&di->lower_path, path_buf, PATH_MAX);
+ 				if (d_unhashed(di->lower_path.dentry) ||
+@@ -451,7 +451,7 @@ int setup_obb_dentry(struct dentry *dentry, struct path *lower_path)
+ 		 * because the sdcard daemon also regards this case as
+ 		 * a lookup fail.
+ 		 */
+-		printk(KERN_INFO "sdcardfs: the sbi->obbpath is not available\n");
++		pr_info("sdcardfs: the sbi->obbpath is not available\n");
+ 	}
+ 	return err;
+ }
+diff --git a/fs/sdcardfs/file.c b/fs/sdcardfs/file.c
+index 4c9726606c0f..eee4eb5896e5 100644
+--- a/fs/sdcardfs/file.c
++++ b/fs/sdcardfs/file.c
+@@ -65,7 +65,7 @@ static ssize_t sdcardfs_write(struct file *file, const char __user *buf,
+ 
+ 	/* check disk space */
+ 	if (!check_min_free_space(dentry, count, 0)) {
+-		printk(KERN_INFO "No minimum free space.\n");
++		pr_err("No minimum free space.\n");
+ 		return -ENOSPC;
+ 	}
+ 
+@@ -160,8 +160,7 @@ static int sdcardfs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	lower_file = sdcardfs_lower_file(file);
+ 	if (willwrite && !lower_file->f_mapping->a_ops->writepage) {
+ 		err = -EINVAL;
+-		printk(KERN_ERR "sdcardfs: lower file system does not "
+-		       "support writeable mmap\n");
++		pr_err("sdcardfs: lower file system does not support writeable mmap\n");
+ 		goto out;
+ 	}
+ 
+@@ -173,14 +172,14 @@ static int sdcardfs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	if (!SDCARDFS_F(file)->lower_vm_ops) {
+ 		err = lower_file->f_op->mmap(lower_file, vma);
+ 		if (err) {
+-			printk(KERN_ERR "sdcardfs: lower mmap failed %d\n", err);
++			pr_err("sdcardfs: lower mmap failed %d\n", err);
+ 			goto out;
+ 		}
+ 		saved_vm_ops = vma->vm_ops; /* save: came from lower ->mmap */
+ 		err = do_munmap(current->mm, vma->vm_start,
+ 				vma->vm_end - vma->vm_start);
+ 		if (err) {
+-			printk(KERN_ERR "sdcardfs: do_munmap failed %d\n", err);
++			pr_err("sdcardfs: do_munmap failed %d\n", err);
+ 			goto out;
+ 		}
+ 	}
+diff --git a/fs/sdcardfs/inode.c b/fs/sdcardfs/inode.c
+index bd05ed88d692..97120e85e31c 100644
+--- a/fs/sdcardfs/inode.c
++++ b/fs/sdcardfs/inode.c
+@@ -248,7 +248,7 @@ static int touch(char *abs_path, mode_t mode)
+ 		if (PTR_ERR(filp) == -EEXIST) {
+ 			return 0;
+ 		} else {
+-			printk(KERN_ERR "sdcardfs: failed to open(%s): %ld\n",
++			pr_err("sdcardfs: failed to open(%s): %ld\n",
+ 						abs_path, PTR_ERR(filp));
+ 			return PTR_ERR(filp);
+ 		}
+@@ -284,7 +284,7 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
+ 
+ 	/* check disk space */
+ 	if (!check_min_free_space(dentry, 0, 1)) {
+-		printk(KERN_INFO "sdcardfs: No minimum free space.\n");
++		pr_err("sdcardfs: No minimum free space.\n");
+ 		err = -ENOSPC;
+ 		goto out_revert;
+ 	}
+@@ -360,7 +360,7 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
+ 		set_fs_pwd(current->fs, &lower_path);
+ 		touch_err = touch(".nomedia", 0664);
+ 		if (touch_err) {
+-			printk(KERN_ERR "sdcardfs: failed to create .nomedia in %s: %d\n",
++			pr_err("sdcardfs: failed to create .nomedia in %s: %d\n",
+ 							lower_path.dentry->d_name.name, touch_err);
+ 			goto out;
+ 		}
+@@ -649,7 +649,7 @@ static int sdcardfs_permission(struct vfsmount *mnt, struct inode *inode, int ma
+ 	release_top(SDCARDFS_I(inode));
+ 	tmp.i_sb = inode->i_sb;
+ 	if (IS_POSIXACL(inode))
+-		printk(KERN_WARNING "%s: This may be undefined behavior... \n", __func__);
++		pr_warn("%s: This may be undefined behavior...\n", __func__);
+ 	err = generic_permission(&tmp, mask);
+ 	/* XXX
+ 	 * Original sdcardfs code calls inode_permission(lower_inode,.. )
+diff --git a/fs/sdcardfs/lookup.c b/fs/sdcardfs/lookup.c
+index 6de2747b636a..f028bfdebeaf 100644
+--- a/fs/sdcardfs/lookup.c
++++ b/fs/sdcardfs/lookup.c
+@@ -323,7 +323,7 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
+ 				 * because the sdcard daemon also regards this case as
+ 				 * a lookup fail.
+ 				 */
+-				printk(KERN_INFO "sdcardfs: base obbpath is not available\n");
++				pr_info("sdcardfs: base obbpath is not available\n");
+ 				sdcardfs_put_reset_orig_path(dentry);
+ 				goto out;
+ 			}
+diff --git a/fs/sdcardfs/main.c b/fs/sdcardfs/main.c
+index 95cf03379019..7344635522cd 100644
+--- a/fs/sdcardfs/main.c
++++ b/fs/sdcardfs/main.c
+@@ -117,19 +117,17 @@ static int parse_options(struct super_block *sb, char *options, int silent,
+ 			break;
+ 		/* unknown option */
+ 		default:
+-			if (!silent) {
+-				printk( KERN_ERR "Unrecognized mount option \"%s\" "
+-						"or missing value", p);
+-			}
++			if (!silent)
++				pr_err("Unrecognized mount option \"%s\" or missing value", p);
+ 			return -EINVAL;
+ 		}
+ 	}
+ 
+ 	if (*debug) {
+-		printk( KERN_INFO "sdcardfs : options - debug:%d\n", *debug);
+-		printk( KERN_INFO "sdcardfs : options - uid:%d\n",
++		pr_info("sdcardfs : options - debug:%d\n", *debug);
++		pr_info("sdcardfs : options - uid:%d\n",
+ 							opts->fs_low_uid);
+-		printk( KERN_INFO "sdcardfs : options - gid:%d\n",
++		pr_info("sdcardfs : options - gid:%d\n",
+ 							opts->fs_low_gid);
+ 	}
+ 
+@@ -175,22 +173,20 @@ int parse_options_remount(struct super_block *sb, char *options, int silent,
+ 		case Opt_fsuid:
+ 		case Opt_fsgid:
+ 		case Opt_reserved_mb:
+-			printk( KERN_WARNING "Option \"%s\" can't be changed during remount\n", p);
++			pr_warn("Option \"%s\" can't be changed during remount\n", p);
+ 			break;
+ 		/* unknown option */
+ 		default:
+-			if (!silent) {
+-				printk( KERN_ERR "Unrecognized mount option \"%s\" "
+-						"or missing value", p);
+-			}
++			if (!silent)
++				pr_err("Unrecognized mount option \"%s\" or missing value", p);
+ 			return -EINVAL;
+ 		}
+ 	}
+ 
+ 	if (debug) {
+-		printk( KERN_INFO "sdcardfs : options - debug:%d\n", debug);
+-		printk( KERN_INFO "sdcardfs : options - gid:%d\n", vfsopts->gid);
+-		printk( KERN_INFO "sdcardfs : options - mask:%d\n", vfsopts->mask);
++		pr_info("sdcardfs : options - debug:%d\n", debug);
++		pr_info("sdcardfs : options - gid:%d\n", vfsopts->gid);
++		pr_info("sdcardfs : options - mask:%d\n", vfsopts->mask);
+ 	}
+ 
+ 	return 0;
+@@ -244,31 +240,30 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
+ 	struct sdcardfs_vfsmount_options *mnt_opt = mnt->data;
+ 	struct inode *inode;
+ 
+-	printk(KERN_INFO "sdcardfs version 2.0\n");
++	pr_info("sdcardfs version 2.0\n");
+ 
+ 	if (!dev_name) {
+-		printk(KERN_ERR
+-		       "sdcardfs: read_super: missing dev_name argument\n");
++		pr_err("sdcardfs: read_super: missing dev_name argument\n");
+ 		err = -EINVAL;
+ 		goto out;
+ 	}
+ 
+-	printk(KERN_INFO "sdcardfs: dev_name -> %s\n", dev_name);
+-	printk(KERN_INFO "sdcardfs: options -> %s\n", (char *)raw_data);
+-	printk(KERN_INFO "sdcardfs: mnt -> %p\n", mnt);
++	pr_info("sdcardfs: dev_name -> %s\n", dev_name);
++	pr_info("sdcardfs: options -> %s\n", (char *)raw_data);
++	pr_info("sdcardfs: mnt -> %p\n", mnt);
+ 
+ 	/* parse lower path */
+ 	err = kern_path(dev_name, LOOKUP_FOLLOW | LOOKUP_DIRECTORY,
+ 			&lower_path);
+ 	if (err) {
+-		printk(KERN_ERR	"sdcardfs: error accessing lower directory '%s'\n", dev_name);
++		pr_err("sdcardfs: error accessing lower directory '%s'\n", dev_name);
+ 		goto out;
+ 	}
+ 
+ 	/* allocate superblock private data */
+ 	sb->s_fs_info = kzalloc(sizeof(struct sdcardfs_sb_info), GFP_KERNEL);
+ 	if (!SDCARDFS_SB(sb)) {
+-		printk(KERN_CRIT "sdcardfs: read_super: out of memory\n");
++		pr_crit("sdcardfs: read_super: out of memory\n");
+ 		err = -ENOMEM;
+ 		goto out_free;
+ 	}
+@@ -277,7 +272,7 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
+ 	/* parse options */
+ 	err = parse_options(sb, raw_data, silent, &debug, mnt_opt, &sb_info->options);
+ 	if (err) {
+-		printk(KERN_ERR	"sdcardfs: invalid options\n");
++		pr_err("sdcardfs: invalid options\n");
+ 		goto out_freesbi;
+ 	}
+ 
+@@ -347,7 +342,7 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
+ 	mutex_unlock(&sdcardfs_super_list_lock);
+ 
+ 	if (!silent)
+-		printk(KERN_INFO "sdcardfs: mounted on top of %s type %s\n",
++		pr_info("sdcardfs: mounted on top of %s type %s\n",
+ 				dev_name, lower_sb->s_type->name);
+ 	goto out; /* all is well */
+ 
+diff --git a/fs/sdcardfs/packagelist.c b/fs/sdcardfs/packagelist.c
+index cadb5fa231c1..5ea6469638d8 100644
+--- a/fs/sdcardfs/packagelist.c
++++ b/fs/sdcardfs/packagelist.c
+@@ -471,7 +471,7 @@ static void packagelist_destroy(void)
+ 	hlist_for_each_entry_safe(hash_cur, h_t, &free_list, dlist)
+ 		free_hashtable_entry(hash_cur);
+ 	mutex_unlock(&sdcardfs_super_list_lock);
+-	printk(KERN_INFO "sdcardfs: destroyed packagelist pkgld\n");
++	pr_info("sdcardfs: destroyed packagelist pkgld\n");
+ }
+ 
+ #define SDCARDFS_CONFIGFS_ATTR(_pfx, _name)			\
+@@ -587,7 +587,8 @@ static ssize_t package_details_clear_userid_store(struct config_item *item,
+ static void package_details_release(struct config_item *item)
+ {
+ 	struct package_details *package_details = to_package_details(item);
+-	printk(KERN_INFO "sdcardfs: removing %s\n", package_details->name.name);
++
++	pr_info("sdcardfs: removing %s\n", package_details->name.name);
+ 	remove_packagelist_entry(&package_details->name);
+ 	kfree(package_details->name.name);
+ 	kfree(package_details);
+@@ -639,7 +640,7 @@ static void extension_details_release(struct config_item *item)
+ {
+ 	struct extension_details *extension_details = to_extension_details(item);
+ 
+-	printk(KERN_INFO "sdcardfs: No longer mapping %s files to gid %d\n",
++	pr_info("sdcardfs: No longer mapping %s files to gid %d\n",
+ 			extension_details->name.name, extension_details->num);
+ 	remove_ext_gid_entry(&extension_details->name, extension_details->num);
+ 	kfree(extension_details->name.name);
+@@ -717,7 +718,7 @@ static void extensions_drop_group(struct config_group *group, struct config_item
+ {
+ 	struct extensions_value *value = to_extensions_value(item);
+ 
+-	printk(KERN_INFO "sdcardfs: No longer mapping any files to gid %d\n", value->num);
++	pr_info("sdcardfs: No longer mapping any files to gid %d\n", value->num);
+ 	kfree(value);
+ }
+ 
+@@ -859,7 +860,7 @@ static int configfs_sdcardfs_init(void)
+ 	mutex_init(&subsys->su_mutex);
+ 	ret = configfs_register_subsystem(subsys);
+ 	if (ret) {
+-		printk(KERN_ERR "Error %d while registering subsystem %s\n",
++		pr_err("Error %d while registering subsystem %s\n",
+ 		       ret,
+ 		       subsys->su_group.cg_item.ci_namebuf);
+ 	}
+@@ -877,7 +878,7 @@ int packagelist_init(void)
+ 		kmem_cache_create("packagelist_hashtable_entry",
+ 					sizeof(struct hashtable_entry), 0, 0, NULL);
+ 	if (!hashtable_entry_cachep) {
+-		printk(KERN_ERR "sdcardfs: failed creating pkgl_hashtable entry slab cache\n");
++		pr_err("sdcardfs: failed creating pkgl_hashtable entry slab cache\n");
+ 		return -ENOMEM;
+ 	}
+ 
+diff --git a/fs/sdcardfs/sdcardfs.h b/fs/sdcardfs/sdcardfs.h
+index 34e6f318b60d..cbeac711c396 100644
+--- a/fs/sdcardfs/sdcardfs.h
++++ b/fs/sdcardfs/sdcardfs.h
+@@ -53,7 +53,7 @@
+ #define SDCARDFS_ROOT_INO     1
+ 
+ /* useful for tracking code reachability */
+-#define UDBG printk(KERN_DEFAULT "DBG:%s:%s:%d\n", __FILE__, __func__, __LINE__)
++#define UDBG pr_default("DBG:%s:%s:%d\n", __FILE__, __func__, __LINE__)
+ 
+ #define SDCARDFS_DIRENT_SIZE 256
+ 
+diff --git a/fs/sdcardfs/super.c b/fs/sdcardfs/super.c
+index 7d3c331379f5..67b4ae24337a 100644
+--- a/fs/sdcardfs/super.c
++++ b/fs/sdcardfs/super.c
+@@ -64,7 +64,7 @@ static int sdcardfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+ 	if (sbi->options.reserved_mb) {
+ 		/* Invalid statfs informations. */
+ 		if (buf->f_bsize == 0) {
+-			printk(KERN_ERR "Returned block size is zero.\n");
++			pr_err("Returned block size is zero.\n");
+ 			return -EINVAL;
+ 		}
+ 
+@@ -100,8 +100,7 @@ static int sdcardfs_remount_fs(struct super_block *sb, int *flags, char *options
+ 	 * SILENT, but anything else left over is an error.
+ 	 */
+ 	if ((*flags & ~(MS_RDONLY | MS_MANDLOCK | MS_SILENT)) != 0) {
+-		printk(KERN_ERR
+-		       "sdcardfs: remount flags 0x%x unsupported\n", *flags);
++		pr_err("sdcardfs: remount flags 0x%x unsupported\n", *flags);
+ 		err = -EINVAL;
+ 	}
+ 
+-- 
+2.17.1
+

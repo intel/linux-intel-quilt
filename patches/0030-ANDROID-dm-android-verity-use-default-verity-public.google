@@ -1,0 +1,193 @@
+From d292a20230722cd28ab536bfc455c90c131d54de Mon Sep 17 00:00:00 2001
+From: Badhri Jagan Sridharan <Badhri@google.com>
+Date: Fri, 20 May 2016 16:45:45 -0700
+Subject: [PATCH 030/352] ANDROID: dm: android-verity: use default verity
+ public key
+
+If the dm-android-verity target does not provide a default
+key try using the default public key from the system keyring.
+The defualt verity keyid is passed as a kernel command line
+argument veritykeyid=.
+
+The order of the dm-android-verity params have been reversed
+to facilitate the change.
+
+Old format example:
+dm="system none ro,0 1 android-verity Android:#7e4333f9bba00adfe0ede979e28ed1920492b40f /dev/mmcblk0p43"
+
+New formats supported:
+dm="system none ro,0 1 android-verity /dev/mmcblk0p43 Android:#7e4333f9bba00adfe0ede979e28ed1920492b40f"
+
+(or)
+
+dm="system none ro,0 1 android-verity /dev/mmcblk0p43"
+when veritykeyid= is set in the kernel command line.
+
+BUG: 28384658
+Signed-off-by: Badhri Jagan Sridharan <Badhri@google.com>
+Change-Id: I506c89b053d835ab579e703eef2bc1f8487250de
+(cherry picked from commit c5c74d0327729f35b576564976885596c6d0e7fb)
+---
+ drivers/md/dm-android-verity.c | 67 ++++++++++++++++++++++++----------
+ drivers/md/dm-android-verity.h | 16 ++++++++
+ 2 files changed, 63 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/md/dm-android-verity.c b/drivers/md/dm-android-verity.c
+index 00275a986d03..097fb2b1de89 100644
+--- a/drivers/md/dm-android-verity.c
++++ b/drivers/md/dm-android-verity.c
+@@ -43,6 +43,7 @@
+ 
+ static char verifiedbootstate[VERITY_COMMANDLINE_PARAM_LENGTH];
+ static char veritymode[VERITY_COMMANDLINE_PARAM_LENGTH];
++static char veritykeyid[VERITY_DEFAULT_KEY_ID_LENGTH];
+ 
+ static bool target_added;
+ static bool verity_enabled = true;
+@@ -79,6 +80,19 @@ static int __init verity_mode_param(char *line)
+ 
+ __setup("androidboot.veritymode=", verity_mode_param);
+ 
++static int __init verity_keyid_param(char *line)
++{
++	strlcpy(veritykeyid, line, sizeof(veritykeyid));
++	return 1;
++}
++
++__setup("veritykeyid=", verity_keyid_param);
++
++static inline bool default_verity_key_id(void)
++{
++	return veritykeyid[0] != '\0';
++}
++
+ static int table_extract_mpi_array(struct public_key_signature *pks,
+ 				const void *data, size_t len)
+ {
+@@ -608,7 +622,7 @@ static int android_verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+ 	dev_t uninitialized_var(dev);
+ 	struct android_metadata *uninitialized_var(metadata);
+ 	int err = 0, i, mode;
+-	char *key_id, *table_ptr, dummy,
++	char *key_id, *table_ptr, dummy, *target_device,
+ 	*verity_table_args[VERITY_TABLE_ARGS + 2 + VERITY_TABLE_OPT_FEC_ARGS];
+ 	/* One for specifying number of opt args and one for mode */
+ 	sector_t data_sectors;
+@@ -619,24 +633,34 @@ static int android_verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+ 	char buf[FEC_ARG_LENGTH], *buf_ptr;
+ 	unsigned long long tmpll;
+ 
+-	if (argc != 2) {
++	if (argc == 1) {
++		/* Use the default keyid */
++		if (default_verity_key_id())
++			key_id = veritykeyid;
++		else {
++			DMERR("veritykeyid= is not set");
++			handle_error();
++			return -EINVAL;
++		}
++	} else if (argc == 2)
++		key_id = argv[1];
++	else {
+ 		DMERR("Incorrect number of arguments");
+ 		handle_error();
+ 		return -EINVAL;
+ 	}
+ 
+-	/* should come as one of the arguments for the verity target */
+-	key_id = argv[0];
+-	strreplace(argv[0], '#', ' ');
++	strreplace(key_id, '#', ' ');
++	target_device = argv[0];
+ 
+-	dev = name_to_dev_t(argv[1]);
++	dev = name_to_dev_t(target_device);
+ 	if (!dev) {
+-		DMERR("no dev found for %s", argv[1]);
++		DMERR("no dev found for %s", target_device);
+ 		handle_error();
+ 		return -EINVAL;
+ 	}
+ 
+-	DMINFO("key:%s dev:%s", argv[0], argv[1]);
++	DMINFO("key:%s dev:%s", key_id, target_device);
+ 
+ 	if (extract_fec_header(dev, &fec, &ecc)) {
+ 		DMERR("Error while extracting fec header");
+@@ -734,30 +758,33 @@ static int android_verity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+ 
+ 	/* Setup linear target and free */
+ 	if (!verity_enabled) {
+-		err = add_as_linear_device(ti, argv[1]);
++		err = add_as_linear_device(ti, target_device);
+ 		goto free_metadata;
+ 	}
+ 
+ 	/*substitute data_dev and hash_dev*/
+-	verity_table_args[1] = argv[1];
+-	verity_table_args[2] = argv[1];
++	verity_table_args[1] = target_device;
++	verity_table_args[2] = target_device;
+ 
+ 	mode = verity_mode();
+ 
+ 	if (ecc.valid && IS_BUILTIN(CONFIG_DM_VERITY_FEC)) {
+ 		if (mode) {
+ 			err = snprintf(buf, FEC_ARG_LENGTH,
+-			"%u %s " VERITY_TABLE_OPT_FEC_FORMAT,
+-			1 + VERITY_TABLE_OPT_FEC_ARGS,
+-			mode == DM_VERITY_MODE_RESTART ?
+-			VERITY_TABLE_OPT_RESTART : VERITY_TABLE_OPT_LOGGING,
+-			argv[1], ecc.start / FEC_BLOCK_SIZE, ecc.blocks,
+-			ecc.roots);
++				"%u %s " VERITY_TABLE_OPT_FEC_FORMAT,
++				1 + VERITY_TABLE_OPT_FEC_ARGS,
++				mode == DM_VERITY_MODE_RESTART ?
++					VERITY_TABLE_OPT_RESTART :
++					VERITY_TABLE_OPT_LOGGING,
++				target_device,
++				ecc.start / FEC_BLOCK_SIZE, ecc.blocks,
++				ecc.roots);
+ 		} else {
+ 			err = snprintf(buf, FEC_ARG_LENGTH,
+-			"%u " VERITY_TABLE_OPT_FEC_FORMAT,
+-			VERITY_TABLE_OPT_FEC_ARGS, argv[1],
+-			ecc.start / FEC_BLOCK_SIZE, ecc.blocks, ecc.roots);
++				"%u " VERITY_TABLE_OPT_FEC_FORMAT,
++				VERITY_TABLE_OPT_FEC_ARGS, target_device,
++				ecc.start / FEC_BLOCK_SIZE, ecc.blocks,
++				ecc.roots);
+ 		}
+ 	} else if (mode) {
+ 		err = snprintf(buf, FEC_ARG_LENGTH,
+diff --git a/drivers/md/dm-android-verity.h b/drivers/md/dm-android-verity.h
+index efb796524896..43655ee0f813 100644
+--- a/drivers/md/dm-android-verity.h
++++ b/drivers/md/dm-android-verity.h
+@@ -27,6 +27,22 @@
+ #define VERITY_TABLE_ARGS 10
+ #define VERITY_COMMANDLINE_PARAM_LENGTH 20
+ 
++/*
++ * <subject>:<sha1-id> is the format for the identifier.
++ * subject can either be the Common Name(CN) + Organization Name(O) or
++ * just the CN if the it is prefixed with O
++ * From https://tools.ietf.org/html/rfc5280#appendix-A
++ * ub-organization-name-length INTEGER ::= 64
++ * ub-common-name-length INTEGER ::= 64
++ *
++ * http://lxr.free-electrons.com/source/crypto/asymmetric_keys/x509_cert_parser.c?v=3.9#L278
++ * ctx->o_size + 2 + ctx->cn_size + 1
++ * + 41 characters for ":" and sha1 id
++ * 64 + 2 + 64 + 1 + 1 + 40 (172)
++ * setting VERITY_DEFAULT_KEY_ID_LENGTH to 200 characters.
++ */
++#define VERITY_DEFAULT_KEY_ID_LENGTH 200
++
+ #define FEC_MAGIC 0xFECFECFE
+ #define FEC_BLOCK_SIZE (4 * 1024)
+ #define FEC_VERSION 0
+-- 
+2.17.1
+

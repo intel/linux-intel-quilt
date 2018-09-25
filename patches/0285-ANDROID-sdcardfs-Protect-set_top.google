@@ -1,0 +1,234 @@
+From fc16b71d3c2a977a42ea29ee63e5b15e2d9dc56e Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Thu, 1 Feb 2018 16:52:22 -0800
+Subject: [PATCH 285/352] ANDROID: sdcardfs: Protect set_top
+
+If the top is changed while we're attempting to use it, it's
+possible that the reference will be put while we are in the
+process of grabbing a reference.
+
+Now we grab a spinlock to protect grabbing our reference count.
+
+Additionally, we now set the inode_info's top value to point to
+it's own data when initializing, which makes tracking changes
+easier.
+
+Change-Id: If15748c786ce4c0480ab8c5051a92523aff284d2
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+---
+ fs/sdcardfs/derived_perm.c | 28 +++++++++++++---------------
+ fs/sdcardfs/main.c         |  6 ++----
+ fs/sdcardfs/sdcardfs.h     | 26 ++++++++++++++++++--------
+ fs/sdcardfs/super.c        |  3 +++
+ 4 files changed, 36 insertions(+), 27 deletions(-)
+
+diff --git a/fs/sdcardfs/derived_perm.c b/fs/sdcardfs/derived_perm.c
+index fffaad4701cf..0b3b22334e54 100644
+--- a/fs/sdcardfs/derived_perm.c
++++ b/fs/sdcardfs/derived_perm.c
+@@ -32,23 +32,20 @@ static void inherit_derived_state(struct inode *parent, struct inode *child)
+ 	ci->data->under_android = pi->data->under_android;
+ 	ci->data->under_cache = pi->data->under_cache;
+ 	ci->data->under_obb = pi->data->under_obb;
+-	set_top(ci, pi->top_data);
+ }
+ 
+ /* helper function for derived state */
+ void setup_derived_state(struct inode *inode, perm_t perm, userid_t userid,
+-					uid_t uid, bool under_android,
+-					struct sdcardfs_inode_data *top)
++					uid_t uid)
+ {
+ 	struct sdcardfs_inode_info *info = SDCARDFS_I(inode);
+ 
+ 	info->data->perm = perm;
+ 	info->data->userid = userid;
+ 	info->data->d_uid = uid;
+-	info->data->under_android = under_android;
++	info->data->under_android = false;
+ 	info->data->under_cache = false;
+ 	info->data->under_obb = false;
+-	set_top(info, top);
+ }
+ 
+ /* While renaming, there is a point where we want the path from dentry,
+@@ -58,8 +55,8 @@ void get_derived_permission_new(struct dentry *parent, struct dentry *dentry,
+ 				const struct qstr *name)
+ {
+ 	struct sdcardfs_inode_info *info = SDCARDFS_I(d_inode(dentry));
+-	struct sdcardfs_inode_data *parent_data =
+-			SDCARDFS_I(d_inode(parent))->data;
++	struct sdcardfs_inode_info *parent_info = SDCARDFS_I(d_inode(parent));
++	struct sdcardfs_inode_data *parent_data = parent_info->data;
+ 	appid_t appid;
+ 	unsigned long user_num;
+ 	int err;
+@@ -80,13 +77,15 @@ void get_derived_permission_new(struct dentry *parent, struct dentry *dentry,
+ 	inherit_derived_state(d_inode(parent), d_inode(dentry));
+ 
+ 	/* Files don't get special labels */
+-	if (!S_ISDIR(d_inode(dentry)->i_mode))
++	if (!S_ISDIR(d_inode(dentry)->i_mode)) {
++		set_top(info, parent_info);
+ 		return;
++	}
+ 	/* Derive custom permissions based on parent and current node */
+ 	switch (parent_data->perm) {
+ 	case PERM_INHERIT:
+ 	case PERM_ANDROID_PACKAGE_CACHE:
+-		/* Already inherited above */
++		set_top(info, parent_info);
+ 		break;
+ 	case PERM_PRE_ROOT:
+ 		/* Legacy internal layout places users at top level */
+@@ -96,7 +95,6 @@ void get_derived_permission_new(struct dentry *parent, struct dentry *dentry,
+ 			info->data->userid = 0;
+ 		else
+ 			info->data->userid = user_num;
+-		set_top(info, info->data);
+ 		break;
+ 	case PERM_ROOT:
+ 		/* Assume masked off by default. */
+@@ -104,24 +102,24 @@ void get_derived_permission_new(struct dentry *parent, struct dentry *dentry,
+ 			/* App-specific directories inside; let anyone traverse */
+ 			info->data->perm = PERM_ANDROID;
+ 			info->data->under_android = true;
+-			set_top(info, info->data);
++		} else {
++			set_top(info, parent_info);
+ 		}
+ 		break;
+ 	case PERM_ANDROID:
+ 		if (qstr_case_eq(name, &q_data)) {
+ 			/* App-specific directories inside; let anyone traverse */
+ 			info->data->perm = PERM_ANDROID_DATA;
+-			set_top(info, info->data);
+ 		} else if (qstr_case_eq(name, &q_obb)) {
+ 			/* App-specific directories inside; let anyone traverse */
+ 			info->data->perm = PERM_ANDROID_OBB;
+ 			info->data->under_obb = true;
+-			set_top(info, info->data);
+ 			/* Single OBB directory is always shared */
+ 		} else if (qstr_case_eq(name, &q_media)) {
+ 			/* App-specific directories inside; let anyone traverse */
+ 			info->data->perm = PERM_ANDROID_MEDIA;
+-			set_top(info, info->data);
++		} else {
++			set_top(info, parent_info);
+ 		}
+ 		break;
+ 	case PERM_ANDROID_OBB:
+@@ -132,13 +130,13 @@ void get_derived_permission_new(struct dentry *parent, struct dentry *dentry,
+ 		if (appid != 0 && !is_excluded(name->name, parent_data->userid))
+ 			info->data->d_uid =
+ 				multiuser_get_uid(parent_data->userid, appid);
+-		set_top(info, info->data);
+ 		break;
+ 	case PERM_ANDROID_PACKAGE:
+ 		if (qstr_case_eq(name, &q_cache)) {
+ 			info->data->perm = PERM_ANDROID_PACKAGE_CACHE;
+ 			info->data->under_cache = true;
+ 		}
++		set_top(info, parent_info);
+ 		break;
+ 	}
+ }
+diff --git a/fs/sdcardfs/main.c b/fs/sdcardfs/main.c
+index ac27bb301c5e..e4fd3fbb05e6 100644
+--- a/fs/sdcardfs/main.c
++++ b/fs/sdcardfs/main.c
+@@ -341,13 +341,11 @@ static int sdcardfs_read_super(struct vfsmount *mnt, struct super_block *sb,
+ 	mutex_lock(&sdcardfs_super_list_lock);
+ 	if (sb_info->options.multiuser) {
+ 		setup_derived_state(d_inode(sb->s_root), PERM_PRE_ROOT,
+-				sb_info->options.fs_user_id, AID_ROOT,
+-				false, SDCARDFS_I(d_inode(sb->s_root))->data);
++				sb_info->options.fs_user_id, AID_ROOT);
+ 		snprintf(sb_info->obbpath_s, PATH_MAX, "%s/obb", dev_name);
+ 	} else {
+ 		setup_derived_state(d_inode(sb->s_root), PERM_ROOT,
+-				sb_info->options.fs_user_id, AID_ROOT,
+-				false, SDCARDFS_I(d_inode(sb->s_root))->data);
++				sb_info->options.fs_user_id, AID_ROOT);
+ 		snprintf(sb_info->obbpath_s, PATH_MAX, "%s/Android/obb", dev_name);
+ 	}
+ 	fixup_tmp_permissions(d_inode(sb->s_root));
+diff --git a/fs/sdcardfs/sdcardfs.h b/fs/sdcardfs/sdcardfs.h
+index 3da9fe94b772..610466ad153d 100644
+--- a/fs/sdcardfs/sdcardfs.h
++++ b/fs/sdcardfs/sdcardfs.h
+@@ -201,6 +201,7 @@ struct sdcardfs_inode_info {
+ 	struct sdcardfs_inode_data *data;
+ 
+ 	/* top folder for ownership */
++	spinlock_t top_lock;
+ 	struct sdcardfs_inode_data *top_data;
+ 
+ 	struct inode vfs_inode;
+@@ -380,7 +381,12 @@ static inline struct sdcardfs_inode_data *data_get(
+ static inline struct sdcardfs_inode_data *top_data_get(
+ 		struct sdcardfs_inode_info *info)
+ {
+-	return data_get(info->top_data);
++	struct sdcardfs_inode_data *top_data;
++
++	spin_lock(&info->top_lock);
++	top_data = data_get(info->top_data);
++	spin_unlock(&info->top_lock);
++	return top_data;
+ }
+ 
+ extern void data_release(struct kref *ref);
+@@ -402,15 +408,20 @@ static inline void release_own_data(struct sdcardfs_inode_info *info)
+ }
+ 
+ static inline void set_top(struct sdcardfs_inode_info *info,
+-			struct sdcardfs_inode_data *top)
++			struct sdcardfs_inode_info *top_owner)
+ {
+-	struct sdcardfs_inode_data *old_top = info->top_data;
++	struct sdcardfs_inode_data *old_top;
++	struct sdcardfs_inode_data *new_top = NULL;
++
++	if (top_owner)
++		new_top = top_data_get(top_owner);
+ 
+-	if (top)
+-		data_get(top);
+-	info->top_data = top;
++	spin_lock(&info->top_lock);
++	old_top = info->top_data;
++	info->top_data = new_top;
+ 	if (old_top)
+ 		data_put(old_top);
++	spin_unlock(&info->top_lock);
+ }
+ 
+ static inline int get_gid(struct vfsmount *mnt,
+@@ -516,8 +527,7 @@ struct limit_search {
+ };
+ 
+ extern void setup_derived_state(struct inode *inode, perm_t perm,
+-		userid_t userid, uid_t uid, bool under_android,
+-		struct sdcardfs_inode_data *top);
++			userid_t userid, uid_t uid);
+ extern void get_derived_permission(struct dentry *parent, struct dentry *dentry);
+ extern void get_derived_permission_new(struct dentry *parent, struct dentry *dentry, const struct qstr *name);
+ extern void fixup_perms_recursive(struct dentry *dentry, struct limit_search *limit);
+diff --git a/fs/sdcardfs/super.c b/fs/sdcardfs/super.c
+index 87d6f836592e..cffcdb11cb8a 100644
+--- a/fs/sdcardfs/super.c
++++ b/fs/sdcardfs/super.c
+@@ -215,6 +215,9 @@ static struct inode *sdcardfs_alloc_inode(struct super_block *sb)
+ 
+ 	i->data = d;
+ 	kref_init(&d->refcount);
++	i->top_data = d;
++	spin_lock_init(&i->top_lock);
++	kref_get(&d->refcount);
+ 
+ 	i->vfs_inode.i_version = 1;
+ 	return &i->vfs_inode;
+-- 
+2.17.1
+
