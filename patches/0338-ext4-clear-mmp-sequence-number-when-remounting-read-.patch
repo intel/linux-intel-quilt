@@ -1,0 +1,59 @@
+From 147b89c421d0c57781ec57888f379e1ca7026cbb Mon Sep 17 00:00:00 2001
+From: Theodore Ts'o <tytso@mit.edu>
+Date: Sun, 8 Jul 2018 19:36:02 -0400
+Subject: [PATCH 0338/2156] ext4: clear mmp sequence number when remounting
+ read-only
+
+[ Upstream commit 2dca60d98e241bea686004168f85208f215fc697 ]
+
+Previously, when an MMP-protected file system is remounted read-only,
+the kmmpd thread would exit the next time it woke up (a few seconds
+later), without resetting the MMP sequence number back to
+EXT4_MMP_SEQ_CLEAN.
+
+Fix this by explicitly killing the MMP thread when the file system is
+remounted read-only.
+
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+Cc: Andreas Dilger <adilger@dilger.ca>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/ext4/mmp.c   | 7 ++-----
+ fs/ext4/super.c | 2 ++
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/fs/ext4/mmp.c b/fs/ext4/mmp.c
+index 27b9a76..638ad47 100644
+--- a/fs/ext4/mmp.c
++++ b/fs/ext4/mmp.c
+@@ -186,11 +186,8 @@ static int kmmpd(void *data)
+ 			goto exit_thread;
+ 		}
+ 
+-		if (sb_rdonly(sb)) {
+-			ext4_warning(sb, "kmmpd being stopped since filesystem "
+-				     "has been remounted as readonly.");
+-			goto exit_thread;
+-		}
++		if (sb_rdonly(sb))
++			break;
+ 
+ 		diff = jiffies - last_update_time;
+ 		if (diff < mmp_update_interval * HZ)
+diff --git a/fs/ext4/super.c b/fs/ext4/super.c
+index f30d2bf..b4fb085 100644
+--- a/fs/ext4/super.c
++++ b/fs/ext4/super.c
+@@ -5163,6 +5163,8 @@ static int ext4_remount(struct super_block *sb, int *flags, char *data)
+ 
+ 			if (sbi->s_journal)
+ 				ext4_mark_recovery_complete(sb, es);
++			if (sbi->s_mmp_tsk)
++				kthread_stop(sbi->s_mmp_tsk);
+ 		} else {
+ 			/* Make sure we can mount this feature set readwrite */
+ 			if (ext4_has_feature_readonly(sb) ||
+-- 
+2.7.4
+

@@ -1,0 +1,52 @@
+From 224c0d0894ff7c3e85add1ce02a523d7f49cfdda Mon Sep 17 00:00:00 2001
+From: Joshua Frkuska <joshua_frkuska@mentor.com>
+Date: Thu, 21 Jun 2018 17:22:48 +0200
+Subject: [PATCH 0351/2156] usb: gadget: u_audio: update hw_ptr in iso_complete
+ after data copied
+
+[ Upstream commit 6b37bd78d30c890e575a1bda22978d1d2a233362 ]
+
+In u_audio_iso_complete, the runtime hw_ptr is updated before the
+data is actually copied over to/from the buffer/dma area. When
+ALSA uses this hw_ptr, the data may not actually be available to
+be used. This causes trash/stale audio to play/record. This
+patch updates the hw_ptr after the data has been copied to avoid
+this.
+
+Fixes: 132fcb460839 ("usb: gadget: Add Audio Class 2.0 Driver")
+Signed-off-by: Joshua Frkuska <joshua_frkuska@mentor.com>
+Signed-off-by: Eugeniu Rosca <erosca@de.adit-jv.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/gadget/function/u_audio.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/function/u_audio.c b/drivers/usb/gadget/function/u_audio.c
+index 429d792..725593f 100644
+--- a/drivers/usb/gadget/function/u_audio.c
++++ b/drivers/usb/gadget/function/u_audio.c
+@@ -152,7 +152,6 @@ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+ 		update_alsa = true;
+ 
+ 	hw_ptr = prm->hw_ptr;
+-	prm->hw_ptr = (prm->hw_ptr + req->actual) % prm->dma_bytes;
+ 
+ 	spin_unlock_irqrestore(&prm->lock, flags);
+ 
+@@ -177,6 +176,11 @@ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+ 		}
+ 	}
+ 
++	spin_lock_irqsave(&prm->lock, flags);
++	/* update hw_ptr after data is copied to memory */
++	prm->hw_ptr = (hw_ptr + req->actual) % prm->dma_bytes;
++	spin_unlock_irqrestore(&prm->lock, flags);
++
+ exit:
+ 	if (usb_ep_queue(ep, req, GFP_ATOMIC))
+ 		dev_err(uac->card->dev, "%d Error!\n", __LINE__);
+-- 
+2.7.4
+

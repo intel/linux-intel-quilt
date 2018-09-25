@@ -1,0 +1,52 @@
+From 979c7c0dd75da54f6e336536c8e3cc4717ec67d7 Mon Sep 17 00:00:00 2001
+From: Zhenzhong Duan <zhenzhong.duan@oracle.com>
+Date: Mon, 2 Jul 2018 23:49:54 -0700
+Subject: [PATCH 0242/2156] x86/mm/32: Initialize the CR4 shadow before
+ __flush_tlb_all()
+
+[ Upstream commit 4fb5f58e8d191f7c81637ad81284e4848afb4244 ]
+
+On 32-bit kernels, __flush_tlb_all() may have read the CR4 shadow before the
+initialization of CR4 shadow in cpu_init().
+
+Fix it by adding an explicit cr4_init_shadow() call into start_secondary()
+which is the first function called on non-boot SMP CPUs - ahead of the
+__flush_tlb_all() call.
+
+( This is somewhat of a layering violation, but start_secondary() does
+  CR4 bootstrap in the PCID case anyway. )
+
+Signed-off-by: Zhenzhong Duan <zhenzhong.duan@oracle.com>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: "H. Peter Anvin" <hpa@zytor.com>
+Link: http://lkml.kernel.org/r/b07b6ae9-4b57-4b40-b9bc-50c2c67f1d91@default
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/x86/kernel/smpboot.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/x86/kernel/smpboot.c b/arch/x86/kernel/smpboot.c
+index 5ebb0db..30447d21 100644
+--- a/arch/x86/kernel/smpboot.c
++++ b/arch/x86/kernel/smpboot.c
+@@ -223,6 +223,11 @@ static void notrace start_secondary(void *unused)
+ #ifdef CONFIG_X86_32
+ 	/* switch away from the initial page table */
+ 	load_cr3(swapper_pg_dir);
++	/*
++	 * Initialize the CR4 shadow before doing anything that could
++	 * try to read it.
++	 */
++	cr4_init_shadow();
+ 	__flush_tlb_all();
+ #endif
+ 	load_current_idt();
+-- 
+2.7.4
+

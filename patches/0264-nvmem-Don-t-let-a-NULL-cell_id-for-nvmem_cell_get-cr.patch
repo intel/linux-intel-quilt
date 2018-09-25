@@ -1,0 +1,79 @@
+From 1b8f1ab088baa4cb29c1373d529955786be8fdc1 Mon Sep 17 00:00:00 2001
+From: Douglas Anderson <dianders@chromium.org>
+Date: Mon, 18 Jun 2018 18:30:43 +0100
+Subject: [PATCH 0264/2156] nvmem: Don't let a NULL cell_id for
+ nvmem_cell_get() crash us
+
+[ Upstream commit 87ed1405ef09d29a14df43295f7b6a93b63bfe6e ]
+
+In commit ca04d9d3e1b1 ("phy: qcom-qusb2: New driver for QUSB2 PHY on
+Qcom chips") you can see a call like:
+
+  devm_nvmem_cell_get(dev, NULL);
+
+Note that the cell ID passed to the function is NULL.  This is because
+the qcom-qusb2 driver is expected to work only on systems where the
+PHY node is hooked up via device-tree and is nameless.
+
+This works OK for the most part.  The first thing nvmem_cell_get()
+does is to call of_nvmem_cell_get() and there it's documented that a
+NULL name is fine.  The problem happens when the call to
+of_nvmem_cell_get() returns -EINVAL.  In such a case we'll fall back
+to nvmem_cell_get_from_list() and eventually might (if nvmem_cells
+isn't an empty list) crash with something that looks like:
+
+ strcmp
+ nvmem_find_cell
+ __nvmem_device_get
+ nvmem_cell_get_from_list
+ nvmem_cell_get
+ devm_nvmem_cell_get
+ qusb2_phy_probe
+
+There are several different ways we could fix this problem:
+
+One could argue that perhaps the qcom-qusb2 driver should be changed
+to use of_nvmem_cell_get() which is allowed to have a NULL name.  In
+that case, we'd need to add a patche to introduce
+devm_of_nvmem_cell_get() since the qcom-qusb2 driver is using devm
+managed resources.
+
+One could also argue that perhaps we could just add a name to
+qcom-qusb2.  That would be OK but I believe it effectively changes the
+device tree bindings, so maybe it's a no-go.
+
+In this patch I have chosen to fix the problem by simply not crashing
+when a NULL cell_id is passed to nvmem_cell_get().
+
+NOTE: that for the qcom-qusb2 driver the "nvmem-cells" property is
+defined to be optional and thus it's expected to be a common case that
+we would hit this crash and this is more than just a theoretical fix.
+
+Fixes: ca04d9d3e1b1 ("phy: qcom-qusb2: New driver for QUSB2 PHY on Qcom chips")
+Signed-off-by: Douglas Anderson <dianders@chromium.org>
+Signed-off-by: Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/nvmem/core.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/nvmem/core.c b/drivers/nvmem/core.c
+index 2afafd5..635886e 100644
+--- a/drivers/nvmem/core.c
++++ b/drivers/nvmem/core.c
+@@ -865,6 +865,10 @@ struct nvmem_cell *nvmem_cell_get(struct device *dev, const char *cell_id)
+ 			return cell;
+ 	}
+ 
++	/* NULL cell_id only allowed for device tree; invalid otherwise */
++	if (!cell_id)
++		return ERR_PTR(-EINVAL);
++
+ 	return nvmem_cell_get_from_list(cell_id);
+ }
+ EXPORT_SYMBOL_GPL(nvmem_cell_get);
+-- 
+2.7.4
+

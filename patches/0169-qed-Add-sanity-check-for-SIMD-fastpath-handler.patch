@@ -1,0 +1,48 @@
+From 3b29b09a53abd1c8c9d32a8129a47372a93dd15a Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Mon, 18 Jun 2018 21:58:01 -0700
+Subject: [PATCH 0169/2156] qed: Add sanity check for SIMD fastpath handler.
+
+[ Upstream commit 3935a70968820c3994db4de7e6e1c7e814bff875 ]
+
+Avoid calling a SIMD fastpath handler if it is NULL. The check is needed
+to handle an unlikely scenario where unsolicited interrupt is destined to
+a PF in INTa mode.
+
+Fixes: fe56b9e6a ("qed: Add module with basic common support")
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: Michal Kalderon <Michal.Kalderon@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/qlogic/qed/qed_main.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/qlogic/qed/qed_main.c b/drivers/net/ethernet/qlogic/qed/qed_main.c
+index 2c95892..954f7ce 100644
+--- a/drivers/net/ethernet/qlogic/qed/qed_main.c
++++ b/drivers/net/ethernet/qlogic/qed/qed_main.c
+@@ -565,8 +565,16 @@ static irqreturn_t qed_single_int(int irq, void *dev_instance)
+ 		/* Fastpath interrupts */
+ 		for (j = 0; j < 64; j++) {
+ 			if ((0x2ULL << j) & status) {
+-				hwfn->simd_proto_handler[j].func(
+-					hwfn->simd_proto_handler[j].token);
++				struct qed_simd_fp_handler *p_handler =
++					&hwfn->simd_proto_handler[j];
++
++				if (p_handler->func)
++					p_handler->func(p_handler->token);
++				else
++					DP_NOTICE(hwfn,
++						  "Not calling fastpath handler as it is NULL [handler #%d, status 0x%llx]\n",
++						  j, status);
++
+ 				status &= ~(0x2ULL << j);
+ 				rc = IRQ_HANDLED;
+ 			}
+-- 
+2.7.4
+

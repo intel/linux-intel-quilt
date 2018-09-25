@@ -1,0 +1,93 @@
+From 3bbb0484a7317707243306352ad5457f64104d68 Mon Sep 17 00:00:00 2001
+From: Taeung Song <treeze.taeung@gmail.com>
+Date: Wed, 4 Jul 2018 22:36:37 +0900
+Subject: [PATCH 0252/2156] samples/bpf: Check the result of system()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[ Upstream commit 492b7e894587c151be681f86d4d1d086375f7b45 ]
+
+To avoid the below build warning message,
+use new generate_load() checking the return value.
+
+  ignoring return value of ‘system’, declared with attribute warn_unused_result
+
+And it also refactors the duplicate code of both
+test_perf_event_all_cpu() and test_perf_event_task()
+
+Cc: Teng Qin <qinteng@fb.com>
+Signed-off-by: Taeung Song <treeze.taeung@gmail.com>
+Acked-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ samples/bpf/trace_event_user.c | 27 ++++++++++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/samples/bpf/trace_event_user.c b/samples/bpf/trace_event_user.c
+index 7bd827b..c7d525e 100644
+--- a/samples/bpf/trace_event_user.c
++++ b/samples/bpf/trace_event_user.c
+@@ -121,6 +121,16 @@ static void print_stacks(void)
+ 	}
+ }
+ 
++static inline int generate_load(void)
++{
++	if (system("dd if=/dev/zero of=/dev/null count=5000k status=none") < 0) {
++		printf("failed to generate some load with dd: %s\n", strerror(errno));
++		return -1;
++	}
++
++	return 0;
++}
++
+ static void test_perf_event_all_cpu(struct perf_event_attr *attr)
+ {
+ 	int nr_cpus = sysconf(_SC_NPROCESSORS_CONF);
+@@ -138,7 +148,11 @@ static void test_perf_event_all_cpu(struct perf_event_attr *attr)
+ 		assert(ioctl(pmu_fd[i], PERF_EVENT_IOC_SET_BPF, prog_fd[0]) == 0);
+ 		assert(ioctl(pmu_fd[i], PERF_EVENT_IOC_ENABLE) == 0);
+ 	}
+-	system("dd if=/dev/zero of=/dev/null count=5000k status=none");
++
++	if (generate_load() < 0) {
++		error = 1;
++		goto all_cpu_err;
++	}
+ 	print_stacks();
+ all_cpu_err:
+ 	for (i--; i >= 0; i--) {
+@@ -152,7 +166,7 @@ static void test_perf_event_all_cpu(struct perf_event_attr *attr)
+ 
+ static void test_perf_event_task(struct perf_event_attr *attr)
+ {
+-	int pmu_fd;
++	int pmu_fd, error = 0;
+ 
+ 	/* open task bound event */
+ 	pmu_fd = sys_perf_event_open(attr, 0, -1, -1, 0);
+@@ -162,10 +176,17 @@ static void test_perf_event_task(struct perf_event_attr *attr)
+ 	}
+ 	assert(ioctl(pmu_fd, PERF_EVENT_IOC_SET_BPF, prog_fd[0]) == 0);
+ 	assert(ioctl(pmu_fd, PERF_EVENT_IOC_ENABLE) == 0);
+-	system("dd if=/dev/zero of=/dev/null count=5000k status=none");
++
++	if (generate_load() < 0) {
++		error = 1;
++		goto err;
++	}
+ 	print_stacks();
++err:
+ 	ioctl(pmu_fd, PERF_EVENT_IOC_DISABLE);
+ 	close(pmu_fd);
++	if (error)
++		int_exit(0);
+ }
+ 
+ static void test_bpf_perf_event(void)
+-- 
+2.7.4
+

@@ -1,0 +1,148 @@
+From 9b0b625841d89e94f7c5321a2bfe8ccbea8b8bb1 Mon Sep 17 00:00:00 2001
+From: Doron Roberts-Kedes <doronrk@fb.com>
+Date: Fri, 15 Jun 2018 14:05:32 -0700
+Subject: [PATCH 0178/2156] nbd: Add the nbd NBD_DISCONNECT_ON_CLOSE config
+ flag.
+
+[ Upstream commit 08ba91ee6e2c1c08d3f0648f978cbb5dbf3491d8 ]
+
+If NBD_DISCONNECT_ON_CLOSE is set on a device, then the driver will
+issue a disconnect from nbd_release if the device has no remaining
+bdev->bd_openers.
+
+Fix ret val so reconfigure with only setting the flag succeeds.
+
+Reviewed-by: Josef Bacik <josef@toxicpanda.com>
+Signed-off-by: Doron Roberts-Kedes <doronrk@fb.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/block/nbd.c      | 40 +++++++++++++++++++++++++++++++++-------
+ include/uapi/linux/nbd.h |  3 +++
+ 2 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/block/nbd.c b/drivers/block/nbd.c
+index 6fb64e7..5feba04 100644
+--- a/drivers/block/nbd.c
++++ b/drivers/block/nbd.c
+@@ -76,6 +76,7 @@ struct link_dead_args {
+ #define NBD_HAS_CONFIG_REF		4
+ #define NBD_BOUND			5
+ #define NBD_DESTROY_ON_DISCONNECT	6
++#define NBD_DISCONNECT_ON_CLOSE 	7
+ 
+ struct nbd_config {
+ 	u32 flags;
+@@ -138,6 +139,7 @@ static void nbd_config_put(struct nbd_device *nbd);
+ static void nbd_connect_reply(struct genl_info *info, int index);
+ static int nbd_genl_status(struct sk_buff *skb, struct genl_info *info);
+ static void nbd_dead_link_work(struct work_struct *work);
++static void nbd_disconnect_and_put(struct nbd_device *nbd);
+ 
+ static inline struct device *nbd_to_dev(struct nbd_device *nbd)
+ {
+@@ -1291,6 +1293,12 @@ static int nbd_open(struct block_device *bdev, fmode_t mode)
+ static void nbd_release(struct gendisk *disk, fmode_t mode)
+ {
+ 	struct nbd_device *nbd = disk->private_data;
++	struct block_device *bdev = bdget_disk(disk, 0);
++
++	if (test_bit(NBD_DISCONNECT_ON_CLOSE, &nbd->config->runtime_flags) &&
++			bdev->bd_openers == 0)
++		nbd_disconnect_and_put(nbd);
++
+ 	nbd_config_put(nbd);
+ 	nbd_put(nbd);
+ }
+@@ -1690,6 +1698,10 @@ static int nbd_genl_connect(struct sk_buff *skb, struct genl_info *info)
+ 				&config->runtime_flags);
+ 			put_dev = true;
+ 		}
++		if (flags & NBD_CFLAG_DISCONNECT_ON_CLOSE) {
++			set_bit(NBD_DISCONNECT_ON_CLOSE,
++				&config->runtime_flags);
++		}
+ 	}
+ 
+ 	if (info->attrs[NBD_ATTR_SOCKETS]) {
+@@ -1734,6 +1746,16 @@ static int nbd_genl_connect(struct sk_buff *skb, struct genl_info *info)
+ 	return ret;
+ }
+ 
++static void nbd_disconnect_and_put(struct nbd_device *nbd)
++{
++	mutex_lock(&nbd->config_lock);
++	nbd_disconnect(nbd);
++	mutex_unlock(&nbd->config_lock);
++	if (test_and_clear_bit(NBD_HAS_CONFIG_REF,
++			       &nbd->config->runtime_flags))
++		nbd_config_put(nbd);
++}
++
+ static int nbd_genl_disconnect(struct sk_buff *skb, struct genl_info *info)
+ {
+ 	struct nbd_device *nbd;
+@@ -1766,12 +1788,7 @@ static int nbd_genl_disconnect(struct sk_buff *skb, struct genl_info *info)
+ 		nbd_put(nbd);
+ 		return 0;
+ 	}
+-	mutex_lock(&nbd->config_lock);
+-	nbd_disconnect(nbd);
+-	mutex_unlock(&nbd->config_lock);
+-	if (test_and_clear_bit(NBD_HAS_CONFIG_REF,
+-			       &nbd->config->runtime_flags))
+-		nbd_config_put(nbd);
++	nbd_disconnect_and_put(nbd);
+ 	nbd_config_put(nbd);
+ 	nbd_put(nbd);
+ 	return 0;
+@@ -1782,7 +1799,7 @@ static int nbd_genl_reconfigure(struct sk_buff *skb, struct genl_info *info)
+ 	struct nbd_device *nbd = NULL;
+ 	struct nbd_config *config;
+ 	int index;
+-	int ret = -EINVAL;
++	int ret = 0;
+ 	bool put_dev = false;
+ 
+ 	if (!netlink_capable(skb, CAP_SYS_ADMIN))
+@@ -1822,6 +1839,7 @@ static int nbd_genl_reconfigure(struct sk_buff *skb, struct genl_info *info)
+ 	    !nbd->task_recv) {
+ 		dev_err(nbd_to_dev(nbd),
+ 			"not configured, cannot reconfigure\n");
++		ret = -EINVAL;
+ 		goto out;
+ 	}
+ 
+@@ -1846,6 +1864,14 @@ static int nbd_genl_reconfigure(struct sk_buff *skb, struct genl_info *info)
+ 					       &config->runtime_flags))
+ 				refcount_inc(&nbd->refs);
+ 		}
++
++		if (flags & NBD_CFLAG_DISCONNECT_ON_CLOSE) {
++			set_bit(NBD_DISCONNECT_ON_CLOSE,
++					&config->runtime_flags);
++		} else {
++			clear_bit(NBD_DISCONNECT_ON_CLOSE,
++					&config->runtime_flags);
++		}
+ 	}
+ 
+ 	if (info->attrs[NBD_ATTR_SOCKETS]) {
+diff --git a/include/uapi/linux/nbd.h b/include/uapi/linux/nbd.h
+index 85a3fb6..20d6cc9 100644
+--- a/include/uapi/linux/nbd.h
++++ b/include/uapi/linux/nbd.h
+@@ -53,6 +53,9 @@ enum {
+ /* These are client behavior specific flags. */
+ #define NBD_CFLAG_DESTROY_ON_DISCONNECT	(1 << 0) /* delete the nbd device on
+ 						    disconnect. */
++#define NBD_CFLAG_DISCONNECT_ON_CLOSE (1 << 1) /* disconnect the nbd device on
++						*  close by last opener.
++						*/
+ 
+ /* userspace doesn't need the nbd_device structure */
+ 
+-- 
+2.7.4
+

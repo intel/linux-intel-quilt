@@ -1,0 +1,71 @@
+From d35cc7ed2cfe509520ed4ed93f91121c41f478a6 Mon Sep 17 00:00:00 2001
+From: Tommi Rantala <tommi.t.rantala@nokia.com>
+Date: Thu, 21 Jun 2018 09:30:47 +0300
+Subject: [PATCH 0334/2156] xfrm: fix missing dst_release() after policy
+ blocking lbcast and multicast
+
+[ Upstream commit 8cc88773855f988d6a3bbf102bbd9dd9c828eb81 ]
+
+Fix missing dst_release() when local broadcast or multicast traffic is
+xfrm policy blocked.
+
+For IPv4 this results to dst leak: ip_route_output_flow() allocates
+dst_entry via __ip_route_output_key() and passes it to
+xfrm_lookup_route(). xfrm_lookup returns ERR_PTR(-EPERM) that is
+propagated. The dst that was allocated is never released.
+
+IPv4 local broadcast testcase:
+ ping -b 192.168.1.255 &
+ sleep 1
+ ip xfrm policy add src 0.0.0.0/0 dst 192.168.1.255/32 dir out action block
+
+IPv4 multicast testcase:
+ ping 224.0.0.1 &
+ sleep 1
+ ip xfrm policy add src 0.0.0.0/0 dst 224.0.0.1/32 dir out action block
+
+For IPv6 the missing dst_release() causes trouble e.g. when used in netns:
+ ip netns add TEST
+ ip netns exec TEST ip link set lo up
+ ip link add dummy0 type dummy
+ ip link set dev dummy0 netns TEST
+ ip netns exec TEST ip addr add fd00::1111 dev dummy0
+ ip netns exec TEST ip link set dummy0 up
+ ip netns exec TEST ping -6 -c 5 ff02::1%dummy0 &
+ sleep 1
+ ip netns exec TEST ip xfrm policy add src ::/0 dst ff02::1 dir out action block
+ wait
+ ip netns del TEST
+
+After netns deletion we see:
+[  258.239097] unregister_netdevice: waiting for lo to become free. Usage count = 2
+[  268.279061] unregister_netdevice: waiting for lo to become free. Usage count = 2
+[  278.367018] unregister_netdevice: waiting for lo to become free. Usage count = 2
+[  288.375259] unregister_netdevice: waiting for lo to become free. Usage count = 2
+
+Fixes: ac37e2515c1a ("xfrm: release dst_orig in case of error in xfrm_lookup()")
+Signed-off-by: Tommi Rantala <tommi.t.rantala@nokia.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/xfrm/xfrm_policy.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/net/xfrm/xfrm_policy.c b/net/xfrm/xfrm_policy.c
+index 9c57d6a..a6c0027 100644
+--- a/net/xfrm/xfrm_policy.c
++++ b/net/xfrm/xfrm_policy.c
+@@ -2285,6 +2285,9 @@ struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
+ 	if (IS_ERR(dst) && PTR_ERR(dst) == -EREMOTE)
+ 		return make_blackhole(net, dst_orig->ops->family, dst_orig);
+ 
++	if (IS_ERR(dst))
++		dst_release(dst_orig);
++
+ 	return dst;
+ }
+ EXPORT_SYMBOL(xfrm_lookup_route);
+-- 
+2.7.4
+

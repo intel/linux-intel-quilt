@@ -1,0 +1,73 @@
+From 9ac1a4644bb8ff4343f9424ab6b3ab6db0f86c4a Mon Sep 17 00:00:00 2001
+From: Varun Prakash <varun@chelsio.com>
+Date: Wed, 11 Jul 2018 22:09:52 +0530
+Subject: [PATCH 0342/2156] scsi: libiscsi: fix possible NULL pointer
+ dereference in case of TMF
+
+[ Upstream commit a17037e7d59075053b522048742a08ac9500bde8 ]
+
+In iscsi_check_tmf_restrictions() task->hdr is dereferenced to print the
+opcode, it is possible that task->hdr is NULL.
+
+There are two cases based on opcode argument:
+
+1. ISCSI_OP_SCSI_CMD - In this case alloc_pdu() is called
+after iscsi_check_tmf_restrictions()
+
+iscsi_prep_scsi_cmd_pdu() -> iscsi_check_tmf_restrictions() -> alloc_pdu().
+
+Transport drivers allocate memory for iSCSI hdr in alloc_pdu() and assign
+it to task->hdr. In case of TMF task->hdr will be NULL resulting in NULL
+pointer dereference.
+
+2. ISCSI_OP_SCSI_DATA_OUT - In this case transport driver can free the
+memory for iSCSI hdr after transmitting the pdu so task->hdr can be NULL or
+invalid.
+
+This patch fixes this issue by removing task->hdr->opcode from the printk
+statement.
+
+Signed-off-by: Varun Prakash <varun@chelsio.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/scsi/libiscsi.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/scsi/libiscsi.c b/drivers/scsi/libiscsi.c
+index bddbe2d..cf8a15e 100644
+--- a/drivers/scsi/libiscsi.c
++++ b/drivers/scsi/libiscsi.c
+@@ -284,11 +284,11 @@ static int iscsi_check_tmf_restrictions(struct iscsi_task *task, int opcode)
+ 		 */
+ 		if (opcode != ISCSI_OP_SCSI_DATA_OUT) {
+ 			iscsi_conn_printk(KERN_INFO, conn,
+-					  "task [op %x/%x itt "
++					  "task [op %x itt "
+ 					  "0x%x/0x%x] "
+ 					  "rejected.\n",
+-					  task->hdr->opcode, opcode,
+-					  task->itt, task->hdr_itt);
++					  opcode, task->itt,
++					  task->hdr_itt);
+ 			return -EACCES;
+ 		}
+ 		/*
+@@ -297,10 +297,10 @@ static int iscsi_check_tmf_restrictions(struct iscsi_task *task, int opcode)
+ 		 */
+ 		if (conn->session->fast_abort) {
+ 			iscsi_conn_printk(KERN_INFO, conn,
+-					  "task [op %x/%x itt "
++					  "task [op %x itt "
+ 					  "0x%x/0x%x] fast abort.\n",
+-					  task->hdr->opcode, opcode,
+-					  task->itt, task->hdr_itt);
++					  opcode, task->itt,
++					  task->hdr_itt);
+ 			return -EACCES;
+ 		}
+ 		break;
+-- 
+2.7.4
+

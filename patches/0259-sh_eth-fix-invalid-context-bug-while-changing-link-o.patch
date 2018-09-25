@@ -1,0 +1,126 @@
+From 7947dc71b9ded5d01fda11580fe540c7fee45278 Mon Sep 17 00:00:00 2001
+From: Vladimir Zapolskiy <vladimir_zapolskiy@mentor.com>
+Date: Wed, 4 Jul 2018 11:12:40 +0300
+Subject: [PATCH 0259/2156] sh_eth: fix invalid context bug while changing link
+ options by ethtool
+
+[ Upstream commit 5cb3f52a11e18628fc4bee76dd14b1f0b76349de ]
+
+The change fixes sleep in atomic context bug, which is encountered
+every time when link settings are changed by ethtool.
+
+Since commit 35b5f6b1a82b ("PHYLIB: Locking fixes for PHY I/O
+potentially sleeping") phy_start_aneg() function utilizes a mutex
+to serialize changes to phy state, however that helper function is
+called in atomic context under a grabbed spinlock, because
+phy_start_aneg() is called by phy_ethtool_ksettings_set() and by
+replaced phy_ethtool_sset() helpers from phylib.
+
+Now duplex mode setting is enforced in sh_eth_adjust_link() only,
+also now RX/TX is disabled when link is put down or modifications
+to E-MAC registers ECMR and GECMR are expected for both cases of
+checked and ignored link status pin state from E-MAC interrupt handler.
+
+For reference the change is a partial rework of commit 1e1b812bbe10
+("sh_eth: fix handling of no LINK signal").
+
+Fixes: dc19e4e5e02f ("sh: sh_eth: Add support ethtool")
+Signed-off-by: Vladimir Zapolskiy <vladimir_zapolskiy@mentor.com>
+Reviewed-by: Sergei Shtylyov <sergei.shtylyov@cogentembedded.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/renesas/sh_eth.c | 49 +++++++++++------------------------
+ 1 file changed, 15 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/net/ethernet/renesas/sh_eth.c b/drivers/net/ethernet/renesas/sh_eth.c
+index 22adaa16..abfb9fa 100644
+--- a/drivers/net/ethernet/renesas/sh_eth.c
++++ b/drivers/net/ethernet/renesas/sh_eth.c
+@@ -1821,8 +1821,15 @@ static void sh_eth_adjust_link(struct net_device *ndev)
+ {
+ 	struct sh_eth_private *mdp = netdev_priv(ndev);
+ 	struct phy_device *phydev = ndev->phydev;
++	unsigned long flags;
+ 	int new_state = 0;
+ 
++	spin_lock_irqsave(&mdp->lock, flags);
++
++	/* Disable TX and RX right over here, if E-MAC change is ignored */
++	if (mdp->cd->no_psr || mdp->no_ether_link)
++		sh_eth_rcv_snd_disable(ndev);
++
+ 	if (phydev->link) {
+ 		if (phydev->duplex != mdp->duplex) {
+ 			new_state = 1;
+@@ -1841,18 +1848,21 @@ static void sh_eth_adjust_link(struct net_device *ndev)
+ 			sh_eth_modify(ndev, ECMR, ECMR_TXF, 0);
+ 			new_state = 1;
+ 			mdp->link = phydev->link;
+-			if (mdp->cd->no_psr || mdp->no_ether_link)
+-				sh_eth_rcv_snd_enable(ndev);
+ 		}
+ 	} else if (mdp->link) {
+ 		new_state = 1;
+ 		mdp->link = 0;
+ 		mdp->speed = 0;
+ 		mdp->duplex = -1;
+-		if (mdp->cd->no_psr || mdp->no_ether_link)
+-			sh_eth_rcv_snd_disable(ndev);
+ 	}
+ 
++	/* Enable TX and RX right over here, if E-MAC change is ignored */
++	if ((mdp->cd->no_psr || mdp->no_ether_link) && phydev->link)
++		sh_eth_rcv_snd_enable(ndev);
++
++	mmiowb();
++	spin_unlock_irqrestore(&mdp->lock, flags);
++
+ 	if (new_state && netif_msg_link(mdp))
+ 		phy_print_status(phydev);
+ }
+@@ -1933,39 +1943,10 @@ static int sh_eth_get_link_ksettings(struct net_device *ndev,
+ static int sh_eth_set_link_ksettings(struct net_device *ndev,
+ 				     const struct ethtool_link_ksettings *cmd)
+ {
+-	struct sh_eth_private *mdp = netdev_priv(ndev);
+-	unsigned long flags;
+-	int ret;
+-
+ 	if (!ndev->phydev)
+ 		return -ENODEV;
+ 
+-	spin_lock_irqsave(&mdp->lock, flags);
+-
+-	/* disable tx and rx */
+-	sh_eth_rcv_snd_disable(ndev);
+-
+-	ret = phy_ethtool_ksettings_set(ndev->phydev, cmd);
+-	if (ret)
+-		goto error_exit;
+-
+-	if (cmd->base.duplex == DUPLEX_FULL)
+-		mdp->duplex = 1;
+-	else
+-		mdp->duplex = 0;
+-
+-	if (mdp->cd->set_duplex)
+-		mdp->cd->set_duplex(ndev);
+-
+-error_exit:
+-	mdelay(1);
+-
+-	/* enable tx and rx */
+-	sh_eth_rcv_snd_enable(ndev);
+-
+-	spin_unlock_irqrestore(&mdp->lock, flags);
+-
+-	return ret;
++	return phy_ethtool_ksettings_set(ndev->phydev, cmd);
+ }
+ 
+ /* If it is ever necessary to increase SH_ETH_REG_DUMP_MAX_REGS, the
+-- 
+2.7.4
+

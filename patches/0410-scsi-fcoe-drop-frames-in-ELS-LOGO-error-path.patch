@@ -1,0 +1,59 @@
+From a67aef68ef24aaa11317662768733c2390e78d07 Mon Sep 17 00:00:00 2001
+From: Johannes Thumshirn <jthumshirn@suse.de>
+Date: Tue, 31 Jul 2018 15:46:02 +0200
+Subject: [PATCH 0410/2156] scsi: fcoe: drop frames in ELS LOGO error path
+
+[ Upstream commit 63d0e3dffda311e77b9a8c500d59084e960a824a ]
+
+Drop the frames in the ELS LOGO error path instead of just returning an
+error.
+
+This fixes the following kmemleak report:
+unreferenced object 0xffff880064cb1000 (size 424):
+  comm "kworker/0:2", pid 24, jiffies 4294904293 (age 68.504s)
+  hex dump (first 32 bytes):
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................
+  backtrace:
+    [<(____ptrval____)>] _fc_frame_alloc+0x2c/0x180 [libfc]
+    [<(____ptrval____)>] fc_lport_enter_logo+0x106/0x360 [libfc]
+    [<(____ptrval____)>] fc_fabric_logoff+0x8c/0xc0 [libfc]
+    [<(____ptrval____)>] fcoe_if_destroy+0x79/0x3b0 [fcoe]
+    [<(____ptrval____)>] fcoe_destroy_work+0xd2/0x170 [fcoe]
+    [<(____ptrval____)>] process_one_work+0x7ff/0x1420
+    [<(____ptrval____)>] worker_thread+0x87/0xef0
+    [<(____ptrval____)>] kthread+0x2db/0x390
+    [<(____ptrval____)>] ret_from_fork+0x35/0x40
+    [<(____ptrval____)>] 0xffffffffffffffff
+
+which can be triggered by issuing
+echo eth0 > /sys/bus/fcoe/ctlr_destroy
+
+Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+Reviewed-by: Hannes Reinecke <hare@suse.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/scsi/fcoe/fcoe_ctlr.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/scsi/fcoe/fcoe_ctlr.c b/drivers/scsi/fcoe/fcoe_ctlr.c
+index d38bda3..03019e0 100644
+--- a/drivers/scsi/fcoe/fcoe_ctlr.c
++++ b/drivers/scsi/fcoe/fcoe_ctlr.c
+@@ -754,9 +754,9 @@ int fcoe_ctlr_els_send(struct fcoe_ctlr *fip, struct fc_lport *lport,
+ 	case ELS_LOGO:
+ 		if (fip->mode == FIP_MODE_VN2VN) {
+ 			if (fip->state != FIP_ST_VNMP_UP)
+-				return -EINVAL;
++				goto drop;
+ 			if (ntoh24(fh->fh_d_id) == FC_FID_FLOGI)
+-				return -EINVAL;
++				goto drop;
+ 		} else {
+ 			if (fip->state != FIP_ST_ENABLED)
+ 				return 0;
+-- 
+2.7.4
+

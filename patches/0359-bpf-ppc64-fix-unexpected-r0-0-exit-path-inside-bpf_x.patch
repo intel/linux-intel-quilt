@@ -1,0 +1,101 @@
+From e3476a6da5d87215ca6e1c9629fec6b5e73c785d Mon Sep 17 00:00:00 2001
+From: Daniel Borkmann <daniel@iogearbox.net>
+Date: Thu, 19 Jul 2018 18:18:35 +0200
+Subject: [PATCH 0359/2156] bpf, ppc64: fix unexpected r0=0 exit path inside
+ bpf_xadd
+
+[ Upstream commit b9c1e60e7bf4e64ac1b4f4d6d593f0bb57886973 ]
+
+None of the JITs is allowed to implement exit paths from the BPF
+insn mappings other than BPF_JMP | BPF_EXIT. In the BPF core code
+we have a couple of rewrites in eBPF (e.g. LD_ABS / LD_IND) and
+in eBPF to cBPF translation to retain old existing behavior where
+exceptions may occur; they are also tightly controlled by the
+verifier where it disallows some of the features such as BPF to
+BPF calls when legacy LD_ABS / LD_IND ops are present in the BPF
+program. During recent review of all BPF_XADD JIT implementations
+I noticed that the ppc64 one is buggy in that it contains two
+jumps to exit paths. This is problematic as this can bypass verifier
+expectations e.g. pointed out in commit f6b1b3bf0d5f ("bpf: fix
+subprog verifier bypass by div/mod by 0 exception"). The first
+exit path is obsoleted by the fix in ca36960211eb ("bpf: allow xadd
+only on aligned memory") anyway, and for the second one we need to
+do a fetch, add and store loop if the reservation from lwarx/ldarx
+was lost in the meantime.
+
+Fixes: 156d0e290e96 ("powerpc/ebpf/jit: Implement JIT compiler for extended BPF")
+Reviewed-by: Naveen N. Rao <naveen.n.rao@linux.vnet.ibm.com>
+Reviewed-by: Sandipan Das <sandipan@linux.vnet.ibm.com>
+Tested-by: Sandipan Das <sandipan@linux.vnet.ibm.com>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: Alexei Starovoitov <ast@kernel.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/powerpc/net/bpf_jit_comp64.c | 29 +++++------------------------
+ 1 file changed, 5 insertions(+), 24 deletions(-)
+
+diff --git a/arch/powerpc/net/bpf_jit_comp64.c b/arch/powerpc/net/bpf_jit_comp64.c
+index 254634f..fee1e1f 100644
+--- a/arch/powerpc/net/bpf_jit_comp64.c
++++ b/arch/powerpc/net/bpf_jit_comp64.c
+@@ -322,6 +322,7 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
+ 		u64 imm64;
+ 		u8 *func;
+ 		u32 true_cond;
++		u32 tmp_idx;
+ 
+ 		/*
+ 		 * addrs[] maps a BPF bytecode address into a real offset from
+@@ -681,11 +682,7 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
+ 		case BPF_STX | BPF_XADD | BPF_W:
+ 			/* Get EA into TMP_REG_1 */
+ 			PPC_ADDI(b2p[TMP_REG_1], dst_reg, off);
+-			/* error if EA is not word-aligned */
+-			PPC_ANDI(b2p[TMP_REG_2], b2p[TMP_REG_1], 0x03);
+-			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + 12);
+-			PPC_LI(b2p[BPF_REG_0], 0);
+-			PPC_JMP(exit_addr);
++			tmp_idx = ctx->idx * 4;
+ 			/* load value from memory into TMP_REG_2 */
+ 			PPC_BPF_LWARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+ 			/* add value from src_reg into this */
+@@ -693,32 +690,16 @@ static int bpf_jit_build_body(struct bpf_prog *fp, u32 *image,
+ 			/* store result back */
+ 			PPC_BPF_STWCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+ 			/* we're done if this succeeded */
+-			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (7*4));
+-			/* otherwise, let's try once more */
+-			PPC_BPF_LWARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+-			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
+-			PPC_BPF_STWCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+-			/* exit if the store was not successful */
+-			PPC_LI(b2p[BPF_REG_0], 0);
+-			PPC_BCC(COND_NE, exit_addr);
++			PPC_BCC_SHORT(COND_NE, tmp_idx);
+ 			break;
+ 		/* *(u64 *)(dst + off) += src */
+ 		case BPF_STX | BPF_XADD | BPF_DW:
+ 			PPC_ADDI(b2p[TMP_REG_1], dst_reg, off);
+-			/* error if EA is not doubleword-aligned */
+-			PPC_ANDI(b2p[TMP_REG_2], b2p[TMP_REG_1], 0x07);
+-			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (3*4));
+-			PPC_LI(b2p[BPF_REG_0], 0);
+-			PPC_JMP(exit_addr);
+-			PPC_BPF_LDARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+-			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
+-			PPC_BPF_STDCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+-			PPC_BCC_SHORT(COND_EQ, (ctx->idx * 4) + (7*4));
++			tmp_idx = ctx->idx * 4;
+ 			PPC_BPF_LDARX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1], 0);
+ 			PPC_ADD(b2p[TMP_REG_2], b2p[TMP_REG_2], src_reg);
+ 			PPC_BPF_STDCX(b2p[TMP_REG_2], 0, b2p[TMP_REG_1]);
+-			PPC_LI(b2p[BPF_REG_0], 0);
+-			PPC_BCC(COND_NE, exit_addr);
++			PPC_BCC_SHORT(COND_NE, tmp_idx);
+ 			break;
+ 
+ 		/*
+-- 
+2.7.4
+

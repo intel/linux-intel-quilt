@@ -1,0 +1,79 @@
+From 00f795e12b8bfbc385ba167446098c227c300183 Mon Sep 17 00:00:00 2001
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Fri, 20 Jul 2018 10:39:07 +0200
+Subject: [PATCH 0373/2156] perf/x86/amd/ibs: Don't access non-started event
+
+[ Upstream commit d2753e6b4882a637a0e8fb3b9c2e15f33265300e ]
+
+Paul Menzel reported the following bug:
+
+> Enabling the undefined behavior sanitizer and building GNU/Linux 4.18-rc5+
+> (with some unrelated commits) with GCC 8.1.0 from Debian Sid/unstable, the
+> warning below is shown.
+>
+> > [    2.111913]
+> > ================================================================================
+> > [    2.111917] UBSAN: Undefined behaviour in arch/x86/events/amd/ibs.c:582:24
+> > [    2.111919] member access within null pointer of type 'struct perf_event'
+> > [    2.111926] CPU: 0 PID: 144 Comm: udevadm Not tainted 4.18.0-rc5-00316-g4864b68cedf2 #104
+> > [    2.111928] Hardware name: ASROCK E350M1/E350M1, BIOS TIMELESS 01/01/1970
+> > [    2.111930] Call Trace:
+> > [    2.111943]  dump_stack+0x55/0x89
+> > [    2.111949]  ubsan_epilogue+0xb/0x33
+> > [    2.111953]  handle_null_ptr_deref+0x7f/0x90
+> > [    2.111958]  __ubsan_handle_type_mismatch_v1+0x55/0x60
+> > [    2.111964]  perf_ibs_handle_irq+0x596/0x620
+
+The code dereferences event before checking the STARTED bit. Patch
+below should cure the issue.
+
+The warning should not trigger, if I analyzed the thing correctly.
+(And Paul's testing confirms this.)
+
+Reported-by: Paul Menzel <pmenzel@molgen.mpg.de>
+Tested-by: Paul Menzel <pmenzel@molgen.mpg.de>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Jiri Olsa <jolsa@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Paul Menzel <pmenzel+linux-x86@molgen.mpg.de>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Stephane Eranian <eranian@google.com>
+Cc: Vince Weaver <vincent.weaver@maine.edu>
+Link: http://lkml.kernel.org/r/alpine.DEB.2.21.1807200958390.1580@nanos.tec.linutronix.de
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/x86/events/amd/ibs.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/events/amd/ibs.c b/arch/x86/events/amd/ibs.c
+index 786fd87..8c51844 100644
+--- a/arch/x86/events/amd/ibs.c
++++ b/arch/x86/events/amd/ibs.c
+@@ -579,7 +579,7 @@ static int perf_ibs_handle_irq(struct perf_ibs *perf_ibs, struct pt_regs *iregs)
+ {
+ 	struct cpu_perf_ibs *pcpu = this_cpu_ptr(perf_ibs->pcpu);
+ 	struct perf_event *event = pcpu->event;
+-	struct hw_perf_event *hwc = &event->hw;
++	struct hw_perf_event *hwc;
+ 	struct perf_sample_data data;
+ 	struct perf_raw_record raw;
+ 	struct pt_regs regs;
+@@ -602,6 +602,10 @@ static int perf_ibs_handle_irq(struct perf_ibs *perf_ibs, struct pt_regs *iregs)
+ 		return 0;
+ 	}
+ 
++	if (WARN_ON_ONCE(!event))
++		goto fail;
++
++	hwc = &event->hw;
+ 	msr = hwc->config_base;
+ 	buf = ibs_data.regs;
+ 	rdmsrl(msr, *buf);
+-- 
+2.7.4
+

@@ -1,0 +1,52 @@
+From a929f067a88f0f9a2b02e328f746007f645fa920 Mon Sep 17 00:00:00 2001
+From: Marek Szyprowski <m.szyprowski@samsung.com>
+Date: Tue, 12 Jun 2018 13:08:40 +0200
+Subject: [PATCH 0166/2156] arm64: dma-mapping: clear buffers allocated with
+ FORCE_CONTIGUOUS flag
+
+[ Upstream commit dd65a941f6ba473a5cb9d013d57fa43b48450a04 ]
+
+dma_alloc_*() buffers might be exposed to userspace via mmap() call, so
+they should be cleared on allocation. In case of IOMMU-based dma-mapping
+implementation such buffer clearing was missing in the code path for
+DMA_ATTR_FORCE_CONTIGUOUS flag handling, because dma_alloc_from_contiguous()
+doesn't honor __GFP_ZERO flag. This patch fixes this issue. For more
+information on clearing buffers allocated by dma_alloc_* functions,
+see commit 6829e274a623 ("arm64: dma-mapping: always clear allocated
+buffers").
+
+Fixes: 44176bb38fa4 ("arm64: Add support for DMA_ATTR_FORCE_CONTIGUOUS to IOMMU")
+Signed-off-by: Marek Szyprowski <m.szyprowski@samsung.com>
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/arm64/mm/dma-mapping.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/mm/dma-mapping.c b/arch/arm64/mm/dma-mapping.c
+index 614af88..58470b1 100644
+--- a/arch/arm64/mm/dma-mapping.c
++++ b/arch/arm64/mm/dma-mapping.c
+@@ -629,13 +629,14 @@ static void *__iommu_alloc_attrs(struct device *dev, size_t size,
+ 						    size >> PAGE_SHIFT);
+ 			return NULL;
+ 		}
+-		if (!coherent)
+-			__dma_flush_area(page_to_virt(page), iosize);
+-
+ 		addr = dma_common_contiguous_remap(page, size, VM_USERMAP,
+ 						   prot,
+ 						   __builtin_return_address(0));
+-		if (!addr) {
++		if (addr) {
++			memset(addr, 0, size);
++			if (!coherent)
++				__dma_flush_area(page_to_virt(page), iosize);
++		} else {
+ 			iommu_dma_unmap_page(dev, *handle, iosize, 0, attrs);
+ 			dma_release_from_contiguous(dev, page,
+ 						    size >> PAGE_SHIFT);
+-- 
+2.7.4
+

@@ -1,0 +1,63 @@
+From 0f868ad81facb32633f528bf5674cd3db025671b Mon Sep 17 00:00:00 2001
+From: Jiri Olsa <jolsa@kernel.org>
+Date: Wed, 20 Jun 2018 11:40:36 +0200
+Subject: [PATCH 0208/2156] perf bench: Fix numa report output code
+
+[ Upstream commit 983107072be1a39cbde67d45cb0059138190e015 ]
+
+Currently we can hit following assert when running numa bench:
+
+  $ perf bench numa mem -p 3 -t 1 -P 512 -s 100 -zZ0cm --thp 1
+  perf: bench/numa.c:1577: __bench_numa: Assertion `!(!(((wait_stat) & 0x7f) == 0))' failed.
+
+The assertion is correct, because we hit the SIGFPE in following line:
+
+  Thread 2.2 "thread 0/0" received signal SIGFPE, Arithmetic exception.
+  [Switching to Thread 0x7fffd28c6700 (LWP 11750)]
+  0x000.. in worker_thread (__tdata=0x7.. ) at bench/numa.c:1257
+  1257 td->speed_gbs = bytes_done / (td->runtime_ns / NSEC_PER_SEC) / 1e9;
+
+We don't check if the runtime is actually bigger than 1 second,
+and thus this might end up with zero division within FPU.
+
+Adding the check to prevent this.
+
+Signed-off-by: Jiri Olsa <jolsa@kernel.org>
+Cc: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+Cc: David Ahern <dsahern@gmail.com>
+Cc: Namhyung Kim <namhyung@kernel.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Link: http://lkml.kernel.org/r/20180620094036.17278-1-jolsa@kernel.org
+Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ tools/perf/bench/numa.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/tools/perf/bench/numa.c b/tools/perf/bench/numa.c
+index 944070e..0afcc7e 100644
+--- a/tools/perf/bench/numa.c
++++ b/tools/perf/bench/numa.c
+@@ -1098,7 +1098,7 @@ static void *worker_thread(void *__tdata)
+ 	u8 *global_data;
+ 	u8 *process_data;
+ 	u8 *thread_data;
+-	u64 bytes_done;
++	u64 bytes_done, secs;
+ 	long work_done;
+ 	u32 l;
+ 	struct rusage rusage;
+@@ -1254,7 +1254,8 @@ static void *worker_thread(void *__tdata)
+ 	timersub(&stop, &start0, &diff);
+ 	td->runtime_ns = diff.tv_sec * NSEC_PER_SEC;
+ 	td->runtime_ns += diff.tv_usec * NSEC_PER_USEC;
+-	td->speed_gbs = bytes_done / (td->runtime_ns / NSEC_PER_SEC) / 1e9;
++	secs = td->runtime_ns / NSEC_PER_SEC;
++	td->speed_gbs = secs ? bytes_done / secs / 1e9 : 0;
+ 
+ 	getrusage(RUSAGE_THREAD, &rusage);
+ 	td->system_time_ns = rusage.ru_stime.tv_sec * NSEC_PER_SEC;
+-- 
+2.7.4
+

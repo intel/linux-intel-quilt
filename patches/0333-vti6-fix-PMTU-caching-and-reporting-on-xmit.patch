@@ -1,0 +1,58 @@
+From d2adc199957f29eb92df308812396098046089dd Mon Sep 17 00:00:00 2001
+From: Eyal Birger <eyal.birger@gmail.com>
+Date: Thu, 7 Jun 2018 10:11:02 +0300
+Subject: [PATCH 0333/2156] vti6: fix PMTU caching and reporting on xmit
+
+[ Upstream commit d6990976af7c5d8f55903bfb4289b6fb030bf754 ]
+
+When setting the skb->dst before doing the MTU check, the route PMTU
+caching and reporting is done on the new dst which is about to be
+released.
+
+Instead, PMTU handling should be done using the original dst.
+
+This is aligned with IPv4 VTI.
+
+Fixes: ccd740cbc6 ("vti6: Add pmtu handling to vti6_xmit.")
+Signed-off-by: Eyal Birger <eyal.birger@gmail.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/ipv6/ip6_vti.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/net/ipv6/ip6_vti.c b/net/ipv6/ip6_vti.c
+index 0e0ab90..b9e638c 100644
+--- a/net/ipv6/ip6_vti.c
++++ b/net/ipv6/ip6_vti.c
+@@ -480,10 +480,6 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
+ 		goto tx_err_dst_release;
+ 	}
+ 
+-	skb_scrub_packet(skb, !net_eq(t->net, dev_net(dev)));
+-	skb_dst_set(skb, dst);
+-	skb->dev = skb_dst(skb)->dev;
+-
+ 	mtu = dst_mtu(dst);
+ 	if (!skb->ignore_df && skb->len > mtu) {
+ 		skb_dst_update_pmtu(skb, mtu);
+@@ -498,9 +494,14 @@ vti6_xmit(struct sk_buff *skb, struct net_device *dev, struct flowi *fl)
+ 				  htonl(mtu));
+ 		}
+ 
+-		return -EMSGSIZE;
++		err = -EMSGSIZE;
++		goto tx_err_dst_release;
+ 	}
+ 
++	skb_scrub_packet(skb, !net_eq(t->net, dev_net(dev)));
++	skb_dst_set(skb, dst);
++	skb->dev = skb_dst(skb)->dev;
++
+ 	err = dst_output(t->net, skb->sk, skb);
+ 	if (net_xmit_eval(err) == 0) {
+ 		struct pcpu_sw_netstats *tstats = this_cpu_ptr(dev->tstats);
+-- 
+2.7.4
+

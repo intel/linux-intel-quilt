@@ -1,0 +1,85 @@
+From 3baa3f9221e221fb9488929e5289b49bb8ee7d18 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Thu, 28 Jun 2018 04:52:15 -0700
+Subject: [PATCH 0233/2156] bnx2x: Fix receiving tx-timeout in error or
+ recovery state.
+
+[ Upstream commit 484c016d9392786ce5c74017c206c706f29f823d ]
+
+Driver performs the internal reload when it receives tx-timeout event from
+the OS. Internal reload might fail in some scenarios e.g., fatal HW issues.
+In such cases OS still see the link, which would result in undesirable
+functionalities such as re-generation of tx-timeouts.
+The patch addresses this issue by indicating the link-down to OS when
+tx-timeout is detected, and keeping the link in down state till the
+internal reload is successful.
+
+Please consider applying it to 'net' branch.
+
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x.h      | 1 +
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c  | 6 ++++++
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c | 6 ++++++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+index 352beff..828e2e5 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+@@ -1529,6 +1529,7 @@ struct bnx2x {
+ 	struct link_vars	link_vars;
+ 	u32			link_cnt;
+ 	struct bnx2x_link_report_data last_reported_link;
++	bool			force_link_down;
+ 
+ 	struct mdio_if_info	mdio;
+ 
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+index 6465414..8498a35 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_cmn.c
+@@ -1260,6 +1260,11 @@ void __bnx2x_link_report(struct bnx2x *bp)
+ {
+ 	struct bnx2x_link_report_data cur_data;
+ 
++	if (bp->force_link_down) {
++		bp->link_vars.link_up = 0;
++		return;
++	}
++
+ 	/* reread mf_cfg */
+ 	if (IS_PF(bp) && !CHIP_IS_E1(bp))
+ 		bnx2x_read_mf_cfg(bp);
+@@ -2817,6 +2822,7 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
+ 		bp->pending_max = 0;
+ 	}
+ 
++	bp->force_link_down = false;
+ 	if (bp->port.pmf) {
+ 		rc = bnx2x_initial_phy_init(bp, load_mode);
+ 		if (rc)
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+index e855a27..bd3e3f0 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+@@ -10279,6 +10279,12 @@ static void bnx2x_sp_rtnl_task(struct work_struct *work)
+ 		bp->sp_rtnl_state = 0;
+ 		smp_mb();
+ 
++		/* Immediately indicate link as down */
++		bp->link_vars.link_up = 0;
++		bp->force_link_down = true;
++		netif_carrier_off(bp->dev);
++		BNX2X_ERR("Indicating link is down due to Tx-timeout\n");
++
+ 		bnx2x_nic_unload(bp, UNLOAD_NORMAL, true);
+ 		bnx2x_nic_load(bp, LOAD_NORMAL);
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,86 @@
+From 165335d4f18e0f730009452f52086c362c250dd2 Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Tue, 24 Jul 2018 16:08:27 -0700
+Subject: [PATCH 0381/2156] x86/boot: Fix if_changed build flip/flop bug
+
+[ Upstream commit 92a4728608a8fd228c572bc8ff50dd98aa0ddf2a ]
+
+Dirk Gouders reported that two consecutive "make" invocations on an
+already compiled tree will show alternating behaviors:
+
+$ make
+  CALL    scripts/checksyscalls.sh
+  DESCEND  objtool
+  CHK     include/generated/compile.h
+  DATAREL arch/x86/boot/compressed/vmlinux
+Kernel: arch/x86/boot/bzImage is ready  (#48)
+  Building modules, stage 2.
+  MODPOST 165 modules
+
+$ make
+  CALL    scripts/checksyscalls.sh
+  DESCEND  objtool
+  CHK     include/generated/compile.h
+  LD      arch/x86/boot/compressed/vmlinux
+  ZOFFSET arch/x86/boot/zoffset.h
+  AS      arch/x86/boot/header.o
+  LD      arch/x86/boot/setup.elf
+  OBJCOPY arch/x86/boot/setup.bin
+  OBJCOPY arch/x86/boot/vmlinux.bin
+  BUILD   arch/x86/boot/bzImage
+Setup is 15644 bytes (padded to 15872 bytes).
+System is 6663 kB
+CRC 3eb90f40
+Kernel: arch/x86/boot/bzImage is ready  (#48)
+  Building modules, stage 2.
+  MODPOST 165 modules
+
+He bisected it back to:
+
+    commit 98f78525371b ("x86/boot: Refuse to build with data relocations")
+
+The root cause was the use of the "if_changed" kbuild function multiple
+times for the same target. It was designed to only be used once per
+target, otherwise it will effectively always trigger, flipping back and
+forth between the two commands getting recorded by "if_changed". Instead,
+this patch merges the two commands into a single function to get stable
+build artifacts (i.e. .vmlinux.cmd), and a single build behavior.
+
+Bisected-and-Reported-by: Dirk Gouders <dirk@gouders.net>
+Fix-Suggested-by: Masahiro Yamada <yamada.masahiro@socionext.com>
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Reviewed-by: Masahiro Yamada <yamada.masahiro@socionext.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/20180724230827.GA37823@beast
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/x86/boot/compressed/Makefile | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/boot/compressed/Makefile b/arch/x86/boot/compressed/Makefile
+index 98018a6..3a250ca 100644
+--- a/arch/x86/boot/compressed/Makefile
++++ b/arch/x86/boot/compressed/Makefile
+@@ -104,9 +104,13 @@ define cmd_check_data_rel
+ 	done
+ endef
+ 
++# We need to run two commands under "if_changed", so merge them into a
++# single invocation.
++quiet_cmd_check-and-link-vmlinux = LD      $@
++      cmd_check-and-link-vmlinux = $(cmd_check_data_rel); $(cmd_ld)
++
+ $(obj)/vmlinux: $(vmlinux-objs-y) FORCE
+-	$(call if_changed,check_data_rel)
+-	$(call if_changed,ld)
++	$(call if_changed,check-and-link-vmlinux)
+ 
+ OBJCOPYFLAGS_vmlinux.bin :=  -R .comment -S
+ $(obj)/vmlinux.bin: vmlinux FORCE
+-- 
+2.7.4
+

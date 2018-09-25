@@ -1,0 +1,75 @@
+From b900c624d467abc34c7dfbf873493cd4e9ab188f Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (VMware)" <rostedt@goodmis.org>
+Date: Tue, 10 Jul 2018 08:22:40 +0100
+Subject: [PATCH 0285/2156] ARM: 8780/1: ftrace: Only set kernel memory back to
+ read-only after boot
+
+[ Upstream commit b4c7e2bd2eb4764afe3af9409ff3b1b87116fa30 ]
+
+Dynamic ftrace requires modifying the code segments that are usually
+set to read-only. To do this, a per arch function is called both before
+and after the ftrace modifications are performed. The "before" function
+will set kernel code text to read-write to allow for ftrace to make the
+modifications, and the "after" function will set the kernel code text
+back to "read-only" to keep the kernel code text protected.
+
+The issue happens when dynamic ftrace is tested at boot up. The test is
+done before the kernel code text has been set to read-only. But the
+"before" and "after" calls are still performed. The "after" call will
+change the kernel code text to read-only prematurely, and other boot
+code that expects this code to be read-write will fail.
+
+The solution is to add a variable that is set when the kernel code text
+is expected to be converted to read-only, and make the ftrace "before"
+and "after" calls do nothing if that variable is not yet set. This is
+similar to the x86 solution from commit 162396309745 ("ftrace, x86:
+make kernel text writable only for conversions").
+
+Link: http://lkml.kernel.org/r/20180620212906.24b7b66e@vmware.local.home
+
+Reported-by: Stefan Agner <stefan@agner.ch>
+Tested-by: Stefan Agner <stefan@agner.ch>
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+Signed-off-by: Russell King <rmk+kernel@armlinux.org.uk>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/arm/mm/init.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm/mm/init.c b/arch/arm/mm/init.c
+index 0f6d153..defb7fc 100644
+--- a/arch/arm/mm/init.c
++++ b/arch/arm/mm/init.c
+@@ -745,19 +745,28 @@ static int __mark_rodata_ro(void *unused)
+ 	return 0;
+ }
+ 
++static int kernel_set_to_readonly __read_mostly;
++
+ void mark_rodata_ro(void)
+ {
++	kernel_set_to_readonly = 1;
+ 	stop_machine(__mark_rodata_ro, NULL, NULL);
+ }
+ 
+ void set_kernel_text_rw(void)
+ {
++	if (!kernel_set_to_readonly)
++		return;
++
+ 	set_section_perms(ro_perms, ARRAY_SIZE(ro_perms), false,
+ 				current->active_mm);
+ }
+ 
+ void set_kernel_text_ro(void)
+ {
++	if (!kernel_set_to_readonly)
++		return;
++
+ 	set_section_perms(ro_perms, ARRAY_SIZE(ro_perms), true,
+ 				current->active_mm);
+ }
+-- 
+2.7.4
+

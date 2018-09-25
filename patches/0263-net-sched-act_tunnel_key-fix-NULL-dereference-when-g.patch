@@ -1,0 +1,156 @@
+From de9f2452b1ad4e223b305618df8fa2b7312d8488 Mon Sep 17 00:00:00 2001
+From: Davide Caratti <dcaratti@redhat.com>
+Date: Fri, 6 Jul 2018 21:01:06 +0200
+Subject: [PATCH 0263/2156] net/sched: act_tunnel_key: fix NULL dereference
+ when 'goto chain' is used
+
+[ Upstream commit 38230a3e0e0933bbcf5df6fa469ba0667f667568 ]
+
+the control action in the common member of struct tcf_tunnel_key must be a
+valid value, as it can contain the chain index when 'goto chain' is used.
+Ensure that the control action can be read as x->tcfa_action, when x is a
+pointer to struct tc_action and x->ops->type is TCA_ACT_TUNNEL_KEY, to
+prevent the following command:
+
+ # tc filter add dev $h2 ingress protocol ip pref 1 handle 101 flower \
+ > $tcflags dst_mac $h2mac action tunnel_key unset goto chain 1
+
+from causing a NULL dereference when a matching packet is received:
+
+ BUG: unable to handle kernel NULL pointer dereference at 0000000000000000
+ PGD 80000001097ac067 P4D 80000001097ac067 PUD 103b0a067 PMD 0
+ Oops: 0000 [#1] SMP PTI
+ CPU: 0 PID: 3491 Comm: mausezahn Tainted: G            E     4.18.0-rc2.auguri+ #421
+ Hardware name: Hewlett-Packard HP Z220 CMT Workstation/1790, BIOS K51 v01.58 02/07/2013
+ RIP: 0010:tcf_action_exec+0xb8/0x100
+ Code: 00 00 00 20 74 1d 83 f8 03 75 09 49 83 c4 08 4d 39 ec 75 bc 48 83 c4 10 5b 5d 41 5c 41 5d 41 5e 41 5f c3 49 8b 97 a8 00 00 00 <48> 8b 12 48 89 55 00 48 83 c4 10 5b 5d 41 5c 41 5d 41 5e 41 5f c3
+ RSP: 0018:ffff95145ea03c40 EFLAGS: 00010246
+ RAX: 0000000020000001 RBX: ffff9514499e5800 RCX: 0000000000000001
+ RDX: 0000000000000000 RSI: 0000000000000002 RDI: 0000000000000000
+ RBP: ffff95145ea03e60 R08: 0000000000000000 R09: ffff95145ea03c9c
+ R10: ffff95145ea03c78 R11: 0000000000000008 R12: ffff951456a69800
+ R13: ffff951456a69808 R14: 0000000000000001 R15: ffff95144965ee40
+ FS:  00007fd67ee11740(0000) GS:ffff95145ea00000(0000) knlGS:0000000000000000
+ CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+ CR2: 0000000000000000 CR3: 00000001038a2006 CR4: 00000000001606f0
+ Call Trace:
+  <IRQ>
+  fl_classify+0x1ad/0x1c0 [cls_flower]
+  ? __update_load_avg_se.isra.47+0x1ca/0x1d0
+  ? __update_load_avg_se.isra.47+0x1ca/0x1d0
+  ? update_load_avg+0x665/0x690
+  ? update_load_avg+0x665/0x690
+  ? kmem_cache_alloc+0x38/0x1c0
+  tcf_classify+0x89/0x140
+  __netif_receive_skb_core+0x5ea/0xb70
+  ? enqueue_entity+0xd0/0x270
+  ? process_backlog+0x97/0x150
+  process_backlog+0x97/0x150
+  net_rx_action+0x14b/0x3e0
+  __do_softirq+0xde/0x2b4
+  do_softirq_own_stack+0x2a/0x40
+  </IRQ>
+  do_softirq.part.18+0x49/0x50
+  __local_bh_enable_ip+0x49/0x50
+  __dev_queue_xmit+0x4ab/0x8a0
+  ? wait_woken+0x80/0x80
+  ? packet_sendmsg+0x38f/0x810
+  ? __dev_queue_xmit+0x8a0/0x8a0
+  packet_sendmsg+0x38f/0x810
+  sock_sendmsg+0x36/0x40
+  __sys_sendto+0x10e/0x140
+  ? do_vfs_ioctl+0xa4/0x630
+  ? syscall_trace_enter+0x1df/0x2e0
+  ? __audit_syscall_exit+0x22a/0x290
+  __x64_sys_sendto+0x24/0x30
+  do_syscall_64+0x5b/0x180
+  entry_SYSCALL_64_after_hwframe+0x44/0xa9
+ RIP: 0033:0x7fd67e18dc93
+ Code: 48 8b 0d 18 83 20 00 f7 d8 64 89 01 48 83 c8 ff c3 66 0f 1f 44 00 00 83 3d 59 c7 20 00 00 75 13 49 89 ca b8 2c 00 00 00 0f 05 <48> 3d 01 f0 ff ff 73 34 c3 48 83 ec 08 e8 2b f7 ff ff 48 89 04 24
+ RSP: 002b:00007ffe0189b748 EFLAGS: 00000246 ORIG_RAX: 000000000000002c
+ RAX: ffffffffffffffda RBX: 00000000020ca010 RCX: 00007fd67e18dc93
+ RDX: 0000000000000062 RSI: 00000000020ca322 RDI: 0000000000000003
+ RBP: 00007ffe0189b780 R08: 00007ffe0189b760 R09: 0000000000000014
+ R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000062
+ R13: 00000000020ca322 R14: 00007ffe0189b760 R15: 0000000000000003
+ Modules linked in: act_tunnel_key act_gact cls_flower sch_ingress vrf veth act_csum(E) xt_CHECKSUM iptable_mangle ipt_MASQUERADE iptable_nat nf_nat_ipv4 nf_nat nf_conntrack_ipv4 nf_defrag_ipv4 xt_conntrack nf_conntrack ipt_REJECT nf_reject_ipv4 tun bridge stp llc ebtable_filter ebtables ip6table_filter ip6_tables iptable_filter intel_rapl snd_hda_codec_hdmi x86_pkg_temp_thermal intel_powerclamp snd_hda_codec_realtek coretemp snd_hda_codec_generic kvm_intel kvm irqbypass snd_hda_intel crct10dif_pclmul crc32_pclmul hp_wmi ghash_clmulni_intel pcbc snd_hda_codec aesni_intel sparse_keymap rfkill snd_hda_core snd_hwdep snd_seq crypto_simd iTCO_wdt gpio_ich iTCO_vendor_support wmi_bmof cryptd mei_wdt glue_helper snd_seq_device snd_pcm pcspkr snd_timer snd i2c_i801 lpc_ich sg soundcore wmi mei_me
+  mei ie31200_edac nfsd auth_rpcgss nfs_acl lockd grace sunrpc ip_tables xfs libcrc32c sd_mod sr_mod cdrom i915 video i2c_algo_bit drm_kms_helper syscopyarea sysfillrect sysimgblt fb_sys_fops ahci crc32c_intel libahci serio_raw sfc libata mtd drm ixgbe mdio i2c_core e1000e dca
+ CR2: 0000000000000000
+ ---[ end trace 1ab8b5b5d4639dfc ]---
+ RIP: 0010:tcf_action_exec+0xb8/0x100
+ Code: 00 00 00 20 74 1d 83 f8 03 75 09 49 83 c4 08 4d 39 ec 75 bc 48 83 c4 10 5b 5d 41 5c 41 5d 41 5e 41 5f c3 49 8b 97 a8 00 00 00 <48> 8b 12 48 89 55 00 48 83 c4 10 5b 5d 41 5c 41 5d 41 5e 41 5f c3
+ RSP: 0018:ffff95145ea03c40 EFLAGS: 00010246
+ RAX: 0000000020000001 RBX: ffff9514499e5800 RCX: 0000000000000001
+ RDX: 0000000000000000 RSI: 0000000000000002 RDI: 0000000000000000
+ RBP: ffff95145ea03e60 R08: 0000000000000000 R09: ffff95145ea03c9c
+ R10: ffff95145ea03c78 R11: 0000000000000008 R12: ffff951456a69800
+ R13: ffff951456a69808 R14: 0000000000000001 R15: ffff95144965ee40
+ FS:  00007fd67ee11740(0000) GS:ffff95145ea00000(0000) knlGS:0000000000000000
+ CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+ CR2: 0000000000000000 CR3: 00000001038a2006 CR4: 00000000001606f0
+ Kernel panic - not syncing: Fatal exception in interrupt
+ Kernel Offset: 0x11400000 from 0xffffffff81000000 (relocation range: 0xffffffff80000000-0xffffffffbfffffff)
+ ---[ end Kernel panic - not syncing: Fatal exception in interrupt ]---
+
+Fixes: d0f6dd8a914f ("net/sched: Introduce act_tunnel_key")
+Signed-off-by: Davide Caratti <dcaratti@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ include/net/tc_act/tc_tunnel_key.h | 1 -
+ net/sched/act_tunnel_key.c         | 6 +++---
+ 2 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/include/net/tc_act/tc_tunnel_key.h b/include/net/tc_act/tc_tunnel_key.h
+index efef0b4..46b8c7f 100644
+--- a/include/net/tc_act/tc_tunnel_key.h
++++ b/include/net/tc_act/tc_tunnel_key.h
+@@ -18,7 +18,6 @@
+ struct tcf_tunnel_key_params {
+ 	struct rcu_head		rcu;
+ 	int			tcft_action;
+-	int			action;
+ 	struct metadata_dst     *tcft_enc_metadata;
+ };
+ 
+diff --git a/net/sched/act_tunnel_key.c b/net/sched/act_tunnel_key.c
+index 7cb6361..cd51f2e 100644
+--- a/net/sched/act_tunnel_key.c
++++ b/net/sched/act_tunnel_key.c
+@@ -36,7 +36,7 @@ static int tunnel_key_act(struct sk_buff *skb, const struct tc_action *a,
+ 
+ 	tcf_lastuse_update(&t->tcf_tm);
+ 	bstats_cpu_update(this_cpu_ptr(t->common.cpu_bstats), skb);
+-	action = params->action;
++	action = READ_ONCE(t->tcf_action);
+ 
+ 	switch (params->tcft_action) {
+ 	case TCA_TUNNEL_KEY_ACT_RELEASE:
+@@ -182,7 +182,7 @@ static int tunnel_key_init(struct net *net, struct nlattr *nla,
+ 
+ 	params_old = rtnl_dereference(t->params);
+ 
+-	params_new->action = parm->action;
++	t->tcf_action = parm->action;
+ 	params_new->tcft_action = parm->t_action;
+ 	params_new->tcft_enc_metadata = metadata;
+ 
+@@ -254,13 +254,13 @@ static int tunnel_key_dump(struct sk_buff *skb, struct tc_action *a,
+ 		.index    = t->tcf_index,
+ 		.refcnt   = t->tcf_refcnt - ref,
+ 		.bindcnt  = t->tcf_bindcnt - bind,
++		.action   = t->tcf_action,
+ 	};
+ 	struct tcf_t tm;
+ 
+ 	params = rtnl_dereference(t->params);
+ 
+ 	opt.t_action = params->tcft_action;
+-	opt.action = params->action;
+ 
+ 	if (nla_put(skb, TCA_TUNNEL_KEY_PARMS, sizeof(opt), &opt))
+ 		goto nla_put_failure;
+-- 
+2.7.4
+

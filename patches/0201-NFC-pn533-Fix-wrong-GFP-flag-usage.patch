@@ -1,0 +1,48 @@
+From d341ce9a63dc3058293ae833107b42a5b40a6139 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Thu, 7 Jun 2018 15:54:48 +0200
+Subject: [PATCH 0201/2156] NFC: pn533: Fix wrong GFP flag usage
+
+[ Upstream commit ecc443c03fb14abfb8a6af5e3b2d43b5257e60f2 ]
+
+pn533_recv_response() is an urb completion handler, so it must use
+GFP_ATOMIC. pn533_usb_send_frame() OTOH runs from a regular sleeping
+context, so the pn533_submit_urb_for_response() there (and only there)
+can use the regular GFP_KERNEL flags.
+
+BugLink: https://bugzilla.redhat.com/show_bug.cgi?id=1514134
+Fixes: 9815c7cf22da ("NFC: pn533: Separate physical layer from ...")
+Cc: Michael Thalmeier <michael.thalmeier@hale.at>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/nfc/pn533/usb.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/nfc/pn533/usb.c b/drivers/nfc/pn533/usb.c
+index d5553c4..5d823e9 100644
+--- a/drivers/nfc/pn533/usb.c
++++ b/drivers/nfc/pn533/usb.c
+@@ -74,7 +74,7 @@ static void pn533_recv_response(struct urb *urb)
+ 	struct sk_buff *skb = NULL;
+ 
+ 	if (!urb->status) {
+-		skb = alloc_skb(urb->actual_length, GFP_KERNEL);
++		skb = alloc_skb(urb->actual_length, GFP_ATOMIC);
+ 		if (!skb) {
+ 			nfc_err(&phy->udev->dev, "failed to alloc memory\n");
+ 		} else {
+@@ -186,7 +186,7 @@ static int pn533_usb_send_frame(struct pn533 *dev,
+ 
+ 	if (dev->protocol_type == PN533_PROTO_REQ_RESP) {
+ 		/* request for response for sent packet directly */
+-		rc = pn533_submit_urb_for_response(phy, GFP_ATOMIC);
++		rc = pn533_submit_urb_for_response(phy, GFP_KERNEL);
+ 		if (rc)
+ 			goto error;
+ 	} else if (dev->protocol_type == PN533_PROTO_REQ_ACK_RESP) {
+-- 
+2.7.4
+

@@ -1,0 +1,105 @@
+From a5b6bb86cc128b8bbcdd8fdccd2567c09bdc0ac4 Mon Sep 17 00:00:00 2001
+From: Eli Cohen <eli@mellanox.com>
+Date: Thu, 31 May 2018 12:24:48 +0300
+Subject: [PATCH 0212/2156] net/mlx5: E-Switch, Disallow vlan/spoofcheck setup
+ if not being esw manager
+
+[ Upstream commit a8d70a054a718b63058b3d3ac58b6181815e4289 ]
+
+In smartnic env, if the host (PF) driver is not an e-switch manager, we
+are not allowed to apply eswitch ports setups such as vlan (VST),
+spoof-checks, min/max rate or state.
+
+Make sure we are eswitch manager when coming to issue these callbacks
+and err otherwise.
+
+Also fix the definition of ESW_ALLOWED to rely on eswitch_manager
+capability and on the vport_group_manger.
+
+Operations on the VF nic vport context, such as setting a mac or reading
+the vport counters are allowed to the PF in this scheme.
+
+The modify nic vport guid code was modified to omit checking the
+nic_vport_node_guid_modify eswitch capability.
+The reason for doing so is that modifying node guid requires vport group
+manager capability, and there's no need to check further capabilities.
+
+1. set_vf_vlan     - disallowed
+2. set_vf_spoofchk - disallowed
+3. set_vf_mac      - allowed
+4. get_vf_config   - allowed
+5. set_vf_trust    - disallowed
+6. set_vf_rate     - disallowed
+7. get_vf_stat     - allowed
+8. set_vf_link_state - disallowed
+
+Fixes: f942380c1239 ('net/mlx5: E-Switch, Vport ingress/egress ACLs rules for spoofchk')
+Signed-off-by: Eli Cohen <eli@mellanox.com>
+Reviewed-by: Or Gerlitz <ogerlitz@mellanox.com>
+Tested-by: Or Gerlitz <ogerlitz@mellanox.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/mellanox/mlx5/core/eswitch.c | 12 +++++-------
+ drivers/net/ethernet/mellanox/mlx5/core/vport.c   |  2 --
+ 2 files changed, 5 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/eswitch.c b/drivers/net/ethernet/mellanox/mlx5/core/eswitch.c
+index f697084..de72b66 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/eswitch.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/eswitch.c
+@@ -1525,17 +1525,15 @@ static void esw_disable_vport(struct mlx5_eswitch *esw, int vport_num)
+ }
+ 
+ /* Public E-Switch API */
+-#define ESW_ALLOWED(esw) ((esw) && MLX5_VPORT_MANAGER((esw)->dev))
++#define ESW_ALLOWED(esw) ((esw) && MLX5_ESWITCH_MANAGER((esw)->dev))
++
+ 
+ int mlx5_eswitch_enable_sriov(struct mlx5_eswitch *esw, int nvfs, int mode)
+ {
+ 	int err;
+ 	int i, enabled_events;
+ 
+-	if (!ESW_ALLOWED(esw))
+-		return 0;
+-
+-	if (!MLX5_ESWITCH_MANAGER(esw->dev) ||
++	if (!ESW_ALLOWED(esw) ||
+ 	    !MLX5_CAP_ESW_FLOWTABLE_FDB(esw->dev, ft_support)) {
+ 		esw_warn(esw->dev, "E-Switch FDB is not supported, aborting ...\n");
+ 		return -EOPNOTSUPP;
+@@ -1728,7 +1726,7 @@ int mlx5_eswitch_set_vport_mac(struct mlx5_eswitch *esw,
+ 	u64 node_guid;
+ 	int err = 0;
+ 
+-	if (!ESW_ALLOWED(esw))
++	if (!MLX5_CAP_GEN(esw->dev, vport_group_manager))
+ 		return -EPERM;
+ 	if (!LEGAL_VPORT(esw, vport) || is_multicast_ether_addr(mac))
+ 		return -EINVAL;
+@@ -1805,7 +1803,7 @@ int mlx5_eswitch_get_vport_config(struct mlx5_eswitch *esw,
+ {
+ 	struct mlx5_vport *evport;
+ 
+-	if (!ESW_ALLOWED(esw))
++	if (!MLX5_CAP_GEN(esw->dev, vport_group_manager))
+ 		return -EPERM;
+ 	if (!LEGAL_VPORT(esw, vport))
+ 		return -EINVAL;
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/vport.c b/drivers/net/ethernet/mellanox/mlx5/core/vport.c
+index 71153c0..aa9a88e 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/vport.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/vport.c
+@@ -549,8 +549,6 @@ int mlx5_modify_nic_vport_node_guid(struct mlx5_core_dev *mdev,
+ 		return -EINVAL;
+ 	if (!MLX5_CAP_GEN(mdev, vport_group_manager))
+ 		return -EACCES;
+-	if (!MLX5_CAP_ESW(mdev, nic_vport_node_guid_modify))
+-		return -EOPNOTSUPP;
+ 
+ 	in = kvzalloc(inlen, GFP_KERNEL);
+ 	if (!in)
+-- 
+2.7.4
+

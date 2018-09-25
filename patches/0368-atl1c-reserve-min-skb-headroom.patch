@@ -1,0 +1,54 @@
+From 5803ce5effc933f0bc142cbb78c8b02931bd801c Mon Sep 17 00:00:00 2001
+From: Florian Westphal <fw@strlen.de>
+Date: Fri, 20 Jul 2018 19:30:57 +0200
+Subject: [PATCH 0368/2156] atl1c: reserve min skb headroom
+
+[ Upstream commit 6e56830776828d8ca9897fc4429eeab47c3bb432 ]
+
+Got crash report with following backtrace:
+BUG: unable to handle kernel paging request at ffff8801869daffe
+RIP: 0010:[<ffffffff816429c4>]  [<ffffffff816429c4>] ip6_finish_output2+0x394/0x4c0
+RSP: 0018:ffff880186c83a98  EFLAGS: 00010283
+RAX: ffff8801869db00e ...
+  [<ffffffff81644cdc>] ip6_finish_output+0x8c/0xf0
+  [<ffffffff81644d97>] ip6_output+0x57/0x100
+  [<ffffffff81643dc9>] ip6_forward+0x4b9/0x840
+  [<ffffffff81645566>] ip6_rcv_finish+0x66/0xc0
+  [<ffffffff81645db9>] ipv6_rcv+0x319/0x530
+  [<ffffffff815892ac>] netif_receive_skb+0x1c/0x70
+  [<ffffffffc0060bec>] atl1c_clean+0x1ec/0x310 [atl1c]
+  ...
+
+The bad access is in neigh_hh_output(), at skb->data - 16 (HH_DATA_MOD).
+atl1c driver provided skb with no headroom, so 14 bytes (ethernet
+header) got pulled, but then 16 are copied.
+
+Reserve NET_SKB_PAD bytes headroom, like netdev_alloc_skb().
+
+Compile tested only; I lack hardware.
+
+Fixes: 7b7017642199 ("atl1c: Fix misuse of netdev_alloc_skb in refilling rx ring")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/atheros/atl1c/atl1c_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/ethernet/atheros/atl1c/atl1c_main.c b/drivers/net/ethernet/atheros/atl1c/atl1c_main.c
+index 8c9986f..3615c2a 100644
+--- a/drivers/net/ethernet/atheros/atl1c/atl1c_main.c
++++ b/drivers/net/ethernet/atheros/atl1c/atl1c_main.c
+@@ -1685,6 +1685,7 @@ static struct sk_buff *atl1c_alloc_skb(struct atl1c_adapter *adapter)
+ 	skb = build_skb(page_address(page) + adapter->rx_page_offset,
+ 			adapter->rx_frag_size);
+ 	if (likely(skb)) {
++		skb_reserve(skb, NET_SKB_PAD);
+ 		adapter->rx_page_offset += adapter->rx_frag_size;
+ 		if (adapter->rx_page_offset >= PAGE_SIZE)
+ 			adapter->rx_page = NULL;
+-- 
+2.7.4
+

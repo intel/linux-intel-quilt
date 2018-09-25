@@ -1,0 +1,76 @@
+From bc928fdf5d1ebfd19feec4ee90baf4b965d26de8 Mon Sep 17 00:00:00 2001
+From: Taehee Yoo <ap420073@gmail.com>
+Date: Sun, 29 Jul 2018 00:28:31 +0900
+Subject: [PATCH 0392/2156] bpf: use GFP_ATOMIC instead of GFP_KERNEL in
+ bpf_parse_prog()
+
+[ Upstream commit 71eb5255f55bdb484d35ff7c9a1803f453dfbf82 ]
+
+bpf_parse_prog() is protected by rcu_read_lock().
+so that GFP_KERNEL is not allowed in the bpf_parse_prog().
+
+[51015.579396] =============================
+[51015.579418] WARNING: suspicious RCU usage
+[51015.579444] 4.18.0-rc6+ #208 Not tainted
+[51015.579464] -----------------------------
+[51015.579488] ./include/linux/rcupdate.h:303 Illegal context switch in RCU read-side critical section!
+[51015.579510] other info that might help us debug this:
+[51015.579532] rcu_scheduler_active = 2, debug_locks = 1
+[51015.579556] 2 locks held by ip/1861:
+[51015.579577]  #0: 00000000a8c12fd1 (rtnl_mutex){+.+.}, at: rtnetlink_rcv_msg+0x2e0/0x910
+[51015.579711]  #1: 00000000bf815f8e (rcu_read_lock){....}, at: lwtunnel_build_state+0x96/0x390
+[51015.579842] stack backtrace:
+[51015.579869] CPU: 0 PID: 1861 Comm: ip Not tainted 4.18.0-rc6+ #208
+[51015.579891] Hardware name: To be filled by O.E.M. To be filled by O.E.M./Aptio CRB, BIOS 5.6.5 07/08/2015
+[51015.579911] Call Trace:
+[51015.579950]  dump_stack+0x74/0xbb
+[51015.580000]  ___might_sleep+0x16b/0x3a0
+[51015.580047]  __kmalloc_track_caller+0x220/0x380
+[51015.580077]  kmemdup+0x1c/0x40
+[51015.580077]  bpf_parse_prog+0x10e/0x230
+[51015.580164]  ? kasan_kmalloc+0xa0/0xd0
+[51015.580164]  ? bpf_destroy_state+0x30/0x30
+[51015.580164]  ? bpf_build_state+0xe2/0x3e0
+[51015.580164]  bpf_build_state+0x1bb/0x3e0
+[51015.580164]  ? bpf_parse_prog+0x230/0x230
+[51015.580164]  ? lock_is_held_type+0x123/0x1a0
+[51015.580164]  lwtunnel_build_state+0x1aa/0x390
+[51015.580164]  fib_create_info+0x1579/0x33d0
+[51015.580164]  ? sched_clock_local+0xe2/0x150
+[51015.580164]  ? fib_info_update_nh_saddr+0x1f0/0x1f0
+[51015.580164]  ? sched_clock_local+0xe2/0x150
+[51015.580164]  fib_table_insert+0x201/0x1990
+[51015.580164]  ? lock_downgrade+0x610/0x610
+[51015.580164]  ? fib_table_lookup+0x1920/0x1920
+[51015.580164]  ? lwtunnel_valid_encap_type.part.6+0xcb/0x3a0
+[51015.580164]  ? rtm_to_fib_config+0x637/0xbd0
+[51015.580164]  inet_rtm_newroute+0xed/0x1b0
+[51015.580164]  ? rtm_to_fib_config+0xbd0/0xbd0
+[51015.580164]  rtnetlink_rcv_msg+0x331/0x910
+[ ... ]
+
+Fixes: 3a0af8fd61f9 ("bpf: BPF for lightweight tunnel infrastructure")
+Signed-off-by: Taehee Yoo <ap420073@gmail.com>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/core/lwt_bpf.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/core/lwt_bpf.c b/net/core/lwt_bpf.c
+index 1307731..832d696 100644
+--- a/net/core/lwt_bpf.c
++++ b/net/core/lwt_bpf.c
+@@ -217,7 +217,7 @@ static int bpf_parse_prog(struct nlattr *attr, struct bpf_lwt_prog *prog,
+ 	if (!tb[LWT_BPF_PROG_FD] || !tb[LWT_BPF_PROG_NAME])
+ 		return -EINVAL;
+ 
+-	prog->name = nla_memdup(tb[LWT_BPF_PROG_NAME], GFP_KERNEL);
++	prog->name = nla_memdup(tb[LWT_BPF_PROG_NAME], GFP_ATOMIC);
+ 	if (!prog->name)
+ 		return -ENOMEM;
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,69 @@
+From a73b6c4c2601dbe1cef92d7adeaf267fc50dcd4e Mon Sep 17 00:00:00 2001
+From: Li Wang <liwang@redhat.com>
+Date: Thu, 26 Jul 2018 16:37:42 -0700
+Subject: [PATCH 0388/2156] zswap: re-check zswap_is_full() after do
+ zswap_shrink()
+
+[ Upstream commit 16e536ef47f567289a5699abee9ff7bb304bc12d ]
+
+/sys/../zswap/stored_pages keeps rising in a zswap test with
+"zswap.max_pool_percent=0" parameter.  But it should not compress or
+store pages any more since there is no space in the compressed pool.
+
+Reproduce steps:
+  1. Boot kernel with "zswap.enabled=1"
+  2. Set the max_pool_percent to 0
+      # echo 0 > /sys/module/zswap/parameters/max_pool_percent
+  3. Do memory stress test to see if some pages have been compressed
+      # stress --vm 1 --vm-bytes $mem_available"M" --timeout 60s
+  4. Watching the 'stored_pages' number increasing or not
+
+The root cause is:
+
+  When zswap_max_pool_percent is set to 0 via kernel parameter,
+  zswap_is_full() will always return true due to zswap_shrink().  But if
+  the shinking is able to reclain a page successfully the code then
+  proceeds to compressing/storing another page, so the value of
+  stored_pages will keep changing.
+
+To solve the issue, this patch adds a zswap_is_full() check again after
+  zswap_shrink() to make sure it's now under the max_pool_percent, and to
+  not compress/store if we reached the limit.
+
+Link: http://lkml.kernel.org/r/20180530103936.17812-1-liwang@redhat.com
+Signed-off-by: Li Wang <liwang@redhat.com>
+Acked-by: Dan Streetman <ddstreet@ieee.org>
+Cc: Seth Jennings <sjenning@redhat.com>
+Cc: Huang Ying <huang.ying.caritas@gmail.com>
+Cc: Yu Zhao <yuzhao@google.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/zswap.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/mm/zswap.c b/mm/zswap.c
+index 597008a..ebb0bc8 100644
+--- a/mm/zswap.c
++++ b/mm/zswap.c
+@@ -989,6 +989,15 @@ static int zswap_frontswap_store(unsigned type, pgoff_t offset,
+ 			ret = -ENOMEM;
+ 			goto reject;
+ 		}
++
++		/* A second zswap_is_full() check after
++		 * zswap_shrink() to make sure it's now
++		 * under the max_pool_percent
++		 */
++		if (zswap_is_full()) {
++			ret = -ENOMEM;
++			goto reject;
++		}
+ 	}
+ 
+ 	/* allocate entry */
+-- 
+2.7.4
+

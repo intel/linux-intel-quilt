@@ -1,0 +1,61 @@
+From 26c6ffff8eec39bb8b767a81c7d8f28f54712919 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Mon, 18 Jun 2018 21:58:00 -0700
+Subject: [PATCH 0168/2156] qed: Fix possible memory leak in Rx error path
+ handling.
+
+[ Upstream commit 4f9de4df901fb84709fe3a864dfa4eaf35700f68 ]
+
+Memory for packet buffers need to be freed in the error paths as there is
+no consumer (e.g., upper layer) for such packets and that memory will never
+get freed.
+The issue was uncovered when port was attacked with flood of isatap
+packets, these are multicast packets hence were directed at all the PFs.
+For foce PF, this meant they were routed to the ll2 module which in turn
+drops such packets.
+
+Fixes: 0a7fb11c ("qed: Add Light L2 support")
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: Michal Kalderon <Michal.Kalderon@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/qlogic/qed/qed_ll2.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/qlogic/qed/qed_ll2.c b/drivers/net/ethernet/qlogic/qed/qed_ll2.c
+index c06ad4f0..5f52f14 100644
+--- a/drivers/net/ethernet/qlogic/qed/qed_ll2.c
++++ b/drivers/net/ethernet/qlogic/qed/qed_ll2.c
+@@ -201,8 +201,9 @@ void qed_ll2b_complete_rx_packet(void *cxt, struct qed_ll2_comp_rx_data *data)
+ 
+ 	skb = build_skb(buffer->data, 0);
+ 	if (!skb) {
+-		rc = -ENOMEM;
+-		goto out_post;
++		DP_INFO(cdev, "Failed to build SKB\n");
++		kfree(buffer->data);
++		goto out_post1;
+ 	}
+ 
+ 	data->u.placement_offset += NET_SKB_PAD;
+@@ -224,8 +225,14 @@ void qed_ll2b_complete_rx_packet(void *cxt, struct qed_ll2_comp_rx_data *data)
+ 		cdev->ll2->cbs->rx_cb(cdev->ll2->cb_cookie, skb,
+ 				      data->opaque_data_0,
+ 				      data->opaque_data_1);
++	} else {
++		DP_VERBOSE(p_hwfn, (NETIF_MSG_RX_STATUS | NETIF_MSG_PKTDATA |
++				    QED_MSG_LL2 | QED_MSG_STORAGE),
++			   "Dropping the packet\n");
++		kfree(buffer->data);
+ 	}
+ 
++out_post1:
+ 	/* Update Buffer information and update FW producer */
+ 	buffer->data = new_data;
+ 	buffer->phys_addr = new_phys_addr;
+-- 
+2.7.4
+

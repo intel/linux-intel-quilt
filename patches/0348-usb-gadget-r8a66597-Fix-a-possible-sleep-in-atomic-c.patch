@@ -1,0 +1,50 @@
+From 43b058dc21cdb8908d01e526a5bb1875ec00bd81 Mon Sep 17 00:00:00 2001
+From: Jia-Ju Bai <baijiaju1990@gmail.com>
+Date: Wed, 20 Jun 2018 11:55:08 +0800
+Subject: [PATCH 0348/2156] usb: gadget: r8a66597: Fix a possible
+ sleep-in-atomic-context bugs in r8a66597_queue()
+
+[ Upstream commit f36b507c14c4b6e634463a610294e9cb0065c8ea ]
+
+The driver may sleep in an interrupt handler.
+The function call path (from bottom to top) in Linux-4.16.7 is:
+
+[FUNC] r8a66597_queue(GFP_KERNEL)
+drivers/usb/gadget/udc/r8a66597-udc.c, 1193:
+		r8a66597_queue in get_status
+drivers/usb/gadget/udc/r8a66597-udc.c, 1301:
+		get_status in setup_packet
+drivers/usb/gadget/udc/r8a66597-udc.c, 1381:
+		setup_packet in irq_control_stage
+drivers/usb/gadget/udc/r8a66597-udc.c, 1508:
+		irq_control_stage in r8a66597_irq (interrupt handler)
+
+To fix this bug, GFP_KERNEL is replaced with GFP_ATOMIC.
+
+This bug is found by my static analysis tool (DSAC-2) and checked by
+my code review.
+
+Signed-off-by: Jia-Ju Bai <baijiaju1990@gmail.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/gadget/udc/r8a66597-udc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/udc/r8a66597-udc.c b/drivers/usb/gadget/udc/r8a66597-udc.c
+index f694573..84b227e 100644
+--- a/drivers/usb/gadget/udc/r8a66597-udc.c
++++ b/drivers/usb/gadget/udc/r8a66597-udc.c
+@@ -1193,7 +1193,7 @@ __acquires(r8a66597->lock)
+ 	r8a66597->ep0_req->length = 2;
+ 	/* AV: what happens if we get called again before that gets through? */
+ 	spin_unlock(&r8a66597->lock);
+-	r8a66597_queue(r8a66597->gadget.ep0, r8a66597->ep0_req, GFP_KERNEL);
++	r8a66597_queue(r8a66597->gadget.ep0, r8a66597->ep0_req, GFP_ATOMIC);
+ 	spin_lock(&r8a66597->lock);
+ }
+ 
+-- 
+2.7.4
+

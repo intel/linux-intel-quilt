@@ -1,0 +1,56 @@
+From 4ce46fff750dbee21034080be293dde19f1697ff Mon Sep 17 00:00:00 2001
+From: Johannes Thumshirn <jthumshirn@suse.de>
+Date: Tue, 31 Jul 2018 15:46:03 +0200
+Subject: [PATCH 0411/2156] scsi: fcoe: clear FC_RP_STARTED flags when
+ receiving a LOGO
+
+[ Upstream commit 1550ec458e0cf1a40a170ab1f4c46e3f52860f65 ]
+
+When receiving a LOGO request we forget to clear the FC_RP_STARTED flag
+before starting the rport delete routine.
+
+As the started flag was not cleared, we're not deleting the rport but
+waiting for a restart and thus are keeping the reference count of the rdata
+object at 1.
+
+This leads to the following kmemleak report:
+unreferenced object 0xffff88006542aa00 (size 512):
+  comm "kworker/0:2", pid 24, jiffies 4294899222 (age 226.880s)
+  hex dump (first 32 bytes):
+    68 96 fe 65 00 88 ff ff 00 00 00 00 00 00 00 00  h..e............
+    01 00 00 00 08 00 00 00 02 c5 45 24 ac b8 00 10  ..........E$....
+  backtrace:
+    [<(____ptrval____)>] fcoe_ctlr_vn_add.isra.5+0x7f/0x770 [libfcoe]
+    [<(____ptrval____)>] fcoe_ctlr_vn_recv+0x12af/0x27f0 [libfcoe]
+    [<(____ptrval____)>] fcoe_ctlr_recv_work+0xd01/0x32f0 [libfcoe]
+    [<(____ptrval____)>] process_one_work+0x7ff/0x1420
+    [<(____ptrval____)>] worker_thread+0x87/0xef0
+    [<(____ptrval____)>] kthread+0x2db/0x390
+    [<(____ptrval____)>] ret_from_fork+0x35/0x40
+    [<(____ptrval____)>] 0xffffffffffffffff
+
+Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+Reported-by: ard <ard@kwaak.net>
+Reviewed-by: Hannes Reinecke <hare@suse.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/scsi/libfc/fc_rport.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/scsi/libfc/fc_rport.c b/drivers/scsi/libfc/fc_rport.c
+index 31d31aa..89b1f1a 100644
+--- a/drivers/scsi/libfc/fc_rport.c
++++ b/drivers/scsi/libfc/fc_rport.c
+@@ -2164,6 +2164,7 @@ static void fc_rport_recv_logo_req(struct fc_lport *lport, struct fc_frame *fp)
+ 		FC_RPORT_DBG(rdata, "Received LOGO request while in state %s\n",
+ 			     fc_rport_state(rdata));
+ 
++		rdata->flags &= ~FC_RP_STARTED;
+ 		fc_rport_enter_delete(rdata, RPORT_EV_STOP);
+ 		mutex_unlock(&rdata->rp_mutex);
+ 		kref_put(&rdata->kref, fc_rport_destroy);
+-- 
+2.7.4
+

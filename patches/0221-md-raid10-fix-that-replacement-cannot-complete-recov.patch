@@ -1,0 +1,58 @@
+From 601c226ea6623b8fb15e33fab3608755929de4da Mon Sep 17 00:00:00 2001
+From: BingJing Chang <bingjingc@synology.com>
+Date: Thu, 28 Jun 2018 18:40:11 +0800
+Subject: [PATCH 0221/2156] md/raid10: fix that replacement cannot complete
+ recovery after reassemble
+
+[ Upstream commit bda3153998f3eb2cafa4a6311971143628eacdbc ]
+
+During assemble, the spare marked for replacement is not checked.
+conf->fullsync cannot be updated to be 1. As a result, recovery will
+treat it as a clean array. All recovering sectors are skipped. Original
+device is replaced with the not-recovered spare.
+
+mdadm -C /dev/md0 -l10 -n4 -pn2 /dev/loop[0123]
+mdadm /dev/md0 -a /dev/loop4
+mdadm /dev/md0 --replace /dev/loop0
+mdadm -S /dev/md0 # stop array during recovery
+
+mdadm -A /dev/md0 /dev/loop[01234]
+
+After reassemble, you can see recovery go on, but it completes
+immediately. In fact, recovery is not actually processed.
+
+To solve this problem, we just add the missing logics for replacment
+spares. (In raid1.c or raid5.c, they have already been checked.)
+
+Reported-by: Alex Chen <alexchen@synology.com>
+Reviewed-by: Alex Wu <alexwu@synology.com>
+Reviewed-by: Chung-Chiang Cheng <cccheng@synology.com>
+Signed-off-by: BingJing Chang <bingjingc@synology.com>
+Signed-off-by: Shaohua Li <shli@fb.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/md/raid10.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/md/raid10.c b/drivers/md/raid10.c
+index b20c23f..262a0f0 100644
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@ -3754,6 +3754,13 @@ static int raid10_run(struct mddev *mddev)
+ 			    disk->rdev->saved_raid_disk < 0)
+ 				conf->fullsync = 1;
+ 		}
++
++		if (disk->replacement &&
++		    !test_bit(In_sync, &disk->replacement->flags) &&
++		    disk->replacement->saved_raid_disk < 0) {
++			conf->fullsync = 1;
++		}
++
+ 		disk->recovery_disabled = mddev->recovery_disabled - 1;
+ 	}
+ 
+-- 
+2.7.4
+

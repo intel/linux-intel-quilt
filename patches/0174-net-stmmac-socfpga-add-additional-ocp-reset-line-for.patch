@@ -1,0 +1,92 @@
+From 62e4c9049e869e34bcc321aac6a16c79c30946e4 Mon Sep 17 00:00:00 2001
+From: Dinh Nguyen <dinguyen@kernel.org>
+Date: Tue, 19 Jun 2018 10:35:38 -0500
+Subject: [PATCH 0174/2156] net: stmmac: socfpga: add additional ocp reset line
+ for Stratix10
+
+[ Upstream commit bc8a2d9bcbf1ca548b1deb315d14e1da81945bea ]
+
+The Stratix10 platform has an additional reset line, OCP(Open Core Protocol),
+that also needs to get deasserted for the stmmac ethernet controller to work.
+Thus we need to update the Kconfig to include ARCH_STRATIX10 in order to build
+dwmac-socfpga.
+
+Also, remove the redundant check for the reset controller pointer. The
+reset driver already checks for the pointer and returns 0 if the pointer
+is NULL.
+
+Signed-off-by: Dinh Nguyen <dinguyen@kernel.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/stmicro/stmmac/Kconfig         |  2 +-
+ drivers/net/ethernet/stmicro/stmmac/dwmac-socfpga.c | 18 ++++++++++++++----
+ 2 files changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/Kconfig b/drivers/net/ethernet/stmicro/stmmac/Kconfig
+index 9703576..5790cd6 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/Kconfig
++++ b/drivers/net/ethernet/stmicro/stmmac/Kconfig
+@@ -111,7 +111,7 @@ config DWMAC_ROCKCHIP
+ config DWMAC_SOCFPGA
+ 	tristate "SOCFPGA dwmac support"
+ 	default ARCH_SOCFPGA
+-	depends on OF && (ARCH_SOCFPGA || COMPILE_TEST)
++	depends on OF && (ARCH_SOCFPGA || ARCH_STRATIX10 || COMPILE_TEST)
+ 	select MFD_SYSCON
+ 	help
+ 	  Support for ethernet controller on Altera SOCFPGA
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac-socfpga.c b/drivers/net/ethernet/stmicro/stmmac/dwmac-socfpga.c
+index 6e35957..5b3b06a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac-socfpga.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-socfpga.c
+@@ -55,6 +55,7 @@ struct socfpga_dwmac {
+ 	struct	device *dev;
+ 	struct regmap *sys_mgr_base_addr;
+ 	struct reset_control *stmmac_rst;
++	struct reset_control *stmmac_ocp_rst;
+ 	void __iomem *splitter_base;
+ 	bool f2h_ptp_ref_clk;
+ 	struct tse_pcs pcs;
+@@ -262,8 +263,8 @@ static int socfpga_dwmac_set_phy_mode(struct socfpga_dwmac *dwmac)
+ 		val = SYSMGR_EMACGRP_CTRL_PHYSEL_ENUM_GMII_MII;
+ 
+ 	/* Assert reset to the enet controller before changing the phy mode */
+-	if (dwmac->stmmac_rst)
+-		reset_control_assert(dwmac->stmmac_rst);
++	reset_control_assert(dwmac->stmmac_ocp_rst);
++	reset_control_assert(dwmac->stmmac_rst);
+ 
+ 	regmap_read(sys_mgr_base_addr, reg_offset, &ctrl);
+ 	ctrl &= ~(SYSMGR_EMACGRP_CTRL_PHYSEL_MASK << reg_shift);
+@@ -288,8 +289,8 @@ static int socfpga_dwmac_set_phy_mode(struct socfpga_dwmac *dwmac)
+ 	/* Deassert reset for the phy configuration to be sampled by
+ 	 * the enet controller, and operation to start in requested mode
+ 	 */
+-	if (dwmac->stmmac_rst)
+-		reset_control_deassert(dwmac->stmmac_rst);
++	reset_control_deassert(dwmac->stmmac_ocp_rst);
++	reset_control_deassert(dwmac->stmmac_rst);
+ 	if (phymode == PHY_INTERFACE_MODE_SGMII) {
+ 		if (tse_pcs_init(dwmac->pcs.tse_pcs_base, &dwmac->pcs) != 0) {
+ 			dev_err(dwmac->dev, "Unable to initialize TSE PCS");
+@@ -324,6 +325,15 @@ static int socfpga_dwmac_probe(struct platform_device *pdev)
+ 		goto err_remove_config_dt;
+ 	}
+ 
++	dwmac->stmmac_ocp_rst = devm_reset_control_get_optional(dev, "stmmaceth-ocp");
++	if (IS_ERR(dwmac->stmmac_ocp_rst)) {
++		ret = PTR_ERR(dwmac->stmmac_ocp_rst);
++		dev_err(dev, "error getting reset control of ocp %d\n", ret);
++		goto err_remove_config_dt;
++	}
++
++	reset_control_deassert(dwmac->stmmac_ocp_rst);
++
+ 	ret = socfpga_dwmac_parse_data(dwmac, dev);
+ 	if (ret) {
+ 		dev_err(dev, "Unable to parse OF data\n");
+-- 
+2.7.4
+

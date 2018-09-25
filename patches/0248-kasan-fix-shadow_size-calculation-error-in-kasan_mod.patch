@@ -1,0 +1,73 @@
+From 6e7084e2c3f9fe203eeab3b0f053b99f830afd71 Mon Sep 17 00:00:00 2001
+From: Zhen Lei <thunder.leizhen@huawei.com>
+Date: Tue, 3 Jul 2018 17:02:46 -0700
+Subject: [PATCH 0248/2156] kasan: fix shadow_size calculation error in
+ kasan_module_alloc
+
+[ Upstream commit 1e8e18f694a52d703665012ca486826f64bac29d ]
+
+There is a special case that the size is "(N << KASAN_SHADOW_SCALE_SHIFT)
+Pages plus X", the value of X is [1, KASAN_SHADOW_SCALE_SIZE-1].  The
+operation "size >> KASAN_SHADOW_SCALE_SHIFT" will drop X, and the
+roundup operation can not retrieve the missed one page.  For example:
+size=0x28006, PAGE_SIZE=0x1000, KASAN_SHADOW_SCALE_SHIFT=3, we will get
+shadow_size=0x5000, but actually we need 6 pages.
+
+  shadow_size = round_up(size >> KASAN_SHADOW_SCALE_SHIFT, PAGE_SIZE);
+
+This can lead to a kernel crash when kasan is enabled and the value of
+mod->core_layout.size or mod->init_layout.size is like above.  Because
+the shadow memory of X has not been allocated and mapped.
+
+move_module:
+  ptr = module_alloc(mod->core_layout.size);
+  ...
+  memset(ptr, 0, mod->core_layout.size);		//crashed
+
+  Unable to handle kernel paging request at virtual address ffff0fffff97b000
+  ......
+  Call trace:
+    __asan_storeN+0x174/0x1a8
+    memset+0x24/0x48
+    layout_and_allocate+0xcd8/0x1800
+    load_module+0x190/0x23e8
+    SyS_finit_module+0x148/0x180
+
+Link: http://lkml.kernel.org/r/1529659626-12660-1-git-send-email-thunder.leizhen@huawei.com
+Signed-off-by: Zhen Lei <thunder.leizhen@huawei.com>
+Reviewed-by: Dmitriy Vyukov <dvyukov@google.com>
+Acked-by: Andrey Ryabinin <aryabinin@virtuozzo.com>
+Cc: Alexander Potapenko <glider@google.com>
+Cc: Hanjun Guo <guohanjun@huawei.com>
+Cc: Libin <huawei.libin@huawei.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/kasan/kasan.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/mm/kasan/kasan.c b/mm/kasan/kasan.c
+index d90f29a..71a4319 100644
+--- a/mm/kasan/kasan.c
++++ b/mm/kasan/kasan.c
+@@ -613,12 +613,13 @@ void kasan_kfree_large(const void *ptr)
+ int kasan_module_alloc(void *addr, size_t size)
+ {
+ 	void *ret;
++	size_t scaled_size;
+ 	size_t shadow_size;
+ 	unsigned long shadow_start;
+ 
+ 	shadow_start = (unsigned long)kasan_mem_to_shadow(addr);
+-	shadow_size = round_up(size >> KASAN_SHADOW_SCALE_SHIFT,
+-			PAGE_SIZE);
++	scaled_size = (size + KASAN_SHADOW_MASK) >> KASAN_SHADOW_SCALE_SHIFT;
++	shadow_size = round_up(scaled_size, PAGE_SIZE);
+ 
+ 	if (WARN_ON(!PAGE_ALIGNED(shadow_start)))
+ 		return -EINVAL;
+-- 
+2.7.4
+

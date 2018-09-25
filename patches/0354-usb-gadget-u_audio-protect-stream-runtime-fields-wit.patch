@@ -1,0 +1,185 @@
+From a362655deb0e15a55dafda8e875e0a1f1b97c92d Mon Sep 17 00:00:00 2001
+From: Vladimir Zapolskiy <vladimir_zapolskiy@mentor.com>
+Date: Thu, 21 Jun 2018 17:22:52 +0200
+Subject: [PATCH 0354/2156] usb: gadget: u_audio: protect stream runtime fields
+ with stream spinlock
+
+[ Upstream commit 56bc61587daadef67712068f251c4ef2e3932d94 ]
+
+The change protects almost the whole body of u_audio_iso_complete()
+function by PCM stream lock, this is mainly sufficient to avoid a race
+between USB request completion and stream termination, the change
+prevents a possibility of invalid memory access in interrupt context
+by memcpy():
+
+    Unable to handle kernel paging request at virtual address 00004e80
+    pgd = c0004000
+    [00004e80] *pgd=00000000
+    Internal error: Oops: 817 [#1] PREEMPT SMP ARM
+    CPU: 0 PID: 3 Comm: ksoftirqd/0 Tainted: G         C   3.14.54+ #117
+    task: da180b80 ti: da192000 task.ti: da192000
+    PC is at memcpy+0x50/0x330
+    LR is at 0xcdd92b0e
+    pc : [<c029ef30>]    lr : [<cdd92b0e>]    psr: 20000193
+    sp : da193ce4  ip : dd86ae26  fp : 0000b180
+    r10: daf81680  r9 : 00000000  r8 : d58a01ea
+    r7 : 2c0b43e4  r6 : acdfb08b  r5 : 01a271cf  r4 : 87389377
+    r3 : 69469782  r2 : 00000020  r1 : daf82fe0  r0 : 00004e80
+    Flags: nzCv  IRQs off  FIQs on  Mode SVC_32  ISA ARM  Segment kernel
+    Control: 10c5387d  Table: 2b70804a  DAC: 00000015
+    Process ksoftirqd/0 (pid: 3, stack limit = 0xda192238)
+
+Also added a check for potential !runtime condition, commonly it is
+done by PCM_RUNTIME_CHECK(substream) in the beginning, however this
+does not completely prevent from oopses in u_audio_iso_complete(),
+because the proper protection scheme must be implemented in PCM
+library functions.
+
+An example of *not fixed* oops due to substream->runtime->*
+dereference by snd_pcm_running(substream) from
+snd_pcm_period_elapsed(), where substream->runtime is gone while
+waiting the substream lock:
+
+    Unable to handle kernel paging request at virtual address 6b6b6b6b
+    pgd = db7e4000
+    [6b6b6b6b] *pgd=00000000
+    CPU: 0 PID: 193 Comm: klogd Tainted: G         C   3.14.54+ #118
+    task: db5ac500 ti: db60c000 task.ti: db60c000
+    PC is at snd_pcm_period_elapsed+0x48/0xd8 [snd_pcm]
+    LR is at snd_pcm_period_elapsed+0x40/0xd8 [snd_pcm]
+    pc : [<>]    lr : [<>]    psr: 60000193
+    Flags: nZCv  IRQs off  FIQs on  Mode SVC_32  ISA ARM  Segment user
+    Control: 10c5387d  Table: 2b7e404a  DAC: 00000015
+    Process klogd (pid: 193, stack limit = 0xdb60c238)
+    [<>] (snd_pcm_period_elapsed [snd_pcm]) from [<>] (udc_irq+0x500/0xbbc)
+    [<>] (udc_irq) from [<>] (ci_irq+0x280/0x304)
+    [<>] (ci_irq) from [<>] (handle_irq_event_percpu+0xa4/0x40c)
+    [<>] (handle_irq_event_percpu) from [<>] (handle_irq_event+0x3c/0x5c)
+    [<>] (handle_irq_event) from [<>] (handle_fasteoi_irq+0xc4/0x110)
+    [<>] (handle_fasteoi_irq) from [<>] (generic_handle_irq+0x20/0x30)
+    [<>] (generic_handle_irq) from [<>] (handle_IRQ+0x80/0xc0)
+    [<>] (handle_IRQ) from [<>] (gic_handle_irq+0x3c/0x60)
+    [<>] (gic_handle_irq) from [<>] (__irq_svc+0x44/0x78)
+
+Signed-off-by: Vladimir Zapolskiy <vladimir_zapolskiy@mentor.com>
+[erosca: W/o this patch, with minimal instrumentation [1], I can
+         consistently reproduce BUG: KASAN: use-after-free [2]]
+
+[1] Instrumentation to reproduce issue [2]:
+#  diff --git a/drivers/usb/gadget/function/u_audio.c b/drivers/usb/gadget/function/u_audio.c
+#  index a72295c953bb..bd0b308024fe 100644
+#  --- a/drivers/usb/gadget/function/u_audio.c
+#  +++ b/drivers/usb/gadget/function/u_audio.c
+#  @@ -16,6 +16,7 @@
+#   #include <sound/core.h>
+#   #include <sound/pcm.h>
+#   #include <sound/pcm_params.h>
+#  +#include <linux/delay.h>
+#
+#   #include "u_audio.h"
+#
+#  @@ -147,6 +148,8 @@ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+#
+# 	spin_unlock_irqrestore(&prm->lock, flags);
+#
+#  +	udelay(500); //delay here to increase probability of parallel activities
+#  +
+# 	/* Pack USB load in ALSA ring buffer */
+# 	pending = prm->dma_bytes - hw_ptr;
+
+[2] After applying [1], below BUG occurs on Rcar-H3-Salvator-X board:
+==================================================================
+BUG: KASAN: use-after-free in u_audio_iso_complete+0x24c/0x520 [u_audio]
+Read of size 8 at addr ffff8006cafcc248 by task swapper/0/0
+
+CPU: 0 PID: 0 Comm: swapper/0 Tainted: G        WC      4.14.47+ #160
+Hardware name: Renesas Salvator-X board based on r8a7795 ES2.0+ (DT)
+Call trace:
+[<ffff2000080925ac>] dump_backtrace+0x0/0x364
+[<ffff200008092924>] show_stack+0x14/0x1c
+[<ffff200008f8dbcc>] dump_stack+0x108/0x174
+[<ffff2000083c71b8>] print_address_description+0x7c/0x32c
+[<ffff2000083c78e8>] kasan_report+0x324/0x354
+[<ffff2000083c6114>] __asan_load8+0x24/0x94
+[<ffff2000021d1b34>] u_audio_iso_complete+0x24c/0x520 [u_audio]
+[<ffff20000152fe50>] usb_gadget_giveback_request+0x480/0x4d0 [udc_core]
+[<ffff200001860ab8>] usbhsg_queue_done+0x100/0x130 [renesas_usbhs]
+[<ffff20000185f814>] usbhsf_pkt_handler+0x1a4/0x298 [renesas_usbhs]
+[<ffff20000185fb38>] usbhsf_irq_ready+0x128/0x178 [renesas_usbhs]
+[<ffff200001859cc8>] usbhs_interrupt+0x440/0x490 [renesas_usbhs]
+[<ffff2000081a0288>] __handle_irq_event_percpu+0x594/0xa58
+[<ffff2000081a07d0>] handle_irq_event_percpu+0x84/0x12c
+[<ffff2000081a0928>] handle_irq_event+0xb0/0x10c
+[<ffff2000081a8384>] handle_fasteoi_irq+0x1e0/0x2ec
+[<ffff20000819e5f8>] generic_handle_irq+0x2c/0x44
+[<ffff20000819f0d0>] __handle_domain_irq+0x190/0x194
+[<ffff20000808177c>] gic_handle_irq+0x80/0xac
+Exception stack(0xffff200009e97c80 to 0xffff200009e97dc0)
+7c80: 0000000000000000 0000000000000000 0000000000000003 ffff200008179298
+7ca0: ffff20000ae1c180 dfff200000000000 0000000000000000 ffff2000081f9a88
+7cc0: ffff200009eb5960 ffff200009e97cf0 0000000000001600 ffff0400041b064b
+7ce0: 0000000000000000 0000000000000002 0000000200000001 0000000000000001
+7d00: ffff20000842197c 0000ffff958c4970 0000000000000000 ffff8006da0d5b80
+7d20: ffff8006d4678498 0000000000000000 000000126bde0a8b ffff8006d4678480
+7d40: 0000000000000000 000000126bdbea64 ffff200008fd0000 ffff8006fffff980
+7d60: 00000000495f0018 ffff200009e97dc0 ffff200008b6c4ec ffff200009e97dc0
+7d80: ffff200008b6c4f0 0000000020000145 ffff8006da0d5b80 ffff8006d4678498
+7da0: ffffffffffffffff ffff8006d4678498 ffff200009e97dc0 ffff200008b6c4f0
+[<ffff200008084034>] el1_irq+0xb4/0x12c
+[<ffff200008b6c4f0>] cpuidle_enter_state+0x818/0x844
+[<ffff200008b6c59c>] cpuidle_enter+0x18/0x20
+[<ffff20000815f2e4>] call_cpuidle+0x98/0x9c
+[<ffff20000815f674>] do_idle+0x214/0x264
+[<ffff20000815facc>] cpu_startup_entry+0x20/0x24
+[<ffff200008fb09d8>] rest_init+0x30c/0x320
+[<ffff2000095f1338>] start_kernel+0x570/0x5b0
+---<-snip->---
+
+Fixes: 132fcb460839 ("usb: gadget: Add Audio Class 2.0 Driver")
+Signed-off-by: Eugeniu Rosca <erosca@de.adit-jv.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/gadget/function/u_audio.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/gadget/function/u_audio.c b/drivers/usb/gadget/function/u_audio.c
+index e964413..d3a6392 100644
+--- a/drivers/usb/gadget/function/u_audio.c
++++ b/drivers/usb/gadget/function/u_audio.c
+@@ -88,7 +88,7 @@ static const struct snd_pcm_hardware uac_pcm_hardware = {
+ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	unsigned pending;
+-	unsigned long flags;
++	unsigned long flags, flags2;
+ 	unsigned int hw_ptr;
+ 	int status = req->status;
+ 	struct uac_req *ur = req->context;
+@@ -115,7 +115,14 @@ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+ 	if (!substream)
+ 		goto exit;
+ 
++	snd_pcm_stream_lock_irqsave(substream, flags2);
++
+ 	runtime = substream->runtime;
++	if (!runtime || !snd_pcm_running(substream)) {
++		snd_pcm_stream_unlock_irqrestore(substream, flags2);
++		goto exit;
++	}
++
+ 	spin_lock_irqsave(&prm->lock, flags);
+ 
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+@@ -174,6 +181,7 @@ static void u_audio_iso_complete(struct usb_ep *ep, struct usb_request *req)
+ 	prm->hw_ptr = (hw_ptr + req->actual) % runtime->dma_bytes;
+ 	hw_ptr = prm->hw_ptr;
+ 	spin_unlock_irqrestore(&prm->lock, flags);
++	snd_pcm_stream_unlock_irqrestore(substream, flags2);
+ 
+ 	if ((hw_ptr % snd_pcm_lib_period_bytes(substream)) < req->actual)
+ 		snd_pcm_period_elapsed(substream);
+-- 
+2.7.4
+

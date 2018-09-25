@@ -1,0 +1,113 @@
+From 94cac10c50c1e38a0c51be0fded73e5aa6fa9080 Mon Sep 17 00:00:00 2001
+From: Ryan Hsu <ryanhsu@codeaurora.org>
+Date: Mon, 18 Jun 2018 17:00:04 +0300
+Subject: [PATCH 0220/2156] ath10k: update the phymode along with bandwidth
+ change request
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[ Upstream commit 9191fc2a431bade3dedc9ad17759495a9f82f41b ]
+
+In the case of Station connects to AP with narrower bandwidth at beginning.
+And later the AP changes the bandwidth to winder bandwidth, the AP will
+beacon with wider bandwidth IE, eg VHT20->VHT40->VHT80 or VHT40->VHT80.
+
+Since the supported BANDWIDTH will be limited by the PHYMODE, so while
+Station receives the bandwidth change request, it will also need to
+reconfigure the PHYMODE setting to firmware instead of just configuring
+the BANDWIDTH info, otherwise it'll trigger a firmware crash with
+non-support bandwidth.
+
+The issue was observed in WLAN.RM.4.4.1-00051-QCARMSWP-1, QCA6174 with
+below scenario:
+
+AP xxx changed bandwidth, new config is 5200 MHz, width 2 (5190/0 MHz)
+disconnect from AP xxx for new auth to yyy
+RX ReassocResp from xxx (capab=0x1111 status=0 aid=102)
+associated
+
+....
+
+AP xxx changed bandwidth, new config is 5200 MHz, width 2 (5190/0 MHz)
+AP xxx changed bandwidth, new config is 5200 MHz, width 3 (5210/0 MHz)
+
+....
+
+firmware register dump:
+[00]: 0x05030000 0x000015B3 0x00987291 0x00955B31
+[04]: 0x00987291 0x00060730 0x00000004 0x00000001
+[08]: 0x004089F0 0x00955A00 0x000A0B00 0x00400000
+[12]: 0x00000009 0x00000000 0x00952CD0 0x00952CE6
+[16]: 0x00952CC4 0x0098E25F 0x00000000 0x0091080D
+[20]: 0x40987291 0x0040E7A8 0x00000000 0x0041EE3C
+[24]: 0x809ABF05 0x0040E808 0x00000000 0xC0987291
+[28]: 0x809A650C 0x0040E948 0x0041FE40 0x004345C4
+[32]: 0x809A5C63 0x0040E988 0x0040E9AC 0x0042D1A8
+[36]: 0x8091D252 0x0040E9A8 0x00000002 0x00000001
+[40]: 0x809FDA9D 0x0040EA58 0x0043D554 0x0042D554
+[44]: 0x809F8B22 0x0040EA78 0x0043D554 0x00000001
+[48]: 0x80911210 0x0040EAC8 0x00000010 0x004041D0
+[52]: 0x80911154 0x0040EB28 0x00400000 0x00000000
+[56]: 0x8091122D 0x0040EB48 0x00000000 0x00400600
+
+Reported-by: Rouven Czerwinski <rouven@czerwinskis.de>
+Tested-by: Timur Kristóf <timur.kristof@gmail.com>
+Signed-off-by: Ryan Hsu <ryanhsu@codeaurora.org>
+Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/wireless/ath/ath10k/mac.c | 16 ++++++++++++++--
+ drivers/net/wireless/ath/ath10k/wmi.h |  1 +
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index df11bb4..52ebed1 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -5923,8 +5923,19 @@ static void ath10k_sta_rc_update_wk(struct work_struct *wk)
+ 			   ath10k_mac_max_vht_nss(vht_mcs_mask)));
+ 
+ 	if (changed & IEEE80211_RC_BW_CHANGED) {
+-		ath10k_dbg(ar, ATH10K_DBG_MAC, "mac update sta %pM peer bw %d\n",
+-			   sta->addr, bw);
++		enum wmi_phy_mode mode;
++
++		mode = chan_to_phymode(&def);
++		ath10k_dbg(ar, ATH10K_DBG_MAC, "mac update sta %pM peer bw %d phymode %d\n",
++				sta->addr, bw, mode);
++
++		err = ath10k_wmi_peer_set_param(ar, arvif->vdev_id, sta->addr,
++				WMI_PEER_PHYMODE, mode);
++		if (err) {
++			ath10k_warn(ar, "failed to update STA %pM peer phymode %d: %d\n",
++					sta->addr, mode, err);
++			goto exit;
++		}
+ 
+ 		err = ath10k_wmi_peer_set_param(ar, arvif->vdev_id, sta->addr,
+ 						WMI_PEER_CHAN_WIDTH, bw);
+@@ -5965,6 +5976,7 @@ static void ath10k_sta_rc_update_wk(struct work_struct *wk)
+ 				    sta->addr);
+ 	}
+ 
++exit:
+ 	mutex_unlock(&ar->conf_mutex);
+ }
+ 
+diff --git a/drivers/net/wireless/ath/ath10k/wmi.h b/drivers/net/wireless/ath/ath10k/wmi.h
+index bab876c..d0e05aa 100644
+--- a/drivers/net/wireless/ath/ath10k/wmi.h
++++ b/drivers/net/wireless/ath/ath10k/wmi.h
+@@ -6002,6 +6002,7 @@ enum wmi_peer_param {
+ 	WMI_PEER_NSS        = 0x5,
+ 	WMI_PEER_USE_4ADDR  = 0x6,
+ 	WMI_PEER_DEBUG      = 0xa,
++	WMI_PEER_PHYMODE    = 0xd,
+ 	WMI_PEER_DUMMY_VAR  = 0xff, /* dummy parameter for STA PS workaround */
+ };
+ 
+-- 
+2.7.4
+

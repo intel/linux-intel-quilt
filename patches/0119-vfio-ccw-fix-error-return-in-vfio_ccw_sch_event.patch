@@ -1,0 +1,57 @@
+From 7dcffd98360a1f0e953eb2aa86976032d83f90dd Mon Sep 17 00:00:00 2001
+From: Dong Jia Shi <bjsdjshi@linux.vnet.ibm.com>
+Date: Wed, 2 May 2018 09:25:59 +0200
+Subject: [PATCH 0119/2156] vfio: ccw: fix error return in vfio_ccw_sch_event
+
+[ Upstream commit 2c861d89ccda2fbcea9358eff9cc5f8fae548be5 ]
+
+If the device has not been registered, or there is work pending,
+we should reschedule a sch_event call again.
+
+Signed-off-by: Dong Jia Shi <bjsdjshi@linux.vnet.ibm.com>
+Message-Id: <20180502072559.50691-1-bjsdjshi@linux.vnet.ibm.com>
+Reviewed-by: Cornelia Huck <cohuck@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/s390/cio/vfio_ccw_drv.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/s390/cio/vfio_ccw_drv.c b/drivers/s390/cio/vfio_ccw_drv.c
+index 82f05c4..ae7a49a 100644
+--- a/drivers/s390/cio/vfio_ccw_drv.c
++++ b/drivers/s390/cio/vfio_ccw_drv.c
+@@ -176,6 +176,7 @@ static int vfio_ccw_sch_event(struct subchannel *sch, int process)
+ {
+ 	struct vfio_ccw_private *private = dev_get_drvdata(&sch->dev);
+ 	unsigned long flags;
++	int rc = -EAGAIN;
+ 
+ 	spin_lock_irqsave(sch->lock, flags);
+ 	if (!device_is_registered(&sch->dev))
+@@ -186,6 +187,7 @@ static int vfio_ccw_sch_event(struct subchannel *sch, int process)
+ 
+ 	if (cio_update_schib(sch)) {
+ 		vfio_ccw_fsm_event(private, VFIO_CCW_EVENT_NOT_OPER);
++		rc = 0;
+ 		goto out_unlock;
+ 	}
+ 
+@@ -194,11 +196,12 @@ static int vfio_ccw_sch_event(struct subchannel *sch, int process)
+ 		private->state = private->mdev ? VFIO_CCW_STATE_IDLE :
+ 				 VFIO_CCW_STATE_STANDBY;
+ 	}
++	rc = 0;
+ 
+ out_unlock:
+ 	spin_unlock_irqrestore(sch->lock, flags);
+ 
+-	return 0;
++	return rc;
+ }
+ 
+ static struct css_device_id vfio_ccw_sch_ids[] = {
+-- 
+2.7.4
+

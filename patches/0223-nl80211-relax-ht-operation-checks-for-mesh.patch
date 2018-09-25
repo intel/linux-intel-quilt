@@ -1,0 +1,79 @@
+From 334c9cd8ba8d8c1b5dcb5a49b997aeef3db06c1d Mon Sep 17 00:00:00 2001
+From: Bob Copeland <me@bobcopeland.com>
+Date: Sun, 24 Jun 2018 21:10:49 -0400
+Subject: [PATCH 0223/2156] nl80211: relax ht operation checks for mesh
+
+[ Upstream commit 188f60ab8e787fcbb5ac9d64ede23a0070231f09 ]
+
+Commit 9757235f451c, "nl80211: correct checks for
+NL80211_MESHCONF_HT_OPMODE value") relaxed the range for the HT
+operation field in meshconf, while also adding checks requiring
+the non-greenfield and non-ht-sta bits to be set in certain
+circumstances.  The latter bit is actually reserved for mesh BSSes
+according to Table 9-168 in 802.11-2016, so in fact it should not
+be set.
+
+wpa_supplicant sets these bits because the mesh and AP code share
+the same implementation, but authsae does not.  As a result, some
+meshconf updates from authsae which set only the NONHT_MIXED
+protection bits were being rejected.
+
+In order to avoid breaking userspace by changing the rules again,
+simply accept the values with or without the bits set, and mask
+off the reserved bit to match the spec.
+
+While in here, update the 802.11-2012 reference to 802.11-2016.
+
+Fixes: 9757235f451c ("nl80211: correct checks for NL80211_MESHCONF_HT_OPMODE value")
+Cc: Masashi Honma <masashi.honma@gmail.com>
+Signed-off-by: Bob Copeland <bobcopeland@fb.com>
+Reviewed-by: Masashi Honma <masashi.honma@gmail.com>
+Reviewed-by: Masashi Honma <masashi.honma@gmail.com>
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/wireless/nl80211.c | 19 +++----------------
+ 1 file changed, 3 insertions(+), 16 deletions(-)
+
+diff --git a/net/wireless/nl80211.c b/net/wireless/nl80211.c
+index ea28aa5..0cecfda 100644
+--- a/net/wireless/nl80211.c
++++ b/net/wireless/nl80211.c
+@@ -5990,7 +5990,7 @@ do {									    \
+ 				  nl80211_check_s32);
+ 	/*
+ 	 * Check HT operation mode based on
+-	 * IEEE 802.11 2012 8.4.2.59 HT Operation element.
++	 * IEEE 802.11-2016 9.4.2.57 HT Operation element.
+ 	 */
+ 	if (tb[NL80211_MESHCONF_HT_OPMODE]) {
+ 		ht_opmode = nla_get_u16(tb[NL80211_MESHCONF_HT_OPMODE]);
+@@ -6000,22 +6000,9 @@ do {									    \
+ 				  IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
+ 			return -EINVAL;
+ 
+-		if ((ht_opmode & IEEE80211_HT_OP_MODE_NON_GF_STA_PRSNT) &&
+-		    (ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
+-			return -EINVAL;
++		/* NON_HT_STA bit is reserved, but some programs set it */
++		ht_opmode &= ~IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT;
+ 
+-		switch (ht_opmode & IEEE80211_HT_OP_MODE_PROTECTION) {
+-		case IEEE80211_HT_OP_MODE_PROTECTION_NONE:
+-		case IEEE80211_HT_OP_MODE_PROTECTION_20MHZ:
+-			if (ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT)
+-				return -EINVAL;
+-			break;
+-		case IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER:
+-		case IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED:
+-			if (!(ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
+-				return -EINVAL;
+-			break;
+-		}
+ 		cfg->ht_opmode = ht_opmode;
+ 		mask |= (1 << (NL80211_MESHCONF_HT_OPMODE - 1));
+ 	}
+-- 
+2.7.4
+

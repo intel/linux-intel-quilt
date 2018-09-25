@@ -1,0 +1,65 @@
+From 637de2c016786aa00697202aefc1d3e69dd05c55 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Tue, 24 Jul 2018 02:43:52 -0700
+Subject: [PATCH 0375/2156] bnx2x: Fix invalid memory access in rss hash config
+ path.
+
+[ Upstream commit ae2dcb28c24794a87e424a726a1cf1a61980f52d ]
+
+Rx hash/filter table configuration uses rss_conf_obj to configure filters
+in the hardware. This object is initialized only when the interface is
+brought up.
+This patch adds driver changes to configure rss params only when the device
+is in opened state. In port disabled case, the config will be cached in the
+driver structure which will be applied in the successive load path.
+
+Please consider applying it to 'net' branch.
+
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+index 1e33abd..3fd1085 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_ethtool.c
+@@ -3387,14 +3387,18 @@ static int bnx2x_set_rss_flags(struct bnx2x *bp, struct ethtool_rxnfc *info)
+ 			DP(BNX2X_MSG_ETHTOOL,
+ 			   "rss re-configured, UDP 4-tupple %s\n",
+ 			   udp_rss_requested ? "enabled" : "disabled");
+-			return bnx2x_rss(bp, &bp->rss_conf_obj, false, true);
++			if (bp->state == BNX2X_STATE_OPEN)
++				return bnx2x_rss(bp, &bp->rss_conf_obj, false,
++						 true);
+ 		} else if ((info->flow_type == UDP_V6_FLOW) &&
+ 			   (bp->rss_conf_obj.udp_rss_v6 != udp_rss_requested)) {
+ 			bp->rss_conf_obj.udp_rss_v6 = udp_rss_requested;
+ 			DP(BNX2X_MSG_ETHTOOL,
+ 			   "rss re-configured, UDP 4-tupple %s\n",
+ 			   udp_rss_requested ? "enabled" : "disabled");
+-			return bnx2x_rss(bp, &bp->rss_conf_obj, false, true);
++			if (bp->state == BNX2X_STATE_OPEN)
++				return bnx2x_rss(bp, &bp->rss_conf_obj, false,
++						 true);
+ 		}
+ 		return 0;
+ 
+@@ -3508,7 +3512,10 @@ static int bnx2x_set_rxfh(struct net_device *dev, const u32 *indir,
+ 		bp->rss_conf_obj.ind_table[i] = indir[i] + bp->fp->cl_id;
+ 	}
+ 
+-	return bnx2x_config_rss_eth(bp, false);
++	if (bp->state == BNX2X_STATE_OPEN)
++		return bnx2x_config_rss_eth(bp, false);
++
++	return 0;
+ }
+ 
+ /**
+-- 
+2.7.4
+

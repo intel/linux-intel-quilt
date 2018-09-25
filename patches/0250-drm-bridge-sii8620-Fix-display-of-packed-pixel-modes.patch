@@ -1,0 +1,73 @@
+From bf030b2faacbc740170e33e1281ef2f96decc2a7 Mon Sep 17 00:00:00 2001
+From: Maciej Purski <m.purski@samsung.com>
+Date: Thu, 28 Jun 2018 18:44:02 +0200
+Subject: [PATCH 0250/2156] drm/bridge/sii8620: Fix display of packed pixel
+ modes
+
+[ Upstream commit fdddc65ab35d575b42aab411b2dc687601eab680 ]
+
+Current implementation does not guarantee packed pixel modes working
+with every dongle. There are some dongles, which require selecting
+the output mode explicitly.
+
+Write proper values to registers in packed_pixel mode, based on how it
+is done in vendor's code. Select output color space: RGB
+(no packed pixel) or YCBCR422 (packed pixel).
+
+This reverts commit e8b92efa629dac0e70ea4145c5e70616de5f89c8
+("drm/bridge/sii8620: fix display of packed pixel modes in MHL2").
+
+Signed-off-by: Maciej Purski <m.purski@samsung.com>
+Signed-off-by: Andrzej Hajda <a.hajda@samsung.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/1530204243-6370-3-git-send-email-m.purski@samsung.com
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/gpu/drm/bridge/sil-sii8620.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/bridge/sil-sii8620.c b/drivers/gpu/drm/bridge/sil-sii8620.c
+index 33bd5d8..0cb69ee 100644
+--- a/drivers/gpu/drm/bridge/sil-sii8620.c
++++ b/drivers/gpu/drm/bridge/sil-sii8620.c
+@@ -1038,21 +1038,36 @@ static void sii8620_stop_video(struct sii8620 *ctx)
+ 
+ static void sii8620_set_format(struct sii8620 *ctx)
+ {
++	u8 out_fmt;
++
+ 	if (sii8620_is_mhl3(ctx)) {
+ 		sii8620_setbits(ctx, REG_M3_P0CTRL,
+ 				BIT_M3_P0CTRL_MHL3_P0_PIXEL_MODE_PACKED,
+ 				ctx->use_packed_pixel ? ~0 : 0);
+ 	} else {
++		if (ctx->use_packed_pixel) {
++			sii8620_write_seq_static(ctx,
++				REG_VID_MODE, BIT_VID_MODE_M1080P,
++				REG_MHL_TOP_CTL, BIT_MHL_TOP_CTL_MHL_PP_SEL | 1,
++				REG_MHLTX_CTL6, 0x60
++			);
++		} else {
+ 			sii8620_write_seq_static(ctx,
+ 				REG_VID_MODE, 0,
+ 				REG_MHL_TOP_CTL, 1,
+ 				REG_MHLTX_CTL6, 0xa0
+ 			);
++		}
+ 	}
+ 
++	if (ctx->use_packed_pixel)
++		out_fmt = VAL_TPI_FORMAT(YCBCR422, FULL);
++	else
++		out_fmt = VAL_TPI_FORMAT(RGB, FULL);
++
+ 	sii8620_write_seq(ctx,
+ 		REG_TPI_INPUT, VAL_TPI_FORMAT(RGB, FULL),
+-		REG_TPI_OUTPUT, VAL_TPI_FORMAT(RGB, FULL),
++		REG_TPI_OUTPUT, out_fmt,
+ 	);
+ }
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,85 @@
+From 63a0f9de021aac2491be8466e44f35b07e3127b1 Mon Sep 17 00:00:00 2001
+From: Vincent Whitchurch <vincent.whitchurch@axis.com>
+Date: Tue, 21 Aug 2018 17:25:07 +0200
+Subject: [PATCH 0494/2156] watchdog: Mark watchdog touch functions as notrace
+
+commit cb9d7fd51d9fbb329d182423bd7b92d0f8cb0e01 upstream.
+
+Some architectures need to use stop_machine() to patch functions for
+ftrace, and the assumption is that the stopped CPUs do not make function
+calls to traceable functions when they are in the stopped state.
+
+Commit ce4f06dcbb5d ("stop_machine: Touch_nmi_watchdog() after
+MULTI_STOP_PREPARE") added calls to the watchdog touch functions from
+the stopped CPUs and those functions lack notrace annotations.  This
+leads to crashes when enabling/disabling ftrace on ARM kernels built
+with the Thumb-2 instruction set.
+
+Fix it by adding the necessary notrace annotations.
+
+Fixes: ce4f06dcbb5d ("stop_machine: Touch_nmi_watchdog() after MULTI_STOP_PREPARE")
+Signed-off-by: Vincent Whitchurch <vincent.whitchurch@axis.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: oleg@redhat.com
+Cc: tj@kernel.org
+Cc: stable@vger.kernel.org
+Link: https://lkml.kernel.org/r/20180821152507.18313-1-vincent.whitchurch@axis.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ kernel/watchdog.c     | 4 ++--
+ kernel/watchdog_hld.c | 2 +-
+ kernel/workqueue.c    | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/watchdog.c b/kernel/watchdog.c
+index c8e0670..087994b 100644
+--- a/kernel/watchdog.c
++++ b/kernel/watchdog.c
+@@ -265,7 +265,7 @@ static void __touch_watchdog(void)
+  * entering idle state.  This should only be used for scheduler events.
+  * Use touch_softlockup_watchdog() for everything else.
+  */
+-void touch_softlockup_watchdog_sched(void)
++notrace void touch_softlockup_watchdog_sched(void)
+ {
+ 	/*
+ 	 * Preemption can be enabled.  It doesn't matter which CPU's timestamp
+@@ -274,7 +274,7 @@ void touch_softlockup_watchdog_sched(void)
+ 	raw_cpu_write(watchdog_touch_ts, 0);
+ }
+ 
+-void touch_softlockup_watchdog(void)
++notrace void touch_softlockup_watchdog(void)
+ {
+ 	touch_softlockup_watchdog_sched();
+ 	wq_watchdog_touch(raw_smp_processor_id());
+diff --git a/kernel/watchdog_hld.c b/kernel/watchdog_hld.c
+index e449a23..4ece602 100644
+--- a/kernel/watchdog_hld.c
++++ b/kernel/watchdog_hld.c
+@@ -29,7 +29,7 @@ static struct cpumask dead_events_mask;
+ static unsigned long hardlockup_allcpu_dumped;
+ static atomic_t watchdog_cpus = ATOMIC_INIT(0);
+ 
+-void arch_touch_nmi_watchdog(void)
++notrace void arch_touch_nmi_watchdog(void)
+ {
+ 	/*
+ 	 * Using __raw here because some code paths have
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index d8a7f89..08bc551 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -5484,7 +5484,7 @@ static void wq_watchdog_timer_fn(unsigned long data)
+ 	mod_timer(&wq_watchdog_timer, jiffies + thresh);
+ }
+ 
+-void wq_watchdog_touch(int cpu)
++notrace void wq_watchdog_touch(int cpu)
+ {
+ 	if (cpu >= 0)
+ 		per_cpu(wq_watchdog_touched_cpu, cpu) = jiffies;
+-- 
+2.7.4
+

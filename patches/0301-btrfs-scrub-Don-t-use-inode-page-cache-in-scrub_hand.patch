@@ -1,0 +1,92 @@
+From fc9caa36d80e7f3aaf0720df58a7611ae88b9a94 Mon Sep 17 00:00:00 2001
+From: Qu Wenruo <wqu@suse.com>
+Date: Wed, 11 Jul 2018 13:41:21 +0800
+Subject: [PATCH 0301/2156] btrfs: scrub: Don't use inode page cache in
+ scrub_handle_errored_block()
+
+[ Upstream commit 665d4953cde6d9e75c62a07ec8f4f8fd7d396ade ]
+
+In commit ac0b4145d662 ("btrfs: scrub: Don't use inode pages for device
+replace") we removed the branch of copy_nocow_pages() to avoid
+corruption for compressed nodatasum extents.
+
+However above commit only solves the problem in scrub_extent(), if
+during scrub_pages() we failed to read some pages,
+sctx->no_io_error_seen will be non-zero and we go to fixup function
+scrub_handle_errored_block().
+
+In scrub_handle_errored_block(), for sctx without csum (no matter if
+we're doing replace or scrub) we go to scrub_fixup_nodatasum() routine,
+which does the similar thing with copy_nocow_pages(), but does it
+without the extra check in copy_nocow_pages() routine.
+
+So for test cases like btrfs/100, where we emulate read errors during
+replace/scrub, we could corrupt compressed extent data again.
+
+This patch will fix it just by avoiding any "optimization" for
+nodatasum, just falls back to the normal fixup routine by try read from
+any good copy.
+
+This also solves WARN_ON() or dead lock caused by lame backref iteration
+in scrub_fixup_nodatasum() routine.
+
+The deadlock or WARN_ON() won't be triggered before commit ac0b4145d662
+("btrfs: scrub: Don't use inode pages for device replace") since
+copy_nocow_pages() have better locking and extra check for data extent,
+and it's already doing the fixup work by try to read data from any good
+copy, so it won't go scrub_fixup_nodatasum() anyway.
+
+This patch disables the faulty code and will be removed completely in a
+followup patch.
+
+Fixes: ac0b4145d662 ("btrfs: scrub: Don't use inode pages for device replace")
+Signed-off-by: Qu Wenruo <wqu@suse.com>
+Signed-off-by: David Sterba <dsterba@suse.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/btrfs/scrub.c | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/fs/btrfs/scrub.c b/fs/btrfs/scrub.c
+index 936d58c..61192c5 100644
+--- a/fs/btrfs/scrub.c
++++ b/fs/btrfs/scrub.c
+@@ -1166,11 +1166,6 @@ static int scrub_handle_errored_block(struct scrub_block *sblock_to_check)
+ 		return ret;
+ 	}
+ 
+-	if (sctx->is_dev_replace && !is_metadata && !have_csum) {
+-		sblocks_for_recheck = NULL;
+-		goto nodatasum_case;
+-	}
+-
+ 	/*
+ 	 * read all mirrors one after the other. This includes to
+ 	 * re-read the extent or metadata block that failed (that was
+@@ -1283,13 +1278,19 @@ static int scrub_handle_errored_block(struct scrub_block *sblock_to_check)
+ 		goto out;
+ 	}
+ 
+-	if (!is_metadata && !have_csum) {
++	/*
++	 * NOTE: Even for nodatasum case, it's still possible that it's a
++	 * compressed data extent, thus scrub_fixup_nodatasum(), which write
++	 * inode page cache onto disk, could cause serious data corruption.
++	 *
++	 * So here we could only read from disk, and hope our recovery could
++	 * reach disk before the newer write.
++	 */
++	if (0 && !is_metadata && !have_csum) {
+ 		struct scrub_fixup_nodatasum *fixup_nodatasum;
+ 
+ 		WARN_ON(sctx->is_dev_replace);
+ 
+-nodatasum_case:
+-
+ 		/*
+ 		 * !is_metadata and !have_csum, this means that the data
+ 		 * might not be COWed, that it might be modified
+-- 
+2.7.4
+

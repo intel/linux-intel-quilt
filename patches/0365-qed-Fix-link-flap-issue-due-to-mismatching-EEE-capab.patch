@@ -1,0 +1,53 @@
+From 77c65d5f40c6979244eee3d4f51fa2a213c73307 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Wed, 18 Jul 2018 22:50:02 -0700
+Subject: [PATCH 0365/2156] qed: Fix link flap issue due to mismatching EEE
+ capabilities.
+
+[ Upstream commit 4ad95a93a702ec4f4fb5159b822797ba67b8cbbe ]
+
+Apparently, MFW publishes EEE capabilities even for Fiber-boards that don't
+support them, and later since qed internally sets adv_caps it would cause
+link-flap avoidance (LFA) to fail when driver would initiate the link.
+This in turn delays the link, causing traffic to fail.
+
+Driver has been modified to not to ask MFW for any EEE config if EEE isn't
+to be enabled.
+
+Fixes: 645874e5 ("qed: Add support for Energy efficient ethernet.")
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: Michal Kalderon <Michal.Kalderon@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/qlogic/qed/qed_mcp.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/qlogic/qed/qed_mcp.c b/drivers/net/ethernet/qlogic/qed/qed_mcp.c
+index 376485d..c0674bc 100644
+--- a/drivers/net/ethernet/qlogic/qed/qed_mcp.c
++++ b/drivers/net/ethernet/qlogic/qed/qed_mcp.c
+@@ -1279,9 +1279,15 @@ int qed_mcp_set_link(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt, bool b_up)
+ 	phy_cfg.pause |= (params->pause.forced_tx) ? ETH_PAUSE_TX : 0;
+ 	phy_cfg.adv_speed = params->speed.advertised_speeds;
+ 	phy_cfg.loopback_mode = params->loopback_mode;
+-	if (p_hwfn->mcp_info->capabilities & FW_MB_PARAM_FEATURE_SUPPORT_EEE) {
+-		if (params->eee.enable)
+-			phy_cfg.eee_cfg |= EEE_CFG_EEE_ENABLED;
++
++	/* There are MFWs that share this capability regardless of whether
++	 * this is feasible or not. And given that at the very least adv_caps
++	 * would be set internally by qed, we want to make sure LFA would
++	 * still work.
++	 */
++	if ((p_hwfn->mcp_info->capabilities &
++	     FW_MB_PARAM_FEATURE_SUPPORT_EEE) && params->eee.enable) {
++		phy_cfg.eee_cfg |= EEE_CFG_EEE_ENABLED;
+ 		if (params->eee.tx_lpi_enable)
+ 			phy_cfg.eee_cfg |= EEE_CFG_TX_LPI;
+ 		if (params->eee.adv_caps & QED_EEE_1G_ADV)
+-- 
+2.7.4
+

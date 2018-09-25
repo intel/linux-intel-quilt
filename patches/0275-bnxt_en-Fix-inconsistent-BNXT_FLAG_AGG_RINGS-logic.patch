@@ -1,0 +1,47 @@
+From 822bbc4c7966392501d43f9f205a6af09e492567 Mon Sep 17 00:00:00 2001
+From: Michael Chan <michael.chan@broadcom.com>
+Date: Mon, 9 Jul 2018 02:24:48 -0400
+Subject: [PATCH 0275/2156] bnxt_en: Fix inconsistent BNXT_FLAG_AGG_RINGS
+ logic.
+
+[ Upstream commit 07f4fde53d12eb8d921b465bb298e964e0bdc38c ]
+
+If there aren't enough RX rings available, the driver will attempt to
+use a single RX ring without the aggregation ring.  If that also
+fails, the BNXT_FLAG_AGG_RINGS flag is cleared but the other ring
+parameters are not set consistently to reflect that.  If more RX
+rings become available at the next open, the RX rings will be in
+an inconsistent state and may crash when freeing the RX rings.
+
+Fix it by restoring the BNXT_FLAG_AGG_RINGS if not enough RX rings are
+available to run without aggregation rings.
+
+Fixes: bdbd1eb59c56 ("bnxt_en: Handle no aggregation ring gracefully.")
+Signed-off-by: Michael Chan <michael.chan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/broadcom/bnxt/bnxt.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/broadcom/bnxt/bnxt.c b/drivers/net/ethernet/broadcom/bnxt/bnxt.c
+index 9493131..0340b2f 100644
+--- a/drivers/net/ethernet/broadcom/bnxt/bnxt.c
++++ b/drivers/net/ethernet/broadcom/bnxt/bnxt.c
+@@ -7884,8 +7884,11 @@ static int bnxt_get_dflt_rings(struct bnxt *bp, int *max_rx, int *max_tx,
+ 		/* Not enough rings, try disabling agg rings. */
+ 		bp->flags &= ~BNXT_FLAG_AGG_RINGS;
+ 		rc = bnxt_get_max_rings(bp, max_rx, max_tx, shared);
+-		if (rc)
++		if (rc) {
++			/* set BNXT_FLAG_AGG_RINGS back for consistency */
++			bp->flags |= BNXT_FLAG_AGG_RINGS;
+ 			return rc;
++		}
+ 		bp->flags |= BNXT_FLAG_NO_AGG_RINGS;
+ 		bp->dev->hw_features &= ~NETIF_F_LRO;
+ 		bp->dev->features &= ~NETIF_F_LRO;
+-- 
+2.7.4
+

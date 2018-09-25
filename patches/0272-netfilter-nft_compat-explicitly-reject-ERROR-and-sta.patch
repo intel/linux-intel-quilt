@@ -1,0 +1,59 @@
+From a76e62b50dc0fb869a5371448395700eb3d31bd3 Mon Sep 17 00:00:00 2001
+From: Florian Westphal <fw@strlen.de>
+Date: Fri, 6 Jul 2018 20:06:05 +0200
+Subject: [PATCH 0272/2156] netfilter: nft_compat: explicitly reject ERROR and
+ standard target
+
+[ Upstream commit 21d5e078192d244df3d6049f9464fff2f72cfd68 ]
+
+iptables-nft never requests these, but make this explicitly illegal.
+If it were quested, kernel could oops as ->eval is NULL, furthermore,
+the builtin targets have no owning module so its possible to rmmod
+eb/ip/ip6_tables module even if they would be loaded.
+
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/netfilter/nft_compat.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/net/netfilter/nft_compat.c b/net/netfilter/nft_compat.c
+index 3bd637e..6da1cec 100644
+--- a/net/netfilter/nft_compat.c
++++ b/net/netfilter/nft_compat.c
+@@ -825,10 +825,18 @@ nft_target_select_ops(const struct nft_ctx *ctx,
+ 	rev = ntohl(nla_get_be32(tb[NFTA_TARGET_REV]));
+ 	family = ctx->afi->family;
+ 
++	if (strcmp(tg_name, XT_ERROR_TARGET) == 0 ||
++	    strcmp(tg_name, XT_STANDARD_TARGET) == 0 ||
++	    strcmp(tg_name, "standard") == 0)
++		return ERR_PTR(-EINVAL);
++
+ 	/* Re-use the existing target if it's already loaded. */
+ 	list_for_each_entry(nft_target, &nft_target_list, head) {
+ 		struct xt_target *target = nft_target->ops.data;
+ 
++		if (!target->target)
++			continue;
++
+ 		if (nft_target_cmp(target, tg_name, rev, family))
+ 			return &nft_target->ops;
+ 	}
+@@ -837,6 +845,11 @@ nft_target_select_ops(const struct nft_ctx *ctx,
+ 	if (IS_ERR(target))
+ 		return ERR_PTR(-ENOENT);
+ 
++	if (!target->target) {
++		err = -EINVAL;
++		goto err;
++	}
++
+ 	if (target->targetsize > nla_len(tb[NFTA_TARGET_INFO])) {
+ 		err = -EINVAL;
+ 		goto err;
+-- 
+2.7.4
+

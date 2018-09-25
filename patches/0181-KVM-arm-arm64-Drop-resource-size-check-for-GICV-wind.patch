@@ -1,0 +1,56 @@
+From 7a21294b84fa7df3b4a894cbde4ca7fc2dfd3047 Mon Sep 17 00:00:00 2001
+From: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+Date: Fri, 1 Jun 2018 17:06:28 +0200
+Subject: [PATCH 0181/2156] KVM: arm/arm64: Drop resource size check for GICV
+ window
+
+[ Upstream commit ba56bc3a0786992755e6804fbcbdc60ef6cfc24c ]
+
+When booting a 64 KB pages kernel on a ACPI GICv3 system that
+implements support for v2 emulation, the following warning is
+produced
+
+  GICV size 0x2000 not a multiple of page size 0x10000
+
+and support for v2 emulation is disabled, preventing GICv2 VMs
+from being able to run on such hosts.
+
+The reason is that vgic_v3_probe() performs a sanity check on the
+size of the window (it should be a multiple of the page size),
+while the ACPI MADT parsing code hardcodes the size of the window
+to 8 KB. This makes sense, considering that ACPI does not bother
+to describe the size in the first place, under the assumption that
+platforms implementing ACPI will follow the architecture and not
+put anything else in the same 64 KB window.
+
+So let's just drop the sanity check altogether, and assume that
+the window is at least 64 KB in size.
+
+Fixes: 909777324588 ("KVM: arm/arm64: vgic-new: vgic_init: implement kvm_vgic_hyp_init")
+Signed-off-by: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+Signed-off-by: Marc Zyngier <marc.zyngier@arm.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ virt/kvm/arm/vgic/vgic-v3.c | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/virt/kvm/arm/vgic/vgic-v3.c b/virt/kvm/arm/vgic/vgic-v3.c
+index 6b4fcd5..a37b03c 100644
+--- a/virt/kvm/arm/vgic/vgic-v3.c
++++ b/virt/kvm/arm/vgic/vgic-v3.c
+@@ -492,11 +492,6 @@ int vgic_v3_probe(const struct gic_kvm_info *info)
+ 		pr_warn("GICV physical address 0x%llx not page aligned\n",
+ 			(unsigned long long)info->vcpu.start);
+ 		kvm_vgic_global_state.vcpu_base = 0;
+-	} else if (!PAGE_ALIGNED(resource_size(&info->vcpu))) {
+-		pr_warn("GICV size 0x%llx not a multiple of page size 0x%lx\n",
+-			(unsigned long long)resource_size(&info->vcpu),
+-			PAGE_SIZE);
+-		kvm_vgic_global_state.vcpu_base = 0;
+ 	} else {
+ 		kvm_vgic_global_state.vcpu_base = info->vcpu.start;
+ 		kvm_vgic_global_state.can_emulate_gicv2 = true;
+-- 
+2.7.4
+

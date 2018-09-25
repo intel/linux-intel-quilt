@@ -1,0 +1,86 @@
+From 28dbfc731fec37ed88e59e6470051f19fc32aec9 Mon Sep 17 00:00:00 2001
+From: Yonghong Song <yhs@fb.com>
+Date: Sat, 16 Jun 2018 10:47:39 -0700
+Subject: [PATCH 0207/2156] perf tools: Fix a clang 7.0 compilation error
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[ Upstream commit c6555c14572aeadf4fe2819abd971c4e7608b926 ]
+
+Arnaldo reported the perf build failure with latest llvm/clang compiler
+(7.0).
+
+   $ make LIBCLANGLLVM=1 -C tools/perf/
+   <SNIP>
+    CC       /tmp/tmp.t53Qo38zci/tests/kmod-path.o
+   util/c++/clang.cpp: In function ‘std::unique_ptr<llvm::SmallVectorImpl<char> >
+       perf::getBPFObjectFromModule(llvm::Module*)’:
+   util/c++/clang.cpp:150:43: error: no matching function for call to
+       ‘llvm::TargetMachine::addPassesToEmitFile(llvm::legacy::PassManager&,
+        llvm::raw_svector_ostream&, llvm::TargetMachine::CodeGenFileType)’
+               TargetMachine::CGFT_ObjectFile)) {
+                                             ^
+   In file included from util/c++/clang.cpp:25:0:
+   /usr/local/include/llvm/Target/TargetMachine.h:254:16: note: candidate:
+       virtual bool llvm::TargetMachine::addPassesToEmitFile(
+       llvm::legacy::PassManagerBase&, llvm::raw_pwrite_stream&,
+       llvm::raw_pwrite_stream*, llvm::TargetMachine::CodeGenFileType, bool,
+       llvm::MachineModuleInfo*)
+     virtual bool addPassesToEmitFile(PassManagerBase &, raw_pwrite_stream &,
+                  ^~~~~~~~~~~~~~~~~~~
+  /usr/local/include/llvm/Target/TargetMachine.h:254:16: note:
+      candidate expects 6 arguments, 3 provided
+  mv: cannot stat '/tmp/tmp.t53Qo38zci/util/c++/.clang.o.tmp': No such file or directory
+  make[7]: *** [/home/acme/git/perf/tools/build/Makefile.build:101:
+      /tmp/tmp.t53Qo38zci/util/c++/clang.o] Error 1
+  make[6]: *** [/home/acme/git/perf/tools/build/Makefile.build:139: c++] Error 2
+  make[5]: *** [/home/acme/git/perf/tools/build/Makefile.build:139: util] Error 2
+  make[5]: *** Waiting for unfinished jobs....
+    CC       /tmp/tmp.t53Qo38zci/tests/thread-map.o
+
+The function addPassesToEmitFile signature changed in llvm 7.0 and such
+a change caused the failure. This patch fixed the issue with using
+proper function signatures under different compiler versions.
+
+Reported-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Yonghong Song <yhs@fb.com>
+Tested-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Alexei Starovoitov <ast@fb.com>
+Cc: Daniel Borkmann <daniel@iogearbox.net>
+Cc: Jiri Olsa <jolsa@kernel.org>
+Cc: Martin KaFai Lau <kafai@fb.com>
+Cc: Wang Nan <wangnan0@huawei.com>
+Link: http://lkml.kernel.org/r/20180616174739.1076733-1-yhs@fb.com
+Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ tools/perf/util/c++/clang.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/tools/perf/util/c++/clang.cpp b/tools/perf/util/c++/clang.cpp
+index bf31cea..8951250 100644
+--- a/tools/perf/util/c++/clang.cpp
++++ b/tools/perf/util/c++/clang.cpp
+@@ -146,8 +146,15 @@ getBPFObjectFromModule(llvm::Module *Module)
+ 	raw_svector_ostream ostream(*Buffer);
+ 
+ 	legacy::PassManager PM;
+-	if (TargetMachine->addPassesToEmitFile(PM, ostream,
+-					       TargetMachine::CGFT_ObjectFile)) {
++	bool NotAdded;
++#if CLANG_VERSION_MAJOR < 7
++	NotAdded = TargetMachine->addPassesToEmitFile(PM, ostream,
++						      TargetMachine::CGFT_ObjectFile);
++#else
++	NotAdded = TargetMachine->addPassesToEmitFile(PM, ostream, nullptr,
++						      TargetMachine::CGFT_ObjectFile);
++#endif
++	if (NotAdded) {
+ 		llvm::errs() << "TargetMachine can't emit a file of this type\n";
+ 		return std::unique_ptr<llvm::SmallVectorImpl<char>>(nullptr);;
+ 	}
+-- 
+2.7.4
+

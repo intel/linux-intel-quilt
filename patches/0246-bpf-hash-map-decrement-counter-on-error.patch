@@ -1,0 +1,67 @@
+From 56f059c87bc6ee42f07b5dfd633daf60e98f2679 Mon Sep 17 00:00:00 2001
+From: Mauricio Vasquez B <mauricio.vasquez@polito.it>
+Date: Fri, 29 Jun 2018 14:48:20 +0200
+Subject: [PATCH 0246/2156] bpf: hash map: decrement counter on error
+
+[ Upstream commit ed2b82c03dc187018307c7c6bf9299705f3db383 ]
+
+Decrement the number of elements in the map in case the allocation
+of a new node fails.
+
+Fixes: 6c9059817432 ("bpf: pre-allocate hash map elements")
+Signed-off-by: Mauricio Vasquez B <mauricio.vasquez@polito.it>
+Acked-by: Alexei Starovoitov <ast@kernel.org>
+Signed-off-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ kernel/bpf/hashtab.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/bpf/hashtab.c b/kernel/bpf/hashtab.c
+index 6533f08..3d0ecc2 100644
+--- a/kernel/bpf/hashtab.c
++++ b/kernel/bpf/hashtab.c
+@@ -730,13 +730,15 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
+ 				 * old element will be freed immediately.
+ 				 * Otherwise return an error
+ 				 */
+-				atomic_dec(&htab->count);
+-				return ERR_PTR(-E2BIG);
++				l_new = ERR_PTR(-E2BIG);
++				goto dec_count;
+ 			}
+ 		l_new = kmalloc_node(htab->elem_size, GFP_ATOMIC | __GFP_NOWARN,
+ 				     htab->map.numa_node);
+-		if (!l_new)
+-			return ERR_PTR(-ENOMEM);
++		if (!l_new) {
++			l_new = ERR_PTR(-ENOMEM);
++			goto dec_count;
++		}
+ 	}
+ 
+ 	memcpy(l_new->key, key, key_size);
+@@ -749,7 +751,8 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
+ 						  GFP_ATOMIC | __GFP_NOWARN);
+ 			if (!pptr) {
+ 				kfree(l_new);
+-				return ERR_PTR(-ENOMEM);
++				l_new = ERR_PTR(-ENOMEM);
++				goto dec_count;
+ 			}
+ 		}
+ 
+@@ -763,6 +766,9 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
+ 
+ 	l_new->hash = hash;
+ 	return l_new;
++dec_count:
++	atomic_dec(&htab->count);
++	return l_new;
+ }
+ 
+ static int check_flags(struct bpf_htab *htab, struct htab_elem *l_old,
+-- 
+2.7.4
+

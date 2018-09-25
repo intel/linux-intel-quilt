@@ -1,0 +1,69 @@
+From b518e870f1f605536b544d81e52f4570bc9e340f Mon Sep 17 00:00:00 2001
+From: "Gustavo A. R. Silva" <gustavo@embeddedor.com>
+Date: Thu, 2 Aug 2018 22:40:19 -0500
+Subject: [PATCH 0115/2156] drm/i915/kvmgt: Fix potential Spectre v1
+
+commit de5372da605d3bca46e3102bab51b7e1c0e0a6f6 upstream.
+
+info.index can be indirectly controlled by user-space, hence leading
+to a potential exploitation of the Spectre variant 1 vulnerability.
+
+This issue was detected with the help of Smatch:
+
+drivers/gpu/drm/i915/gvt/kvmgt.c:1232 intel_vgpu_ioctl() warn:
+potential spectre issue 'vgpu->vdev.region' [r]
+
+Fix this by sanitizing info.index before indirectly using it to index
+vgpu->vdev.region
+
+Notice that given that speculation windows are large, the policy is
+to kill the speculation on the first load and not worry if it can be
+completed with a dependent load/store [1].
+
+[1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/gpu/drm/i915/gvt/kvmgt.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/kvmgt.c b/drivers/gpu/drm/i915/gvt/kvmgt.c
+index 9bf4045..73c672f 100644
+--- a/drivers/gpu/drm/i915/gvt/kvmgt.c
++++ b/drivers/gpu/drm/i915/gvt/kvmgt.c
+@@ -42,6 +42,8 @@
+ #include <linux/vfio.h>
+ #include <linux/mdev.h>
+ 
++#include <linux/nospec.h>
++
+ #include "i915_drv.h"
+ #include "gvt.h"
+ 
+@@ -953,7 +955,8 @@ static long intel_vgpu_ioctl(struct mdev_device *mdev, unsigned int cmd,
+ 	} else if (cmd == VFIO_DEVICE_GET_REGION_INFO) {
+ 		struct vfio_region_info info;
+ 		struct vfio_info_cap caps = { .buf = NULL, .size = 0 };
+-		int i, ret;
++		unsigned int i;
++		int ret;
+ 		struct vfio_region_info_cap_sparse_mmap *sparse = NULL;
+ 		size_t size;
+ 		int nr_areas = 1;
+@@ -1030,6 +1033,10 @@ static long intel_vgpu_ioctl(struct mdev_device *mdev, unsigned int cmd,
+ 				if (info.index >= VFIO_PCI_NUM_REGIONS +
+ 						vgpu->vdev.num_regions)
+ 					return -EINVAL;
++				info.index =
++					array_index_nospec(info.index,
++							VFIO_PCI_NUM_REGIONS +
++							vgpu->vdev.num_regions);
+ 
+ 				i = info.index - VFIO_PCI_NUM_REGIONS;
+ 
+-- 
+2.7.4
+

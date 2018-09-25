@@ -1,0 +1,59 @@
+From 7ccd2c1be366d249e7c67997dbc930d5be0879b1 Mon Sep 17 00:00:00 2001
+From: John Garry <john.garry@huawei.com>
+Date: Fri, 8 Jun 2018 18:26:33 +0800
+Subject: [PATCH 0156/2156] libahci: Fix possible Spectre-v1 pmp indexing in
+ ahci_led_store()
+
+[ Upstream commit fae2a63737e5973f1426bc139935a0f42e232844 ]
+
+Currently smatch warns of possible Spectre-V1 issue in ahci_led_store():
+drivers/ata/libahci.c:1150 ahci_led_store() warn: potential spectre issue 'pp->em_priv' (local cap)
+
+Userspace controls @pmp from following callchain:
+em_message->store()
+->ata_scsi_em_message_store()
+-->ap->ops->em_store()
+--->ahci_led_store()
+
+After the mask+shift @pmp is effectively an 8b value, which is used to
+index into an array of length 8, so sanitize the array index.
+
+Signed-off-by: John Garry <john.garry@huawei.com>
+Signed-off-by: Tejun Heo <tj@kernel.org>
+
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/ata/libahci.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/ata/libahci.c b/drivers/ata/libahci.c
+index 5ae268b..bc562fd 100644
+--- a/drivers/ata/libahci.c
++++ b/drivers/ata/libahci.c
+@@ -35,6 +35,7 @@
+ #include <linux/kernel.h>
+ #include <linux/gfp.h>
+ #include <linux/module.h>
++#include <linux/nospec.h>
+ #include <linux/blkdev.h>
+ #include <linux/delay.h>
+ #include <linux/interrupt.h>
+@@ -1135,10 +1136,12 @@ static ssize_t ahci_led_store(struct ata_port *ap, const char *buf,
+ 
+ 	/* get the slot number from the message */
+ 	pmp = (state & EM_MSG_LED_PMP_SLOT) >> 8;
+-	if (pmp < EM_MAX_SLOTS)
++	if (pmp < EM_MAX_SLOTS) {
++		pmp = array_index_nospec(pmp, EM_MAX_SLOTS);
+ 		emp = &pp->em_priv[pmp];
+-	else
++	} else {
+ 		return -EINVAL;
++	}
+ 
+ 	/* mask off the activity bits if we are in sw_activity
+ 	 * mode, user should turn off sw_activity before setting
+-- 
+2.7.4
+

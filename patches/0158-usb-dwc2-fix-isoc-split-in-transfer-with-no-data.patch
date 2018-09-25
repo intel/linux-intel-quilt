@@ -1,0 +1,62 @@
+From a54f59199a81faec807e23fa265ba8f5e9f725a7 Mon Sep 17 00:00:00 2001
+From: William Wu <william.wu@rock-chips.com>
+Date: Fri, 11 May 2018 17:46:32 +0800
+Subject: [PATCH 0158/2156] usb: dwc2: fix isoc split in transfer with no data
+
+[ Upstream commit 70c3c8cb83856758025c2a211dd022bc0478922a ]
+
+If isoc split in transfer with no data (the length of DATA0
+packet is zero), we can't simply return immediately. Because
+the DATA0 can be the first transaction or the second transaction
+for the isoc split in transaction. If the DATA0 packet with no
+data is in the first transaction, we can return immediately.
+But if the DATA0 packet with no data is in the second transaction
+of isoc split in transaction sequence, we need to increase the
+qtd->isoc_frame_index and giveback urb to device driver if needed,
+otherwise, the MDATA packet will be lost.
+
+A typical test case is that connect the dwc2 controller with an
+usb hs Hub (GL852G-12), and plug an usb fs audio device (Plantronics
+headset) into the downstream port of Hub. Then use the usb mic
+to record, we can find noise when playback.
+
+In the case, the isoc split in transaction sequence like this:
+
+- SSPLIT IN transaction
+- CSPLIT IN transaction
+  - MDATA packet (176 bytes)
+- CSPLIT IN transaction
+  - DATA0 packet (0 byte)
+
+This patch use both the length of DATA0 and qtd->isoc_split_offset
+to check if the DATA0 is in the second transaction.
+
+Tested-by: Gevorg Sahakyan <sahakyan@synopsys.com>
+Tested-by: Heiko Stuebner <heiko@sntech.de>
+Acked-by: Minas Harutyunyan hminas@synopsys.com>
+Signed-off-by: William Wu <william.wu@rock-chips.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/dwc2/hcd_intr.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/usb/dwc2/hcd_intr.c b/drivers/usb/dwc2/hcd_intr.c
+index 5f72140..17905ba 100644
+--- a/drivers/usb/dwc2/hcd_intr.c
++++ b/drivers/usb/dwc2/hcd_intr.c
+@@ -923,9 +923,8 @@ static int dwc2_xfercomp_isoc_split_in(struct dwc2_hsotg *hsotg,
+ 	frame_desc = &qtd->urb->iso_descs[qtd->isoc_frame_index];
+ 	len = dwc2_get_actual_xfer_length(hsotg, chan, chnum, qtd,
+ 					  DWC2_HC_XFER_COMPLETE, NULL);
+-	if (!len) {
++	if (!len && !qtd->isoc_split_offset) {
+ 		qtd->complete_split = 0;
+-		qtd->isoc_split_offset = 0;
+ 		return 0;
+ 	}
+ 
+-- 
+2.7.4
+

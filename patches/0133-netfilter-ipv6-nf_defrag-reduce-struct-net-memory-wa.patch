@@ -1,0 +1,80 @@
+From 69c471908ddd7b9927aa0735766d486cbf094cab Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Wed, 13 Jun 2018 10:11:56 -0700
+Subject: [PATCH 0133/2156] netfilter: ipv6: nf_defrag: reduce struct net
+ memory waste
+
+[ Upstream commit 9ce7bc036ae4cfe3393232c86e9e1fea2153c237 ]
+
+It is a waste of memory to use a full "struct netns_sysctl_ipv6"
+while only one pointer is really used, considering netns_sysctl_ipv6
+keeps growing.
+
+Also, since "struct netns_frags" has cache line alignment,
+it is better to move the frags_hdr pointer outside, otherwise
+we spend a full cache line for this pointer.
+
+This saves 192 bytes of memory per netns.
+
+Fixes: c038a767cd69 ("ipv6: add a new namespace for nf_conntrack_reasm")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ include/net/net_namespace.h             | 1 +
+ include/net/netns/ipv6.h                | 1 -
+ net/ipv6/netfilter/nf_conntrack_reasm.c | 6 +++---
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/include/net/net_namespace.h b/include/net/net_namespace.h
+index 0490084..f4bf75f 100644
+--- a/include/net/net_namespace.h
++++ b/include/net/net_namespace.h
+@@ -120,6 +120,7 @@ struct net {
+ #endif
+ #if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
+ 	struct netns_nf_frag	nf_frag;
++	struct ctl_table_header *nf_frag_frags_hdr;
+ #endif
+ 	struct sock		*nfnl;
+ 	struct sock		*nfnl_stash;
+diff --git a/include/net/netns/ipv6.h b/include/net/netns/ipv6.h
+index dc825a5..c004d05 100644
+--- a/include/net/netns/ipv6.h
++++ b/include/net/netns/ipv6.h
+@@ -94,7 +94,6 @@ struct netns_ipv6 {
+ 
+ #if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
+ struct netns_nf_frag {
+-	struct netns_sysctl_ipv6 sysctl;
+ 	struct netns_frags	frags;
+ };
+ #endif
+diff --git a/net/ipv6/netfilter/nf_conntrack_reasm.c b/net/ipv6/netfilter/nf_conntrack_reasm.c
+index 722a9db..ee33a67 100644
+--- a/net/ipv6/netfilter/nf_conntrack_reasm.c
++++ b/net/ipv6/netfilter/nf_conntrack_reasm.c
+@@ -117,7 +117,7 @@ static int nf_ct_frag6_sysctl_register(struct net *net)
+ 	if (hdr == NULL)
+ 		goto err_reg;
+ 
+-	net->nf_frag.sysctl.frags_hdr = hdr;
++	net->nf_frag_frags_hdr = hdr;
+ 	return 0;
+ 
+ err_reg:
+@@ -131,8 +131,8 @@ static void __net_exit nf_ct_frags6_sysctl_unregister(struct net *net)
+ {
+ 	struct ctl_table *table;
+ 
+-	table = net->nf_frag.sysctl.frags_hdr->ctl_table_arg;
+-	unregister_net_sysctl_table(net->nf_frag.sysctl.frags_hdr);
++	table = net->nf_frag_frags_hdr->ctl_table_arg;
++	unregister_net_sysctl_table(net->nf_frag_frags_hdr);
+ 	if (!net_eq(net, &init_net))
+ 		kfree(table);
+ }
+-- 
+2.7.4
+

@@ -1,0 +1,74 @@
+From 4a0144a43c526e6d8d274fce2e4241854ef8712c Mon Sep 17 00:00:00 2001
+From: Florian Westphal <fw@strlen.de>
+Date: Tue, 17 Jul 2018 07:17:55 +0200
+Subject: [PATCH 0360/2156] netfilter: nf_tables: fix memory leaks on chain
+ rename
+
+[ Upstream commit 9f8aac0be21ed5f99bd5ba0ff315d710737d1794 ]
+
+The new name is stored in the transaction metadata, on commit,
+the pointers to the old and new names are swapped.
+
+Therefore in abort and commit case we have to free the
+pointer in the chain_trans container.
+
+In commit case, the pointer can be used by another cpu that
+is currently dumping the renamed chain, thus kfree needs to
+happen after waiting for rcu readers to complete.
+
+Fixes: b7263e071a ("netfilter: nf_tables: Allow chain name of up to 255 chars")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/netfilter/nf_tables_api.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/net/netfilter/nf_tables_api.c b/net/netfilter/nf_tables_api.c
+index 9a94502..194674c 100644
+--- a/net/netfilter/nf_tables_api.c
++++ b/net/netfilter/nf_tables_api.c
+@@ -5043,6 +5043,9 @@ static void nf_tables_commit_release(struct nft_trans *trans)
+ 	case NFT_MSG_DELTABLE:
+ 		nf_tables_table_destroy(&trans->ctx);
+ 		break;
++	case NFT_MSG_NEWCHAIN:
++		kfree(nft_trans_chain_name(trans));
++		break;
+ 	case NFT_MSG_DELCHAIN:
+ 		nf_tables_chain_destroy(trans->ctx.chain);
+ 		break;
+@@ -5100,13 +5103,15 @@ static int nf_tables_commit(struct net *net, struct sk_buff *skb)
+ 			nf_tables_table_notify(&trans->ctx, NFT_MSG_DELTABLE);
+ 			break;
+ 		case NFT_MSG_NEWCHAIN:
+-			if (nft_trans_chain_update(trans))
++			if (nft_trans_chain_update(trans)) {
+ 				nft_chain_commit_update(trans);
+-			else
++				nf_tables_chain_notify(&trans->ctx, NFT_MSG_NEWCHAIN);
++				/* trans destroyed after rcu grace period */
++			} else {
+ 				nft_clear(net, trans->ctx.chain);
+-
+-			nf_tables_chain_notify(&trans->ctx, NFT_MSG_NEWCHAIN);
+-			nft_trans_destroy(trans);
++				nf_tables_chain_notify(&trans->ctx, NFT_MSG_NEWCHAIN);
++				nft_trans_destroy(trans);
++			}
+ 			break;
+ 		case NFT_MSG_DELCHAIN:
+ 			list_del_rcu(&trans->ctx.chain->list);
+@@ -5246,7 +5251,7 @@ static int nf_tables_abort(struct net *net, struct sk_buff *skb)
+ 		case NFT_MSG_NEWCHAIN:
+ 			if (nft_trans_chain_update(trans)) {
+ 				free_percpu(nft_trans_chain_stats(trans));
+-
++				kfree(nft_trans_chain_name(trans));
+ 				nft_trans_destroy(trans);
+ 			} else {
+ 				trans->ctx.table->use--;
+-- 
+2.7.4
+

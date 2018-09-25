@@ -1,0 +1,72 @@
+From 586ae5694e375ceced8abafe1501eece4e922852 Mon Sep 17 00:00:00 2001
+From: Trond Myklebust <trond.myklebust@hammerspace.com>
+Date: Fri, 15 Jun 2018 15:58:45 -0400
+Subject: [PATCH 0163/2156] pNFS: Always free the session slot on error in
+ nfs4_layoutget_handle_exception
+
+[ Upstream commit 2dbf8dffbf35fd8f611083b9d9fe74fdccf912a3 ]
+
+Right now, we can call nfs_commit_inode() while holding the session slot,
+which could lead to NFSv4 deadlocks. Ensure we only keep the slot if
+the server returned a layout that we have to process.
+
+Signed-off-by: Trond Myklebust <trond.myklebust@hammerspace.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/nfs/nfs4proc.c | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index 43fbf44..51deff8 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -8429,6 +8429,8 @@ nfs4_layoutget_handle_exception(struct rpc_task *task,
+ 
+ 	dprintk("--> %s tk_status => %d\n", __func__, -task->tk_status);
+ 
++	nfs4_sequence_free_slot(&lgp->res.seq_res);
++
+ 	switch (nfs4err) {
+ 	case 0:
+ 		goto out;
+@@ -8493,7 +8495,6 @@ nfs4_layoutget_handle_exception(struct rpc_task *task,
+ 		goto out;
+ 	}
+ 
+-	nfs4_sequence_free_slot(&lgp->res.seq_res);
+ 	err = nfs4_handle_exception(server, nfs4err, exception);
+ 	if (!status) {
+ 		if (exception->retry)
+@@ -8619,20 +8620,22 @@ nfs4_proc_layoutget(struct nfs4_layoutget *lgp, long *timeout, gfp_t gfp_flags)
+ 	if (IS_ERR(task))
+ 		return ERR_CAST(task);
+ 	status = rpc_wait_for_completion_task(task);
+-	if (status == 0) {
++	if (status != 0)
++		goto out;
++
++	/* if layoutp->len is 0, nfs4_layoutget_prepare called rpc_exit */
++	if (task->tk_status < 0 || lgp->res.layoutp->len == 0) {
+ 		status = nfs4_layoutget_handle_exception(task, lgp, &exception);
+ 		*timeout = exception.timeout;
+-	}
+-
++	} else
++		lseg = pnfs_layout_process(lgp);
++out:
+ 	trace_nfs4_layoutget(lgp->args.ctx,
+ 			&lgp->args.range,
+ 			&lgp->res.range,
+ 			&lgp->res.stateid,
+ 			status);
+ 
+-	/* if layoutp->len is 0, nfs4_layoutget_prepare called rpc_exit */
+-	if (status == 0 && lgp->res.layoutp->len)
+-		lseg = pnfs_layout_process(lgp);
+ 	rpc_put_task(task);
+ 	dprintk("<-- %s status=%d\n", __func__, status);
+ 	if (status)
+-- 
+2.7.4
+

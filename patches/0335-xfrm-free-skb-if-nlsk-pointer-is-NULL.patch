@@ -1,0 +1,43 @@
+From 0118f86d21f1fdc83e5b560d761b5db0fded25ad Mon Sep 17 00:00:00 2001
+From: Florian Westphal <fw@strlen.de>
+Date: Mon, 25 Jun 2018 14:00:07 +0200
+Subject: [PATCH 0335/2156] xfrm: free skb if nlsk pointer is NULL
+
+[ Upstream commit 86126b77dcd551ce223e7293bb55854e3df05646 ]
+
+nlmsg_multicast() always frees the skb, so in case we cannot call
+it we must do that ourselves.
+
+Fixes: 21ee543edc0dea ("xfrm: fix race between netns cleanup and state expire notification")
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/xfrm/xfrm_user.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/net/xfrm/xfrm_user.c b/net/xfrm/xfrm_user.c
+index dde40f9..5554d28 100644
+--- a/net/xfrm/xfrm_user.c
++++ b/net/xfrm/xfrm_user.c
+@@ -1021,10 +1021,12 @@ static inline int xfrm_nlmsg_multicast(struct net *net, struct sk_buff *skb,
+ {
+ 	struct sock *nlsk = rcu_dereference(net->xfrm.nlsk);
+ 
+-	if (nlsk)
+-		return nlmsg_multicast(nlsk, skb, pid, group, GFP_ATOMIC);
+-	else
+-		return -1;
++	if (!nlsk) {
++		kfree_skb(skb);
++		return -EPIPE;
++	}
++
++	return nlmsg_multicast(nlsk, skb, pid, group, GFP_ATOMIC);
+ }
+ 
+ static inline size_t xfrm_spdinfo_msgsize(void)
+-- 
+2.7.4
+

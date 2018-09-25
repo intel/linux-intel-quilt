@@ -1,0 +1,80 @@
+From 1d7bf02d716d353924b963e3f24508416701a382 Mon Sep 17 00:00:00 2001
+From: Kirill Tkhai <ktkhai@virtuozzo.com>
+Date: Thu, 2 Aug 2018 15:36:01 -0700
+Subject: [PATCH 0407/2156] memcg: remove memcg_cgroup::id from IDR on
+ mem_cgroup_css_alloc() failure
+
+[ Upstream commit 7e97de0b033bcac4fa9a35cef72e0c06e6a22c67 ]
+
+In case of memcg_online_kmem() failure, memcg_cgroup::id remains hashed
+in mem_cgroup_idr even after memcg memory is freed.  This leads to leak
+of ID in mem_cgroup_idr.
+
+This patch adds removal into mem_cgroup_css_alloc(), which fixes the
+problem.  For better readability, it adds a generic helper which is used
+in mem_cgroup_alloc() and mem_cgroup_id_put_many() as well.
+
+Link: http://lkml.kernel.org/r/152354470916.22460.14397070748001974638.stgit@localhost.localdomain
+Fixes 73f576c04b94 ("mm: memcontrol: fix cgroup creation failure after many small jobs")
+Signed-off-by: Kirill Tkhai <ktkhai@virtuozzo.com>
+Acked-by: Johannes Weiner <hannes@cmpxchg.org>
+Acked-by: Vladimir Davydov <vdavydov.dev@gmail.com>
+Cc: Michal Hocko <mhocko@kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ mm/memcontrol.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index db69d93..6a9a7e1 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -4110,6 +4110,14 @@ static struct cftype mem_cgroup_legacy_files[] = {
+ 
+ static DEFINE_IDR(mem_cgroup_idr);
+ 
++static void mem_cgroup_id_remove(struct mem_cgroup *memcg)
++{
++	if (memcg->id.id > 0) {
++		idr_remove(&mem_cgroup_idr, memcg->id.id);
++		memcg->id.id = 0;
++	}
++}
++
+ static void mem_cgroup_id_get_many(struct mem_cgroup *memcg, unsigned int n)
+ {
+ 	VM_BUG_ON(atomic_read(&memcg->id.ref) <= 0);
+@@ -4120,8 +4128,7 @@ static void mem_cgroup_id_put_many(struct mem_cgroup *memcg, unsigned int n)
+ {
+ 	VM_BUG_ON(atomic_read(&memcg->id.ref) < n);
+ 	if (atomic_sub_and_test(n, &memcg->id.ref)) {
+-		idr_remove(&mem_cgroup_idr, memcg->id.id);
+-		memcg->id.id = 0;
++		mem_cgroup_id_remove(memcg);
+ 
+ 		/* Memcg ID pins CSS */
+ 		css_put(&memcg->css);
+@@ -4258,8 +4265,7 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
+ 	idr_replace(&mem_cgroup_idr, memcg, memcg->id.id);
+ 	return memcg;
+ fail:
+-	if (memcg->id.id > 0)
+-		idr_remove(&mem_cgroup_idr, memcg->id.id);
++	mem_cgroup_id_remove(memcg);
+ 	__mem_cgroup_free(memcg);
+ 	return NULL;
+ }
+@@ -4318,6 +4324,7 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
+ 
+ 	return &memcg->css;
+ fail:
++	mem_cgroup_id_remove(memcg);
+ 	mem_cgroup_free(memcg);
+ 	return ERR_PTR(-ENOMEM);
+ }
+-- 
+2.7.4
+

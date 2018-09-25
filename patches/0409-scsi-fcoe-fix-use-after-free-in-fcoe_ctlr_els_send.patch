@@ -1,0 +1,43 @@
+From 95239b2db50f301b19da9f15df724e129e9b8ff5 Mon Sep 17 00:00:00 2001
+From: Johannes Thumshirn <jthumshirn@suse.de>
+Date: Tue, 31 Jul 2018 15:46:01 +0200
+Subject: [PATCH 0409/2156] scsi: fcoe: fix use-after-free in
+ fcoe_ctlr_els_send
+
+[ Upstream commit 2d7d4fd35e6e15b47c13c70368da83add19f01e7 ]
+
+KASAN reports a use-after-free in fcoe_ctlr_els_send() when we're sending a
+LOGO and have FIP debugging enabled. This is because we're first freeing
+the skb and then printing the frame's DID. But the DID is a member of the
+FC frame header which in turn is the skb's payload.
+
+Exchange the debug print and kfree_skb() calls so we're not touching the
+freed data.
+
+Signed-off-by: Johannes Thumshirn <jthumshirn@suse.de>
+Reviewed-by: Hannes Reinecke <hare@suse.com>
+Signed-off-by: Martin K. Petersen <martin.petersen@oracle.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/scsi/fcoe/fcoe_ctlr.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/scsi/fcoe/fcoe_ctlr.c b/drivers/scsi/fcoe/fcoe_ctlr.c
+index fff6f18..d38bda3 100644
+--- a/drivers/scsi/fcoe/fcoe_ctlr.c
++++ b/drivers/scsi/fcoe/fcoe_ctlr.c
+@@ -799,9 +799,9 @@ int fcoe_ctlr_els_send(struct fcoe_ctlr *fip, struct fc_lport *lport,
+ 	fip->send(fip, skb);
+ 	return -EINPROGRESS;
+ drop:
+-	kfree_skb(skb);
+ 	LIBFCOE_FIP_DBG(fip, "drop els_send op %u d_id %x\n",
+ 			op, ntoh24(fh->fh_d_id));
++	kfree_skb(skb);
+ 	return -EINVAL;
+ }
+ EXPORT_SYMBOL(fcoe_ctlr_els_send);
+-- 
+2.7.4
+

@@ -1,0 +1,59 @@
+From 222e05e0a29a4537575103a0e9118e385e928766 Mon Sep 17 00:00:00 2001
+From: Cong Wang <xiyou.wangcong@gmail.com>
+Date: Tue, 7 Aug 2018 12:41:38 -0700
+Subject: [PATCH 0086/2156] llc: use refcount_inc_not_zero() for llc_sap_find()
+
+[ Upstream commit 0dcb82254d65f72333aa50ad626d1e9665ad093b ]
+
+llc_sap_put() decreases the refcnt before deleting sap
+from the global list. Therefore, there is a chance
+llc_sap_find() could find a sap with zero refcnt
+in this global list.
+
+Close this race condition by checking if refcnt is zero
+or not in llc_sap_find(), if it is zero then it is being
+removed so we can just treat it as gone.
+
+Reported-by: <syzbot+278893f3f7803871f7ce@syzkaller.appspotmail.com>
+Signed-off-by: Cong Wang <xiyou.wangcong@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ include/net/llc.h  | 5 +++++
+ net/llc/llc_core.c | 4 ++--
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/include/net/llc.h b/include/net/llc.h
+index dc35f25..890a873 100644
+--- a/include/net/llc.h
++++ b/include/net/llc.h
+@@ -116,6 +116,11 @@ static inline void llc_sap_hold(struct llc_sap *sap)
+ 	refcount_inc(&sap->refcnt);
+ }
+ 
++static inline bool llc_sap_hold_safe(struct llc_sap *sap)
++{
++	return refcount_inc_not_zero(&sap->refcnt);
++}
++
+ void llc_sap_close(struct llc_sap *sap);
+ 
+ static inline void llc_sap_put(struct llc_sap *sap)
+diff --git a/net/llc/llc_core.c b/net/llc/llc_core.c
+index 8904126..260b3dc 100644
+--- a/net/llc/llc_core.c
++++ b/net/llc/llc_core.c
+@@ -73,8 +73,8 @@ struct llc_sap *llc_sap_find(unsigned char sap_value)
+ 
+ 	rcu_read_lock_bh();
+ 	sap = __llc_sap_find(sap_value);
+-	if (sap)
+-		llc_sap_hold(sap);
++	if (!sap || !llc_sap_hold_safe(sap))
++		sap = NULL;
+ 	rcu_read_unlock_bh();
+ 	return sap;
+ }
+-- 
+2.7.4
+

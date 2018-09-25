@@ -1,0 +1,59 @@
+From bd43d233acaa0a80dbc2ae5e605374719eb4bdf7 Mon Sep 17 00:00:00 2001
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Mon, 18 Jun 2018 12:02:00 -0400
+Subject: [PATCH 0288/2156] ixgbe: Be more careful when modifying MAC filters
+
+[ Upstream commit d14c780c11fbc10f66c43e7b64eefe87ca442bd3 ]
+
+This change makes it so that we are much more explicit about the ordering
+of updates to the receive address register (RAR) table. Prior to this patch
+I believe we may have been updating the table while entries were still
+active, or possibly allowing for reordering of things since we weren't
+explicitly flushing writes to either the lower or upper portion of the
+register prior to accessing the other half.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Reviewed-by: Shannon Nelson <shannon.nelson@oracle.com>
+Tested-by: Andrew Bowers <andrewx.bowers@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_common.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
+index 64429a1..815284f 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_common.c
+@@ -1895,7 +1895,12 @@ s32 ixgbe_set_rar_generic(struct ixgbe_hw *hw, u32 index, u8 *addr, u32 vmdq,
+ 	if (enable_addr != 0)
+ 		rar_high |= IXGBE_RAH_AV;
+ 
++	/* Record lower 32 bits of MAC address and then make
++	 * sure that write is flushed to hardware before writing
++	 * the upper 16 bits and setting the valid bit.
++	 */
+ 	IXGBE_WRITE_REG(hw, IXGBE_RAL(index), rar_low);
++	IXGBE_WRITE_FLUSH(hw);
+ 	IXGBE_WRITE_REG(hw, IXGBE_RAH(index), rar_high);
+ 
+ 	return 0;
+@@ -1927,8 +1932,13 @@ s32 ixgbe_clear_rar_generic(struct ixgbe_hw *hw, u32 index)
+ 	rar_high = IXGBE_READ_REG(hw, IXGBE_RAH(index));
+ 	rar_high &= ~(0x0000FFFF | IXGBE_RAH_AV);
+ 
+-	IXGBE_WRITE_REG(hw, IXGBE_RAL(index), 0);
++	/* Clear the address valid bit and upper 16 bits of the address
++	 * before clearing the lower bits. This way we aren't updating
++	 * a live filter.
++	 */
+ 	IXGBE_WRITE_REG(hw, IXGBE_RAH(index), rar_high);
++	IXGBE_WRITE_FLUSH(hw);
++	IXGBE_WRITE_REG(hw, IXGBE_RAL(index), 0);
+ 
+ 	/* clear VMDq pool/queue selection for this RAR */
+ 	hw->mac.ops.clear_vmdq(hw, index, IXGBE_CLEAR_VMDQ_ALL);
+-- 
+2.7.4
+

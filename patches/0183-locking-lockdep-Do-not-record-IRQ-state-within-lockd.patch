@@ -1,0 +1,86 @@
+From c55300fcac1c15eb065eac626e17bd7b6d110346 Mon Sep 17 00:00:00 2001
+From: "Steven Rostedt (VMware)" <rostedt@goodmis.org>
+Date: Wed, 4 Apr 2018 14:06:30 -0400
+Subject: [PATCH 0183/2156] locking/lockdep: Do not record IRQ state within
+ lockdep code
+
+[ Upstream commit fcc784be837714a9173b372ff9fb9b514590dad9 ]
+
+While debugging where things were going wrong with mapping
+enabling/disabling interrupts with the lockdep state and actual real
+enabling and disabling interrupts, I had to silent the IRQ
+disabling/enabling in debug_check_no_locks_freed() because it was
+always showing up as it was called before the splat was.
+
+Use raw_local_irq_save/restore() for not only debug_check_no_locks_freed()
+but for all internal lockdep functions, as they hide useful information
+about where interrupts were used incorrectly last.
+
+Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Will Deacon <will.deacon@arm.com>
+Link: https://lkml.kernel.org/lkml/20180404140630.3f4f4c7a@gandalf.local.home
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ kernel/locking/lockdep.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/kernel/locking/lockdep.c b/kernel/locking/lockdep.c
+index 2f0f572..d7c1550 100644
+--- a/kernel/locking/lockdep.c
++++ b/kernel/locking/lockdep.c
+@@ -1296,11 +1296,11 @@ unsigned long lockdep_count_forward_deps(struct lock_class *class)
+ 	this.parent = NULL;
+ 	this.class = class;
+ 
+-	local_irq_save(flags);
++	raw_local_irq_save(flags);
+ 	arch_spin_lock(&lockdep_lock);
+ 	ret = __lockdep_count_forward_deps(&this);
+ 	arch_spin_unlock(&lockdep_lock);
+-	local_irq_restore(flags);
++	raw_local_irq_restore(flags);
+ 
+ 	return ret;
+ }
+@@ -1323,11 +1323,11 @@ unsigned long lockdep_count_backward_deps(struct lock_class *class)
+ 	this.parent = NULL;
+ 	this.class = class;
+ 
+-	local_irq_save(flags);
++	raw_local_irq_save(flags);
+ 	arch_spin_lock(&lockdep_lock);
+ 	ret = __lockdep_count_backward_deps(&this);
+ 	arch_spin_unlock(&lockdep_lock);
+-	local_irq_restore(flags);
++	raw_local_irq_restore(flags);
+ 
+ 	return ret;
+ }
+@@ -4478,7 +4478,7 @@ void debug_check_no_locks_freed(const void *mem_from, unsigned long mem_len)
+ 	if (unlikely(!debug_locks))
+ 		return;
+ 
+-	local_irq_save(flags);
++	raw_local_irq_save(flags);
+ 	for (i = 0; i < curr->lockdep_depth; i++) {
+ 		hlock = curr->held_locks + i;
+ 
+@@ -4489,7 +4489,7 @@ void debug_check_no_locks_freed(const void *mem_from, unsigned long mem_len)
+ 		print_freed_lock_bug(curr, mem_from, mem_from + mem_len, hlock);
+ 		break;
+ 	}
+-	local_irq_restore(flags);
++	raw_local_irq_restore(flags);
+ }
+ EXPORT_SYMBOL_GPL(debug_check_no_locks_freed);
+ 
+-- 
+2.7.4
+

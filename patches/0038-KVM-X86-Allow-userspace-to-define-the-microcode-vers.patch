@@ -1,0 +1,135 @@
+From 8c9900543e2698ce2f374af712b8fbd2007fddbf Mon Sep 17 00:00:00 2001
+From: Wanpeng Li <wanpengli@tencent.com>
+Date: Wed, 28 Feb 2018 14:03:31 +0800
+Subject: [PATCH 0038/2156] KVM: X86: Allow userspace to define the microcode
+ version
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 518e7b94817abed94becfe6a44f1ece0d4745afe upstream
+
+Linux (among the others) has checks to make sure that certain features
+aren't enabled on a certain family/model/stepping if the microcode version
+isn't greater than or equal to a known good version.
+
+By exposing the real microcode version, we're preventing buggy guests that
+don't check that they are running virtualized (i.e., they should trust the
+hypervisor) from disabling features that are effectively not buggy.
+
+Suggested-by: Filippo Sironi <sironi@amazon.de>
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+Signed-off-by: Radim Krčmář <rkrcmar@redhat.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Liran Alon <liran.alon@oracle.com>
+Cc: Nadav Amit <nadav.amit@gmail.com>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/svm.c              |  4 +---
+ arch/x86/kvm/vmx.c              |  1 +
+ arch/x86/kvm/x86.c              | 11 +++++++++--
+ 4 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 017dbbd..d6ff1b1 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -507,6 +507,7 @@ struct kvm_vcpu_arch {
+ 	u64 smbase;
+ 	bool tpr_access_reporting;
+ 	u64 ia32_xss;
++	u64 microcode_version;
+ 
+ 	/*
+ 	 * Paging state of the vcpu
+diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
+index 48236bf..282bbcb 100644
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -1618,6 +1618,7 @@ static void svm_vcpu_reset(struct kvm_vcpu *vcpu, bool init_event)
+ 	u32 dummy;
+ 	u32 eax = 1;
+ 
++	vcpu->arch.microcode_version = 0x01000065;
+ 	svm->spec_ctrl = 0;
+ 	svm->virt_spec_ctrl = 0;
+ 
+@@ -3655,9 +3656,6 @@ static int svm_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 
+ 		msr_info->data = svm->virt_spec_ctrl;
+ 		break;
+-	case MSR_IA32_UCODE_REV:
+-		msr_info->data = 0x01000065;
+-		break;
+ 	case MSR_F15H_IC_CFG: {
+ 
+ 		int family, model;
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index fe583f0..bbaa542 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -5934,6 +5934,7 @@ static void vmx_vcpu_reset(struct kvm_vcpu *vcpu, bool init_event)
+ 	vmx->rmode.vm86_active = 0;
+ 	vmx->spec_ctrl = 0;
+ 
++	vcpu->arch.microcode_version = 0x100000000ULL;
+ 	vmx->vcpu.arch.regs[VCPU_REGS_RDX] = get_rdx_init_val();
+ 	kvm_set_cr8(vcpu, 0);
+ 
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 0c7e448..b68be75 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -1048,6 +1048,7 @@ static unsigned num_emulated_msrs;
+  */
+ static u32 msr_based_features[] = {
+ 	MSR_F10H_DECFG,
++	MSR_IA32_UCODE_REV,
+ };
+ 
+ static unsigned int num_msr_based_features;
+@@ -1055,6 +1056,9 @@ static unsigned int num_msr_based_features;
+ static int kvm_get_msr_feature(struct kvm_msr_entry *msr)
+ {
+ 	switch (msr->index) {
++	case MSR_IA32_UCODE_REV:
++		rdmsrl(msr->index, msr->data);
++		break;
+ 	default:
+ 		if (kvm_x86_ops->get_msr_feature(msr))
+ 			return 1;
+@@ -2192,7 +2196,6 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 
+ 	switch (msr) {
+ 	case MSR_AMD64_NB_CFG:
+-	case MSR_IA32_UCODE_REV:
+ 	case MSR_IA32_UCODE_WRITE:
+ 	case MSR_VM_HSAVE_PA:
+ 	case MSR_AMD64_PATCH_LOADER:
+@@ -2200,6 +2203,10 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 	case MSR_AMD64_DC_CFG:
+ 		break;
+ 
++	case MSR_IA32_UCODE_REV:
++		if (msr_info->host_initiated)
++			vcpu->arch.microcode_version = data;
++		break;
+ 	case MSR_EFER:
+ 		return set_efer(vcpu, data);
+ 	case MSR_K7_HWCR:
+@@ -2486,7 +2493,7 @@ int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ 		msr_info->data = 0;
+ 		break;
+ 	case MSR_IA32_UCODE_REV:
+-		msr_info->data = 0x100000000ULL;
++		msr_info->data = vcpu->arch.microcode_version;
+ 		break;
+ 	case MSR_MTRRcap:
+ 	case 0x200 ... 0x2ff:
+-- 
+2.7.4
+

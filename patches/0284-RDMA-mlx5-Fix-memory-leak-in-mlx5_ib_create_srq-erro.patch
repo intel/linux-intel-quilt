@@ -1,0 +1,59 @@
+From 26c7588c28caafda58ed88b45912dafc240c495e Mon Sep 17 00:00:00 2001
+From: Kamal Heib <kamalheib1@gmail.com>
+Date: Tue, 10 Jul 2018 11:56:50 +0300
+Subject: [PATCH 0284/2156] RDMA/mlx5: Fix memory leak in mlx5_ib_create_srq()
+ error path
+
+[ Upstream commit d63c46734c545ad0488761059004a65c46efdde3 ]
+
+Fix memory leak in the error path of mlx5_ib_create_srq() by making sure
+to free the allocated srq.
+
+Fixes: c2b37f76485f ("IB/mlx5: Fix integer overflows in mlx5_ib_create_srq")
+Signed-off-by: Kamal Heib <kamalheib1@gmail.com>
+Acked-by: Leon Romanovsky <leonro@mellanox.com>
+Signed-off-by: Jason Gunthorpe <jgg@mellanox.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/infiniband/hw/mlx5/srq.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/infiniband/hw/mlx5/srq.c b/drivers/infiniband/hw/mlx5/srq.c
+index 3c7522d..93d67d9 100644
+--- a/drivers/infiniband/hw/mlx5/srq.c
++++ b/drivers/infiniband/hw/mlx5/srq.c
+@@ -266,18 +266,24 @@ struct ib_srq *mlx5_ib_create_srq(struct ib_pd *pd,
+ 
+ 	desc_size = sizeof(struct mlx5_wqe_srq_next_seg) +
+ 		    srq->msrq.max_gs * sizeof(struct mlx5_wqe_data_seg);
+-	if (desc_size == 0 || srq->msrq.max_gs > desc_size)
+-		return ERR_PTR(-EINVAL);
++	if (desc_size == 0 || srq->msrq.max_gs > desc_size) {
++		err = -EINVAL;
++		goto err_srq;
++	}
+ 	desc_size = roundup_pow_of_two(desc_size);
+ 	desc_size = max_t(size_t, 32, desc_size);
+-	if (desc_size < sizeof(struct mlx5_wqe_srq_next_seg))
+-		return ERR_PTR(-EINVAL);
++	if (desc_size < sizeof(struct mlx5_wqe_srq_next_seg)) {
++		err = -EINVAL;
++		goto err_srq;
++	}
+ 	srq->msrq.max_avail_gather = (desc_size - sizeof(struct mlx5_wqe_srq_next_seg)) /
+ 		sizeof(struct mlx5_wqe_data_seg);
+ 	srq->msrq.wqe_shift = ilog2(desc_size);
+ 	buf_size = srq->msrq.max * desc_size;
+-	if (buf_size < desc_size)
+-		return ERR_PTR(-EINVAL);
++	if (buf_size < desc_size) {
++		err = -EINVAL;
++		goto err_srq;
++	}
+ 	in.type = init_attr->srq_type;
+ 
+ 	if (pd->uobject)
+-- 
+2.7.4
+

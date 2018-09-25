@@ -1,0 +1,87 @@
+From 331c36cd01d8c11dbde3abc8e31b7ec8c67d1c02 Mon Sep 17 00:00:00 2001
+From: Eugeniy Paltsev <Eugeniy.Paltsev@synopsys.com>
+Date: Thu, 26 Jul 2018 16:15:43 +0300
+Subject: [PATCH 0391/2156] ARC: dma [non-IOC] setup SMP_CACHE_BYTES and
+ cache_line_size
+
+[ Upstream commit eb2777397fd83a4a7eaa26984d09d3babb845d2a ]
+
+As for today we don't setup SMP_CACHE_BYTES and cache_line_size for
+ARC, so they are set to L1_CACHE_BYTES by default. L1 line length
+(L1_CACHE_BYTES) might be easily smaller than L2 line (which is
+usually the case BTW). This breaks code.
+
+For example this breaks ethernet infrastructure on HSDK/AXS103 boards
+with IOC disabled, involving manual cache flushes
+Functions which alloc and manage sk_buff packet data area rely on
+SMP_CACHE_BYTES define. In the result we can share last L2 cache
+line in sk_buff linear packet data area between DMA buffer and
+some useful data in other structure. So we can lose this data when
+we invalidate DMA buffer.
+
+   sk_buff linear packet data area
+                |
+                |
+                |         skb->end        skb->tail
+                V            |                |
+                             V                V
+----------------------------------------------.
+      packet data            | <tail padding> |  <useful data in other struct>
+----------------------------------------------.
+
+---------------------.--------------------------------------------------.
+     SLC line        |             SLC (L2 cache) line (128B)           |
+---------------------.--------------------------------------------------.
+        ^                                     ^
+        |                                     |
+     These cache lines will be invalidated when we invalidate skb
+     linear packet data area before DMA transaction starting.
+
+This leads to issues painful to debug as it reproduces only if
+(sk_buff->end - sk_buff->tail) < SLC_LINE_SIZE and
+if we have some useful data right after sk_buff->end.
+
+Fix that by hardcode SMP_CACHE_BYTES to max line length we may have.
+
+Signed-off-by: Eugeniy Paltsev <Eugeniy.Paltsev@synopsys.com>
+Signed-off-by: Vineet Gupta <vgupta@synopsys.com>
+
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ arch/arc/Kconfig             | 3 +++
+ arch/arc/include/asm/cache.h | 4 +++-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arc/Kconfig b/arch/arc/Kconfig
+index 5c8caf85..8ff0660 100644
+--- a/arch/arc/Kconfig
++++ b/arch/arc/Kconfig
+@@ -45,6 +45,9 @@ config ARC
+ 	select HAVE_KERNEL_GZIP
+ 	select HAVE_KERNEL_LZMA
+ 
++config ARCH_HAS_CACHE_LINE_SIZE
++	def_bool y
++
+ config MIGHT_HAVE_PCI
+ 	bool
+ 
+diff --git a/arch/arc/include/asm/cache.h b/arch/arc/include/asm/cache.h
+index 8486f32..ff7d323 100644
+--- a/arch/arc/include/asm/cache.h
++++ b/arch/arc/include/asm/cache.h
+@@ -48,7 +48,9 @@
+ })
+ 
+ /* Largest line length for either L1 or L2 is 128 bytes */
+-#define ARCH_DMA_MINALIGN      128
++#define SMP_CACHE_BYTES		128
++#define cache_line_size()	SMP_CACHE_BYTES
++#define ARCH_DMA_MINALIGN	SMP_CACHE_BYTES
+ 
+ extern void arc_cache_init(void);
+ extern char *arc_cache_mumbojumbo(int cpu_id, char *buf, int len);
+-- 
+2.7.4
+

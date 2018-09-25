@@ -1,0 +1,96 @@
+From 6367516474c8589510b5ce8b2ccf68dff40ecc8b Mon Sep 17 00:00:00 2001
+From: Thomas Richter <tmricht@linux.ibm.com>
+Date: Mon, 11 Jun 2018 09:31:52 +0200
+Subject: [PATCH 0204/2156] perf record: Support s390 random socket_id
+ assignment
+
+[ Upstream commit 01766229533f9bdb1144a41b4345c8c7286da7b4 ]
+
+On s390 the socket identifier assigned to a CPU identifier is random and
+(depending on the configuration of the LPAR) may be higher than the CPU
+identifier. This is currently not supported.
+
+Fix this by allowing arbitrary socket identifiers being assigned to
+CPU id.
+
+Output before:
+
+  [root@p23lp27 perf]# ./perf report --header -I -v
+  ...
+  socket_id number is too big.You may need to upgrade the perf tool.
+  Error:
+  The perf.data file has no samples!
+  # ========
+  # captured on    : Tue May 29 09:29:57 2018
+  # header version : 1
+  ...
+  # Core ID and Socket ID information is not available
+  ...
+  [root@p23lp27 perf]#
+
+Output after:
+
+  [root@p23lp27 perf]# ./perf report --header -I -v
+  ...
+  Error:
+  The perf.data file has no samples!
+  # ========
+  # captured on    : Tue May 29 09:29:57 2018
+  # header version : 1
+  ...
+  # CPU 0: Core ID 0, Socket ID 6
+  # CPU 1: Core ID 1, Socket ID 3
+  # CPU 2: Core ID -1, Socket ID -1
+  ...
+  [root@p23lp27 perf]#
+
+Signed-off-by: Thomas Richter <tmricht@linux.ibm.com>
+Reviewed-by: Hendrik Brueckner <brueckner@linux.ibm.com>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Link: http://lkml.kernel.org/r/20180611073153.15592-1-tmricht@linux.ibm.com
+Signed-off-by: Arnaldo Carvalho de Melo <acme@redhat.com>
+Signed-off-by: Sasha Levin <alexander.levin@microsoft.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ tools/perf/util/header.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/tools/perf/util/header.c b/tools/perf/util/header.c
+index ba0cea8..8a678a3 100644
+--- a/tools/perf/util/header.c
++++ b/tools/perf/util/header.c
+@@ -1824,6 +1824,7 @@ static int process_cpu_topology(struct feat_fd *ff, void *data __maybe_unused)
+ 	int cpu_nr = ff->ph->env.nr_cpus_avail;
+ 	u64 size = 0;
+ 	struct perf_header *ph = ff->ph;
++	bool do_core_id_test = true;
+ 
+ 	ph->env.cpu = calloc(cpu_nr, sizeof(*ph->env.cpu));
+ 	if (!ph->env.cpu)
+@@ -1878,6 +1879,13 @@ static int process_cpu_topology(struct feat_fd *ff, void *data __maybe_unused)
+ 		return 0;
+ 	}
+ 
++	/* On s390 the socket_id number is not related to the numbers of cpus.
++	 * The socket_id number might be higher than the numbers of cpus.
++	 * This depends on the configuration.
++	 */
++	if (ph->env.arch && !strncmp(ph->env.arch, "s390", 4))
++		do_core_id_test = false;
++
+ 	for (i = 0; i < (u32)cpu_nr; i++) {
+ 		if (do_read_u32(ff, &nr))
+ 			goto free_cpu;
+@@ -1887,7 +1895,7 @@ static int process_cpu_topology(struct feat_fd *ff, void *data __maybe_unused)
+ 		if (do_read_u32(ff, &nr))
+ 			goto free_cpu;
+ 
+-		if (nr != (u32)-1 && nr > (u32)cpu_nr) {
++		if (do_core_id_test && nr != (u32)-1 && nr > (u32)cpu_nr) {
+ 			pr_debug("socket_id number is too big."
+ 				 "You may need to upgrade the perf tool.\n");
+ 			goto free_cpu;
+-- 
+2.7.4
+

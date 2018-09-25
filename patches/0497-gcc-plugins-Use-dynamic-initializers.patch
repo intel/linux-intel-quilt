@@ -1,0 +1,182 @@
+From 77d1658e5dd111dc01972d57ce1984654cca1131 Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Mon, 5 Feb 2018 17:27:46 -0800
+Subject: [PATCH 0497/2156] gcc-plugins: Use dynamic initializers
+
+commit b86729109c5fd0a480300f40608aac68764b5adf upstream.
+
+GCC 8 changed the order of some fields and is very picky about ordering
+in static initializers, so instead just move to dynamic initializers,
+and drop the redundant already-zero field assignments.
+
+Suggested-by: Valdis Kletnieks <valdis.kletnieks@vt.edu>
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Lance Albertson <lance@osuosl.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ scripts/gcc-plugins/latent_entropy_plugin.c   | 17 ++----
+ scripts/gcc-plugins/randomize_layout_plugin.c | 75 ++++++++-------------------
+ scripts/gcc-plugins/structleak_plugin.c       | 19 +++----
+ 3 files changed, 33 insertions(+), 78 deletions(-)
+
+diff --git a/scripts/gcc-plugins/latent_entropy_plugin.c b/scripts/gcc-plugins/latent_entropy_plugin.c
+index 6526496..cbe1d6c 100644
+--- a/scripts/gcc-plugins/latent_entropy_plugin.c
++++ b/scripts/gcc-plugins/latent_entropy_plugin.c
+@@ -255,21 +255,14 @@ static tree handle_latent_entropy_attribute(tree *node, tree name,
+ 	return NULL_TREE;
+ }
+ 
+-static struct attribute_spec latent_entropy_attr = {
+-	.name				= "latent_entropy",
+-	.min_length			= 0,
+-	.max_length			= 0,
+-	.decl_required			= true,
+-	.type_required			= false,
+-	.function_type_required		= false,
+-	.handler			= handle_latent_entropy_attribute,
+-#if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity		= false
+-#endif
+-};
++static struct attribute_spec latent_entropy_attr = { };
+ 
+ static void register_attributes(void *event_data __unused, void *data __unused)
+ {
++	latent_entropy_attr.name		= "latent_entropy";
++	latent_entropy_attr.decl_required	= true;
++	latent_entropy_attr.handler		= handle_latent_entropy_attribute;
++
+ 	register_attribute(&latent_entropy_attr);
+ }
+ 
+diff --git a/scripts/gcc-plugins/randomize_layout_plugin.c b/scripts/gcc-plugins/randomize_layout_plugin.c
+index 0073af3..c4a345c 100644
+--- a/scripts/gcc-plugins/randomize_layout_plugin.c
++++ b/scripts/gcc-plugins/randomize_layout_plugin.c
+@@ -580,68 +580,35 @@ static void finish_type(void *event_data, void *data)
+ 	return;
+ }
+ 
+-static struct attribute_spec randomize_layout_attr = {
+-	.name		= "randomize_layout",
+-	// related to args
+-	.min_length	= 0,
+-	.max_length	= 0,
+-	.decl_required	= false,
+-	// need type declaration
+-	.type_required	= true,
+-	.function_type_required = false,
+-	.handler		= handle_randomize_layout_attr,
+-#if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity  = true
+-#endif
+-};
++static struct attribute_spec randomize_layout_attr = { };
++static struct attribute_spec no_randomize_layout_attr = { };
++static struct attribute_spec randomize_considered_attr = { };
++static struct attribute_spec randomize_performed_attr = { };
+ 
+-static struct attribute_spec no_randomize_layout_attr = {
+-	.name		= "no_randomize_layout",
+-	// related to args
+-	.min_length	= 0,
+-	.max_length	= 0,
+-	.decl_required	= false,
+-	// need type declaration
+-	.type_required	= true,
+-	.function_type_required = false,
+-	.handler		= handle_randomize_layout_attr,
++static void register_attributes(void *event_data, void *data)
++{
++	randomize_layout_attr.name		= "randomize_layout";
++	randomize_layout_attr.type_required	= true;
++	randomize_layout_attr.handler		= handle_randomize_layout_attr;
+ #if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity  = true
++	randomize_layout_attr.affects_type_identity = true;
+ #endif
+-};
+ 
+-static struct attribute_spec randomize_considered_attr = {
+-	.name		= "randomize_considered",
+-	// related to args
+-	.min_length	= 0,
+-	.max_length	= 0,
+-	.decl_required	= false,
+-	// need type declaration
+-	.type_required	= true,
+-	.function_type_required = false,
+-	.handler		= handle_randomize_considered_attr,
++	no_randomize_layout_attr.name		= "no_randomize_layout";
++	no_randomize_layout_attr.type_required	= true;
++	no_randomize_layout_attr.handler	= handle_randomize_layout_attr;
+ #if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity  = false
++	no_randomize_layout_attr.affects_type_identity = true;
+ #endif
+-};
+ 
+-static struct attribute_spec randomize_performed_attr = {
+-	.name		= "randomize_performed",
+-	// related to args
+-	.min_length	= 0,
+-	.max_length	= 0,
+-	.decl_required	= false,
+-	// need type declaration
+-	.type_required	= true,
+-	.function_type_required = false,
+-	.handler		= handle_randomize_performed_attr,
+-#if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity  = false
+-#endif
+-};
++	randomize_considered_attr.name		= "randomize_considered";
++	randomize_considered_attr.type_required	= true;
++	randomize_considered_attr.handler	= handle_randomize_considered_attr;
++
++	randomize_performed_attr.name		= "randomize_performed";
++	randomize_performed_attr.type_required	= true;
++	randomize_performed_attr.handler	= handle_randomize_performed_attr;
+ 
+-static void register_attributes(void *event_data, void *data)
+-{
+ 	register_attribute(&randomize_layout_attr);
+ 	register_attribute(&no_randomize_layout_attr);
+ 	register_attribute(&randomize_considered_attr);
+diff --git a/scripts/gcc-plugins/structleak_plugin.c b/scripts/gcc-plugins/structleak_plugin.c
+index 3f8dd48..10292f7 100644
+--- a/scripts/gcc-plugins/structleak_plugin.c
++++ b/scripts/gcc-plugins/structleak_plugin.c
+@@ -57,21 +57,16 @@ static tree handle_user_attribute(tree *node, tree name, tree args, int flags, b
+ 	return NULL_TREE;
+ }
+ 
+-static struct attribute_spec user_attr = {
+-	.name			= "user",
+-	.min_length		= 0,
+-	.max_length		= 0,
+-	.decl_required		= false,
+-	.type_required		= false,
+-	.function_type_required	= false,
+-	.handler		= handle_user_attribute,
+-#if BUILDING_GCC_VERSION >= 4007
+-	.affects_type_identity	= true
+-#endif
+-};
++static struct attribute_spec user_attr = { };
+ 
+ static void register_attributes(void *event_data, void *data)
+ {
++	user_attr.name			= "user";
++	user_attr.handler		= handle_user_attribute;
++#if BUILDING_GCC_VERSION >= 4007
++	user_attr.affects_type_identity	= true;
++#endif
++
+ 	register_attribute(&user_attr);
+ }
+ 
+-- 
+2.7.4
+
