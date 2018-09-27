@@ -1,0 +1,105 @@
+From 760cc7d632b75502f6c4b5609467be34d9becc15 Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Wed, 3 May 2017 11:48:46 -0700
+Subject: [PATCH 0509/2104] x86/umip: Force a page fault when unable to copy
+ emulated result to user
+
+fixup_umip_exception() will be called from do_general_protection(). If the
+former returns false, the latter will issue a SIGSEGV with SEND_SIG_PRIV.
+However, when emulation is successful but the emulated result cannot be
+copied to user space memory, it is more accurate to issue a SIGSEGV with
+SEGV_MAPERR with the offending address. A new function, inspired in
+force_sig_info_fault(), is introduced to model the page fault.
+
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Chen Yucong <slaoub@gmail.com>
+Cc: Chris Metcalf <cmetcalf@mellanox.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Huang Rui <ray.huang@amd.com>
+Cc: Jiri Slaby <jslaby@suse.cz>
+Cc: Jonathan Corbet <corbet@lwn.net>
+Cc: Michael S. Tsirkin <mst@redhat.com>
+Cc: Paul Gortmaker <paul.gortmaker@windriver.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: Shuah Khan <shuah@kernel.org>
+Cc: Vlastimil Babka <vbabka@suse.cz>
+Cc: Tony Luck <tony.luck@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: x86@kernel.org
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/kernel/umip.c | 45 +++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kernel/umip.c b/arch/x86/kernel/umip.c
+index cd3201a..6e38b8f 100644
+--- a/arch/x86/kernel/umip.c
++++ b/arch/x86/kernel/umip.c
+@@ -185,6 +185,41 @@ static int emulate_umip_insn(struct insn *insn, int umip_inst,
+ }
+ 
+ /**
++ * force_sig_info_umip_fault() - Force a SIGSEGV with SEGV_MAPERR
++ * @addr:	Address that caused the signal
++ * @regs:	Register set containing the instruction pointer
++ *
++ * Force a SIGSEGV signal with SEGV_MAPERR as the error code. This function is
++ * intended to be used to provide a segmentation fault when the result of the
++ * UMIP emulation could not be copied to the user space memory.
++ *
++ * Return: none
++ */
++static void force_sig_info_umip_fault(void __user *addr, struct pt_regs *regs)
++{
++	siginfo_t info;
++	struct task_struct *tsk = current;
++
++	tsk->thread.cr2		= (unsigned long)addr;
++	tsk->thread.error_code	= X86_PF_USER | X86_PF_WRITE;
++	tsk->thread.trap_nr	= X86_TRAP_PF;
++
++	info.si_signo	= SIGSEGV;
++	info.si_errno	= 0;
++	info.si_code	= SEGV_MAPERR;
++	info.si_addr	= addr;
++	force_sig_info(SIGSEGV, &info, tsk);
++
++	if (!(show_unhandled_signals && unhandled_signal(tsk, SIGSEGV)))
++		return;
++
++	pr_err_ratelimited("%s[%d] umip emulation segfault ip:%lx sp:%lx error:%x in %lx\n",
++			   tsk->comm, task_pid_nr(tsk), regs->ip,
++			   regs->sp, X86_PF_USER | X86_PF_WRITE,
++			   regs->ip);
++}
++
++/**
+  * fixup_umip_exception() - Fixup #GP faults caused by UMIP
+  * @regs:	Registers as saved when entering the #GP trap
+  *
+@@ -293,8 +328,14 @@ bool fixup_umip_exception(struct pt_regs *regs)
+ 			return false;
+ 
+ 		nr_copied = copy_to_user(uaddr, dummy_data, dummy_data_size);
+-		if (nr_copied  > 0)
+-			return false;
++		if (nr_copied  > 0) {
++			/*
++			 * If copy fails, send a signal and tell caller that
++			 * fault was fixed up.
++			 */
++			force_sig_info_umip_fault(uaddr, regs);
++			return true;
++		}
+ 	}
+ 
+ 	/* increase IP to let the program keep going */
+-- 
+2.7.4
+

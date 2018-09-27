@@ -1,0 +1,53 @@
+From c82bb66cee59cfb01e906e8f3a466e597e4c2626 Mon Sep 17 00:00:00 2001
+From: Fei Jiang <fei.jiang@intel.com>
+Date: Mon, 26 Feb 2018 20:07:34 +0800
+Subject: [PATCH 1095/2104] [INTERNAL] drm/i915/gvt: add pvmmio support in
+ preempt context submission
+
+This patch added the pvmmio support in preemption context submission for
+gvt-g guest.
+And because GVT-g doesn't support preemption in guests, this patch also
+disabled preempttion in guest.
+
+Signed-off-by: Fei Jiang <fei.jiang@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index f9c079c1..8da04aa 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -528,6 +528,19 @@ static void inject_preempt_context(struct intel_engine_cs *engine)
+ 	ce->ring->tail &= (ce->ring->size - 1);
+ 	ce->lrc_reg_state[CTX_RING_TAIL+1] = ce->ring->tail;
+ 
++	if (intel_vgpu_active(engine->i915) && i915_modparams.enable_pvmmio) {
++		u32 __iomem *elsp_data = engine->i915->shared_page->elsp_data;
++
++		spin_lock(&engine->i915->shared_page_lock);
++		writel(0, elsp_data);
++		writel(0, elsp_data + 1);
++		writel(upper_32_bits(ce->lrc_desc), elsp_data + 2);
++		writel(lower_32_bits(ce->lrc_desc), elsp);
++		spin_unlock(&engine->i915->shared_page_lock);
++
++		return;
++	}
++
+ 	for (n = execlists_num_ports(&engine->execlists); --n; )
+ 		elsp_write(0, elsp);
+ 
+@@ -536,7 +549,8 @@ static void inject_preempt_context(struct intel_engine_cs *engine)
+ 
+ static bool can_preempt(struct intel_engine_cs *engine)
+ {
+-	return INTEL_INFO(engine->i915)->has_logical_ring_preemption;
++	return !intel_vgpu_active(engine->i915) &&
++		INTEL_INFO(engine->i915)->has_logical_ring_preemption;
+ }
+ 
+ static void execlists_dequeue(struct intel_engine_cs *engine)
+-- 
+2.7.4
+

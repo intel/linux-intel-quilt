@@ -1,0 +1,87 @@
+From 7e911ae625eee375ad932132e98be0993d7df610 Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Tue, 5 Sep 2017 15:38:33 -0700
+Subject: [PATCH 0501/2104] x86/insn-eval: Indicate a 32-bit displacement if
+ ModRM.mod is 0 and ModRM.rm is 101b
+
+Section 2.2.1.3 of the Intel 64 and IA-32 Architectures Software
+Developer's Manual volume 2A states that when ModRM.mod is zero and
+ModRM.rm is 101b, a 32-bit displacement follows the ModRM byte. This means
+that none of the registers are used in the computation of the effective
+address. A return value of -EDOM indicates callers that they should not
+use the value of registers when computing the effective address for the
+instruction.
+
+In long mode, the effective address is given by the 32-bit displacement
+plus the location of the next instruction. In protected mode, only the
+displacement is used.
+
+The instruction decoder takes care of obtaining the displacement.
+
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Adam Buchbinder <adam.buchbinder@gmail.com>
+Cc: Colin Ian King <colin.king@canonical.com>
+Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+Cc: Qiaowei Ren <qiaowei.ren@intel.com>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Masami Hiramatsu <mhiramat@kernel.org>
+Cc: Adrian Hunter <adrian.hunter@intel.com>
+Cc: Kees Cook <keescook@chromium.org>
+Cc: Thomas Garnier <thgarnie@google.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Dmitry Vyukov <dvyukov@google.com>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: x86@kernel.org
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/lib/insn-eval.c | 25 ++++++++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/lib/insn-eval.c b/arch/x86/lib/insn-eval.c
+index b29f80b..a24e421 100644
+--- a/arch/x86/lib/insn-eval.c
++++ b/arch/x86/lib/insn-eval.c
+@@ -363,6 +363,14 @@ static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
+ 	switch (type) {
+ 	case REG_TYPE_RM:
+ 		regno = X86_MODRM_RM(insn->modrm.value);
++
++		/*
++		 * ModRM.mod == 0 and ModRM.rm == 5 means a 32-bit displacement
++		 * follows the ModRM byte.
++		 */
++		if (!X86_MODRM_MOD(insn->modrm.value) && regno == 5)
++			return -EDOM;
++
+ 		if (X86_REX_B(insn->rex_prefix.value))
+ 			regno += 8;
+ 		break;
+@@ -710,10 +718,21 @@ void __user *insn_get_addr_ref(struct insn *insn, struct pt_regs *regs)
+ 			eff_addr = base + indx * (1 << X86_SIB_SCALE(sib));
+ 		} else {
+ 			addr_offset = get_reg_offset(insn, regs, REG_TYPE_RM);
+-			if (addr_offset < 0)
++			/*
++			 * -EDOM means that we must ignore the address_offset.
++			 * In such a case, in 64-bit mode the effective address
++			 * relative to the RIP of the following instruction.
++			 */
++			if (addr_offset == -EDOM) {
++				if (user_64bit_mode(regs))
++					eff_addr = (long)regs->ip + insn->length;
++				else
++					eff_addr = 0;
++			} else if (addr_offset < 0) {
+ 				goto out;
+-
+-			eff_addr = regs_get_register(regs, addr_offset);
++			} else {
++				eff_addr = regs_get_register(regs, addr_offset);
++			}
+ 		}
+ 
+ 		eff_addr += insn->displacement.value;
+-- 
+2.7.4
+

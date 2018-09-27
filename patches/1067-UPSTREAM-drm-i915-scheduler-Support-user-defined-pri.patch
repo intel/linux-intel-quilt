@@ -1,0 +1,183 @@
+From ecb53e4688bade73e72ec12759679ddb6344d588 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 3 Oct 2017 21:34:53 +0100
+Subject: [PATCH 1067/2104] UPSTREAM: drm/i915/scheduler: Support user-defined
+ priorities
+
+Use a priority stored in the context as the initial value when
+submitting a request. This allows us to change the default priority on a
+per-context basis, allowing different contexts to be favoured with GPU
+time at the expense of lower importance work. The user can adjust the
+context's priority via I915_CONTEXT_PARAM_PRIORITY, with more positive
+values being higher priority (they will be serviced earlier, after their
+dependencies have been resolved). Any prerequisite work for an execbuf
+will have its priority raised to match the new request as required.
+
+Normal users can specify any value in the range of -1023 to 0 [default],
+i.e. they can reduce the priority of their workloads (and temporarily
+boost it back to normal if so desired).
+
+Privileged users can specify any value in the range of -1023 to 1023,
+[default is 0], i.e. they can raise their priority above all overs and
+so potentially starve the system.
+
+Note that the existing schedulers are not fair, nor load balancing, the
+execution is strictly by priority on a first-come, first-served basis,
+and the driver may choose to boost some requests above the range
+available to users.
+
+This priority was originally based around nice(2), but evolved to allow
+clients to adjust their priority within a small range, and allow for a
+privileged high priority range.
+
+For example, this can be used to implement EGL_IMG_context_priority
+https://www.khronos.org/registry/egl/extensions/IMG/EGL_IMG_context_priority.txt
+
+	EGL_CONTEXT_PRIORITY_LEVEL_IMG determines the priority level of
+        the context to be created. This attribute is a hint, as an
+        implementation may not support multiple contexts at some
+        priority levels and system policy may limit access to high
+        priority contexts to appropriate system privilege level. The
+        default value for EGL_CONTEXT_PRIORITY_LEVEL_IMG is
+        EGL_CONTEXT_PRIORITY_MEDIUM_IMG."
+
+so we can map
+
+	PRIORITY_HIGH -> 1023 [privileged, will failback to 0]
+	PRIORITY_MED -> 0 [default]
+	PRIORITY_LOW -> -1023
+
+They also map onto the priorities used by VkQueue (and a VkQueue is
+essentially a timeline, our i915_gem_context under full-ppgtt).
+
+v2: s/CAP_SYS_ADMIN/CAP_SYS_NICE/
+v3: Report min/max user priorities as defines in the uapi, and rebase
+internal priorities on the exposed values.
+
+Testcase: igt/gem_exec_schedule
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171003203453.15692-9-chris@chris-wilson.co.uk
+(cherry picked from commit 78ae1d4290a63d99b3f89fe6fdcaceb9a997c582)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.c         |  1 +
+ drivers/gpu/drm/i915/i915_gem_context.c | 23 +++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_gem_request.h | 14 ++++++++++----
+ include/uapi/drm/i915_drm.h             |  7 +++++++
+ 4 files changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 7b6971f..ab83b54 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -373,6 +373,7 @@ static int i915_getparam(struct drm_device *dev, void *data,
+ 		value = 0;
+ 		if (dev_priv->engine[RCS] && dev_priv->engine[RCS]->schedule) {
+ 			value |= I915_SCHEDULER_CAP_ENABLED;
++			value |= I915_SCHEDULER_CAP_PRIORITY;
+ 
+ 			if (INTEL_INFO(dev_priv)->has_logical_ring_preemption &&
+ 			    i915_modparams.enable_execlists &&
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 67cef036..1895687 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -1076,6 +1076,9 @@ int i915_gem_context_getparam_ioctl(struct drm_device *dev, void *data,
+ 	case I915_CONTEXT_PARAM_BANNABLE:
+ 		args->value = i915_gem_context_is_bannable(ctx);
+ 		break;
++	case I915_CONTEXT_PARAM_PRIORITY:
++		args->value = ctx->priority;
++		break;
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+@@ -1131,6 +1134,26 @@ int i915_gem_context_setparam_ioctl(struct drm_device *dev, void *data,
+ 		else
+ 			i915_gem_context_clear_bannable(ctx);
+ 		break;
++
++	case I915_CONTEXT_PARAM_PRIORITY:
++		{
++			int priority = args->value;
++
++			if (args->size)
++				ret = -EINVAL;
++			else if (!to_i915(dev)->engine[RCS]->schedule)
++				ret = -ENODEV;
++			else if (priority > I915_CONTEXT_MAX_USER_PRIORITY ||
++				 priority < I915_CONTEXT_MIN_USER_PRIORITY)
++				ret = -EINVAL;
++			else if (priority > I915_CONTEXT_DEFAULT_PRIORITY &&
++				 !capable(CAP_SYS_NICE))
++				ret = -EPERM;
++			else
++				ctx->priority = priority;
++		}
++		break;
++
+ 	default:
+ 		ret = -EINVAL;
+ 		break;
+diff --git a/drivers/gpu/drm/i915/i915_gem_request.h b/drivers/gpu/drm/i915/i915_gem_request.h
+index e25fcb1..e129202 100644
+--- a/drivers/gpu/drm/i915/i915_gem_request.h
++++ b/drivers/gpu/drm/i915/i915_gem_request.h
+@@ -30,6 +30,8 @@
+ #include "i915_gem.h"
+ #include "i915_sw_fence.h"
+ 
++#include <uapi/drm/i915_drm.h>
++
+ struct drm_file;
+ struct drm_i915_gem_object;
+ struct drm_i915_gem_request;
+@@ -69,10 +71,14 @@ struct i915_priotree {
+ 	struct list_head waiters_list; /* those after us, they depend upon us */
+ 	struct list_head link;
+ 	int priority;
+-#define I915_PRIORITY_MAX 1024
+-#define I915_PRIORITY_NORMAL 0
+-#define I915_PRIORITY_MIN (-I915_PRIORITY_MAX)
+-#define I915_PRIORITY_INVALID INT_MIN
++};
++
++enum {
++	I915_PRIORITY_MIN = I915_CONTEXT_MIN_USER_PRIORITY - 1,
++	I915_PRIORITY_NORMAL = I915_CONTEXT_DEFAULT_PRIORITY,
++	I915_PRIORITY_MAX = I915_CONTEXT_MAX_USER_PRIORITY + 1,
++
++	I915_PRIORITY_INVALID = INT_MIN
+ };
+ 
+ struct i915_gem_capture_list {
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index 8d450f9..791368c 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -407,6 +407,9 @@ typedef struct drm_i915_irq_wait {
+  * priorities and the driver will attempt to execute batches in priority order.
+  * The param returns a capability bitmask, nonzero implies that the scheduler
+  * is enabled, with different features present according to the mask.
++ *
++ * The initial priority for each batch is supplied by the context and is
++ * controlled via I915_CONTEXT_PARAM_PRIORITY.
+  */
+ #define I915_PARAM_HAS_SCHEDULER	 41
+ #define   I915_SCHEDULER_CAP_ENABLED	(1ul << 0)
+@@ -1388,6 +1391,10 @@ struct drm_i915_gem_context_param {
+ #define I915_CONTEXT_PARAM_GTT_SIZE	0x3
+ #define I915_CONTEXT_PARAM_NO_ERROR_CAPTURE	0x4
+ #define I915_CONTEXT_PARAM_BANNABLE	0x5
++#define I915_CONTEXT_PARAM_PRIORITY	0x6
++#define   I915_CONTEXT_MAX_USER_PRIORITY	1023 /* inclusive */
++#define   I915_CONTEXT_DEFAULT_PRIORITY		0
++#define   I915_CONTEXT_MIN_USER_PRIORITY	-1023 /* inclusive */
+ 	__u64 value;
+ };
+ 
+-- 
+2.7.4
+

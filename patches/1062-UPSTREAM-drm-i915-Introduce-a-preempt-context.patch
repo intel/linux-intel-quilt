@@ -1,0 +1,251 @@
+From 5f14e918e3ff6e8cb7847ff1556d853f0f39a06f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 3 Oct 2017 21:34:48 +0100
+Subject: [PATCH 1062/2104] UPSTREAM: drm/i915: Introduce a preempt context
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add another perma-pinned context for using for preemption at any time.
+We cannot just reuse the existing kernel context, as first and foremost
+we need to ensure that we can preempt the kernel context itself, so
+require a distinct context id. Similar to the kernel context, we may
+want to interrupt execution and switch to the preempt context at any
+time, and so it needs to be permanently pinned and available.
+
+To compensate for yet another permanent allocation, we shrink the
+existing context and the new context by reducing their ringbuffer to the
+minimum.
+
+v2: Assert that we never allocate a request from the preemption context.
+v3: Limit perma-pin to engines that may preempt.
+v4: Onion cleanup for early driver death
+v5: Onion ordering in main driver cleanup as well.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Michał Winiarski <michal.winiarski@intel.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171003203453.15692-4-chris@chris-wilson.co.uk
+(cherry picked from commit 262ad37800c3b18012b3e376281a9d87f8b0b3cd)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h         |  6 ++-
+ drivers/gpu/drm/i915/i915_gem_context.c | 76 ++++++++++++++++++++++++---------
+ drivers/gpu/drm/i915/i915_gem_request.c |  7 +++
+ drivers/gpu/drm/i915/intel_engine_cs.c  | 22 +++++++++-
+ 4 files changed, 87 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6255725..072af04 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -768,6 +768,7 @@ struct intel_csr {
+ 	func(has_l3_dpf); \
+ 	func(has_llc); \
+ 	func(has_logical_ring_contexts); \
++	func(has_logical_ring_preemption); \
+ 	func(has_overlay); \
+ 	func(has_pipe_cxsr); \
+ 	func(has_pooled_eu); \
+@@ -2195,8 +2196,11 @@ struct drm_i915_private {
+ 	wait_queue_head_t gmbus_wait_queue;
+ 
+ 	struct pci_dev *bridge_dev;
+-	struct i915_gem_context *kernel_context;
+ 	struct intel_engine_cs *engine[I915_NUM_ENGINES];
++	/* Context used internally to idle the GPU and setup initial state */
++	struct i915_gem_context *kernel_context;
++	/* Context only to be used for injecting preemption commands */
++	struct i915_gem_context *preempt_context;
+ 	struct i915_vma *semaphore;
+ 
+ 	struct drm_dma_handle *status_page_dmah;
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 3004c36..67cef036 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -422,14 +422,43 @@ i915_gem_context_create_gvt(struct drm_device *dev)
+ 	return ctx;
+ }
+ 
++static struct i915_gem_context *
++create_kernel_context(struct drm_i915_private *i915, int prio)
++{
++	struct i915_gem_context *ctx;
++
++	ctx = i915_gem_create_context(i915, NULL);
++	if (IS_ERR(ctx))
++		return ctx;
++
++	i915_gem_context_clear_bannable(ctx);
++	ctx->priority = prio;
++	ctx->ring_size = PAGE_SIZE;
++
++	GEM_BUG_ON(!i915_gem_context_is_kernel(ctx));
++
++	return ctx;
++}
++
++static void
++destroy_kernel_context(struct i915_gem_context **ctxp)
++{
++	struct i915_gem_context *ctx;
++
++	/* Keep the context ref so that we can free it immediately ourselves */
++	ctx = i915_gem_context_get(fetch_and_zero(ctxp));
++	GEM_BUG_ON(!i915_gem_context_is_kernel(ctx));
++
++	context_close(ctx);
++	i915_gem_context_free(ctx);
++}
++
+ int i915_gem_contexts_init(struct drm_i915_private *dev_priv)
+ {
+ 	struct i915_gem_context *ctx;
++	int err;
+ 
+-	/* Init should only be called once per module load. Eventually the
+-	 * restriction on the context_disabled check can be loosened. */
+-	if (WARN_ON(dev_priv->kernel_context))
+-		return 0;
++	GEM_BUG_ON(dev_priv->kernel_context);
+ 
+ 	INIT_LIST_HEAD(&dev_priv->contexts.list);
+ 	INIT_WORK(&dev_priv->contexts.free_work, contexts_free_worker);
+@@ -447,28 +476,38 @@ int i915_gem_contexts_init(struct drm_i915_private *dev_priv)
+ 	BUILD_BUG_ON(MAX_CONTEXT_HW_ID > INT_MAX);
+ 	ida_init(&dev_priv->contexts.hw_ida);
+ 
+-	ctx = i915_gem_create_context(dev_priv, NULL);
++	/* lowest priority; idle task */
++	ctx = create_kernel_context(dev_priv, I915_PRIORITY_MIN);
+ 	if (IS_ERR(ctx)) {
+-		DRM_ERROR("Failed to create default global context (error %ld)\n",
+-			  PTR_ERR(ctx));
+-		return PTR_ERR(ctx);
++		DRM_ERROR("Failed to create default global context\n");
++		err = PTR_ERR(ctx);
++		goto err;
+ 	}
+-
+-	/* For easy recognisablity, we want the kernel context to be 0 and then
++	/*
++	 * For easy recognisablity, we want the kernel context to be 0 and then
+ 	 * all user contexts will have non-zero hw_id.
+ 	 */
+ 	GEM_BUG_ON(ctx->hw_id);
+-
+-	i915_gem_context_clear_bannable(ctx);
+-	ctx->priority = I915_PRIORITY_MIN; /* lowest priority; idle task */
+ 	dev_priv->kernel_context = ctx;
+ 
+-	GEM_BUG_ON(!i915_gem_context_is_kernel(ctx));
++	/* highest priority; preempting task */
++	ctx = create_kernel_context(dev_priv, INT_MAX);
++	if (IS_ERR(ctx)) {
++		DRM_ERROR("Failed to create default preempt context\n");
++		err = PTR_ERR(ctx);
++		goto err_kernel_context;
++	}
++	dev_priv->preempt_context = ctx;
+ 
+ 	DRM_DEBUG_DRIVER("%s context support initialized\n",
+ 			 dev_priv->engine[RCS]->context_size ? "logical" :
+ 			 "fake");
+ 	return 0;
++
++err_kernel_context:
++	destroy_kernel_context(&dev_priv->kernel_context);
++err:
++	return err;
+ }
+ 
+ void i915_gem_contexts_lost(struct drm_i915_private *dev_priv)
+@@ -513,15 +552,10 @@ void i915_gem_contexts_lost(struct drm_i915_private *dev_priv)
+ 
+ void i915_gem_contexts_fini(struct drm_i915_private *i915)
+ {
+-	struct i915_gem_context *ctx;
+-
+ 	lockdep_assert_held(&i915->drm.struct_mutex);
+ 
+-	/* Keep the context so that we can free it immediately ourselves */
+-	ctx = i915_gem_context_get(fetch_and_zero(&i915->kernel_context));
+-	GEM_BUG_ON(!i915_gem_context_is_kernel(ctx));
+-	context_close(ctx);
+-	i915_gem_context_free(ctx);
++	destroy_kernel_context(&i915->preempt_context);
++	destroy_kernel_context(&i915->kernel_context);
+ 
+ 	/* Must free all deferred contexts (via flush_workqueue) first */
+ 	ida_destroy(&i915->contexts.hw_ida);
+diff --git a/drivers/gpu/drm/i915/i915_gem_request.c b/drivers/gpu/drm/i915/i915_gem_request.c
+index 9ec8fd5..b7dce47 100644
+--- a/drivers/gpu/drm/i915/i915_gem_request.c
++++ b/drivers/gpu/drm/i915/i915_gem_request.c
+@@ -587,6 +587,13 @@ i915_gem_request_alloc(struct intel_engine_cs *engine,
+ 
+ 	lockdep_assert_held(&dev_priv->drm.struct_mutex);
+ 
++	/*
++	 * Preempt contexts are reserved for exclusive use to inject a
++	 * preemption context switch. They are never to be used for any trivial
++	 * request!
++	 */
++	GEM_BUG_ON(ctx == dev_priv->preempt_context);
++
+ 	/* ABI: Before userspace accesses the GPU (e.g. execbuffer), report
+ 	 * EIO if the GPU is already wedged.
+ 	 */
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index 441d62b..8bb6932 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -611,9 +611,22 @@ int intel_engine_init_common(struct intel_engine_cs *engine)
+ 	if (IS_ERR(ring))
+ 		return PTR_ERR(ring);
+ 
++	/*
++	 * Similarly the preempt context must always be available so that
++	 * we can interrupt the engine at any time.
++	 */
++	if (INTEL_INFO(engine->i915)->has_logical_ring_preemption) {
++		ring = engine->context_pin(engine,
++					   engine->i915->preempt_context);
++		if (IS_ERR(ring)) {
++			ret = PTR_ERR(ring);
++			goto err_unpin_kernel;
++		}
++	}
++
+ 	ret = intel_engine_init_breadcrumbs(engine);
+ 	if (ret)
+-		goto err_unpin;
++		goto err_unpin_preempt;
+ 
+ 	ret = i915_gem_render_state_init(engine);
+ 	if (ret)
+@@ -632,7 +645,10 @@ int intel_engine_init_common(struct intel_engine_cs *engine)
+ 	i915_gem_render_state_fini(engine);
+ err_breadcrumbs:
+ 	intel_engine_fini_breadcrumbs(engine);
+-err_unpin:
++err_unpin_preempt:
++	if (INTEL_INFO(engine->i915)->has_logical_ring_preemption)
++		engine->context_unpin(engine, engine->i915->preempt_context);
++err_unpin_kernel:
+ 	engine->context_unpin(engine, engine->i915->kernel_context);
+ 	return ret;
+ }
+@@ -658,6 +674,8 @@ void intel_engine_cleanup_common(struct intel_engine_cs *engine)
+ 	intel_engine_cleanup_cmd_parser(engine);
+ 	i915_gem_batch_pool_fini(&engine->batch_pool);
+ 
++	if (INTEL_INFO(engine->i915)->has_logical_ring_preemption)
++		engine->context_unpin(engine, engine->i915->preempt_context);
+ 	engine->context_unpin(engine, engine->i915->kernel_context);
+ }
+ 
+-- 
+2.7.4
+

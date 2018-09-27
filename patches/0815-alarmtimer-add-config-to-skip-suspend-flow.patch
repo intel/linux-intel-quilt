@@ -1,0 +1,112 @@
+From 718626e0fc47a8f815ccb40a5ba53f0048466b3f Mon Sep 17 00:00:00 2001
+From: Yipeng <yipeng.yao@intel.com>
+Date: Wed, 20 Sep 2017 14:15:02 +0800
+Subject: [PATCH 0815/2104] alarmtimer: add config to skip suspend flow
+
+Port from kernel4.4(bxtp_ivi_m).
+Unlike phone design, IVI should be always lighten on when driver is
+driving, without auto-sleep. Suspend is being used for 2 cases: a)
+driver
+shutdown system by pressing button; b) garage mode.
+Garage mode means that android system may needs to update some apps such
+as GPS when car is parking in garge, with wifi connected. It needs timer
+to wake up android system to see if upgrade is avalible.
+However, garage mode is introduced after N.car. Garage mode is not
+supported in current program, based on Android M release.
+As a result, alarmtimer wakup during suspend is not being used in IVI M.
+
+There are more operating systems to manage system on IVI. Android is
+not the only one. IOC is another OS (RTOS), with much higher priority to
+control Android OS, to manage system. Almost all inputs would be routed
+from IOC, to Android, including even the simplest signal, power_key for
+example. And there is a pre-defined communication protocol between IOC
+and
+Android, to share all messages, asynchronously, of cause. As a result,
+the suspend flow would be like:
+
+    IOC suspend message received -> power event -> event handling by
+    Android ->
+    continuously send postpone message to IOC, until Android work
+    finished -> send
+    ready to suspend message to IOC, after work finished -> kernel
+    suspend -> h/w
+    seq to tell IOC it is ready to enter low power mode -> IOC lets
+    system enter
+    suspend.
+    IOC received wakeup signal -> h/w seq to bring back SoC online ->
+    kernel
+    resume -> IOC send wakeup reason message to Android -> Android to
+    decide
+    whether to enter active mode (with screen on), or to enter garage
+    mode (with
+         screen off)
+    (if Active mode) -> Android send stack ready signal to IOC -> event
+    handling by Android
+    (if Garage mode) -> Android send stack ready signal to IOC ->
+    continuously
+    send postpone message to IOC, until Android work finished -> send
+    ready to
+    suspend message to IOC, afte work finished -> suspend (the same as
+                                                           above)
+
+    At last, wake lock mechanism is totally broken on IVI system.
+    Actually from
+    google's feedback, even based on N.Car, the answer to how to use
+    general
+    libsuspend interface to implement power feature, with wakelock
+    mechanism
+    supported, is to use "echo mem > /sys/power/state" directly. Things
+    would
+    be going to be right in O release.
+
+Signed-off-by: Yipeng <yipeng.yao@intel.com>
+Signed-off-by: xichen1x <xix.a.chen@intel.com>
+---
+ kernel/time/Kconfig      | 9 +++++++++
+ kernel/time/alarmtimer.c | 4 ++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/kernel/time/Kconfig b/kernel/time/Kconfig
+index ac09bc2..aa61e4d 100644
+--- a/kernel/time/Kconfig
++++ b/kernel/time/Kconfig
+@@ -143,5 +143,14 @@ config HIGH_RES_TIMERS
+ 	  hardware is not capable then this option only increases
+ 	  the size of the kernel image.
+ 
++# Wakelock and suspend for IVI system needs to disable alarmtimer_suspend
++config ANDROID_AUTO_SUSPEND_BEHAVIOR
++       bool "skip alarm timer suspend flow for Android auto usage"
++       default n
++       help
++         Say Y if it doesn't need alarm timer to wake up system, especially
++         in vehicle usage.
++         Say N if you are unsure.
++
+ endmenu
+ endif
+diff --git a/kernel/time/alarmtimer.c b/kernel/time/alarmtimer.c
+index 0c7227f..118edef 100644
+--- a/kernel/time/alarmtimer.c
++++ b/kernel/time/alarmtimer.c
+@@ -245,6 +245,9 @@ EXPORT_SYMBOL_GPL(alarm_expires_remaining);
+  */
+ static int alarmtimer_suspend(struct device *dev)
+ {
++#ifdef CONFIG_ANDROID_AUTO_SUSPEND_BEHAVIOR
++	return 0;
++#else
+ 	ktime_t min, now, expires;
+ 	int i, ret, type;
+ 	struct rtc_device *rtc;
+@@ -302,6 +305,7 @@ static int alarmtimer_suspend(struct device *dev)
+ 	if (ret < 0)
+ 		__pm_wakeup_event(ws, MSEC_PER_SEC);
+ 	return ret;
++#endif
+ }
+ 
+ static int alarmtimer_resume(struct device *dev)
+-- 
+2.7.4
+

@@ -1,0 +1,1299 @@
+From 92d7fbdc6d2fb22279902b663a1b337056a91051 Mon Sep 17 00:00:00 2001
+From: Bob Moore <robert.moore@intel.com>
+Date: Wed, 20 Sep 2017 10:00:36 +0800
+Subject: [PATCH 0804/2104] ACPICA: Restructure/cleanup all string-to-integer
+ conversion functions
+
+ACPICA commit 610046d444ad781cc36673bf1f030abe50cbc61f
+
+Improve adherence to ACPI spec for implicit and explicit conversions
+Adds octal support for constants in ASL code
+Adds integer overflow errors for constants during ASL compilation
+Eliminates most of the existing complex flags parameters
+Simplify support for implicit/explicit runtime conversions
+Adds one new file, utilities/utstrsuppt.c
+
+Link: https://github.com/acpica/acpica/commit/610046d444ad
+Signed-off-by: Bob Moore <robert.moore@intel.com>
+Signed-off-by: Lv Zheng <lv.zheng@intel.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+---
+ drivers/acpi/acpica/Makefile             |   1 +
+ drivers/acpi/acpica/acinterp.h           |   6 +-
+ drivers/acpi/acpica/acutils.h            |  31 ++-
+ drivers/acpi/acpica/dbconvert.c          |   5 +-
+ drivers/acpi/acpica/dswexec.c            |   2 +-
+ drivers/acpi/acpica/exconcat.c           |   2 +-
+ drivers/acpi/acpica/exconvrt.c           |  30 ++-
+ drivers/acpi/acpica/exmisc.c             |   2 +-
+ drivers/acpi/acpica/exresop.c            |   2 +-
+ drivers/acpi/acpica/nsconvert.c          |   4 +-
+ drivers/acpi/acpica/utstrsuppt.c         | 417 ++++++++++++++++++++++++++++++
+ drivers/acpi/acpica/utstrtoul64.c        | 420 +++++++++++++++----------------
+ include/acpi/acexcep.h                   |  16 +-
+ tools/power/acpi/tools/acpidump/Makefile |   1 +
+ tools/power/acpi/tools/acpidump/apdump.c |   3 +-
+ tools/power/acpi/tools/acpidump/apmain.c |   4 +-
+ 16 files changed, 690 insertions(+), 256 deletions(-)
+ create mode 100644 drivers/acpi/acpica/utstrsuppt.c
+
+diff --git a/drivers/acpi/acpica/Makefile b/drivers/acpi/acpica/Makefile
+index e05232d..71f6f26 100644
+--- a/drivers/acpi/acpica/Makefile
++++ b/drivers/acpi/acpica/Makefile
+@@ -178,6 +178,7 @@ acpi-y +=		\
+ 	utresrc.o	\
+ 	utstate.o	\
+ 	utstring.o	\
++	utstrsuppt.o	\
+ 	utstrtoul64.o	\
+ 	utxface.o	\
+ 	utxfinit.o	\
+diff --git a/drivers/acpi/acpica/acinterp.h b/drivers/acpi/acpica/acinterp.h
+index 29a863c..29555c8 100644
+--- a/drivers/acpi/acpica/acinterp.h
++++ b/drivers/acpi/acpica/acinterp.h
+@@ -101,7 +101,8 @@ typedef const struct acpi_exdump_info {
+  */
+ acpi_status
+ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
+-			   union acpi_operand_object **result_desc, u32 flags);
++			   union acpi_operand_object **result_desc,
++			   u32 implicit_conversion);
+ 
+ acpi_status
+ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
+@@ -424,9 +425,6 @@ acpi_ex_store_object_to_node(union acpi_operand_object *source_desc,
+ 			     struct acpi_walk_state *walk_state,
+ 			     u8 implicit_conversion);
+ 
+-#define ACPI_IMPLICIT_CONVERSION        TRUE
+-#define ACPI_NO_IMPLICIT_CONVERSION     FALSE
+-
+ /*
+  * exstoren - resolve/store object
+  */
+diff --git a/drivers/acpi/acpica/acutils.h b/drivers/acpi/acpica/acutils.h
+index 745134a..7a568c6 100644
+--- a/drivers/acpi/acpica/acutils.h
++++ b/drivers/acpi/acpica/acutils.h
+@@ -141,6 +141,11 @@ extern const char *acpi_gbl_ptyp_decode[];
+ #define ACPI_MSG_SUFFIX \
+ 	acpi_os_printf (" (%8.8X/%s-%u)\n", ACPI_CA_VERSION, module_name, line_number)
+ 
++/* Flags to indicate implicit or explicit string-to-integer conversion */
++
++#define ACPI_IMPLICIT_CONVERSION        TRUE
++#define ACPI_NO_IMPLICIT_CONVERSION     FALSE
++
+ /* Types for Resource descriptor entries */
+ 
+ #define ACPI_INVALID_RESOURCE           0
+@@ -197,15 +202,29 @@ void acpi_ut_strlwr(char *src_string);
+ 
+ int acpi_ut_stricmp(char *string1, char *string2);
+ 
+-acpi_status acpi_ut_strtoul64(char *string, u32 flags, u64 *ret_integer);
++/*
++ * utstrsuppt - string-to-integer conversion support functions
++ */
++acpi_status acpi_ut_convert_octal_string(char *string, u64 *return_value);
++
++acpi_status acpi_ut_convert_decimal_string(char *string, u64 *return_value_ptr);
++
++acpi_status acpi_ut_convert_hex_string(char *string, u64 *return_value_ptr);
++
++char acpi_ut_remove_leading_zeros(char **string);
++
++u8 acpi_ut_detect_hex_prefix(char **string);
++
++u8 acpi_ut_detect_octal_prefix(char **string);
+ 
+ /*
+- * Values for Flags above
+- * Note: LIMIT values correspond to acpi_gbl_integer_byte_width values (4/8)
++ * utstrtoul64 - string-to-integer conversion functions
+  */
+-#define ACPI_STRTOUL_32BIT          0x04	/* 4 bytes */
+-#define ACPI_STRTOUL_64BIT          0x08	/* 8 bytes */
+-#define ACPI_STRTOUL_BASE16         0x10	/* Default: Base10/16 */
++acpi_status acpi_ut_strtoul64(char *string, u64 *ret_integer);
++
++u64 acpi_ut_explicit_strtoul64(char *string);
++
++u64 acpi_ut_implicit_strtoul64(char *string);
+ 
+ /*
+  * utglobal - Global data structures and procedures
+diff --git a/drivers/acpi/acpica/dbconvert.c b/drivers/acpi/acpica/dbconvert.c
+index 857dbc4..32d546f 100644
+--- a/drivers/acpi/acpica/dbconvert.c
++++ b/drivers/acpi/acpica/dbconvert.c
+@@ -277,10 +277,7 @@ acpi_db_convert_to_object(acpi_object_type type,
+ 	default:
+ 
+ 		object->type = ACPI_TYPE_INTEGER;
+-		status = acpi_ut_strtoul64(string,
+-					   (acpi_gbl_integer_byte_width |
+-					    ACPI_STRTOUL_BASE16),
+-					   &object->integer.value);
++		status = acpi_ut_strtoul64(string, &object->integer.value);
+ 		break;
+ 	}
+ 
+diff --git a/drivers/acpi/acpica/dswexec.c b/drivers/acpi/acpica/dswexec.c
+index 20d7744..22f45d0 100644
+--- a/drivers/acpi/acpica/dswexec.c
++++ b/drivers/acpi/acpica/dswexec.c
+@@ -134,7 +134,7 @@ acpi_ds_get_predicate_value(struct acpi_walk_state *walk_state,
+ 	 * object. Implicitly convert the argument if necessary.
+ 	 */
+ 	status = acpi_ex_convert_to_integer(obj_desc, &local_obj_desc,
+-					    ACPI_STRTOUL_BASE16);
++					    ACPI_IMPLICIT_CONVERSION);
+ 	if (ACPI_FAILURE(status)) {
+ 		goto cleanup;
+ 	}
+diff --git a/drivers/acpi/acpica/exconcat.c b/drivers/acpi/acpica/exconcat.c
+index 76bfb7d..59b8de2 100644
+--- a/drivers/acpi/acpica/exconcat.c
++++ b/drivers/acpi/acpica/exconcat.c
+@@ -156,7 +156,7 @@ acpi_ex_do_concatenate(union acpi_operand_object *operand0,
+ 
+ 		status =
+ 		    acpi_ex_convert_to_integer(local_operand1, &temp_operand1,
+-					       ACPI_STRTOUL_BASE16);
++					       ACPI_IMPLICIT_CONVERSION);
+ 		break;
+ 
+ 	case ACPI_TYPE_BUFFER:
+diff --git a/drivers/acpi/acpica/exconvrt.c b/drivers/acpi/acpica/exconvrt.c
+index f71028e..23ebadb 100644
+--- a/drivers/acpi/acpica/exconvrt.c
++++ b/drivers/acpi/acpica/exconvrt.c
+@@ -57,10 +57,10 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 max_length);
+  *
+  * FUNCTION:    acpi_ex_convert_to_integer
+  *
+- * PARAMETERS:  obj_desc        - Object to be converted. Must be an
+- *                                Integer, Buffer, or String
+- *              result_desc     - Where the new Integer object is returned
+- *              flags           - Used for string conversion
++ * PARAMETERS:  obj_desc            - Object to be converted. Must be an
++ *                                    Integer, Buffer, or String
++ *              result_desc         - Where the new Integer object is returned
++ *              implicit_conversion - Used for string conversion
+  *
+  * RETURN:      Status
+  *
+@@ -70,14 +70,14 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 max_length);
+ 
+ acpi_status
+ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
+-			   union acpi_operand_object **result_desc, u32 flags)
++			   union acpi_operand_object **result_desc,
++			   u32 implicit_conversion)
+ {
+ 	union acpi_operand_object *return_desc;
+ 	u8 *pointer;
+ 	u64 result;
+ 	u32 i;
+ 	u32 count;
+-	acpi_status status;
+ 
+ 	ACPI_FUNCTION_TRACE_PTR(ex_convert_to_integer, obj_desc);
+ 
+@@ -123,12 +123,18 @@ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
+ 		 * hexadecimal as per the ACPI specification. The only exception (as
+ 		 * of ACPI 3.0) is that the to_integer() operator allows both decimal
+ 		 * and hexadecimal strings (hex prefixed with "0x").
++		 *
++		 * Explicit conversion is used only by to_integer.
++		 * All other string-to-integer conversions are implicit conversions.
+ 		 */
+-		status = acpi_ut_strtoul64(ACPI_CAST_PTR(char, pointer),
+-					   (acpi_gbl_integer_byte_width |
+-					    flags), &result);
+-		if (ACPI_FAILURE(status)) {
+-			return_ACPI_STATUS(status);
++		if (implicit_conversion) {
++			result =
++			    acpi_ut_implicit_strtoul64(ACPI_CAST_PTR
++						       (char, pointer));
++		} else {
++			result =
++			    acpi_ut_explicit_strtoul64(ACPI_CAST_PTR
++						       (char, pointer));
+ 		}
+ 		break;
+ 
+@@ -631,7 +637,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
+ 			 */
+ 			status =
+ 			    acpi_ex_convert_to_integer(source_desc, result_desc,
+-						       ACPI_STRTOUL_BASE16);
++						       ACPI_IMPLICIT_CONVERSION);
+ 			break;
+ 
+ 		case ACPI_TYPE_STRING:
+diff --git a/drivers/acpi/acpica/exmisc.c b/drivers/acpi/acpica/exmisc.c
+index 1e7649c..dbad3eb 100644
+--- a/drivers/acpi/acpica/exmisc.c
++++ b/drivers/acpi/acpica/exmisc.c
+@@ -330,7 +330,7 @@ acpi_ex_do_logical_op(u16 opcode,
+ 	case ACPI_TYPE_INTEGER:
+ 
+ 		status = acpi_ex_convert_to_integer(operand1, &local_operand1,
+-						    ACPI_STRTOUL_BASE16);
++						    ACPI_IMPLICIT_CONVERSION);
+ 		break;
+ 
+ 	case ACPI_TYPE_STRING:
+diff --git a/drivers/acpi/acpica/exresop.c b/drivers/acpi/acpica/exresop.c
+index c485242..1c7c996 100644
+--- a/drivers/acpi/acpica/exresop.c
++++ b/drivers/acpi/acpica/exresop.c
+@@ -415,7 +415,7 @@ acpi_ex_resolve_operands(u16 opcode,
+ 			 * Known as "Implicit Source Operand Conversion"
+ 			 */
+ 			status = acpi_ex_convert_to_integer(obj_desc, stack_ptr,
+-							    ACPI_STRTOUL_BASE16);
++							    ACPI_IMPLICIT_CONVERSION);
+ 			if (ACPI_FAILURE(status)) {
+ 				if (status == AE_TYPE) {
+ 					ACPI_ERROR((AE_INFO,
+diff --git a/drivers/acpi/acpica/nsconvert.c b/drivers/acpi/acpica/nsconvert.c
+index e4a7da8..539d775 100644
+--- a/drivers/acpi/acpica/nsconvert.c
++++ b/drivers/acpi/acpica/nsconvert.c
+@@ -78,8 +78,8 @@ acpi_ns_convert_to_integer(union acpi_operand_object *original_object,
+ 
+ 		/* String-to-Integer conversion */
+ 
+-		status = acpi_ut_strtoul64(original_object->string.pointer,
+-					   acpi_gbl_integer_byte_width, &value);
++		status =
++		    acpi_ut_strtoul64(original_object->string.pointer, &value);
+ 		if (ACPI_FAILURE(status)) {
+ 			return (status);
+ 		}
+diff --git a/drivers/acpi/acpica/utstrsuppt.c b/drivers/acpi/acpica/utstrsuppt.c
+new file mode 100644
+index 0000000..ca41f03
+--- /dev/null
++++ b/drivers/acpi/acpica/utstrsuppt.c
+@@ -0,0 +1,417 @@
++/*******************************************************************************
++ *
++ * Module Name: utstrsuppt - string-to-integer conversion support functions
++ *
++ ******************************************************************************/
++
++/*
++ * Copyright (C) 2000 - 2017, Intel Corp.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions, and the following disclaimer,
++ *    without modification.
++ * 2. Redistributions in binary form must reproduce at minimum a disclaimer
++ *    substantially similar to the "NO WARRANTY" disclaimer below
++ *    ("Disclaimer") and any redistribution must be conditioned upon
++ *    including a substantially similar Disclaimer requirement for further
++ *    binary redistribution.
++ * 3. Neither the names of the above-listed copyright holders nor the names
++ *    of any contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * Alternatively, this software may be distributed under the terms of the
++ * GNU General Public License ("GPL") version 2 as published by the Free
++ * Software Foundation.
++ *
++ * NO WARRANTY
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
++ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGES.
++ */
++
++#include <acpi/acpi.h>
++#include "accommon.h"
++
++#define _COMPONENT          ACPI_UTILITIES
++ACPI_MODULE_NAME("utstrsuppt")
++
++/* Local prototypes */
++static acpi_status
++acpi_ut_insert_digit(u64 *accumulated_value, u32 base, int ascii_digit);
++
++static acpi_status
++acpi_ut_strtoul_multiply64(u64 multiplicand, u64 multiplier, u64 *out_product);
++
++static acpi_status
++acpi_ut_strtoul_add64(u64 addend1, u64 addend2, u64 *out_sum);
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_convert_octal_string
++ *
++ * PARAMETERS:  string                  - Null terminated input string
++ *              return_value_ptr        - Where the converted value is returned
++ *
++ * RETURN:      Status and 64-bit converted integer
++ *
++ * DESCRIPTION: Performs a base 8 conversion of the input string to an
++ *              integer value, either 32 or 64 bits.
++ *
++ * NOTE:        Maximum 64-bit unsigned octal value is 01777777777777777777777
++ *              Maximum 32-bit unsigned octal value is 037777777777
++ *
++ ******************************************************************************/
++
++acpi_status acpi_ut_convert_octal_string(char *string, u64 *return_value_ptr)
++{
++	u64 accumulated_value = 0;
++	acpi_status status = AE_OK;
++
++	/* Convert each ASCII byte in the input string */
++
++	while (*string) {
++
++		/* Must be ASCII 0-7, otherwise terminate with no error */
++
++		if (!(ACPI_IS_OCTAL_DIGIT(*string))) {
++			break;
++		}
++
++		/* Convert and insert this octal digit into the accumulator */
++
++		status = acpi_ut_insert_digit(&accumulated_value, 8, *string);
++		if (ACPI_FAILURE(status)) {
++			status = AE_OCTAL_OVERFLOW;
++			break;
++		}
++
++		string++;
++	}
++
++	/* Always return the value that has been accumulated */
++
++	*return_value_ptr = accumulated_value;
++	return (status);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_convert_decimal_string
++ *
++ * PARAMETERS:  string                  - Null terminated input string
++ *              return_value_ptr        - Where the converted value is returned
++ *
++ * RETURN:      Status and 64-bit converted integer
++ *
++ * DESCRIPTION: Performs a base 10 conversion of the input string to an
++ *              integer value, either 32 or 64 bits.
++ *
++ * NOTE:        Maximum 64-bit unsigned decimal value is 18446744073709551615
++ *              Maximum 32-bit unsigned decimal value is 4294967295
++ *
++ ******************************************************************************/
++
++acpi_status acpi_ut_convert_decimal_string(char *string, u64 *return_value_ptr)
++{
++	u64 accumulated_value = 0;
++	acpi_status status = AE_OK;
++
++	/* Convert each ASCII byte in the input string */
++
++	while (*string) {
++
++		/* Must be ASCII 0-9, otherwise terminate with no error */
++
++		if (!isdigit(*string)) {
++			break;
++		}
++
++		/* Convert and insert this decimal digit into the accumulator */
++
++		status = acpi_ut_insert_digit(&accumulated_value, 10, *string);
++		if (ACPI_FAILURE(status)) {
++			status = AE_DECIMAL_OVERFLOW;
++			break;
++		}
++
++		string++;
++	}
++
++	/* Always return the value that has been accumulated */
++
++	*return_value_ptr = accumulated_value;
++	return (status);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_convert_hex_string
++ *
++ * PARAMETERS:  string                  - Null terminated input string
++ *              return_value_ptr        - Where the converted value is returned
++ *
++ * RETURN:      Status and 64-bit converted integer
++ *
++ * DESCRIPTION: Performs a base 16 conversion of the input string to an
++ *              integer value, either 32 or 64 bits.
++ *
++ * NOTE:        Maximum 64-bit unsigned hex value is 0xFFFFFFFFFFFFFFFF
++ *              Maximum 32-bit unsigned hex value is 0xFFFFFFFF
++ *
++ ******************************************************************************/
++
++acpi_status acpi_ut_convert_hex_string(char *string, u64 *return_value_ptr)
++{
++	u64 accumulated_value = 0;
++	acpi_status status = AE_OK;
++
++	/* Convert each ASCII byte in the input string */
++
++	while (*string) {
++
++		/* Must be ASCII A-F, a-f, or 0-9, otherwise terminate with no error */
++
++		if (!isxdigit(*string)) {
++			break;
++		}
++
++		/* Convert and insert this hex digit into the accumulator */
++
++		status = acpi_ut_insert_digit(&accumulated_value, 16, *string);
++		if (ACPI_FAILURE(status)) {
++			status = AE_HEX_OVERFLOW;
++			break;
++		}
++
++		string++;
++	}
++
++	/* Always return the value that has been accumulated */
++
++	*return_value_ptr = accumulated_value;
++	return (status);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_remove_leading_zeros
++ *
++ * PARAMETERS:  string                  - Pointer to input ASCII string
++ *
++ * RETURN:      Next character after the leading zeros. This behavior may be
++ *              Used by the caller to detect end-of-string.
++ *
++ * DESCRIPTION: Remove all leading zeros in the input string. Return the
++ *              next character after the final zero to check for the end
++ *              of the string (NULL terminator).
++ *
++ ******************************************************************************/
++
++char acpi_ut_remove_leading_zeros(char **string)
++{
++	/* Skip all leading zeros */
++
++	while (**string == ACPI_ASCII_ZERO) {
++		*string += 1;
++	}
++
++	return (**string);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_detect_hex_prefix
++ *
++ * PARAMETERS:  string                  - Pointer to input ASCII string
++ *
++ * RETURN:      TRUE if a 0x prefix was found
++ *
++ * DESCRIPTION: Detect and remove a hex 0x prefix
++ *
++ ******************************************************************************/
++
++u8 acpi_ut_detect_hex_prefix(char **string)
++{
++
++	if ((**string == ACPI_ASCII_ZERO) &&
++	    (tolower((int)*(*string + 1)) == 'x')) {
++		*string += 2;	/* Go past the leading 0x */
++		return (TRUE);
++	}
++
++	return (FALSE);		/* Not a hex string */
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_detect_octal_prefix
++ *
++ * PARAMETERS:  string                  - Pointer to input ASCII string
++ *
++ * RETURN:      True if an octal 0 prefix was found
++ *
++ * DESCRIPTION: Detect and remove an octal prefix (zero)
++ *
++ ******************************************************************************/
++
++u8 acpi_ut_detect_octal_prefix(char **string)
++{
++
++	if (**string == ACPI_ASCII_ZERO) {
++		*string += 1;	/* Go past the leading 0 */
++		return (TRUE);
++	}
++
++	return (FALSE);		/* Not an octal string */
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_insert_digit
++ *
++ * PARAMETERS:  accumulated_value       - Current value of the integer value
++ *                                        accumulator. The New value is
++ *                                        returned here.
++ *              base                    - Radix, either 8/10/16 supported
++ *              ascii_digit             - ASCII single digit to be inserted
++ *
++ * RETURN:      Status and result of convert/insert operation. The only
++ *              exception is numeric overflow of either the multiply or the
++ *              add operations.
++ *
++ * DESCRIPTION: Generic conversion and insertion function for all bases:
++ *
++ *              1) Multiply the current accumulated converted value by the
++ *              base in order to make room for the new character.
++ *
++ *              2) Add the current accumulated/converted value the new
++ *              character (after the character has been converted to a binary
++ *              value).
++ *
++ *              Note: The only possible exception indicates an integer
++ *              overflow (AE_NUMERIC_OVERFLOW)
++ *
++ ******************************************************************************/
++
++static acpi_status
++acpi_ut_insert_digit(u64 *accumulated_value, u32 base, int ascii_digit)
++{
++	acpi_status status;
++	u64 product;
++
++	/* Make room in the accumulated value for the incoming digit */
++
++	status = acpi_ut_strtoul_multiply64(*accumulated_value, base, &product);
++	if (ACPI_FAILURE(status)) {
++		return (status);
++	}
++
++	/* Add in the new digit, and store to the caller's accumulated value */
++
++	status =
++	    acpi_ut_strtoul_add64(product,
++				  acpi_ut_ascii_char_to_hex(ascii_digit),
++				  accumulated_value);
++	if (ACPI_FAILURE(status)) {
++		return (status);
++	}
++
++	return (AE_OK);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_strtoul_multiply64
++ *
++ * PARAMETERS:  multiplicand            - Current accumulated converted integer
++ *              multiplier              - Base/Radix
++ *              out_product             - Where the product is returned
++ *
++ * RETURN:      Status and 64-bit product
++ *
++ * DESCRIPTION: Multiply two 64-bit values, with checking for 64-bit overflow as
++ *              well as 32-bit overflow if necessary (if the current global
++ *              integer width is 32).
++ *
++ ******************************************************************************/
++
++static acpi_status
++acpi_ut_strtoul_multiply64(u64 multiplicand, u64 multiplier, u64 *out_product)
++{
++	u64 val;
++
++	/* Exit if either operand is zero */
++
++	*out_product = 0;
++	if (!multiplicand || !multiplier) {
++		return (AE_OK);
++	}
++
++	/* Check for 64-bit overflow before the actual multiplication */
++
++	acpi_ut_short_divide(ACPI_UINT64_MAX, (u32)multiplier, &val, NULL);
++	if (multiplicand > val) {
++		return (AE_NUMERIC_OVERFLOW);
++	}
++
++	val = multiplicand * multiplier;
++
++	/* Check for 32-bit overflow if necessary */
++
++	if ((acpi_gbl_integer_bit_width == 32) && (val > ACPI_UINT32_MAX)) {
++		return (AE_NUMERIC_OVERFLOW);
++	}
++
++	*out_product = val;
++	return (AE_OK);
++}
++
++/*******************************************************************************
++ *
++ * FUNCTION:    acpi_ut_strtoul_add64
++ *
++ * PARAMETERS:  addend1                 - Current accumulated converted integer
++ *              addend2                 - New hex value/char
++ *              out_sum                 - Where sum is returned (Accumulator)
++ *
++ * RETURN:      Status and 64-bit sum
++ *
++ * DESCRIPTION: Add two 64-bit values, with checking for 64-bit overflow as
++ *              well as 32-bit overflow if necessary (if the current global
++ *              integer width is 32).
++ *
++ ******************************************************************************/
++
++static acpi_status acpi_ut_strtoul_add64(u64 addend1, u64 addend2, u64 *out_sum)
++{
++	u64 sum;
++
++	/* Check for 64-bit overflow before the actual addition */
++
++	if ((addend1 > 0) && (addend2 > (ACPI_UINT64_MAX - addend1))) {
++		return (AE_NUMERIC_OVERFLOW);
++	}
++
++	sum = addend1 + addend2;
++
++	/* Check for 32-bit overflow if necessary */
++
++	if ((acpi_gbl_integer_bit_width == 32) && (sum > ACPI_UINT32_MAX)) {
++		return (AE_NUMERIC_OVERFLOW);
++	}
++
++	*out_sum = sum;
++	return (AE_OK);
++}
+diff --git a/drivers/acpi/acpica/utstrtoul64.c b/drivers/acpi/acpica/utstrtoul64.c
+index 9633ee1..e5a2df3 100644
+--- a/drivers/acpi/acpica/utstrtoul64.c
++++ b/drivers/acpi/acpica/utstrtoul64.c
+@@ -1,6 +1,7 @@
+ /*******************************************************************************
+  *
+- * Module Name: utstrtoul64 - string to 64-bit integer support
++ * Module Name: utstrtoul64 - string-to-integer support for both 64-bit
++ *                            and 32-bit integers
+  *
+  ******************************************************************************/
+ 
+@@ -44,152 +45,74 @@
+ #include <acpi/acpi.h>
+ #include "accommon.h"
+ 
+-/*******************************************************************************
+- *
+- * The functions in this module satisfy the need for 64-bit string-to-integer
+- * conversions on both 32-bit and 64-bit platforms.
+- *
+- ******************************************************************************/
+-
+ #define _COMPONENT          ACPI_UTILITIES
+ ACPI_MODULE_NAME("utstrtoul64")
+ 
+-/* Local prototypes */
+-static u64 acpi_ut_strtoul_base10(char *string, u32 flags);
+-
+-static u64 acpi_ut_strtoul_base16(char *string, u32 flags);
+-
+ /*******************************************************************************
+  *
+- * String conversion rules as written in the ACPI specification. The error
+- * conditions and behavior are different depending on the type of conversion.
+- *
++ * This module contains the external string to 64/32-bit unsigned integer
++ * conversion functions:
+  *
+- * Implicit data type conversion: string-to-integer
+- * --------------------------------------------------
+- *
+- * Base is always 16. This is the ACPI_STRTOUL_BASE16 case.
+- *
+- * Example:
+- *      Add ("BA98", Arg0, Local0)
+- *
+- * The integer is initialized to the value zero.
+- * The ASCII string is interpreted as a hexadecimal constant.
+- *
+- *  1)  A "0x" prefix is not allowed. However, ACPICA allows this for
+- *      compatibility with previous ACPICA. (NO ERROR)
+- *
+- *  2)  Terminates when the size of an integer is reached (32 or 64 bits).
+- *      (NO ERROR)
++ *  1) Standard strtoul() function with 64-bit support. This is mostly used by
++ *      the iASL compiler.
++ *  2) Runtime "Explicit conversion" as defined in the ACPI specification.
++ *  3) Runtime "Implicit conversion" as defined in the ACPI specification.
+  *
+- *  3)  The first non-hex character terminates the conversion without error.
+- *      (NO ERROR)
++ * Current users of this module:
+  *
+- *  4)  Conversion of a null (zero-length) string to an integer is not
+- *      allowed. However, ACPICA allows this for compatibility with previous
+- *      ACPICA. This conversion returns the value 0. (NO ERROR)
+- *
+- *
+- * Explicit data type conversion:  to_integer() with string operand
+- * ---------------------------------------------------------------
+- *
+- * Base is either 10 (default) or 16 (with 0x prefix)
+- *
+- * Examples:
+- *      to_integer ("1000")
+- *      to_integer ("0xABCD")
+- *
+- *  1)  Can be (must be) either a decimal or hexadecimal numeric string.
+- *      A hex value must be prefixed by "0x" or it is interpreted as a decimal.
++ *  interpreter - Implicit and explicit conversions, GPE method names
++ *  debugger    - Command line input string conversion
++ *  iASL        - Main parser, conversion of constants to integers
++ *  iASL        - Data Table Compiler parser (constant math expressions)
++ *  iASL        - Preprocessor (constant math expressions)
++ *  acpi_dump   - Input table addresses
++ *  acpi_exec   - Testing of the acpi_ut_strtoul64 function
+  *
+- *  2)  The value must not exceed the maximum of an integer value. ACPI spec
+- *      states the behavior is "unpredictable", so ACPICA matches the behavior
+- *      of the implicit conversion case.(NO ERROR)
++ * Notes concerning users of these interfaces:
+  *
+- *  3)  Behavior on the first non-hex character is not specified by the ACPI
+- *      spec, so ACPICA matches the behavior of the implicit conversion case
+- *      and terminates. (NO ERROR)
++ *  acpi_gbl_integer_byte_width is used to set the 32/64 bit limit. This global
++ *  must be set to the proper width. For the core ACPICA code, the width
++ *  depends on the DSDT version. For iASL, the default width is 64 bits for
++ *  all parsers, but error checking is performed later to flag cases where
++ *  a 64-bit constant is wrongly defined in a 32-bit DSDT/SSDT.
+  *
+- *  4)  A null (zero-length) string is illegal.
+- *      However, ACPICA allows this for compatibility with previous ACPICA.
+- *      This conversion returns the value 0. (NO ERROR)
++ *  In ACPI, the only place where octal numbers are supported is within
++ *  the ASL language itself. There is no runtime support for octal.
+  *
+  ******************************************************************************/
+-
+ /*******************************************************************************
+  *
+  * FUNCTION:    acpi_ut_strtoul64
+  *
+- * PARAMETERS:  string                  - Null terminated input string
+- *              flags                   - Conversion info, see below
++ * PARAMETERS:  string                  - Null terminated input string.
++ *                                        Must be a valid pointer
+  *              return_value            - Where the converted integer is
+- *                                        returned
+- *
+- * RETURN:      Status and Converted value
+- *
+- * DESCRIPTION: Convert a string into an unsigned value. Performs either a
+- *              32-bit or 64-bit conversion, depending on the input integer
+- *              size in Flags (often the current mode of the interpreter).
+- *
+- * Values for Flags:
+- *      ACPI_STRTOUL_32BIT      - Max integer value is 32 bits
+- *      ACPI_STRTOUL_64BIT      - Max integer value is 64 bits
+- *      ACPI_STRTOUL_BASE16     - Input string is hexadecimal. Default
+- *                                is 10/16 based on string prefix (0x).
++ *                                        returned. Must be a valid pointer
+  *
+- * NOTES:
+- *   Negative numbers are not supported, as they are not supported by ACPI.
++ * RETURN:      Status and converted integer
++ *              Returns an exception on numeric overflow
+  *
+- *   Supports only base 16 or base 10 strings/values. Does not
+- *   support Octal strings, as these are not supported by ACPI.
++ * DESCRIPTION: Convert a string into an unsigned integer. Performs either a
++ *              32-bit or 64-bit conversion, depending on the current global
++ *              integer width. Supports Decimal, Hex, and Octal strings.
+  *
+- * Current users of this support:
++ * Current users of this function:
+  *
+- *  interpreter - Implicit and explicit conversions, GPE method names
+- *  debugger    - Command line input string conversion
+- *  iASL        - Main parser, conversion of constants to integers
+- *  iASL        - Data Table Compiler parser (constant math expressions)
+  *  iASL        - Preprocessor (constant math expressions)
+- *  acpi_dump   - Input table addresses
+- *  acpi_exec   - Testing of the acpi_ut_strtoul64 function
+- *
+- * Note concerning callers:
+- *   acpi_gbl_integer_byte_width can be used to set the 32/64 limit. If used,
+- *   this global should be set to the proper width. For the core ACPICA code,
+- *   this width depends on the DSDT version. For iASL, the default byte
+- *   width is always 8 for the parser, but error checking is performed later
+- *   to flag cases where a 64-bit constant is defined in a 32-bit DSDT/SSDT.
++ *  iASL        - Main parser, conversion of ASL constants to integers
++ *  iASL        - Data Table Compiler parser (constant math expressions)
+  *
+  ******************************************************************************/
+-
+-acpi_status acpi_ut_strtoul64(char *string, u32 flags, u64 *return_value)
++acpi_status acpi_ut_strtoul64(char *string, u64 *return_value)
+ {
+ 	acpi_status status = AE_OK;
+-	u32 base;
++	u32 base = 10;		/* Default is decimal */
+ 
+ 	ACPI_FUNCTION_TRACE_STR(ut_strtoul64, string);
+ 
+-	/* Parameter validation */
+-
+-	if (!string || !return_value) {
+-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+-	}
+-
+ 	*return_value = 0;
+ 
+-	/* Check for zero-length string, returns 0 */
+-
+-	if (*string == 0) {
+-		return_ACPI_STATUS(AE_OK);
+-	}
+-
+-	/* Skip over any white space at start of string */
+-
+-	while (isspace((int)*string)) {
+-		string++;
+-	}
+-
+-	/* End of string? return 0 */
++	/* Null return string returns a value of zero */
+ 
+ 	if (*string == 0) {
+ 		return_ACPI_STATUS(AE_OK);
+@@ -198,45 +121,45 @@ acpi_status acpi_ut_strtoul64(char *string, u32 flags, u64 *return_value)
+ 	/*
+ 	 * 1) The "0x" prefix indicates base 16. Per the ACPI specification,
+ 	 * the "0x" prefix is only allowed for implicit (non-strict) conversions.
+-	 * However, we always allow it for compatibility with older ACPICA.
++	 * However, we always allow it for compatibility with older ACPICA and
++	 * just plain on principle.
+ 	 */
+-	if ((*string == ACPI_ASCII_ZERO) &&
+-	    (tolower((int)*(string + 1)) == 'x')) {
+-		string += 2;	/* Go past the 0x */
+-		if (*string == 0) {
+-			return_ACPI_STATUS(AE_OK);	/* Return value 0 */
+-		}
+-
+-		base = 16;
+-	}
+-
+-	/* 2) Force to base 16 (implicit conversion case) */
+-
+-	else if (flags & ACPI_STRTOUL_BASE16) {
++	if (acpi_ut_detect_hex_prefix(&string)) {
+ 		base = 16;
+ 	}
+ 
+-	/* 3) Default fallback is to Base 10 */
+-
+-	else {
+-		base = 10;
++	/*
++	 * 2) Check for an octal constant, defined to be a leading zero
++	 * followed by an valid octal digit (0-7)
++	 */
++	else if (acpi_ut_detect_octal_prefix(&string)) {
++		base = 8;
+ 	}
+ 
+-	/* Skip all leading zeros */
+-
+-	while (*string == ACPI_ASCII_ZERO) {
+-		string++;
+-		if (*string == 0) {
+-			return_ACPI_STATUS(AE_OK);	/* Return value 0 */
+-		}
++	if (!acpi_ut_remove_leading_zeros(&string)) {
++		return_ACPI_STATUS(AE_OK);	/* Return value 0 */
+ 	}
+ 
+-	/* Perform the base 16 or 10 conversion */
+-
+-	if (base == 16) {
+-		*return_value = acpi_ut_strtoul_base16(string, flags);
+-	} else {
+-		*return_value = acpi_ut_strtoul_base10(string, flags);
++	/*
++	 * Perform the base 8, 10, or 16 conversion. A numeric overflow will
++	 * return an exception.
++	 */
++	switch (base) {
++	case 8:
++		status = acpi_ut_convert_octal_string(string, return_value);
++		break;
++
++	case 10:
++		status = acpi_ut_convert_decimal_string(string, return_value);
++		break;
++
++	case 16:
++		status = acpi_ut_convert_hex_string(string, return_value);
++		break;
++
++	default:
++		status = AE_AML_INTERNAL;	/* Should never happen */
++		break;
+ 	}
+ 
+ 	return_ACPI_STATUS(status);
+@@ -244,104 +167,167 @@ acpi_status acpi_ut_strtoul64(char *string, u32 flags, u64 *return_value)
+ 
+ /*******************************************************************************
+  *
+- * FUNCTION:    acpi_ut_strtoul_base10
++ * FUNCTION:    acpi_ut_implicit_strtoul64
++ *
++ * PARAMETERS:  string                  - Null terminated input string.
++ *                                        Must be a valid pointer
+  *
+- * PARAMETERS:  string                  - Null terminated input string
+- *              flags                   - Conversion info
++ * RETURN:      Converted integer
+  *
+- * RETURN:      64-bit converted integer
++ * DESCRIPTION: Perform a 64-bit conversion with restrictions placed upon
++ *              an "implicit conversion" by the ACPI specification. Used by
++ *              many ASL operators that require an integer operand, and support
++ *              an automatic (implicit) conversion from a string operand
++ *              to the final integer operand. The restriction is that only
++ *              hex strings are supported.
+  *
+- * DESCRIPTION: Performs a base 10 conversion of the input string to an
+- *              integer value, either 32 or 64 bits.
+- *              Note: String must be valid and non-null.
++ * -----------------------------------------------------------------------------
++ *
++ * Base is always 16, either with or without the 0x prefix.
++ *
++ * Examples (both are hex values):
++ *      Add ("BA98", Arg0, Local0)
++ *      Subtract ("0x12345678", Arg1, Local1)
++ *
++ * Rules extracted from the ACPI specification:
++ *
++ *  The converted integer is initialized to the value zero.
++ *  The ASCII string is interpreted as a hexadecimal constant.
++ *
++ *  1)  A "0x" prefix is not allowed. However, ACPICA allows this as an
++ *      ACPI extension on general principle. (NO ERROR)
++ *
++ *  2)  Terminates when the size of an integer is reached (32 or 64 bits).
++ *      There are no numeric overflow conditions. (NO ERROR)
++ *
++ *  3)  The first non-hex character terminates the conversion and returns
++ *      the current accumulated value of the converted integer (NO ERROR).
++ *
++ *  4)  Conversion of a null (zero-length) string to an integer is
++ *      technically allowed. However, ACPICA allows as an ACPI extension.
++ *      The conversion returns the value 0. (NO ERROR)
++ *
++ * Note: there are no error conditions returned by this function. At
++ * the minimum, a value of zero is returned.
++ *
++ * Current users of this function:
++ *
++ *  interpreter - All runtime implicit conversions, as per ACPI specification
++ *  iASL        - Data Table Compiler parser (constant math expressions)
+  *
+  ******************************************************************************/
+ 
+-static u64 acpi_ut_strtoul_base10(char *string, u32 flags)
++u64 acpi_ut_implicit_strtoul64(char *string)
+ {
+-	int ascii_digit;
+-	u64 next_value;
+-	u64 return_value = 0;
++	u64 converted_integer = 0;
+ 
+-	/* Main loop: convert each ASCII byte in the input string */
++	ACPI_FUNCTION_TRACE_STR(ut_implicit_strtoul64, string);
+ 
+-	while (*string) {
+-		ascii_digit = *string;
+-		if (!isdigit(ascii_digit)) {
+-
+-			/* Not ASCII 0-9, terminate */
+-
+-			goto exit;
+-		}
+-
+-		/* Convert and insert (add) the decimal digit */
+-
+-		acpi_ut_short_multiply(return_value, 10, &next_value);
+-		next_value += (ascii_digit - ACPI_ASCII_ZERO);
+-
+-		/* Check for overflow (32 or 64 bit) - return current converted value */
+-
+-		if (((flags & ACPI_STRTOUL_32BIT) && (next_value > ACPI_UINT32_MAX)) || (next_value < return_value)) {	/* 64-bit overflow case */
+-			goto exit;
+-		}
++	/*
++	 * Per the ACPI specification, only hexadecimal is supported for
++	 * implicit conversions, and the "0x" prefix is "not allowed".
++	 * However, allow a "0x" prefix as an ACPI extension.
++	 */
++	acpi_ut_detect_hex_prefix(&string);
+ 
+-		return_value = next_value;
+-		string++;
++	if (!acpi_ut_remove_leading_zeros(&string)) {
++		return_VALUE(0);
+ 	}
+ 
+-exit:
+-	return (return_value);
++	/*
++	 * Ignore overflow as per the ACPI specification. This is implemented by
++	 * ignoring the return status below. On overflow, the input string is
++	 * simply truncated.
++	 */
++	acpi_ut_convert_hex_string(string, &converted_integer);
++	return_VALUE(converted_integer);
+ }
+ 
+ /*******************************************************************************
+  *
+- * FUNCTION:    acpi_ut_strtoul_base16
++ * FUNCTION:    acpi_ut_explicit_strtoul64
++ *
++ * PARAMETERS:  string                  - Null terminated input string.
++ *                                        Must be a valid pointer
++ *
++ * RETURN:      Converted integer
++ *
++ * DESCRIPTION: Perform a 64-bit conversion with the restrictions placed upon
++ *              an "explicit conversion" by the ACPI specification. The
++ *              main restriction is that only hex and decimal are supported.
++ *
++ * -----------------------------------------------------------------------------
++ *
++ * Base is either 10 (default) or 16 (with 0x prefix). There is no octal
++ * (base 8), as per the ACPI specification.
++ *
++ * Examples:
++ *      to_integer ("1000")     Decimal
++ *      to_integer ("0xABCD")   Hex
++ *
++ * Rules extracted from the ACPI specification:
++ *
++ *  1)  Thi input string is either a decimal or hexadecimal numeric string.
++ *      A hex value must be prefixed by "0x" or it is interpreted as decimal.
++ *
++ *  2)  The value must not exceed the maximum of an integer value
++ *      (32 or 64 bits). The ACPI specification states the behavior is
++ *      "unpredictable", so ACPICA matches the behavior of the implicit
++ *      conversion case. There are no numeric overflow conditions. (NO ERROR)
++ *
++ *  3)  Behavior on the first non-hex character is not specified by the ACPI
++ *      specification (for the to_integer operator), so ACPICA matches the
++ *      behavior of the implicit conversion case. It terminates the
++ *      conversion and returns the current accumulated value of the converted
++ *      integer. (NO ERROR)
+  *
+- * PARAMETERS:  string                  - Null terminated input string
+- *              flags                   - conversion info
++ *  4)  Conversion of a null (zero-length) string to an integer is
++ *      technically allowed. However, ACPICA allows as an ACPI extension.
++ *      The conversion returns the value 0. (NO ERROR)
+  *
+- * RETURN:      64-bit converted integer
++ * Note: there are no error conditions returned by this function. At
++ * the minimum, a value of zero is returned.
+  *
+- * DESCRIPTION: Performs a base 16 conversion of the input string to an
+- *              integer value, either 32 or 64 bits.
+- *              Note: String must be valid and non-null.
++ * Current users of this function:
++ *
++ *  interpreter - Runtime ASL to_integer operator, as per the ACPI specification
+  *
+  ******************************************************************************/
+ 
+-static u64 acpi_ut_strtoul_base16(char *string, u32 flags)
++u64 acpi_ut_explicit_strtoul64(char *string)
+ {
+-	int ascii_digit;
+-	u32 valid_digits = 1;
+-	u64 return_value = 0;
+-
+-	/* Main loop: convert each ASCII byte in the input string */
+-
+-	while (*string) {
+-
+-		/* Check for overflow (32 or 64 bit) - return current converted value */
+-
+-		if ((valid_digits > 16) ||
+-		    ((valid_digits > 8) && (flags & ACPI_STRTOUL_32BIT))) {
+-			goto exit;
+-		}
+-
+-		ascii_digit = *string;
+-		if (!isxdigit(ascii_digit)) {
+-
+-			/* Not Hex ASCII A-F, a-f, or 0-9, terminate */
++	u64 converted_integer = 0;
++	u32 base = 10;		/* Default is decimal */
+ 
+-			goto exit;
+-		}
++	ACPI_FUNCTION_TRACE_STR(ut_explicit_strtoul64, string);
+ 
+-		/* Convert and insert the hex digit */
++	/*
++	 * Only Hex and Decimal are supported, as per the ACPI specification.
++	 * 0x prefix means hex; otherwise decimal is assumed.
++	 */
++	if (acpi_ut_detect_hex_prefix(&string)) {
++		base = 16;
++	}
+ 
+-		acpi_ut_short_shift_left(return_value, 4, &return_value);
+-		return_value |= acpi_ut_ascii_char_to_hex(ascii_digit);
++	if (!acpi_ut_remove_leading_zeros(&string)) {
++		return_VALUE(0);
++	}
+ 
+-		string++;
+-		valid_digits++;
++	/*
++	 * Ignore overflow as per the ACPI specification. This is implemented by
++	 * ignoring the return status below. On overflow, the input string is
++	 * simply truncated.
++	 */
++	switch (base) {
++	case 10:
++	default:
++		acpi_ut_convert_decimal_string(string, &converted_integer);
++		break;
++
++	case 16:
++		acpi_ut_convert_hex_string(string, &converted_integer);
++		break;
+ 	}
+ 
+-exit:
+-	return (return_value);
++	return_VALUE(converted_integer);
+ }
+diff --git a/include/acpi/acexcep.h b/include/acpi/acexcep.h
+index ad54610..17d61b1 100644
+--- a/include/acpi/acexcep.h
++++ b/include/acpi/acexcep.h
+@@ -126,8 +126,12 @@ struct acpi_exception_info {
+ #define AE_NOT_CONFIGURED               EXCEP_ENV (0x001C)
+ #define AE_ACCESS                       EXCEP_ENV (0x001D)
+ #define AE_IO_ERROR                     EXCEP_ENV (0x001E)
++#define AE_NUMERIC_OVERFLOW             EXCEP_ENV (0x001F)
++#define AE_HEX_OVERFLOW                 EXCEP_ENV (0x0020)
++#define AE_DECIMAL_OVERFLOW             EXCEP_ENV (0x0021)
++#define AE_OCTAL_OVERFLOW               EXCEP_ENV (0x0022)
+ 
+-#define AE_CODE_ENV_MAX                 0x001E
++#define AE_CODE_ENV_MAX                 0x0022
+ 
+ /*
+  * Programmer exceptions
+@@ -263,7 +267,15 @@ static const struct acpi_exception_info acpi_gbl_exception_names_env[] = {
+ 	EXCEP_TXT("AE_NOT_CONFIGURED",
+ 		  "The interface is not part of the current subsystem configuration"),
+ 	EXCEP_TXT("AE_ACCESS", "Permission denied for the requested operation"),
+-	EXCEP_TXT("AE_IO_ERROR", "An I/O error occurred")
++	EXCEP_TXT("AE_IO_ERROR", "An I/O error occurred"),
++	EXCEP_TXT("AE_NUMERIC_OVERFLOW",
++		  "Overflow during string-to-integer conversion"),
++	EXCEP_TXT("AE_HEX_OVERFLOW",
++		  "Overflow during ASCII hex-to-binary conversion"),
++	EXCEP_TXT("AE_DECIMAL_OVERFLOW",
++		  "Overflow during ASCII decimal-to-binary conversion"),
++	EXCEP_TXT("AE_OCTAL_OVERFLOW",
++		  "Overflow during ASCII octal-to-binary conversion")
+ };
+ 
+ static const struct acpi_exception_info acpi_gbl_exception_names_pgm[] = {
+diff --git a/tools/power/acpi/tools/acpidump/Makefile b/tools/power/acpi/tools/acpidump/Makefile
+index f7c7af1..b436f86 100644
+--- a/tools/power/acpi/tools/acpidump/Makefile
++++ b/tools/power/acpi/tools/acpidump/Makefile
+@@ -39,6 +39,7 @@ TOOL_OBJS = \
+ 	utnonansi.o\
+ 	utprint.o\
+ 	utstring.o\
++	utstrsuppt.o\
+ 	utstrtoul64.o\
+ 	utxferror.o\
+ 	oslinuxtbl.o\
+diff --git a/tools/power/acpi/tools/acpidump/apdump.c b/tools/power/acpi/tools/acpidump/apdump.c
+index 60df1fb..0634449 100644
+--- a/tools/power/acpi/tools/acpidump/apdump.c
++++ b/tools/power/acpi/tools/acpidump/apdump.c
+@@ -287,8 +287,7 @@ int ap_dump_table_by_address(char *ascii_address)
+ 
+ 	/* Convert argument to an integer physical address */
+ 
+-	status = acpi_ut_strtoul64(ascii_address, ACPI_STRTOUL_64BIT,
+-				   &long_address);
++	status = acpi_ut_strtoul64(ascii_address, &long_address);
+ 	if (ACPI_FAILURE(status)) {
+ 		fprintf(stderr, "%s: Could not convert to a physical address\n",
+ 			ascii_address);
+diff --git a/tools/power/acpi/tools/acpidump/apmain.c b/tools/power/acpi/tools/acpidump/apmain.c
+index 943b6b6..22c3b4e 100644
+--- a/tools/power/acpi/tools/acpidump/apmain.c
++++ b/tools/power/acpi/tools/acpidump/apmain.c
+@@ -208,9 +208,7 @@ static int ap_do_options(int argc, char **argv)
+ 		case 'r':	/* Dump tables from specified RSDP */
+ 
+ 			status =
+-			    acpi_ut_strtoul64(acpi_gbl_optarg,
+-					      ACPI_STRTOUL_64BIT,
+-					      &gbl_rsdp_base);
++			    acpi_ut_strtoul64(acpi_gbl_optarg, &gbl_rsdp_base);
+ 			if (ACPI_FAILURE(status)) {
+ 				fprintf(stderr,
+ 					"%s: Could not convert to a physical address\n",
+-- 
+2.7.4
+

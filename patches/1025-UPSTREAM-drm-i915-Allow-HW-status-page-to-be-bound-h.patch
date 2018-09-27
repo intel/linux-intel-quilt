@@ -1,0 +1,175 @@
+From fa1f145830e661827d3dbab109d420169ec40312 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 13 Sep 2017 09:56:03 +0100
+Subject: [PATCH 1025/2104] UPSTREAM: drm/i915: Allow HW status page to be
+ bound high
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+At the time of commit 1f767e02d69f ("drm/i915: HWS must be in the
+mappable region for g33"), drm_mm insertion would often default to
+placing a new object high in the zone forcing us to specify that certain
+HWSP must be bound within the low mappable region. Since then, drm_mm
+has gained more finesse over its placement and exposes that to the
+caller, commit 4e64e5539d15 ("drm: Improve drm_mm search (and fix
+topdown allocation) with rbtrees"). As such where possible we want the
+HWSP to be outside of the mappable aperture and so need to specify that
+can be pinned high.
+
+Rebase fix-ups. (Jim)
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Cc: Michel Thierry <michel.thierry@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170913085605.18299-4-chris@chris-wilson.co.uk
+(cherry picked from commit bfb1bc0ecace0e7b87d93244fa95270469e64e90)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+Signed-off-by: Jim Bride <jim.bride@intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c     |  7 +++++--
+ drivers/gpu/drm/i915/intel_engine_cs.c  |  2 ++
+ drivers/gpu/drm/i915/intel_lrc.c        | 34 ++++++++++++++++++++++++++++-----
+ drivers/gpu/drm/i915/intel_ringbuffer.h |  3 +++
+ 4 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index c30650c..e7c653d 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -3372,6 +3372,7 @@ static int i915_engine_info(struct seq_file *m, void *unused)
+ 			   upper_32_bits(addr), lower_32_bits(addr));
+ 
+ 		if (i915.enable_execlists) {
++			const u32 *hws = &engine->status_page.page_addr[I915_HWS_CSB_BUF0_INDEX];
+ 			u32 ptr, read, write;
+ 			unsigned int idx;
+ 
+@@ -3394,10 +3395,12 @@ static int i915_engine_info(struct seq_file *m, void *unused)
+ 				write += GEN8_CSB_ENTRIES;
+ 			while (read < write) {
+ 				idx = ++read % GEN8_CSB_ENTRIES;
+-				seq_printf(m, "\tExeclist CSB[%d]: 0x%08x, context: %d\n",
++				seq_printf(m, "\tExeclist CSB[%d]: 0x%08x [0x%08x in hwsp], context: %d [%d in hwsp]\n",
+ 					   idx,
+ 					   I915_READ(RING_CONTEXT_STATUS_BUF_LO(engine, idx)),
+-					   I915_READ(RING_CONTEXT_STATUS_BUF_HI(engine, idx)));
++					   hws[idx * 2],
++					   I915_READ(RING_CONTEXT_STATUS_BUF_HI(engine, idx)),
++					   hws[idx * 2 + 1]);
+ 			}
+ 
+ 			rcu_read_lock();
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index eaefe09..0023860 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -508,6 +508,8 @@ static int init_status_page(struct intel_engine_cs *engine)
+ 		 * actually map it).
+ 		 */
+ 		flags |= PIN_MAPPABLE;
++	else
++		flags |= PIN_HIGH;
+ 	ret = i915_vma_pin(vma, 0, 4096, flags);
+ 	if (ret)
+ 		goto err;
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index cd35212..408b8ee 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -559,10 +559,17 @@ static void intel_lrc_irq_handler(unsigned long data)
+ 	while (test_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted)) {
+ 		u32 __iomem *csb_mmio =
+ 			dev_priv->regs + i915_mmio_reg_offset(RING_CONTEXT_STATUS_PTR(engine));
+-		u32 __iomem *buf =
+-			dev_priv->regs + i915_mmio_reg_offset(RING_CONTEXT_STATUS_BUF_LO(engine, 0));
++		/* The HWSP contains a (cacheable) mirror of the CSB */
++		const u32 *buf =
++			&engine->status_page.page_addr[I915_HWS_CSB_BUF0_INDEX];
+ 		unsigned int head, tail;
+ 
++		/* However GVT emulation depends upon intercepting CSB mmio */
++		if (unlikely(engine->csb_use_mmio)) {
++			buf = (u32 * __force)
++				(dev_priv->regs + i915_mmio_reg_offset(RING_CONTEXT_STATUS_BUF_LO(engine, 0)));
++		}
++
+ 		/* The write will be ordered by the uncached read (itself
+ 		 * a memory barrier), so we do not need another in the form
+ 		 * of a locked instruction. The race between the interrupt
+@@ -602,13 +609,12 @@ static void intel_lrc_irq_handler(unsigned long data)
+ 			 * status notifier.
+ 			 */
+ 
+-			status = readl(buf + 2 * head);
++			status = READ_ONCE(buf[2 * head]); /* maybe mmio! */
+ 			if (!(status & GEN8_CTX_STATUS_COMPLETED_MASK))
+ 				continue;
+ 
+ 			/* Check the context/desc id for this event matches */
+-			GEM_DEBUG_BUG_ON(readl(buf + 2 * head + 1) !=
+-					 port->context_id);
++			GEM_DEBUG_BUG_ON(buf[2 * head + 1] != port->context_id);
+ 
+ 			rq = port_unpack(port, &count);
+ 			GEM_BUG_ON(count == 0);
+@@ -1748,6 +1754,22 @@ logical_ring_default_irqs(struct intel_engine_cs *engine)
+ 	engine->irq_keep_mask = GT_CONTEXT_SWITCH_INTERRUPT << shift;
+ }
+ 
++static bool
++irq_handler_force_mmio(struct drm_i915_private *i915)
++{
++	/* GVT emulation depends upon intercepting CSB mmio */
++	if (intel_vgpu_active(i915))
++		return true;
++	/*
++	 * IOMMU adds unpredictable latency causing the CSB write (from the
++	 * GPU into the HWSP) to only be visible some time after the interrupt
++	 * (missed breadcrumb syndrome).
++	 */
++	if (intel_vtd_active())
++		return true;
++	return false;
++}
++
+ static void i915_error_reset(struct work_struct *work) {
+ 	struct intel_engine_cs *engine =
+ 		container_of(work, struct intel_engine_cs,
+@@ -1768,6 +1790,8 @@ logical_ring_setup(struct intel_engine_cs *engine)
+ 	/* Intentionally left blank. */
+ 	engine->buffer = NULL;
+ 
++	engine->csb_use_mmio = irq_handler_force_mmio(dev_priv);
++
+ 	fw_domains = intel_uncore_forcewake_for_reg(dev_priv,
+ 						    RING_ELSP(engine),
+ 						    FW_REG_WRITE);
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 6119b5b..7a74624 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -393,6 +393,7 @@ struct intel_engine_cs {
+ 	struct rb_node *execlist_first;
+ 	unsigned int fw_domains;
+ 	struct work_struct reset_work;
++	bool csb_use_mmio;
+ 
+ 	/* Contexts are pinned whilst they are active on the GPU. The last
+ 	 * context executed remains active whilst the GPU is idle - the
+@@ -502,6 +503,8 @@ intel_write_status_page(struct intel_engine_cs *engine, int reg, u32 value)
+ #define I915_GEM_HWS_SCRATCH_INDEX     0x50
+ #define I915_GEM_HWS_SCRATCH_ADDR (I915_GEM_HWS_SCRATCH_INDEX << MI_STORE_DWORD_INDEX_SHIFT)
+ 
++#define I915_HWS_CSB_BUF0_INDEX		0x10
++
+ struct intel_ring *
+ intel_engine_create_ring(struct intel_engine_cs *engine, int size);
+ int intel_ring_pin(struct intel_ring *ring,
+-- 
+2.7.4
+
