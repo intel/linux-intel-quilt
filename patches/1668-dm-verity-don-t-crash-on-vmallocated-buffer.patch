@@ -1,0 +1,67 @@
+From 5e08aeabfb8a813073b557a9dfb4f9c3d848ccb3 Mon Sep 17 00:00:00 2001
+From: Kris Pan <kris.pan@intel.com>
+Date: Wed, 19 Sep 2018 16:03:27 +0800
+Subject: [PATCH 1668/1669] dm verity: don't crash on vmallocated buffer
+
+Since the commit d1ac3ff008fb ("dm verity: switch to using asynchronous"+
+hash crypto API"), dm-verity uses asynchronous crypto calls for
+verification, so that it can use hardware with asynchronous processing of
+crypto operations.
+
+These asynchronous calls don't support vmalloc memory, but the buffer data
+can be vmallocated if dm-bufio is short of memory and uses a reserved
+buffer that was preallocated in dm_bufio_client_create.
+
+This patch fixes verity_hash_update, so that it deals with vmallocated
+memory correctly.
+
+Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+Reported-by: "Xiao, Jin" <jin.xiao@intel.com>
+Fixes: d1ac3ff008fb ("dm verity: switch to using asynchronous hash crypto API")
+Cc: stable@vger.kernel.org	# 4.11+
+
+Change-Id: Ia2aea80471625becd6a484324372e103fa2361c6
+Signed-off-by: Kris Pan <kris.pan@intel.com>
+Signed-off-by: Lili Li <lili.li@intel.com>
+---
+ drivers/md/dm-verity-target.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/md/dm-verity-target.c b/drivers/md/dm-verity-target.c
+index bda3cac..bc1370a 100644
+--- a/drivers/md/dm-verity-target.c
++++ b/drivers/md/dm-verity-target.c
+@@ -139,10 +139,26 @@ static int verity_hash_update(struct dm_verity *v, struct ahash_request *req,
+ {
+ 	struct scatterlist sg;
+ 
+-	sg_init_one(&sg, data, len);
+-	ahash_request_set_crypt(req, &sg, NULL, len);
+-
+-	return verity_complete_op(res, crypto_ahash_update(req));
++	if (likely(!is_vmalloc_addr(data))) {
++		sg_init_one(&sg, data, len);
++		ahash_request_set_crypt(req, &sg, NULL, len);
++		return verity_complete_op(res, crypto_ahash_update(req));
++	} else {
++		do {
++			int r;
++			size_t this_step = min(len, PAGE_SIZE - offset_in_page(data));
++			flush_kernel_vmap_range((void *)data, this_step);
++			sg_init_table(&sg, 1);
++			sg_set_page(&sg, vmalloc_to_page(data), this_step, offset_in_page(data));
++			ahash_request_set_crypt(req, &sg, NULL, this_step);
++			r = verity_complete_op(res, crypto_ahash_update(req));
++			if (unlikely(r))
++				return r;
++			data += this_step;
++			len -= this_step;
++		} while (len);
++		return 0;
++	}
+ }
+ 
+ /*
+-- 
+2.7.4
+
