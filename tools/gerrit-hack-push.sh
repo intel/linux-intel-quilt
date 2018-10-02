@@ -7,16 +7,17 @@
 # need to had "git --ammend" to  fix it based on the error reported back from
 # gerrit if it fails....
 
+# use this to set up the inital baseline to gerrit
+
 rc=$1
 manifest=$2
 
-git push -f codereview $rc:master
+git push -f gerrit $rc:master
 
 for b in `cat $manifest`; do 
-	rm -rf patches .pc
 	echo $b
-	git push -f codereview $rc:dev/4.19/$b
-	git push codereview $b-gerrit:refs/for/4.19/$b 2>$b.gerrit
+	git push -f gerrit $rc:4.19/$b
+	git push gerrit $gerrit-$b:refs/for/4.19/$b 2>$b.gerrit
 done
 
 

@@ -10,23 +10,10 @@
 rc=$1
 manifest=$2
 
-git push codereview $rc:master
+git push gerrit $rc:master
 
 for b in `cat $manifest`; do 
-	rm -rf patches .pc
-	git reset --hard
-	git checkout $rc
-	git push codereview $rc:refs/for/4.19/$b 2>$b.gerrit
-	git branch -D $b-gerrit
-	git checkout -b $b-gerrit
-	echo $b
-	mkdir patches
-	mv *.$b patches
-	cd patches
-	ls *.$b > series
-	cd ..
-	git quiltimport
-	git push codereview $b-gerrit:refs/for/4.19/$b 2>$b.gerrit
+	git push gerrit gerrit-$b:refs/for/4.19/$b 2>$b.gerrit
 done
 
 

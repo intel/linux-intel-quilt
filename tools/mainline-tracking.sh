@@ -11,8 +11,8 @@ rc=$1
 manifest=$2
 
 git checkout $rc
-git branch -D dev-bkc-android-$rc 
-git checkout -b dev-bkc-android-$rc $rc
+git branch -D mainline-tracking-android-$rc 
+git checkout -b mainline-tracking-android-$rc $rc
 
 for b in `cat $manifest`; do 
 	git merge --no-ff $b
