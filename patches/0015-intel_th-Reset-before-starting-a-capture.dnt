@@ -1,0 +1,645 @@
+From 0d153712e9176d876d3b4745a5d9fac25255884f Mon Sep 17 00:00:00 2001
+From: Laurent FERT <laurent.fert@intel.com>
+Date: Thu, 13 Aug 2015 19:31:41 +0200
+Subject: [PATCH 15/63] intel_th: Reset before starting a capture
+
+Intel Trace Hub may be configured by firmwares or by a debugger before
+the driver is used. It is therefore difficult to start a capture from
+the OS with a well known state.
+
+Trigger a reset and re-apply all the configuration before starting a
+capture.
+
+Signed-off-by: Laurent FERT <laurent.fert@intel.com>
+Signed-off-by: Tian, Baofeng <baofeng.tian@intel.com>
+---
+ drivers/hwtracing/intel_th/core.c     |  93 ++++++++++----------
+ drivers/hwtracing/intel_th/gth.c      | 120 ++++++++++++++------------
+ drivers/hwtracing/intel_th/intel_th.h |  22 +++--
+ drivers/hwtracing/intel_th/msu.c      |  21 ++---
+ drivers/hwtracing/intel_th/pci.c      |  31 ++++++-
+ drivers/hwtracing/intel_th/pti.c      |   2 -
+ 6 files changed, 165 insertions(+), 124 deletions(-)
+
+diff --git a/drivers/hwtracing/intel_th/core.c b/drivers/hwtracing/intel_th/core.c
+index fb7c9a5144e4..db28872bba34 100644
+--- a/drivers/hwtracing/intel_th/core.c
++++ b/drivers/hwtracing/intel_th/core.c
+@@ -215,48 +215,46 @@ static ssize_t port_show(struct device *dev, struct device_attribute *attr,
+ 
+ static DEVICE_ATTR_RO(port);
+ 
+-static int intel_th_output_activate(struct intel_th_device *thdev)
++/**
++ * intel_th_output_activate() - call output initialization procedure
++ * @output:	output to activate
++ */
++int intel_th_output_activate(struct intel_th_output *output)
+ {
+-	struct intel_th_driver *thdrv =
+-		to_intel_th_driver_or_null(thdev->dev.driver);
+-	struct intel_th *th = to_intel_th(thdev);
+-	int ret = 0;
+-
+-	if (!thdrv)
+-		return -ENODEV;
+-
+-	if (!try_module_get(thdrv->driver.owner))
+-		return -ENODEV;
++	struct intel_th_device *outdev =
++		container_of(output, struct intel_th_device, output);
++	struct intel_th_driver *outdrv =
++		to_intel_th_driver(outdev->dev.driver);
+ 
+-	pm_runtime_get_sync(&thdev->dev);
+-
+-	if (th->activate)
+-		ret = th->activate(th);
+-	if (ret)
+-		goto fail_put;
+-
+-	if (thdrv->activate)
+-		ret = thdrv->activate(thdev);
+-	else
+-		intel_th_trace_enable(thdev);
++	if (WARN_ON_ONCE(outdev->type != INTEL_TH_OUTPUT))
++		return -EINVAL;
+ 
+-	if (ret)
+-		goto fail_deactivate;
++	if (outdrv->activate)
++		return outdrv->activate(outdev);
+ 
+ 	return 0;
++}
++EXPORT_SYMBOL_GPL(intel_th_output_activate);
+ 
+-fail_deactivate:
+-	if (th->deactivate)
+-		th->deactivate(th);
++ * @thdev:	output device that requests tracing
++ */
++static int intel_th_start_trace(struct intel_th_device *thdev)
++{
++	struct intel_th_device *hub = to_intel_th_device(thdev->dev.parent);
++	struct intel_th_driver *hubdrv = to_intel_th_driver(hub->dev.driver);
+ 
+-fail_put:
+-	pm_runtime_put(&thdev->dev);
+-	module_put(thdrv->driver.owner);
++	if (WARN_ON_ONCE(hub->type != INTEL_TH_SWITCH))
++		return -EINVAL;
+ 
+-	return ret;
++	if (WARN_ON_ONCE(thdev->type != INTEL_TH_OUTPUT))
++		return -EINVAL;
++
++	/* The hub has control over Intel Trace Hub.
++	 * Let the hub start a trace if possible and activate the output. */
++	return hubdrv->enable(hub, &thdev->output);
+ }
+ 
+-static void intel_th_output_deactivate(struct intel_th_device *thdev)
++static void intel_th_stop_trace(struct intel_th_device *thdev)
+ {
+ 	struct intel_th_driver *thdrv =
+ 		to_intel_th_driver_or_null(thdev->dev.driver);
+@@ -298,9 +296,9 @@ static ssize_t active_store(struct device *dev, struct device_attribute *attr,
+ 
+ 	if (!!val != thdev->output.active) {
+ 		if (val)
+-			ret = intel_th_output_activate(thdev);
++			ret = intel_th_start_trace(thdev);
+ 		else
+-			intel_th_output_deactivate(thdev);
++			intel_th_stop_trace(thdev);
+ 	}
+ 
+ 	return ret ? ret : size;
+@@ -369,6 +367,7 @@ intel_th_device_alloc(struct intel_th *th, unsigned int type, const char *name,
+ 
+ 	thdev->id = id;
+ 	thdev->type = type;
++	thdev->th = th;
+ 
+ 	strcpy(thdev->name, name);
+ 	device_initialize(&thdev->dev);
+@@ -811,10 +810,11 @@ static const struct file_operations intel_th_output_fops = {
+  * @devres:	parent's resources
+  * @ndevres:	number of resources
+  * @irq:	irq number
++ * @reset:	parent's reset function
+  */
+ struct intel_th *
+ intel_th_alloc(struct device *dev, struct intel_th_drvdata *drvdata,
+-	       struct resource *devres, unsigned int ndevres, int irq)
++	       struct resource *devres, unsigned int ndevres, int irq, void (*reset)(struct intel_th *th))
+ {
+ 	struct intel_th *th;
+ 	int err, r;
+@@ -848,6 +848,7 @@ intel_th_alloc(struct device *dev, struct intel_th_drvdata *drvdata,
+ 	th->resource = devres;
+ 	th->num_resources = ndevres;
+ 	th->irq = irq;
++	th->reset = reset;
+ 
+ 	dev_set_drvdata(dev, th);
+ 
+@@ -902,26 +903,20 @@ void intel_th_free(struct intel_th *th)
+ EXPORT_SYMBOL_GPL(intel_th_free);
+ 
+ /**
+- * intel_th_trace_enable() - enable tracing for an output device
+- * @thdev:	output device that requests tracing be enabled
++ * intel_th_reset() - reset hardware registers
++ * @hub:	hub requesting the reset
+  */
+-int intel_th_trace_enable(struct intel_th_device *thdev)
++void intel_th_reset(struct intel_th_device *hub)
+ {
+-	struct intel_th_device *hub = to_intel_th_device(thdev->dev.parent);
+-	struct intel_th_driver *hubdrv = to_intel_th_driver(hub->dev.driver);
++	struct intel_th *th = hub->th;
+ 
+ 	if (WARN_ON_ONCE(hub->type != INTEL_TH_SWITCH))
+-		return -EINVAL;
+-
+-	if (WARN_ON_ONCE(thdev->type != INTEL_TH_OUTPUT))
+-		return -EINVAL;
+-
+-	pm_runtime_get_sync(&thdev->dev);
+-	hubdrv->enable(hub, &thdev->output);
++		return;
+ 
+-	return 0;
++	if (th->reset)
++		th->reset(th);
+ }
+-EXPORT_SYMBOL_GPL(intel_th_trace_enable);
++EXPORT_SYMBOL_GPL(intel_th_reset);
+ 
+ /**
+  * intel_th_trace_switch() - execute a switch sequence
+diff --git a/drivers/hwtracing/intel_th/gth.c b/drivers/hwtracing/intel_th/gth.c
+index 7d1c2e9cd6b2..91d3ffc779b7 100644
+--- a/drivers/hwtracing/intel_th/gth.c
++++ b/drivers/hwtracing/intel_th/gth.c
+@@ -27,14 +27,16 @@ struct gth_device;
+  * @output:	link to output device's output descriptor
+  * @index:	output port number
+  * @port_type:	one of GTH_* port type values
+- * @master:	bitmap of masters configured for this output
++ * @config:	output configuration backup
++ * @smcfreq:	maintenance packet frequency backup
+  */
+ struct gth_output {
+ 	struct gth_device	*gth;
+ 	struct intel_th_output	*output;
+ 	unsigned int		index;
+ 	unsigned int		port_type;
+-	DECLARE_BITMAP(master, TH_CONFIGURABLE_MASTERS + 1);
++	u32			config;
++	u32			smcfreq;
+ };
+ 
+ /**
+@@ -65,6 +67,8 @@ static void gth_output_set(struct gth_device *gth, int port,
+ 	u32 val;
+ 	int shift = (port & 3) * 8;
+ 
++	gth->output[port].config = config;
++
+ 	val = ioread32(gth->base + reg);
+ 	val &= ~(0xff << shift);
+ 	val |= config << shift;
+@@ -91,6 +95,8 @@ static void gth_smcfreq_set(struct gth_device *gth, int port,
+ 	int shift = (port & 1) * 16;
+ 	u32 val;
+ 
++	gth->output[port].smcfreq = freq;
++
+ 	val = ioread32(gth->base + reg);
+ 	val &= ~(0xffff << shift);
+ 	val |= freq << shift;
+@@ -200,7 +206,6 @@ static ssize_t master_attr_store(struct device *dev,
+ 	old_port = gth->master[ma->master];
+ 	if (old_port >= 0) {
+ 		gth->master[ma->master] = -1;
+-		clear_bit(ma->master, gth->output[old_port].master);
+ 		gth_master_set(gth, ma->master, -1);
+ 	}
+ 
+@@ -212,7 +217,6 @@ static ssize_t master_attr_store(struct device *dev,
+ 			goto unlock;
+ 		}
+ 
+-		set_bit(ma->master, gth->output[port].master);
+ 		gth_master_set(gth, ma->master, port);
+ 		gth->master[ma->master] = port;
+ 	}
+@@ -282,30 +286,6 @@ gth_output_parm_get(struct gth_device *gth, int port, unsigned int parm)
+ 	return config;
+ }
+ 
+-/*
+- * Reset outputs and sources
+- */
+-static void intel_th_gth_reset(struct gth_device *gth)
+-{
+-	u32 scratchpad;
+-
+-	/* Always save/restore STH and TU registers in S0ix entry/exit */
+-	scratchpad = ioread32(gth->base + REG_GTH_SCRPD0);
+-	scratchpad |= SCRPD_STH_IS_ENABLED | SCRPD_TRIGGER_IS_ENABLED;
+-	iowrite32(scratchpad, gth->base + REG_GTH_SCRPD0);
+-
+-	/* disable overrides */
+-	iowrite32(0, gth->base + REG_GTH_DESTOVR);
+-
+-	/* sources */
+-	iowrite32(0, gth->base + REG_GTH_SCR);
+-	iowrite32(0xfc, gth->base + REG_GTH_SCR2);
+-
+-	/* setup CTS for single trigger */
+-	iowrite32(0x80000000, gth->base + REG_CTS_C0S0_EN);
+-	iowrite32(0x40000010, gth->base + REG_CTS_C0S0_ACT);
+-}
+-
+ /*
+  * "outputs" attribute group
+  */
+@@ -524,16 +504,16 @@ static void intel_th_gth_disable(struct intel_th_device *thdev,
+ 				 struct intel_th_output *output)
+ {
+ 	struct gth_device *gth = dev_get_drvdata(&thdev->dev);
+-	int master;
++	int i;
+ 	u32 reg;
+ 
+ 	spin_lock(&gth->gth_lock);
+ 	output->active = false;
+ 
+-	for_each_set_bit(master, gth->output[output->port].master,
+-			 TH_CONFIGURABLE_MASTERS) {
+-		gth_master_set(gth, master, -1);
+-	}
++	for (i = 0; i < TH_CONFIGURABLE_MASTERS + 1; i++)
++		if (gth->master[i] == output->port)
++			gth_master_set(gth, i, -1);
++
+ 	spin_unlock(&gth->gth_lock);
+ 
+ 	intel_th_gth_stop(gth, output, true);
+@@ -543,13 +523,25 @@ static void intel_th_gth_disable(struct intel_th_device *thdev,
+ 	iowrite32(reg, gth->base + REG_GTH_SCRPD0);
+ }
+ 
+-static void gth_tscu_resync(struct gth_device *gth)
++/*
++ * Set default configuration.
++ */
++static void intel_th_gth_reset(struct gth_device *gth)
+ {
+ 	u32 reg;
+ 
+-	reg = ioread32(gth->base + REG_TSCU_TSUCTRL);
+-	reg &= ~TSUCTRL_CTCRESYNC;
+-	iowrite32(reg, gth->base + REG_TSCU_TSUCTRL);
++	/* Always save/restore STH and TU registers in S0ix entry/exit */
++	reg = ioread32(gth->base + REG_GTH_SCRPD0);
++	reg |= SCRPD_STH_IS_ENABLED | SCRPD_TRIGGER_IS_ENABLED;
++	iowrite32(reg, gth->base + REG_GTH_SCRPD0);
++
++	/* Force sources off */
++	iowrite32(0, gth->base + REG_GTH_SCR);
++	iowrite32(0xfc, gth->base + REG_GTH_SCR2);
++
++	/* Setup CTS for single trigger */
++	iowrite32(0x80000000, gth->base + REG_CTS_C0S0_EN);
++	iowrite32(0x40000010, gth->base + REG_CTS_C0S0_ACT);
+ }
+ 
+ /**
+@@ -560,33 +552,59 @@ static void gth_tscu_resync(struct gth_device *gth)
+  * This will configure all masters set to output to this device and
+  * enable tracing using force storeEn signal.
+  */
+-static void intel_th_gth_enable(struct intel_th_device *thdev,
+-				struct intel_th_output *output)
++static int intel_th_gth_enable(struct intel_th_device *thdev,
++			       struct intel_th_output *output)
+ {
+ 	struct gth_device *gth = dev_get_drvdata(&thdev->dev);
+ 	struct intel_th *th = to_intel_th(thdev);
+ 	u32 scrpd;
+-	int master;
++	int i;
++	int ret = -EBUSY;
++
++	/* No operation allowed while a debugger is connected */
++	scrpd = ioread32(gth->base + REG_GTH_SCRPD0);
++	if (scrpd & SCRPD_DEBUGGER_IN_USE)
++		return ret;
+ 
+ 	spin_lock(&gth->gth_lock);
+-	intel_th_gth_reset(gth);
+ 
+-	for_each_set_bit(master, gth->output[output->port].master,
+-			 TH_CONFIGURABLE_MASTERS + 1) {
+-		gth_master_set(gth, master, output->port);
++	/* Only allow one output active at a time */
++	for (i = 0; i < TH_POSSIBLE_OUTPUTS; i++) {
++		if (gth->output[i].output &&
++		    gth->output[i].output->active) {
++			spin_unlock(&gth->gth_lock);
++			return ret;
++		}
+ 	}
+ 
++	intel_th_reset(thdev);
++	intel_th_gth_reset(gth);
++
++	/* Re-configure output */
++	gth_output_set(gth, output->port, gth->output[output->port].config);
++	gth_smcfreq_set(gth, output->port, gth->output[output->port].smcfreq);
++
++	/* Enable masters for the output, disable others */
++	for (i = 0; i < TH_CONFIGURABLE_MASTERS + 1; i++)
++		gth_master_set(gth, i, gth->master[i] == output->port ?
++				       output->port : -1);
++
+ 	output->active = true;
+ 	spin_unlock(&gth->gth_lock);
+ 
+-	if (INTEL_TH_CAP(th, tscu_enable))
+-		gth_tscu_resync(gth);
++	/* Setup the output */
++	ret = intel_th_output_activate(output);
++	if (ret)
++		return ret;
+ 
+ 	scrpd = ioread32(gth->base + REG_GTH_SCRPD0);
+ 	scrpd |= output->scratchpad;
+ 	iowrite32(scrpd, gth->base + REG_GTH_SCRPD0);
+ 
++	/* Enable sources */
+ 	intel_th_gth_start(gth, output);
++
++	return 0;
+ }
+ 
+ /**
+@@ -700,10 +718,9 @@ intel_th_gth_set_output(struct intel_th_device *thdev, unsigned int master)
+ 		master = TH_CONFIGURABLE_MASTERS;
+ 
+ 	spin_lock(&gth->gth_lock);
+-	if (gth->master[master] == -1) {
+-		set_bit(master, gth->output[port].master);
++	if (gth->master[master] == -1)
+ 		gth->master[master] = port;
+-	}
++
+ 	spin_unlock(&gth->gth_lock);
+ 
+ 	return 0;
+@@ -717,7 +734,6 @@ static int intel_th_gth_probe(struct intel_th_device *thdev)
+ 	struct resource *res;
+ 	void __iomem *base;
+ 	int i, ret;
+-	u32 scratchpad;
+ 
+ 	res = intel_th_device_get_resource(thdev, IORESOURCE_MEM, 0);
+ 	if (!res)
+@@ -746,10 +762,6 @@ static int intel_th_gth_probe(struct intel_th_device *thdev)
+        if (thdev->host_mode)
+                return 0;
+ 
+-	scratchpad = ioread32(gth->base + REG_GTH_SCRPD0);
+-	if (scratchpad & SCRPD_DEBUGGER_IN_USE)
+-		return -EBUSY;
+-
+ 	for (i = 0; i < TH_CONFIGURABLE_MASTERS + 1; i++)
+ 		gth->master[i] = gth_master_get(gth, i);
+ 
+diff --git a/drivers/hwtracing/intel_th/intel_th.h b/drivers/hwtracing/intel_th/intel_th.h
+index 4f55d53ac761..441fb9d85add 100644
+--- a/drivers/hwtracing/intel_th/intel_th.h
++++ b/drivers/hwtracing/intel_th/intel_th.h
+@@ -59,6 +59,7 @@ struct intel_th_drvdata {
+  * struct intel_th_device - device on the intel_th bus
+  * @dev:		device
+  * @drvdata:		hardware capabilities/quirks
++ * @th:			core device
+  * @resource:		array of resources available to this device
+  * @num_resources:	number of resources in @resource array
+  * @type:		INTEL_TH_{SOURCE,OUTPUT,SWITCH}
+@@ -68,12 +69,13 @@ struct intel_th_drvdata {
+  * @name:		device name to match the driver
+  */
+ struct intel_th_device {
+-	struct device		dev;
++	struct device	dev;
+ 	struct intel_th_drvdata *drvdata;
+-	struct resource		*resource;
+-	unsigned int		num_resources;
+-	unsigned int		type;
+-	int			id;
++	struct intel_th *th;
++	struct resource	*resource;
++	unsigned int	num_resources;
++	unsigned int	type;
++	int		id;
+ 
+ 	/* INTEL_TH_SWITCH specific */
+ 	bool			host_mode;
+@@ -159,7 +161,7 @@ struct intel_th_driver {
+ 					  struct intel_th_device *othdev);
+ 	void			(*unassign)(struct intel_th_device *thdev,
+ 					    struct intel_th_device *othdev);
+-	void			(*enable)(struct intel_th_device *thdev,
++	int			(*enable)(struct intel_th_device *thdev,
+ 					  struct intel_th_output *output);
+ 	void			(*trig_switch)(struct intel_th_device *thdev,
+ 					       struct intel_th_output *output);
+@@ -219,13 +221,14 @@ static inline struct intel_th *to_intel_th(struct intel_th_device *thdev)
+ 
+ struct intel_th *
+ intel_th_alloc(struct device *dev, struct intel_th_drvdata *drvdata,
+-	       struct resource *devres, unsigned int ndevres, int irq);
++	       struct resource *devres, unsigned int ndevres, int irq, void (*reset)(struct intel_th *th));
+ void intel_th_free(struct intel_th *th);
+ 
+ int intel_th_driver_register(struct intel_th_driver *thdrv);
+ void intel_th_driver_unregister(struct intel_th_driver *thdrv);
+ 
+-int intel_th_trace_enable(struct intel_th_device *thdev);
++int intel_th_output_activate(struct intel_th_output *output);
++void intel_th_reset(struct intel_th_device *hub);
+ int intel_th_trace_switch(struct intel_th_device *thdev);
+ int intel_th_trace_disable(struct intel_th_device *thdev);
+ int intel_th_set_output(struct intel_th_device *thdev,
+@@ -253,6 +256,7 @@ enum {
+  * @num_thdevs:	number of devices in the @thdev array
+  * @num_resources:	number or resources in the @resource array
+  * @irq:	irq number
++ * @reset:	reset function of the core device
+  * @id:		this Intel TH controller's device ID in the system
+  * @major:	device node major for output devices
+  */
+@@ -270,6 +274,8 @@ struct intel_th {
+ 	unsigned int		num_resources;
+ 	int			irq;
+ 
++	void			(*reset)(struct intel_th *th);
++
+ 	int			id;
+ 	int			major;
+ #ifdef CONFIG_MODULES
+diff --git a/drivers/hwtracing/intel_th/msu.c b/drivers/hwtracing/intel_th/msu.c
+index 6eae13f02629..47d2f7d8419b 100644
+--- a/drivers/hwtracing/intel_th/msu.c
++++ b/drivers/hwtracing/intel_th/msu.c
+@@ -89,6 +89,7 @@ struct msc_iter {
+  * @single_wrap:	single mode wrap occurred
+  * @base:		buffer's base pointer
+  * @base_addr:		buffer's base address
++ * @nwsa:		next window start address backup
+  * @user_count:		number of users of the buffer
+  * @mmap_count:		number of mappings
+  * @buf_mutex:		mutex to serialize access to buffer-related bits
+@@ -109,6 +110,7 @@ struct msc {
+ 	unsigned int		single_wrap : 1;
+ 	void			*base;
+ 	dma_addr_t		base_addr;
++	unsigned long		nwsa;
+ 
+ 	/* <0: no buffer, 0: no users, >0: active users */
+ 	atomic_t		user_count;
+@@ -151,8 +153,6 @@ static inline bool msc_block_is_empty(struct msc_block_desc *bdesc)
+ static struct msc_window *msc_oldest_window(struct msc *msc)
+ {
+ 	struct msc_window *win;
+-	u32 reg = ioread32(msc->reg_base + REG_MSU_MSC0NWSA);
+-	unsigned long win_addr = (unsigned long)reg << PAGE_SHIFT;
+ 	unsigned int found = 0;
+ 
+ 	if (list_empty(&msc->win_list))
+@@ -164,7 +164,7 @@ static struct msc_window *msc_oldest_window(struct msc *msc)
+ 	 * something like 2, in which case we're good
+ 	 */
+ 	list_for_each_entry(win, &msc->win_list, entry) {
+-		if (win->block[0].addr == win_addr)
++		if (win->block[0].addr == msc->nwsa)
+ 			found++;
+ 
+ 		/* skip the empty ones */
+@@ -478,9 +478,9 @@ static void msc_buffer_clear_hw_header(struct msc *msc)
+  * msc_configure() - set up MSC hardware
+  * @msc:	the MSC device to configure
+  *
+- * Program storage mode, wrapping, burst length and trace buffer address
+- * into a given MSC. Then, enable tracing and set msc::enabled.
+- * The latter is serialized on msc::buf_mutex, so make sure to hold it.
++ * Program all relevant registers for a given MSC.
++ * Programming registers must be delayed until this stage since the hardware
++ * will be reset before a capture is started.
+  */
+ static int msc_configure(struct msc *msc)
+ {
+@@ -515,10 +515,8 @@ static int msc_configure(struct msc *msc)
+ 	iowrite32(reg, msc->reg_base + REG_MSU_MSC0CTL);
+ 
+ 	msc->thdev->output.multiblock = msc->mode == MSC_MODE_MULTI;
+-	intel_th_trace_enable(msc->thdev);
+ 	msc->enabled = 1;
+ 
+-
+ 	return 0;
+ }
+ 
+@@ -547,6 +545,10 @@ static void msc_disable(struct msc *msc)
+ 			reg, msc->single_sz, msc->single_wrap);
+ 	}
+ 
++	/* Save next window start address before disabling */
++	reg = ioread32(msc->reg_base + REG_MSU_MSC0NWSA);
++	msc->nwsa = (unsigned long)reg << PAGE_SHIFT;
++
+ 	reg = ioread32(msc->reg_base + REG_MSU_MSC0CTL);
+ 	reg &= ~MSC_EN;
+ 	iowrite32(reg, msc->reg_base + REG_MSU_MSC0CTL);
+@@ -555,8 +557,7 @@ static void msc_disable(struct msc *msc)
+ 	iowrite32(0, msc->reg_base + REG_MSU_MSC0BAR);
+ 	iowrite32(0, msc->reg_base + REG_MSU_MSC0SIZE);
+ 
+-	dev_dbg(msc_dev(msc), "MSCnNWSA: %08x\n",
+-		ioread32(msc->reg_base + REG_MSU_MSC0NWSA));
++	dev_dbg(msc_dev(msc), "MSCnNWSA: %08lx\n", msc->nwsa);
+ 
+ 	reg = ioread32(msc->reg_base + REG_MSU_MSC0STS);
+ 	dev_dbg(msc_dev(msc), "MSCnSTS: %08x\n", reg);
+diff --git a/drivers/hwtracing/intel_th/pci.c b/drivers/hwtracing/intel_th/pci.c
+index 1cf6290d6435..3a4f5733d24d 100644
+--- a/drivers/hwtracing/intel_th/pci.c
++++ b/drivers/hwtracing/intel_th/pci.c
+@@ -61,6 +61,35 @@ static void intel_th_pci_deactivate(struct intel_th *th)
+ 	if (err)
+ 		dev_err(&pdev->dev, "failed to read NPKDSC register\n");
+ }
++/*
++ * PCI Configuration Registers
++ */
++enum {
++	REG_PCI_NPKDSC		= 0x80, /* NPK Device Specific Control */
++	REG_PCI_NPKDSD		= 0x90, /* NPK Device Specific Defeature */
++};
++
++/* Trace Hub software reset */
++#define NPKDSC_RESET	BIT(1)
++
++/* Force On */
++#define NPKDSD_FON	BIT(0)
++
++static void intel_th_pci_reset(struct intel_th *th)
++{
++	struct pci_dev *pdev = container_of(th->dev, struct pci_dev, dev);
++	u32 val;
++
++	/* Software reset */
++	pci_read_config_dword(pdev, REG_PCI_NPKDSC, &val);
++	val |= NPKDSC_RESET;
++	pci_write_config_dword(pdev, REG_PCI_NPKDSC, val);
++
++	/* Always set FON for S0ix flow */
++	pci_read_config_dword(pdev, REG_PCI_NPKDSD, &val);
++	val |= NPKDSD_FON;
++	pci_write_config_dword(pdev, REG_PCI_NPKDSD, val);
++}
+ 
+ static int intel_th_pci_probe(struct pci_dev *pdev,
+ 			      const struct pci_device_id *id)
+@@ -78,7 +107,7 @@ static int intel_th_pci_probe(struct pci_dev *pdev,
+ 		return err;
+ 
+ 	th = intel_th_alloc(&pdev->dev, drvdata, pdev->resource,
+-			    DEVICE_COUNT_RESOURCE, pdev->irq);
++			    DEVICE_COUNT_RESOURCE, pdev->irq, intel_th_pci_reset);
+ 	if (IS_ERR(th))
+ 		return PTR_ERR(th);
+ 
+diff --git a/drivers/hwtracing/intel_th/pti.c b/drivers/hwtracing/intel_th/pti.c
+index 56694339cb06..9b6224b22a5f 100644
+--- a/drivers/hwtracing/intel_th/pti.c
++++ b/drivers/hwtracing/intel_th/pti.c
+@@ -161,8 +161,6 @@ static int intel_th_pti_activate(struct intel_th_device *thdev)
+ 
+ 	iowrite32(ctl, pti->base + REG_PTI_CTL);
+ 
+-	intel_th_trace_enable(thdev);
+-
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

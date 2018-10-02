@@ -1,0 +1,51 @@
+From 9940ca86c951e76d4c7b41eb564d5152a339a9d5 Mon Sep 17 00:00:00 2001
+From: Ganesh Mahendran <opensource.ganesh@gmail.com>
+Date: Tue, 25 Apr 2017 18:07:43 +0800
+Subject: [PATCH 170/351] ANDROID: uid_sys_stats: fix access of task_uid(task)
+
+struct task_struct *task should be proteced by tasklist_lock.
+
+Change-Id: Iefcd13442a9b9d855a2bbcde9fd838a4132fee58
+Signed-off-by: Ganesh Mahendran <opensource.ganesh@gmail.com>
+(cherry picked from commit 90d78776c4a0e13fb7ee5bd0787f04a1730631a6)
+---
+ drivers/misc/uid_sys_stats.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/misc/uid_sys_stats.c b/drivers/misc/uid_sys_stats.c
+index c9ee4f0cd4e4..6934380014c0 100644
+--- a/drivers/misc/uid_sys_stats.c
++++ b/drivers/misc/uid_sys_stats.c
+@@ -96,9 +96,11 @@ static int uid_cputime_show(struct seq_file *m, void *v)
+ {
+ 	struct uid_entry *uid_entry;
+ 	struct task_struct *task, *temp;
++	struct user_namespace *user_ns = current_user_ns();
+ 	u64 utime;
+ 	u64 stime;
+ 	unsigned long bkt;
++	uid_t uid;
+ 
+ 	rt_mutex_lock(&uid_lock);
+ 
+@@ -109,14 +111,13 @@ static int uid_cputime_show(struct seq_file *m, void *v)
+ 
+ 	read_lock(&tasklist_lock);
+ 	do_each_thread(temp, task) {
+-		uid_entry = find_or_register_uid(from_kuid_munged(
+-			current_user_ns(), task_uid(task)));
++		uid = from_kuid_munged(user_ns, task_uid(task));
++		uid_entry = find_or_register_uid(uid);
+ 		if (!uid_entry) {
+ 			read_unlock(&tasklist_lock);
+ 			rt_mutex_unlock(&uid_lock);
+ 			pr_err("%s: failed to find the uid_entry for uid %d\n",
+-				__func__, from_kuid_munged(current_user_ns(),
+-				task_uid(task)));
++				__func__, uid);
+ 			return -ENOMEM;
+ 		}
+ 		task_cputime_adjusted(task, &utime, &stime);
+-- 
+2.17.1
+
