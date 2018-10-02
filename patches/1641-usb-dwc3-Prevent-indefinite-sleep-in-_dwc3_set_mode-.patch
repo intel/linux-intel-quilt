@@ -1,0 +1,80 @@
+From a2821b0a17c4488b689286f96b0060beab936593 Mon Sep 17 00:00:00 2001
+From: Roger Quadros <rogerq@ti.com>
+Date: Fri, 9 Mar 2018 14:47:04 +0200
+Subject: [PATCH 1641/1670] usb: dwc3: Prevent indefinite sleep in
+ _dwc3_set_mode during suspend/resume
+
+In the following test we get stuck by sleeping forever in _dwc3_set_mode()
+after which dual-role switching doesn't work.
+
+On dra7-evm's dual-role port,
+- Load g_zero gadget driver and enumerate to host
+- suspend to mem
+- disconnect USB cable to host and connect otg cable with Pen drive in it.
+- resume system
+- we sleep indefinitely in _dwc3_set_mode due to.
+  dwc3_gadget_exit()->usb_del_gadget_udc()->udc_stop()->
+	dwc3_gadget_stop()->wait_event_lock_irq()
+
+To fix this instead of waiting indefinitely with wait_event_lock_irq()
+we use wait_event_interruptible_lock_irq_timeout() and print
+and error message if there was a timeout.
+
+Signed-off-by: Roger Quadros <rogerq@ti.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+(Cherry picked from commit 498f0478aba425ba5555a72e72fe1ce9ee45a0bd)
+---
+ drivers/usb/dwc3/gadget.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
+index 7120678..ae381fe 100644
+--- a/drivers/usb/dwc3/gadget.c
++++ b/drivers/usb/dwc3/gadget.c
+@@ -1998,6 +1998,7 @@ static int dwc3_gadget_stop(struct usb_gadget *g)
+ 	struct dwc3		*dwc = gadget_to_dwc(g);
+ 	unsigned long		flags;
+ 	int			epnum;
++	u32			tmo_eps = 0;
+ 
+ 
+         if (dwc->usb2_phy)
+@@ -2012,6 +2013,7 @@ static int dwc3_gadget_stop(struct usb_gadget *g)
+ 
+ 	for (epnum = 2; epnum < DWC3_ENDPOINTS_NUM; epnum++) {
+ 		struct dwc3_ep  *dep = dwc->eps[epnum];
++		int ret;
+ 
+ 		if (!dep)
+ 			continue;
+@@ -2019,9 +2021,24 @@ static int dwc3_gadget_stop(struct usb_gadget *g)
+ 		if (!(dep->flags & DWC3_EP_END_TRANSFER_PENDING))
+ 			continue;
+ 
+-		wait_event_lock_irq(dep->wait_end_transfer,
+-				    !(dep->flags & DWC3_EP_END_TRANSFER_PENDING),
+-				    dwc->lock);
++		ret = wait_event_interruptible_lock_irq_timeout(dep->wait_end_transfer,
++			    !(dep->flags & DWC3_EP_END_TRANSFER_PENDING),
++			    dwc->lock, msecs_to_jiffies(5));
++
++		if (ret <= 0) {
++			/* Timed out or interrupted! There's nothing much
++			 * we can do so we just log here and print which
++			 * endpoints timed out at the end.
++			 */
++			tmo_eps |= 1 << epnum;
++			dep->flags &= DWC3_EP_END_TRANSFER_PENDING;
++		}
++	}
++
++	if (tmo_eps) {
++		dev_err(dwc->dev,
++			"end transfer timed out on endpoints 0x%x [bitmap]\n",
++			tmo_eps);
+ 	}
+ 
+ out:
+-- 
+2.7.4
+
