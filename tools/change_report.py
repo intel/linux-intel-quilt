@@ -275,7 +275,7 @@ def find_matching_subject(patch, old_patch_dict):
      (sstr, sscore, skey)) = match_subject(patch, old_patch_dict)
     if rkey and skey and rkey == skey:
         score = rscore + sscore
-        if score > 190:
+        if score > 180:
             return subject_key
 
     return None
@@ -297,7 +297,7 @@ def find_matching_commit_dominate(patch, old_patch_dict):
      (sstr, sscore, skey)) = match_comment(patch, old_patch_dict)
     if rkey and skey and rkey == skey:
         score = rscore + sscore
-        if score > 170:  # this is lower than patch_tool.py
+        if score > 170:
             # print("comment match", score, rkey)
             comment_key = rkey
             # optimization if comment matches and ratios look good call it good
@@ -305,7 +305,7 @@ def find_matching_commit_dominate(patch, old_patch_dict):
             ratio = fuzz.ratio(patch[6], old_patch_dict[comment_key][6])
             set_ratio = fuzz.token_set_ratio(patch[6],
                                              old_patch_dict[comment_key][6])
-            if set_ratio + ratio > 180:  # this is higher than patch_tool.py
+            if set_ratio + ratio > 160:
                 # print("hunk match score : ", set_ratio + ratio)
                 return comment_key
 
@@ -401,7 +401,7 @@ def main(oldpatches, newpatches):
         match = find_matching_commit_dominate(patch, old_patch_dic)
         if match:
             # remove match from old and new dict as optimization:
-            del old_patch_dic[match[0]]
+            del old_patch_dic[match]
             new_matches.append(key)
 
     # reduce the new_patch_dic to just whats not matched yet:
