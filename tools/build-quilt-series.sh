@@ -8,6 +8,9 @@ rc=$1
 # first arg is the tag name for the RC to use.
 manifest=$2
 
+echo \# $rc >> series;
+echo -n \# >> series; git log $rc --oneline -n 1 >> series
+
 for b in `cat $manifest`; do 
 	echo \# $b >> series;
 	git checkout $b; 
