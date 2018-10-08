@@ -1,0 +1,134 @@
+From 4d6a38c48100ec89a82343b3b92740fa5db41a5a Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Thu, 6 Sep 2018 11:04:13 +0800
+Subject: [PATCH 1628/1676] drm/i915/gvt: allocate ddb according to active
+ pipes
+
+This patch add back the ddb allocation for the PLANE_CURSOR
+and allocate ddb according to current active pipes.
+In this way, this patch can support 4K monitors and fix the
+issue that cursor not work when enable_initial_modeset is 0.
+
+v2:
+- correct ddb start calculation
+
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: Fei Jiang <fei.jiang@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gvt.c  | 24 +++++++++++++++---------
+ drivers/gpu/drm/i915/gvt/gvt.h  |  4 ++--
+ drivers/gpu/drm/i915/intel_pm.c | 13 +++++++++++--
+ 3 files changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index 7fecfa7..8e6a43b 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -190,33 +190,40 @@ void intel_gvt_init_pipe_info(struct intel_gvt *gvt);
+ /*
+  * When enabling multi-plane in DomU, an issue is that the PLANE_BUF_CFG
+  * register cannot be updated dynamically, since Dom0 has no idea of the
+- * plane information of DomU's planes, so here we statically allocate the
++ * plane information of DomU's planes, so here we allocate the
+  * ddb entries for all the possible enabled planes.
+  */
+-static void intel_gvt_init_ddb(struct intel_gvt *gvt)
++void intel_gvt_allocate_ddb(struct intel_gvt *gvt,
++		struct skl_ddb_allocation *ddb, unsigned int active_crtcs)
+ {
+ 	struct drm_i915_private *dev_priv = gvt->dev_priv;
+-	struct skl_ddb_allocation *ddb = &gvt->ddb;
+ 	unsigned int pipe_size, ddb_size, plane_size, plane_cnt;
+ 	u16 start, end;
+ 	enum pipe pipe;
+ 	enum plane_id plane;
++	int i = 0;
++	int num_active = hweight32(active_crtcs);
++
++	if (WARN_ON(!num_active))
++		return;
+ 
+ 	ddb_size = INTEL_INFO(dev_priv)->ddb_size;
+ 	ddb_size -= 4; /* 4 blocks for bypass path allocation */
+-	pipe_size = ddb_size / INTEL_INFO(dev_priv)->num_pipes;
++	pipe_size = ddb_size / num_active;
+ 
+ 	memset(ddb, 0, sizeof(*ddb));
+-	for_each_pipe(dev_priv, pipe) {
+-		start = pipe * ddb_size / INTEL_INFO(dev_priv)->num_pipes;
++	for_each_pipe_masked(dev_priv, pipe, active_crtcs) {
++		start = pipe_size * (i++);
+ 		end = start + pipe_size;
++		ddb->plane[pipe][PLANE_CURSOR].start = end - 8;
++		ddb->plane[pipe][PLANE_CURSOR].end = end;
+ 
+ 		plane_cnt = (INTEL_INFO(dev_priv)->num_sprites[pipe] + 1);
+-		plane_size = pipe_size / plane_cnt;
++		plane_size = (pipe_size - 8) / plane_cnt;
+ 
+ 		for_each_universal_plane(dev_priv, pipe, plane) {
+ 			ddb->plane[pipe][plane].start = start +
+-				(plane * pipe_size / plane_cnt);
++				(plane * (pipe_size - 8) / plane_cnt);
+ 			ddb->plane[pipe][plane].end =
+ 				ddb->plane[pipe][plane].start + plane_size;
+ 		}
+@@ -347,7 +354,6 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
+ 		goto out_clean_thread;
+ 
+ 	intel_gvt_init_pipe_info(gvt);
+-	intel_gvt_init_ddb(gvt);
+ 
+ 	ret = intel_gvt_hypervisor_host_init(&dev_priv->drm.pdev->dev, gvt,
+ 				&intel_gvt_ops);
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 9240809..dc744da 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -321,8 +321,6 @@ struct intel_gvt {
+ 	wait_queue_head_t service_thread_wq;
+ 	unsigned long service_request;
+ 	struct intel_gvt_pipe_info pipe_info[I915_MAX_PIPES];
+-
+-	struct skl_ddb_allocation ddb;
+ };
+ 
+ static inline struct intel_gvt *to_gvt(struct drm_i915_private *i915)
+@@ -541,6 +539,8 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu);
+ int gvt_pause_user_domains(struct drm_i915_private *dev_priv);
+ int gvt_unpause_user_domains(struct drm_i915_private *dev_priv);
+ int gvt_dom0_ready(struct drm_i915_private *dev_priv);
++void intel_gvt_allocate_ddb(struct intel_gvt *gvt,
++		struct skl_ddb_allocation *ddb, unsigned int active_crtcs);
+ 
+ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index b380c5d..f0c7ed7 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -5038,9 +5038,18 @@ skl_compute_ddb(struct drm_atomic_state *state)
+ 	memcpy(ddb, &dev_priv->wm.skl_hw.ddb, sizeof(*ddb));
+ 
+ #if IS_ENABLED(CONFIG_DRM_I915_GVT)
+-	/* In GVT environemnt, we only use the statically allocated ddb */
++	/*
++	 * In GVT environemnt, allocate ddb for all planes in active crtc.
++	 * When there is active pipe change, intel_state active_crtcs is
++	 * not zero and updated before dev_priv, so use intel_state
++	 * active_crtc when it is not zero.
++	 */
+ 	if (dev_priv->gvt) {
+-		memcpy(ddb, &dev_priv->gvt->ddb, sizeof(*ddb));
++		unsigned int active_crtcs;
++
++		active_crtcs = intel_state->active_crtcs ?
++			intel_state->active_crtcs : dev_priv->active_crtcs;
++		intel_gvt_allocate_ddb(dev_priv->gvt, ddb, active_crtcs);
+ 		return 0;
+ 	}
+ #endif
+-- 
+2.7.4
+

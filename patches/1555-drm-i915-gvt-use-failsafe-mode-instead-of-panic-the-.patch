@@ -1,0 +1,52 @@
+From 6ceaa13b0203c211302e425a52eb5b35b747d2ae Mon Sep 17 00:00:00 2001
+From: Xinyun Liu <xinyun.liu@intel.com>
+Date: Tue, 7 Aug 2018 17:02:15 +0800
+Subject: [PATCH 1555/1676] drm/i915/gvt: use failsafe mode instead of panic
+ the host kernel
+
+Kernel panic is trigged in host OS if there is error while handling I/O
+request from guest OS previously. It's more reasonable to switch to the
+failsafe mode instead of stop the host OS.
+
+v2: suppress error output per He Min's advice
+
+Signed-off-by: Xinyun Liu <xinyun.liu@intel.com>
+Reviewed-by: Min He <min.he@intel.com>
+Reviewed-by: Yakui Zhao<yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/acrn-gvt.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/acrn-gvt.c b/drivers/gpu/drm/i915/gvt/acrn-gvt.c
+index 07622aa..73575af 100644
+--- a/drivers/gpu/drm/i915/gvt/acrn-gvt.c
++++ b/drivers/gpu/drm/i915/gvt/acrn-gvt.c
+@@ -200,6 +200,16 @@ static int acrngt_hvm_mmio_emulation(struct intel_vgpu *vgpu,
+ 	return 0;
+ }
+ 
++static void handle_request_error(struct intel_vgpu *vgpu)
++{
++       mutex_lock(&vgpu->gvt->lock);
++       if (vgpu->failsafe == false) {
++               vgpu->failsafe= true;
++               gvt_err("Now vgpu %d will enter failsafe mode.\n", vgpu->id);
++       }
++       mutex_unlock(&vgpu->gvt->lock);
++}
++
+ static int acrngt_emulation_thread(void *priv)
+ {
+ 	struct intel_vgpu *vgpu = (struct intel_vgpu *)priv;
+@@ -242,7 +252,7 @@ static int acrngt_emulation_thread(void *priv)
+ 				}
+ 				/* error handling */
+ 				if (ret)
+-					BUG();
++					handle_request_error(vgpu);
+ 
+ 				smp_mb();
+ 				atomic_set(&req->processed, REQ_STATE_COMPLETE);
+-- 
+2.7.4
+

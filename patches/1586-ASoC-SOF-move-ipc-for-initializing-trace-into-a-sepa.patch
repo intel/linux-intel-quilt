@@ -1,0 +1,141 @@
+From 562f915eae7bb72fc00ab0733e0c781d692db4a2 Mon Sep 17 00:00:00 2001
+From: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Date: Mon, 16 Jul 2018 23:02:46 -0700
+Subject: [PATCH 1586/1676] ASoC: SOF: move ipc for initializing trace into a
+ separate function
+
+Move the code to send ipc for initializing trace into a separate
+function that can also be called during suspend/resume.
+
+Signed-off-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+---
+ sound/soc/sof/sof-priv.h |  1 +
+ sound/soc/sof/trace.c    | 85 +++++++++++++++++++++++++++---------------------
+ 2 files changed, 49 insertions(+), 37 deletions(-)
+
+diff --git a/sound/soc/sof/sof-priv.h b/sound/soc/sof/sof-priv.h
+index e8aed71..827456a 100644
+--- a/sound/soc/sof/sof-priv.h
++++ b/sound/soc/sof/sof-priv.h
+@@ -473,6 +473,7 @@ void snd_sof_trace_notify_for_error(struct snd_sof_dev *sdev);
+ int snd_sof_get_status(struct snd_sof_dev *sdev, u32 panic_code,
+ 		       u32 tracep_code, void *oops, void *stack,
+ 		       size_t stack_size);
++int snd_sof_init_trace_ipc(struct snd_sof_dev *sdev);
+ 
+ /*
+  * Platform specific ops.
+diff --git a/sound/soc/sof/trace.c b/sound/soc/sof/trace.c
+index 1b37970..172ff25 100644
+--- a/sound/soc/sof/trace.c
++++ b/sound/soc/sof/trace.c
+@@ -145,12 +145,57 @@ static int trace_debugfs_create(struct snd_sof_dev *sdev)
+ 	return 0;
+ }
+ 
+-int snd_sof_init_trace(struct snd_sof_dev *sdev)
++int snd_sof_init_trace_ipc(struct snd_sof_dev *sdev)
+ {
+ 	struct sof_ipc_dma_trace_params params;
+ 	struct sof_ipc_reply ipc_reply;
+ 	int ret;
+ 
++	/* set IPC parameters */
++	params.hdr.size = sizeof(params);
++	params.hdr.cmd = SOF_IPC_GLB_TRACE_MSG | SOF_IPC_TRACE_DMA_PARAMS;
++	params.buffer.phy_addr = sdev->dmatp.addr;
++	params.buffer.size = sdev->dmatb.bytes;
++	params.buffer.offset = 0;
++	params.buffer.pages = sdev->dma_trace_pages;
++
++	init_waitqueue_head(&sdev->trace_sleep);
++	sdev->host_offset = 0;
++
++	ret = snd_sof_dma_trace_init(sdev, &params.stream_tag);
++	if (ret < 0) {
++		dev_err(sdev->dev,
++			"error: fail in snd_sof_dma_trace_init %d\n", ret);
++		return ret;
++	}
++	dev_dbg(sdev->dev, "stream_tag: %d\n", params.stream_tag);
++
++	/* send IPC to the DSP */
++	ret = sof_ipc_tx_message(sdev->ipc,
++				 params.hdr.cmd, &params, sizeof(params),
++				 &ipc_reply, sizeof(ipc_reply));
++	if (ret < 0) {
++		dev_err(sdev->dev,
++			"error: can't set params for DMA for trace %d\n", ret);
++		return ret;
++	}
++
++	ret = snd_sof_dma_trace_trigger(sdev, SNDRV_PCM_TRIGGER_START);
++	if (ret < 0) {
++		dev_err(sdev->dev,
++			"error: snd_sof_dma_trace_trigger: start: %d\n", ret);
++		return ret;
++	}
++
++	sdev->dtrace_is_enabled = true;
++
++	return 0;
++}
++
++int snd_sof_init_trace(struct snd_sof_dev *sdev)
++{
++	int ret;
++
+ 	/* set false before start initialization */
+ 	sdev->dtrace_is_enabled = false;
+ 
+@@ -185,45 +230,11 @@ int snd_sof_init_trace(struct snd_sof_dev *sdev)
+ 	if (ret < 0)
+ 		goto table_err;
+ 
+-	/* set IPC parameters */
+-	params.hdr.size = sizeof(params);
+-	params.hdr.cmd = SOF_IPC_GLB_TRACE_MSG | SOF_IPC_TRACE_DMA_PARAMS;
+-	params.buffer.phy_addr = sdev->dmatp.addr;
+-	params.buffer.size = sdev->dmatb.bytes;
+-	params.buffer.offset = 0;
+-	params.buffer.pages = sdev->dma_trace_pages;
+-
+-	init_waitqueue_head(&sdev->trace_sleep);
+-	sdev->host_offset = 0;
+-
+-	ret = snd_sof_dma_trace_init(sdev, &params.stream_tag);
+-	if (ret < 0) {
+-		dev_err(sdev->dev,
+-			"error: fail in snd_sof_dma_trace_init %d\n", ret);
+-		goto table_err;
+-	}
+-	dev_dbg(sdev->dev, "stream_tag: %d\n", params.stream_tag);
+-
+-	/* send IPC to the DSP */
+-	ret = sof_ipc_tx_message(sdev->ipc,
+-				 params.hdr.cmd, &params, sizeof(params),
+-				 &ipc_reply, sizeof(ipc_reply));
+-	if (ret < 0) {
+-		dev_err(sdev->dev,
+-			"error: can't set params for DMA for trace %d\n", ret);
+-		goto table_err;
+-	}
+-
+-	ret = snd_sof_dma_trace_trigger(sdev, SNDRV_PCM_TRIGGER_START);
+-	if (ret < 0) {
+-		dev_err(sdev->dev,
+-			"error: snd_sof_dma_trace_trigger: start: %d\n", ret);
++	ret = snd_sof_init_trace_ipc(sdev);
++	if (ret < 0)
+ 		goto table_err;
+-	}
+ 
+-	sdev->dtrace_is_enabled = true;
+ 	return 0;
+-
+ table_err:
+ 	snd_dma_free_pages(&sdev->dmatb);
+ page_err:
+-- 
+2.7.4
+
