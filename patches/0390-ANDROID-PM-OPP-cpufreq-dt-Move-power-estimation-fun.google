@@ -1,0 +1,150 @@
+From b13a391484842b059f798b23c6d2478e5206f134 Mon Sep 17 00:00:00 2001
+From: Quentin Perret <quentin.perret@arm.com>
+Date: Wed, 12 Sep 2018 14:49:58 +0100
+Subject: [PATCH 390/429] ANDROID: PM / OPP: cpufreq-dt: Move power estimation
+ function
+
+The cpufreq-dt driver has a function estimating the power of CPUs using
+the dynamic-power-coefficient DT binding and the parameters of PM_OPP.
+Since this function can be useful to other drivers, relocate it to
+PM_OPP which is already a dependency anyway.
+
+Change-Id: I34f8f9cd9433c622c82f23f32ae9968a096a4390
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+---
+ drivers/cpufreq/cpufreq-dt.c | 43 +-----------------------------------
+ drivers/opp/of.c             | 41 ++++++++++++++++++++++++++++++++++
+ include/linux/pm_opp.h       |  5 +++++
+ 3 files changed, 47 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/cpufreq/cpufreq-dt.c b/drivers/cpufreq/cpufreq-dt.c
+index 15ac9754afa2..83ad2a60991c 100644
+--- a/drivers/cpufreq/cpufreq-dt.c
++++ b/drivers/cpufreq/cpufreq-dt.c
+@@ -150,50 +150,9 @@ static int resources_available(void)
+ 	return 0;
+ }
+ 
+-static int __maybe_unused of_est_power(unsigned long *mW, unsigned long *KHz,
+-				       int cpu)
+-{
+-	unsigned long mV, Hz, MHz;
+-	struct device *cpu_dev;
+-	struct dev_pm_opp *opp;
+-	struct device_node *np;
+-	u32 cap;
+-	u64 tmp;
+-
+-	cpu_dev = get_cpu_device(cpu);
+-	if (!cpu_dev)
+-		return -ENODEV;
+-
+-	np = of_node_get(cpu_dev->of_node);
+-	if (!np)
+-		return -EINVAL;
+-
+-	if (of_property_read_u32(np, "dynamic-power-coefficient", &cap))
+-		return -EINVAL;
+-
+-	Hz = *KHz * 1000;
+-	opp = dev_pm_opp_find_freq_ceil(cpu_dev, &Hz);
+-	if (IS_ERR(opp))
+-		return -EINVAL;
+-
+-	mV = dev_pm_opp_get_voltage(opp) / 1000;
+-	dev_pm_opp_put(opp);
+-	if (!mV)
+-		return -EINVAL;
+-
+-	MHz = Hz / 1000000;
+-	tmp = (u64)cap * mV * mV * MHz;
+-	do_div(tmp, 1000000000);
+-
+-	*mW = (unsigned long)tmp;
+-	*KHz = Hz / 1000;
+-
+-	return 0;
+-}
+-
+ static int cpufreq_init(struct cpufreq_policy *policy)
+ {
+-	struct em_data_callback em_cb = EM_DATA_CB(of_est_power);
++	struct em_data_callback em_cb = EM_DATA_CB(of_dev_pm_opp_get_cpu_power);
+ 	struct cpufreq_frequency_table *freq_table;
+ 	struct opp_table *opp_table = NULL;
+ 	struct private_data *priv;
+diff --git a/drivers/opp/of.c b/drivers/opp/of.c
+index 7af0ddec936b..34157eac789d 100644
+--- a/drivers/opp/of.c
++++ b/drivers/opp/of.c
+@@ -777,3 +777,44 @@ struct device_node *dev_pm_opp_get_of_node(struct dev_pm_opp *opp)
+ 	return of_node_get(opp->np);
+ }
+ EXPORT_SYMBOL_GPL(dev_pm_opp_get_of_node);
++
++int of_dev_pm_opp_get_cpu_power(unsigned long *mW, unsigned long *KHz, int cpu)
++{
++	unsigned long mV, Hz, MHz;
++	struct device *cpu_dev;
++	struct dev_pm_opp *opp;
++	struct device_node *np;
++	u32 cap;
++	u64 tmp;
++
++	cpu_dev = get_cpu_device(cpu);
++	if (!cpu_dev)
++		return -ENODEV;
++
++	np = of_node_get(cpu_dev->of_node);
++	if (!np)
++		return -EINVAL;
++
++	if (of_property_read_u32(np, "dynamic-power-coefficient", &cap))
++		return -EINVAL;
++
++	Hz = *KHz * 1000;
++	opp = dev_pm_opp_find_freq_ceil(cpu_dev, &Hz);
++	if (IS_ERR(opp))
++		return -EINVAL;
++
++	mV = dev_pm_opp_get_voltage(opp) / 1000;
++	dev_pm_opp_put(opp);
++	if (!mV)
++		return -EINVAL;
++
++	MHz = Hz / 1000000;
++	tmp = (u64)cap * mV * mV * MHz;
++	do_div(tmp, 1000000000);
++
++	*mW = (unsigned long)tmp;
++	*KHz = Hz / 1000;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(of_dev_pm_opp_get_cpu_power);
+diff --git a/include/linux/pm_opp.h b/include/linux/pm_opp.h
+index 099b31960dec..11dbffc7f889 100644
+--- a/include/linux/pm_opp.h
++++ b/include/linux/pm_opp.h
+@@ -301,6 +301,7 @@ int dev_pm_opp_of_get_sharing_cpus(struct device *cpu_dev, struct cpumask *cpuma
+ struct device_node *dev_pm_opp_of_get_opp_desc_node(struct device *dev);
+ struct dev_pm_opp *of_dev_pm_opp_find_required_opp(struct device *dev, struct device_node *np);
+ struct device_node *dev_pm_opp_get_of_node(struct dev_pm_opp *opp);
++int of_dev_pm_opp_get_cpu_power(unsigned long *mW, unsigned long *KHz, int cpu);
+ #else
+ static inline int dev_pm_opp_of_add_table(struct device *dev)
+ {
+@@ -343,6 +344,10 @@ static inline struct device_node *dev_pm_opp_get_of_node(struct dev_pm_opp *opp)
+ {
+ 	return NULL;
+ }
++static inline int of_dev_pm_opp_get_cpu_power(unsigned long *mW, unsigned long *KHz, int cpu)
++{
++	return -ENOTSUPP;
++}
+ #endif
+ 
+ #endif		/* __LINUX_OPP_H__ */
+-- 
+2.19.1
+
