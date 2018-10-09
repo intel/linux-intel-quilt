@@ -132,6 +132,12 @@ def extract_hunks(patch):
             flag = True
             continue  # we don't want to include the "---"
 
+        #next skip all hunk headers that don't add much to the diff.
+        if line.find("diff ") == 0 || line.find("index ") == 0 ||
+           line.find("--- ") == 0 || line.find("+++ ") == 0 ||
+           line.find("@@ ") == 0:
+            continue
+
         if flag:
             hunks += line
 
@@ -182,12 +188,11 @@ def get_subject(patch):
     return subject
 
 
-def load_patches(path):
-    files = os.listdir(path)
-    if len(files) == 0:
-        return None
+def load_patches(path, series):
     ret_dict = {}
-    for file in files:
+    for file in series:
+        if file[0] == '#':
+            continue
         patch = readin_patch(os.path.join(path, file))
         author = get_author(patch)
         date = get_date_stamp(patch)
@@ -305,7 +310,7 @@ def find_matching_commit_dominate(patch, old_patch_dict):
             ratio = fuzz.ratio(patch[6], old_patch_dict[comment_key][6])
             set_ratio = fuzz.token_set_ratio(patch[6],
                                              old_patch_dict[comment_key][6])
-            if set_ratio + ratio > 160:
+            if set_ratio + ratio > 175:
                 # print("hunk match score : ", set_ratio + ratio)
                 return comment_key
 
@@ -329,7 +334,7 @@ def find_matching_patch(patch, old_patch_dict):
     # match_hunks can take a long time. 90+ seconds
     if rkey and skey and rkey == skey:
         score = rscore + sscore
-        if score > 160:
+        if score > 175:
             # print("hunks match", score, rkey)
             hunks_key = rkey
 
@@ -372,7 +377,7 @@ def orginal_find_matching_patch(patch, old_patch_dict):
     # match_hunks can take a long time. 90+ seconds
     if rkey and skey and rkey == skey:
         score = rscore + sscore
-        if score > 170:
+        if score > 175:
             # print("hunks match", score, rkey)
             hunks_key = rkey
 
@@ -389,9 +394,36 @@ def check_for_changeid_collisions():
     return
 
 
-def main(oldpatches, newpatches):
-    old_patch_dic = load_patches(oldpatches)
-    new_patch_dic = load_patches(newpatches)
+def my_print(list_of_patches):
+    dict_of_lists = {}
+    for p in list_of_patches:
+        split_p = p.split(".")
+        if split_p[-1] in dict_of_lists.keys():
+            dict_of_lists[split_p[-1]].append(p)
+        else:
+            dict_of_lists[split_p[-1]] = [p]
+
+    for p in dict_of_lists.keys():
+        dict_of_lists[p].sort()
+        print(" ")
+        print("*** ", p, " ***")
+        for name in dict_of_lists[p]:
+            print(name)
+
+
+def main(oldpath, newpath, series):
+    file = open(os.path.join(oldpath, series))
+    temp = file.read()
+    oldpatches = temp.splitlines()
+    file.close()
+
+    file = open(os.path.join(newpath, series))
+    temp = file.read()
+    newpatches = temp.splitlines()
+    file.close()
+
+    old_patch_dic = load_patches(oldpath, oldpatches)
+    new_patch_dic = load_patches(newpath, newpatches)
     new_patches = []
     new_matches = []
 
@@ -429,15 +461,26 @@ def main(oldpatches, newpatches):
             del old_patch_dic[match]
 
     print("********* updated patches ********* :")
-    print(changed_patches)
+    print("********* updated patches ********* :")
+    print("********* updated patches ********* :")
+    print(" ")
+    my_print(changed_patches)
+    print(" ")
     print("********* orphined patches ********* :")
-    print(old_patch_dic.keys())
+    print("********* orphined patches ********* :")
+    print("********* orphined patches ********* :")
+    print(" ")
+    my_print(old_patch_dic.keys())
+    print(" ")
     print("********* new patches ********* :")
-    print(new_patches)
+    print("********* new patches ********* :")
+    print("********* new patches ********* :")
+    print(" ")
+    my_print(new_patches)
 
 # from the ophined patches left find the ones with matching subject and commit
 # comments that have significant updates.
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1], sys.argv[2], sys.argv[3])

@@ -13,10 +13,12 @@ echo -n \# >> series; git log $rc --oneline -n 1 >> series
 
 for b in `cat $manifest`; do 
 	echo \# $b >> series;
+	echo \# $b >> series-android;
 	git checkout $b; 
 	mkdir patches;
 	git format-patch --suffix=.$b $rc..; 
-	ls *.$b >> series; 
+	ls *.$b >> series;
+	ls *.$b >> series-android;
 	mv *.$b patches;
 done
 
