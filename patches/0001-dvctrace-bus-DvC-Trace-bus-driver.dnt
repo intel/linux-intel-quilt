@@ -1,0 +1,544 @@
+From e40e8440aab9cc6d2a396dd69d16d5024d9edb11 Mon Sep 17 00:00:00 2001
+From: Traian Schiau <traianx.schiau@intel.com>
+Date: Thu, 31 Mar 2016 11:30:56 +0300
+Subject: [PATCH 01/63] dvctrace-bus: DvC-Trace bus driver
+
+DvC Trace is part of USB Debug class which provides a way of
+sending trace data via USB.
+This adds a pseudobus for devices/drivers capable of sending
+traces over such interface.
+
+Signed-off-by: Traian Schiau <traianx.schiau@intel.com>
+Signed-off-by: Tian, Baofeng <baofeng.tian@intel.com>
+---
+ Documentation/ABI/testing/sysfs-bus-dvctrace |  26 ++
+ MAINTAINERS                                  |   7 +
+ drivers/bus/Kconfig                          |  24 ++
+ drivers/bus/Makefile                         |   2 +
+ drivers/bus/dvctrace.c                       | 278 +++++++++++++++++++
+ include/linux/dvctrace.h                     | 134 +++++++++
+ 6 files changed, 471 insertions(+)
+ create mode 100644 Documentation/ABI/testing/sysfs-bus-dvctrace
+ create mode 100644 drivers/bus/dvctrace.c
+ create mode 100644 include/linux/dvctrace.h
+
+diff --git a/Documentation/ABI/testing/sysfs-bus-dvctrace b/Documentation/ABI/testing/sysfs-bus-dvctrace
+new file mode 100644
+index 000000000000..0abdd3293364
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-bus-dvctrace
+@@ -0,0 +1,26 @@
++What:		/sys/bus/dvctrace
++Date:		May 2015
++KernelVersion:	4.0
++Contact:	Traian Schiau <traianx.schiau@intel.com>
++Description:	Groups the devices and drivers registered to
++		to dvc-trace bus.
++
++What:		/sys/bus/dvctrace/devices/<device>/status
++Date:		May 2015
++KernelVersion:	4.0
++Contact:	Traian Schiau <traianx.schiau@intel.com>
++Description:	(R) The status of a dvc-trace source device with
++		respect to an USB function driver.
++		  Free - The device is free
++		  Reserved - The device is reserved by an USB
++			function but not in use.
++		  In use - The device is used by an USB function.
++
++What:		/sys/bus/dvctrace/devices/<device>/protocol
++Date:		May 2015
++KernelVersion:	4.0
++Contact:	Traian Schiau <traianx.schiau@intel.com>
++Description:	(RW) The protocol id of a dvc-trace source device,
++		this will used in function driver interface
++		descriptors (u8). According to USB debug class
++		specification the protocol id is vendor specific.
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 48a65c3a4189..1f22e788fffd 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -5129,6 +5129,13 @@ S:	Maintained
+ F:	drivers/media/usb/dvb-usb-v2/dvb_usb*
+ F:	drivers/media/usb/dvb-usb-v2/usb_urb.c
+ 
++DVC_TRACE BUS DRIVER
++M:	Traian Schiau <traianx.schiau@intel.com>
++S:	Maintained
++F:	drivers/bus/dvctrace.c
++F:	include/linux/dvctrace.h
++F:	Documentation/ABI/testing/sysfs-bus-dvctrace
++
+ DYNAMIC DEBUG
+ M:	Jason Baron <jbaron@akamai.com>
+ S:	Maintained
+diff --git a/drivers/bus/Kconfig b/drivers/bus/Kconfig
+index 1851112ccc29..16f0e0f0d59c 100644
+--- a/drivers/bus/Kconfig
++++ b/drivers/bus/Kconfig
+@@ -183,4 +183,28 @@ config DA8XX_MSTPRI
+ 
+ source "drivers/bus/fsl-mc/Kconfig"
+ 
++config DVC_TRACE_BUS
++	bool "DvC-Trace pseudobus"
++	default n
++	depends on USB_GADGET
++	help
++	  DvC-Trace pseudobus is meant to group devices capable of sending
++	  trace data via a USB DvC-Trace gadget function.
++	  An usb function driver will be able to choose a source device and
++	  provide the means to transfer the data.
++
++	  Say Y to enable it.
++
++config DVC_TRACE_BUS_DEBUG
++	bool "DvC-Trace pseudobus debug"
++	default n
++	depends on DVC_TRACE_BUS
++	help
++	  DvC-Trace pseudobus is meant to group devices capable of sending
++	  trace data via a USB DvC-Trace gadget function.
++	  An usb function driver will be able to choose a source device and
++	  provide the means to transfer the data.
++
++	  Say Y to enable extended debug messages in this driver.
++
+ endmenu
+diff --git a/drivers/bus/Makefile b/drivers/bus/Makefile
+index ca300b1914ce..cf118be0785f 100644
+--- a/drivers/bus/Makefile
++++ b/drivers/bus/Makefile
+@@ -32,3 +32,5 @@ obj-$(CONFIG_UNIPHIER_SYSTEM_BUS)	+= uniphier-system-bus.o
+ obj-$(CONFIG_VEXPRESS_CONFIG)	+= vexpress-config.o
+ 
+ obj-$(CONFIG_DA8XX_MSTPRI)	+= da8xx-mstpri.o
++obj-$(CONFIG_DVC_TRACE_BUS) += dvctrace.o
++subdir-ccflags-$(CONFIG_DVC_TRACE_BUS_DEBUG)	+= -DDVCT_DEBUG
+diff --git a/drivers/bus/dvctrace.c b/drivers/bus/dvctrace.c
+new file mode 100644
+index 000000000000..c1770ca44422
+--- /dev/null
++++ b/drivers/bus/dvctrace.c
+@@ -0,0 +1,278 @@
++/*
++ * DvC-Trace(dvct) Bus driver
++ *
++ * Copyright (C) 2015, Intel Corporation.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": %s: " fmt, __func__
++
++#include <linux/module.h>
++#include <linux/device.h>
++#include <linux/dvctrace.h>
++
++#ifdef DVCT_DEBUG
++#define DVCT_IN() pr_debug("in\n")
++#else
++#define DVCT_IN() do {} while (0)
++#endif
++
++static ssize_t protocol_show(struct device *dev, struct device_attribute *attr,
++			     char *buf)
++{
++	DVCT_IN();
++	return sprintf(buf, "%d\n", dev_to_dvct_source_device(dev)->protocol);
++}
++
++static ssize_t protocol_store(struct device *dev, struct device_attribute *attr,
++			      const char *buf, size_t size)
++{
++	struct dvct_source_device *ds_dev = dev_to_dvct_source_device(dev);
++
++	DVCT_IN();
++	if (ds_dev->instance_taken)
++		return -EBUSY;
++
++	if (!kstrtou8(buf, 10, &ds_dev->protocol))
++		return size;
++
++	return -EINVAL;
++}
++
++static DEVICE_ATTR_RW(protocol);
++
++static ssize_t status_show(struct device *dev, struct device_attribute *attr,
++			   char *buf)
++{
++	struct dvct_source_device *ds_dev = dev_to_dvct_source_device(dev);
++
++	DVCT_IN();
++	if (ds_dev->instance_taken) {
++		if (ds_dev->function_taken)
++			return sprintf(buf, "In use\n");
++		else
++			return sprintf(buf, "Reserved\n");
++	} else {
++		return sprintf(buf, "Free\n");
++	}
++}
++
++static DEVICE_ATTR_RO(status);
++
++static struct attribute *dvct_source_attrs[] = {
++	&dev_attr_protocol.attr,
++	&dev_attr_status.attr,
++	NULL,
++};
++
++ATTRIBUTE_GROUPS(dvct_source);
++
++
++static int dvct_match(struct device *dev, struct device_driver *drv)
++{
++	const char *devname = dev_name(dev);
++
++	DVCT_IN();
++	if (strlen(devname) <= strlen(drv->name))
++		return -1;
++	if (strncmp(devname, drv->name, strlen(drv->name)))
++		return -1;
++	return devname[strlen(drv->name)] == '-';
++};
++
++static struct bus_type dvctrace_bus_type = {
++	.name = "dvctrace",
++	.match = dvct_match,
++	.dev_groups = dvct_source_groups,
++};
++
++static struct device dvctrace_bus = {
++	.init_name = "dvctrace-bus",
++};
++
++static int dvct_match_free(struct device *dev, void *data)
++{
++	struct dvct_source_device *ds_dev = dev_to_dvct_source_device(dev);
++
++	DVCT_IN();
++	return !ds_dev->instance_taken;
++}
++
++struct dvct_source_device *dvct_source_find_by_name(const char *name)
++{
++	struct device *dev;
++
++	DVCT_IN();
++	dev = bus_find_device_by_name(&dvctrace_bus_type, NULL, name);
++	if (IS_ERR_OR_NULL(dev))
++		return ERR_PTR(-ENODEV);
++	return dev_to_dvct_source_device(dev);
++}
++EXPORT_SYMBOL_GPL(dvct_source_find_by_name);
++
++struct dvct_source_device *dvct_source_find_free_by_name(const char *name)
++{
++	struct dvct_source_device *ds_dev = dvct_source_find_by_name(name);
++
++	DVCT_IN();
++	if (IS_ERR_OR_NULL(ds_dev))
++		return ERR_PTR(-ENODEV);
++
++	if (ds_dev->instance_taken)
++		return ERR_PTR(-EBUSY);
++
++	return ds_dev;
++}
++EXPORT_SYMBOL_GPL(dvct_source_find_free_by_name);
++
++struct dvct_source_device *dvct_source_find_free(void)
++{
++	struct device *dev = bus_find_device(&dvctrace_bus_type, NULL,
++					     NULL, dvct_match_free);
++	DVCT_IN();
++	if (IS_ERR_OR_NULL(dev))
++		return ERR_PTR(-ENODEV);
++
++	return dev_to_dvct_source_device(dev);
++}
++EXPORT_SYMBOL_GPL(dvct_source_find_free);
++
++static int fn_count_free(struct device *dev, void *data)
++{
++	int *count = data;
++	struct dvct_source_device *ds_dev = dev_to_dvct_source_device(dev);
++
++	DVCT_IN();
++	if (!ds_dev->instance_taken)
++		(*count)++;
++	return 0;
++}
++
++int dvct_source_count_free(void)
++{
++	int count = 0;
++
++	DVCT_IN();
++	bus_for_each_dev(&dvctrace_bus_type, NULL, &count, fn_count_free);
++	return count;
++}
++EXPORT_SYMBOL_GPL(dvct_source_count_free);
++
++struct dvct_source_driver
++*dvct_source_get_drv(struct dvct_source_device *ds_dev)
++{
++	BUG_ON(ds_dev->device.driver == NULL);
++	return drv_to_dvct_source_driver(ds_dev->device.driver);
++}
++EXPORT_SYMBOL_GPL(dvct_source_get_drv);
++
++int dvct_source_device_add(struct dvct_source_device *ds_dev,
++			struct dvct_source_driver *ds_drv)
++{
++	int ret;
++
++	DVCT_IN();
++	if (!ds_dev)
++		return -ENODEV;
++	if (!ds_drv)
++		return -EINVAL;
++
++	spin_lock_init(&ds_dev->lock);
++	spin_lock(&ds_dev->lock);
++	ds_dev->instance_taken = 0;
++	ds_dev->function_taken = 0;
++	spin_unlock(&ds_dev->lock);
++
++	device_initialize(&ds_dev->device);
++	ds_dev->device.bus = &dvctrace_bus_type;
++
++	if (!ds_dev->device.parent)
++		ds_dev->device.parent = &dvctrace_bus;
++
++	dev_set_name(&ds_dev->device, "%s-%s", ds_drv->driver.name,
++		     ds_dev->name_add);
++
++	ret = device_add(&ds_dev->device);
++	if (ret) {
++		dev_err(&dvctrace_bus, "Cannot add device %s %d\n",
++			ds_dev->name_add, ret);
++		return ret;
++	}
++
++	dev_notice(&dvctrace_bus, "Adding device %s\n", ds_dev->name_add);
++	return 0;
++};
++EXPORT_SYMBOL_GPL(dvct_source_device_add);
++
++void dvct_source_device_del(struct dvct_source_device *ds_dev)
++{
++	DVCT_IN();
++	device_del(&ds_dev->device);
++};
++EXPORT_SYMBOL_GPL(dvct_source_device_del);
++
++int __dvct_source_driver_register(struct dvct_source_driver *ds_drv,
++			       struct module *owner)
++{
++	DVCT_IN();
++	if (!ds_drv->activate ||
++	    !ds_drv->binded ||
++	    !ds_drv->start_transfer ||
++	    !ds_drv->stop_transfer ||
++	    !ds_drv->unbinded ||
++	    !ds_drv->deactivate)
++		return -EINVAL;
++
++	ds_drv->driver.owner = owner;
++	ds_drv->driver.bus = &dvctrace_bus_type;
++	return driver_register(&ds_drv->driver);
++}
++EXPORT_SYMBOL_GPL(__dvct_source_driver_register);
++
++void dvct_source_driver_unregister(struct dvct_source_driver *ds_drv)
++{
++	DVCT_IN();
++	driver_unregister(&ds_drv->driver);
++}
++EXPORT_SYMBOL_GPL(dvct_source_driver_unregister);
++
++static int __init dtb_init(void)
++{
++	int ret;
++
++	DVCT_IN();
++	ret = device_register(&dvctrace_bus);
++	if (ret) {
++		pr_err("Cannot register bus device %d\n", ret);
++		return ret;
++	}
++
++	ret = bus_register(&dvctrace_bus_type);
++	if (ret) {
++		pr_err("Cannot register bus %d\n", ret);
++		return ret;
++	}
++	return 0;
++}
++
++static void __exit dtb_exit(void)
++{
++	DVCT_IN();
++	bus_unregister(&dvctrace_bus_type);
++}
++
++subsys_initcall(dtb_init);
++module_exit(dtb_exit);
++
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("DvC-Trace bus implementation");
++MODULE_AUTHOR("Traian Schiau <traianx.schiau@intel.com>");
+diff --git a/include/linux/dvctrace.h b/include/linux/dvctrace.h
+new file mode 100644
+index 000000000000..18291efb18b6
+--- /dev/null
++++ b/include/linux/dvctrace.h
+@@ -0,0 +1,134 @@
++/*
++ * DvC.Trace(dvct) Bus
++ *
++ * Copyright (C) 2015, Intel Corporation.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef __DVCTRACE_H
++#define __DVCTRACE_H
++
++#include <linux/usb/gadget.h>
++
++/**
++ * The function is binded to a gadget
++ *	function-driver RW
++ *	client-driver   RO
++ */
++#define DVCT_MASK_ONLINE   BIT(0)
++
++/**
++ * The client is currently transferring
++ *	function-driver RO
++ *	client-driver   RW
++ */
++#define DVCT_MASK_TRANS    BIT(1)
++
++/**
++ * An error was detected the client
++ *	function-driver RO
++ *	client-driver   RW
++ */
++#define DVCT_MASK_ERR      BIT(2)
++
++#define DVCT_MASK_ONLINE_TRANS (DVCT_MASK_ONLINE | DVCT_MASK_TRANS)
++#define DVCT_MASK_ALL (DVCT_MASK_ONLINE | DVCT_MASK_TRANS | DVCT_MASK_ERR)
++
++/**
++ * Bitwise status manipulation macros
++ */
++#define dvct_set_status(s, m) atomic_set(s, atomic_read(s)|(m))
++#define dvct_clr_status(s, m) atomic_set(s, atomic_read(s) & (~(m)))
++#define dvct_get_status(s, m) (atomic_read(s) & (m))
++
++/**
++ * dvct_source_device - DvC Trace function to source (backend) interface
++ *
++ * @name_add: postfix used to compute the source name (<driver_name>-<name_add>)
++ * @protocol: Interface protocol code (used in IAD, control and data
++ *
++ * @instance_taken, @function_taken, @lock, @device are reserved for
++ * internal use only.
++ */
++struct dvct_source_device {
++	const char *name_add;
++	u8 protocol;
++	u32 instance_taken:1;
++	u32 function_taken:1;
++	spinlock_t lock;
++	struct device device;
++};
++
++/**
++ * dvct_source_driver - DvC Trace source (backend) representation
++ * @activate: pre-bind callback called when the function instance linked to the
++ *	source device is selected as a part of a configuration eg.
++ *	ln -s cfgfs/.../functions/dvctrace.x  cfgfs/.../configs/c.x/
++ *	atomic_t * , points to the status field of the function, the client
++ *	should update relevant bits (DVCT_MASK_TRANS, DVCT_MASK_ERR).
++ * @binded: post-bind callback, at this stage the transfer endpoint is
++ *	allocated;
++ * @connected: (Optional) The gadget is now connected to a host, the connection
++ *	speed is available.
++ * @start_transfer: called upon receiving SET_TRACE, the host side should be
++ *	able ready to receive data, the client could submit usb requests.
++ * @stop_transfer: host side request to stop the data transfer.
++ * @disconnected: (Optional) The gadget was disconnected from the host.
++ *	Before calling this the function driver will call stop_trasfer if
++ *	DVCT_MASK_TRANS is set.
++ * @unbinded: The USB-function is no longer used.
++ * @deactivate: The USB-function is no longer part of a configuration.
++ *
++ * If any of the non optional callbacks is not provided (NULL) driver
++ * registration will fail.
++ */
++struct dvct_source_driver {
++	struct device_driver driver;
++	int (*activate)(struct dvct_source_device *, atomic_t *);
++	int (*binded)(struct dvct_source_device *, struct usb_ep *,
++				 struct usb_function *);
++	void (*connected)(struct dvct_source_device *, enum usb_device_speed);
++	int (*start_transfer)(struct dvct_source_device *, u8);
++	int (*stop_transfer)(struct dvct_source_device *);
++	void (*disconnected)(struct dvct_source_device *);
++	void (*unbinded)(struct dvct_source_device *);
++	void (*deactivate)(struct dvct_source_device *);
++};
++
++#define dev_to_dvct_source_device(ptr) \
++	container_of(ptr, struct dvct_source_device, device)
++
++#define drv_to_dvct_source_driver(ptr) \
++	container_of(ptr, struct dvct_source_driver, driver)
++
++extern struct dvct_source_driver
++*dvct_source_get_drv(struct dvct_source_device *dev);
++
++#define dvct_source_driver_register(drv) \
++	__dvct_source_driver_register(drv, THIS_MODULE)
++extern int __dvct_source_driver_register(struct dvct_source_driver *,
++					 struct module *);
++extern void dvct_source_driver_unregister(struct dvct_source_driver *);
++extern int dvct_source_device_add(struct dvct_source_device *,
++				  struct dvct_source_driver *);
++extern void dvct_source_device_del(struct dvct_source_device *);
++
++extern struct dvct_source_device *dvct_source_find_by_name(const char *name);
++
++extern struct dvct_source_device
++*dvct_source_find_free_by_name(const char *name);
++
++extern struct dvct_source_device *dvct_source_find_free(void);
++
++extern int dvct_source_count_free(void);
++
++#endif /* __DVCTRACE_H*/
+-- 
+2.19.1
+

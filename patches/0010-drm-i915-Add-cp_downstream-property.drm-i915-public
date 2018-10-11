@@ -1,0 +1,155 @@
+From 1c1ae6c93368cf8b574acbfc01cce541339a856f Mon Sep 17 00:00:00 2001
+From: "Romli, Khairul Anuar" <khairul.anuar.romli@intel.com>
+Date: Thu, 21 Dec 2017 23:51:03 +0530
+Subject: [PATCH 10/11] drm/i915: Add cp_downstream property
+
+Implements drm blob property cp_downstream_info property on HDCP
+capable connectors.
+
+Downstream topology info is gathered across authentication stages
+and stored in intel_conenctor. When HDCP authentication is successful,
+new blob with latest downstream topology information is updated to
+cp_downstream_info property.
+
+Change-Id: I4646ce3c1e971573bab815e655c2bb66da170a40
+Signed-off-by: Ramalingam C <ramalingam.c@intel.com>
+Signed-off-by: Romli, Khairul Anuar <khairul.anuar.romli@intel.com>
+---
+ drivers/gpu/drm/i915/intel_drv.h  |  3 +++
+ drivers/gpu/drm/i915/intel_hdcp.c | 39 +++++++++++++++++++++++++++++--
+ include/drm/drm_hdcp.h            |  3 ++-
+ 3 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index d4b307b531ec..d734030c2ac1 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -424,6 +424,9 @@ struct intel_connector {
+ 	unsigned int revocated_ksv_cnt;
+ 	u8 *revocated_ksv_list;
+ 	u32 srm_blob_id;
++
++	/* Downstream info like, depth, device_count, bksv and ksv_list etc */
++	struct cp_downstream_info *downstream_info;
+ };
+ 
+ struct intel_digital_connector_state {
+diff --git a/drivers/gpu/drm/i915/intel_hdcp.c b/drivers/gpu/drm/i915/intel_hdcp.c
+index 20f78b572d1b..0c481f59b24d 100644
+--- a/drivers/gpu/drm/i915/intel_hdcp.c
++++ b/drivers/gpu/drm/i915/intel_hdcp.c
+@@ -266,6 +266,9 @@ int intel_hdcp_auth_downstream(struct intel_connector *connector)
+ 	if (num_downstream == 0)
+ 		return -EINVAL;
+ 
++	connector->downstream_info->device_count = num_downstream;
++	connector->downstream_info->depth = DRM_HDCP_DEPTH(bstatus[1]);
++
+ 	ksv_fifo = kzalloc(num_downstream * DRM_HDCP_KSV_LEN, GFP_KERNEL);
+ 	if (!ksv_fifo)
+ 		return -ENOMEM;
+@@ -279,6 +282,9 @@ int intel_hdcp_auth_downstream(struct intel_connector *connector)
+ 		return -EPERM;
+ 	}
+ 
++	memcpy(connector->downstream_info->ksv_list, ksv_fifo,
++	       num_downstream * DRM_HDCP_KSV_LEN);
++
+ 	/* Process V' values from the receiver */
+ 	for (i = 0; i < DRM_HDCP_V_PRIME_NUM_PARTS; i++) {
+ 		ret = shim->read_v_prime_part(intel_dig_port, i, &vprime);
+@@ -568,15 +574,20 @@ static int intel_hdcp_auth(struct intel_connector *connector)
+ 		return -EPERM;
+ 	}
+ 
++	memcpy(connector->downstream_info->bksv, bksv.shim,
++	       DRM_MODE_HDCP_KSV_LEN);
++
+ 	I915_WRITE(PORT_HDCP_BKSVLO(port), bksv.reg[0]);
+ 	I915_WRITE(PORT_HDCP_BKSVHI(port), bksv.reg[1]);
+ 
+ 	ret = shim->repeater_present(intel_dig_port, &repeater_present);
+ 	if (ret)
+ 		return ret;
+-	if (repeater_present)
++	if (repeater_present) {
+ 		I915_WRITE(HDCP_REP_CTL,
+ 			   intel_hdcp_get_repeater_ctl(intel_dig_port));
++		connector->downstream_info->is_repeater = true;
++	}
+ 
+ 	ret = shim->toggle_signalling(intel_dig_port, true);
+ 	if (ret)
+@@ -669,6 +680,9 @@ static int _intel_hdcp_disable(struct intel_connector *connector)
+ 		return ret;
+ 	}
+ 
++	memset(connector->downstream_info, 0,
++	       sizeof(struct cp_downstream_info));
++
+ 	DRM_DEBUG_KMS("HDCP is disabled\n");
+ 	return 0;
+ }
+@@ -715,6 +729,9 @@ static int _intel_hdcp_enable(struct intel_connector *connector)
+ 		_intel_hdcp_disable(connector);
+ 	}
+ 
++	memset(connector->downstream_info, 0,
++	       sizeof(struct cp_downstream_info));
++
+ 	DRM_ERROR("HDCP authentication failed (%d tries/%d)\n", tries, ret);
+ 	return ret;
+ }
+@@ -724,9 +741,18 @@ static void intel_hdcp_enable_work(struct work_struct *work)
+ 	struct intel_connector *connector = container_of(work,
+ 							 struct intel_connector,
+ 							 hdcp_enable_work);
++	int ret;
+ 
+ 	mutex_lock(&connector->hdcp_mutex);
+-	_intel_hdcp_enable(connector);
++	ret = _intel_hdcp_enable(connector);
++	if (!ret) {
++		ret = drm_mode_connector_update_cp_downstream_property(
++						&connector->base,
++						connector->downstream_info);
++		if (ret)
++			DRM_ERROR("Downstream_property update failed.%d\n",
++				  ret);
++	}
+ 	mutex_unlock(&connector->hdcp_mutex);
+ }
+ 
+@@ -786,6 +812,15 @@ int intel_hdcp_init(struct intel_connector *connector,
+ 	if (ret)
+ 		return ret;
+ 
++	ret = drm_connector_attach_cp_downstream_property(&connector->base);
++	if (ret)
++		return ret;
++
++	connector->downstream_info = kzalloc(sizeof(struct cp_downstream_info),
++					     GFP_KERNEL);
++	if (!connector->downstream_info)
++		return -ENOMEM;
++
+ 	connector->hdcp_shim = hdcp_shim;
+ 	mutex_init(&connector->hdcp_mutex);
+ 	INIT_DELAYED_WORK(&connector->hdcp_check_work, intel_hdcp_check_work);
+diff --git a/include/drm/drm_hdcp.h b/include/drm/drm_hdcp.h
+index f17eb2910bdb..9f5284e4e427 100644
+--- a/include/drm/drm_hdcp.h
++++ b/include/drm/drm_hdcp.h
+@@ -19,7 +19,8 @@
+ #define DRM_HDCP_RI_LEN				2
+ #define DRM_HDCP_V_PRIME_PART_LEN		4
+ #define DRM_HDCP_V_PRIME_NUM_PARTS		5
+-#define DRM_HDCP_NUM_DOWNSTREAM(x)		(x & 0x7f)
++#define DRM_HDCP_NUM_DOWNSTREAM(x)		(x & 0x3f)
++#define DRM_HDCP_DEPTH(x)			(x & 0x7)
+ #define DRM_HDCP_MAX_CASCADE_EXCEEDED(x)	(x & BIT(3))
+ #define DRM_HDCP_MAX_DEVICE_EXCEEDED(x)		(x & BIT(7))
+ 
+-- 
+2.19.1
+
