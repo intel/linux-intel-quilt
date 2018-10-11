@@ -1,0 +1,96 @@
+From c98303c54ec63d45360b26610fa6d7ff3bdb7128 Mon Sep 17 00:00:00 2001
+From: Todd Poynor <toddpoynor@google.com>
+Date: Tue, 19 Jun 2012 21:06:47 -0700
+Subject: [PATCH 052/429] ANDROID: input: gpio_input: convert from wakelocks to
+ wakeup sources
+
+And add device names to wakeup source names
+
+Change-Id: Ia5f2723319a2e749f00d6ec7d846edff6af6d5c2
+Signed-off-by: Todd Poynor <toddpoynor@google.com>
+---
+ drivers/input/misc/gpio_input.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/input/misc/gpio_input.c b/drivers/input/misc/gpio_input.c
+index 3122c19466a4..5875d739c550 100644
+--- a/drivers/input/misc/gpio_input.c
++++ b/drivers/input/misc/gpio_input.c
+@@ -20,7 +20,7 @@
+ #include <linux/input.h>
+ #include <linux/interrupt.h>
+ #include <linux/slab.h>
+-#include <linux/wakelock.h>
++#include <linux/pm_wakeup.h>
+ 
+ enum {
+ 	DEBOUNCE_UNSTABLE     = BIT(0),	/* Got irq, while debouncing */
+@@ -45,7 +45,7 @@ struct gpio_input_state {
+ 	int use_irq;
+ 	int debounce_count;
+ 	spinlock_t irq_lock;
+-	struct wake_lock wake_lock;
++	struct wakeup_source *ws;
+ 	struct gpio_key_state key_state[0];
+ };
+ 
+@@ -153,7 +153,7 @@ static enum hrtimer_restart gpio_event_input_timer_func(struct hrtimer *timer)
+ 	else if (!ds->use_irq)
+ 		hrtimer_start(timer, ds->info->poll_time, HRTIMER_MODE_REL);
+ 	else
+-		wake_unlock(&ds->wake_lock);
++		__pm_relax(ds->ws);
+ 
+ 	spin_unlock_irqrestore(&ds->irq_lock, irqflags);
+ 
+@@ -179,7 +179,7 @@ static irqreturn_t gpio_event_input_irq_handler(int irq, void *dev_id)
+ 		if (ks->debounce & DEBOUNCE_WAIT_IRQ) {
+ 			ks->debounce = DEBOUNCE_UNKNOWN;
+ 			if (ds->debounce_count++ == 0) {
+-				wake_lock(&ds->wake_lock);
++				__pm_stay_awake(ds->ws);
+ 				hrtimer_start(
+ 					&ds->timer, ds->info->debounce_time,
+ 					HRTIMER_MODE_REL);
+@@ -262,6 +262,7 @@ int gpio_event_input_func(struct gpio_event_input_devs *input_devs,
+ 	unsigned long irqflags;
+ 	struct gpio_event_input_info *di;
+ 	struct gpio_input_state *ds = *data;
++	char *wlname;
+ 
+ 	di = container_of(info, struct gpio_event_input_info, info);
+ 
+@@ -297,7 +298,19 @@ int gpio_event_input_func(struct gpio_event_input_devs *input_devs,
+ 		ds->debounce_count = di->keymap_size;
+ 		ds->input_devs = input_devs;
+ 		ds->info = di;
+-		wake_lock_init(&ds->wake_lock, WAKE_LOCK_SUSPEND, "gpio_input");
++		wlname = kasprintf(GFP_KERNEL, "gpio_input:%s%s",
++				   input_devs->dev[0]->name,
++				   (input_devs->count > 1) ? "..." : "");
++
++		ds->ws = wakeup_source_register(wlname);
++		kfree(wlname);
++		if (!ds->ws) {
++			ret = -ENOMEM;
++			pr_err("gpio_event_input_func: "
++				"Failed to allocate wakeup source\n");
++			goto err_ws_failed;
++		}
++
+ 		spin_lock_init(&ds->irq_lock);
+ 
+ 		for (i = 0; i < di->keymap_size; i++) {
+@@ -369,7 +382,8 @@ int gpio_event_input_func(struct gpio_event_input_devs *input_devs,
+ 		;
+ 	}
+ err_bad_keymap:
+-	wake_lock_destroy(&ds->wake_lock);
++	wakeup_source_unregister(ds->ws);
++err_ws_failed:
+ 	kfree(ds);
+ err_ds_alloc_failed:
+ 	return ret;
+-- 
+2.19.1
+

@@ -1,0 +1,275 @@
+From 66c4da236187e24893182d3562f91be210cc77b0 Mon Sep 17 00:00:00 2001
+From: Quentin Perret <quentin.perret@arm.com>
+Date: Thu, 12 Jul 2018 16:58:37 +0100
+Subject: [PATCH 395/429] ANDROID: drivers: Introduce a legacy Energy Model
+ loading driver
+
+The Energy Aware Scheduler (EAS) used to rely on statically defined
+Energy Models (EMs) in the device tree. Now that EAS uses the EM
+framework, the old-style EMs are not usable by default.
+
+To address this issue, introduce a driver able to read DT-based EMs and
+to load them in the EM framework, hence making them available to EAS.
+Since EAS now uses only the active costs of CPUs, the idle cost and
+cluster cost of the old EM are ignored. The driver can be compiled in
+using the CONFIG_LEGACY_ENERGY_MODEL_DT Kconfig option (off by default).
+
+The implementation of the driver is highly inspired by the EM loading
+code from android-4.14 and before (written by Robin Randhawa
+<robin.randhawa@arm.com>), and the arch_topology driver (Juri Lelli
+<juri.lelli@redhat.com>).
+
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I4f525dfb45113ba63f01aaf8e1e809ae6b34dd52
+---
+ drivers/Kconfig                     |    2 
+ drivers/Makefile                    |    2 
+ drivers/energy_model/Kconfig        |   16 ++
+ drivers/energy_model/Makefile       |    3 
+ drivers/energy_model/legacy_em_dt.c |  193 ++++++++++++++++++++++++++++++++++++
+ 5 files changed, 216 insertions(+)
+ create mode 100644 drivers/energy_model/Kconfig
+ create mode 100644 drivers/energy_model/Makefile
+ create mode 100644 drivers/energy_model/legacy_em_dt.c
+
+--- dev-bkc.orig/drivers/Kconfig
++++ dev-bkc/drivers/Kconfig
+@@ -227,4 +227,6 @@ source "drivers/vbs/Kconfig"
+ source "drivers/acrn/Kconfig"
+ 
+ source "drivers/vhm/Kconfig"
++
++source "drivers/energy_model/Kconfig"
+ endmenu
+--- dev-bkc.orig/drivers/Makefile
++++ dev-bkc/drivers/Makefile
+@@ -159,6 +159,8 @@ obj-$(CONFIG_REMOTEPROC)	+= remoteproc/
+ obj-$(CONFIG_RPMSG)		+= rpmsg/
+ obj-$(CONFIG_SOUNDWIRE)		+= soundwire/
+ 
++obj-$(CONFIG_ENERGY_MODEL)	+= energy_model/
++
+ # Virtualization drivers
+ obj-$(CONFIG_VIRT_DRIVERS)	+= virt/
+ obj-$(CONFIG_HYPERV)		+= hv/
+--- /dev/null
++++ dev-bkc/drivers/energy_model/Kconfig
+@@ -0,0 +1,16 @@
++config LEGACY_ENERGY_MODEL_DT
++	bool "Legacy DT-based Energy Model of CPUs"
++	default n
++	help
++	  The Energy Aware Scheduler (EAS) used to rely on Energy Models
++	  (EMs) statically defined in the Device Tree. More recent
++	  versions of EAS now rely on the EM framework to get the power
++	  costs of CPUs.
++
++	  This driver reads old-style static EMs in DT and feeds them in
++	  the EM framework, hence enabling to use EAS on platforms with
++	  old DT files. Since EAS now uses only the active costs of CPUs,
++	  the cluster-related costs and idle-costs of the old EM are
++	  ignored.
++
++	  If in doubt, say N.
+--- /dev/null
++++ dev-bkc/drivers/energy_model/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++
++obj-$(CONFIG_LEGACY_ENERGY_MODEL_DT)	+= legacy_em_dt.o
+--- /dev/null
++++ dev-bkc/drivers/energy_model/legacy_em_dt.c
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Legacy Energy Model loading driver
++ *
++ * Copyright (C) 2018, ARM Ltd.
++ * Written by: Quentin Perret, ARM Ltd.
++ */
++
++#define pr_fmt(fmt) "legacy-dt-em: " fmt
++
++#include <linux/cpufreq.h>
++#include <linux/cpumask.h>
++#include <linux/cpuset.h>
++#include <linux/energy_model.h>
++#include <linux/gfp.h>
++#include <linux/init.h>
++#include <linux/of.h>
++#include <linux/printk.h>
++#include <linux/slab.h>
++
++static cpumask_var_t cpus_to_visit;
++
++static DEFINE_PER_CPU(unsigned long, nr_states) = 0;
++
++struct em_state {
++	unsigned long frequency;
++	unsigned long power;
++	unsigned long capacity;
++};
++static DEFINE_PER_CPU(struct em_state*, cpu_em) = NULL;
++
++static void finish_em_loading_workfn(struct work_struct *work);
++static DECLARE_WORK(finish_em_loading_work, finish_em_loading_workfn);
++
++static DEFINE_MUTEX(em_loading_mutex);
++
++/*
++ * Callback given to the EM framework. All this does is browse the table
++ * created by legacy_em_dt().
++ */
++static int get_power(unsigned long *mW, unsigned long *KHz, int cpu)
++{
++	unsigned long nstates = per_cpu(nr_states, cpu);
++	struct em_state *em = per_cpu(cpu_em, cpu);
++	int i;
++
++	if (!nstates || !em)
++		return -ENODEV;
++
++	for (i = 0; i < nstates - 1; i++) {
++		if (em[i].frequency > *KHz)
++			break;
++	}
++
++	*KHz = em[i].frequency;
++	*mW = em[i].power;
++
++	return 0;
++}
++
++static int init_em_dt_callback(struct notifier_block *nb, unsigned long val,
++			       void *data)
++{
++	struct em_data_callback em_cb = EM_DATA_CB(get_power);
++	unsigned long nstates, scale_cpu, max_freq;
++	struct cpufreq_policy *policy = data;
++	const struct property *prop;
++	struct device_node *cn, *cp;
++	struct em_state *em;
++	int cpu, i, ret = 0;
++	const __be32 *tmp;
++
++	if (val != CPUFREQ_NOTIFY)
++		return 0;
++
++	mutex_lock(&em_loading_mutex);
++
++	/* Do not register twice an energy model */
++	for_each_cpu(cpu, policy->cpus) {
++		if (per_cpu(nr_states, cpu) || per_cpu(cpu_em, cpu)) {
++			pr_err("EM of CPU%d already loaded\n", cpu);
++			ret = -EEXIST;
++			goto unlock;
++		}
++	}
++
++	max_freq = policy->cpuinfo.max_freq;
++	if (!max_freq) {
++		pr_err("No policy->max for CPU%d\n", cpu);
++		ret = -EINVAL;
++		goto unlock;
++	}
++
++	cpu = cpumask_first(policy->cpus);
++	cn = of_get_cpu_node(cpu, NULL);
++	if (!cn) {
++		pr_err("No device_node for CPU%d\n", cpu);
++		ret = -ENODEV;
++		goto unlock;
++	}
++
++	cp = of_parse_phandle(cn, "sched-energy-costs", 0);
++	if (!cp) {
++		pr_err("CPU%d node has no sched-energy-costs\n", cpu);
++		ret = -ENODEV;
++		goto unlock;
++	}
++
++	prop = of_find_property(cp, "busy-cost-data", NULL);
++	if (!prop || !prop->value) {
++		pr_err("No busy-cost-data for CPU%d\n", cpu);
++		ret = -ENODEV;
++		goto unlock;
++	}
++
++	nstates = (prop->length / sizeof(u32)) / 2;
++	em = kcalloc(nstates, sizeof(struct em_cap_state), GFP_KERNEL);
++	if (!em) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++
++	/* Copy the capacity and power cost to the table. */
++	for (i = 0, tmp = prop->value; i < nstates; i++) {
++		em[i].capacity = be32_to_cpup(tmp++);
++		em[i].power = be32_to_cpup(tmp++);
++	}
++
++	/* Get the CPU capacity (according to the EM) */
++	scale_cpu = em[nstates - 1].capacity;
++	if (!scale_cpu) {
++		pr_err("CPU%d: capacity cannot be 0\n", cpu);
++		kfree(em);
++		ret = -EINVAL;
++		goto unlock;
++	}
++
++	/* Re-compute the intermediate frequencies based on the EM. */
++	for (i = 0; i < nstates; i++)
++		em[i].frequency = em[i].capacity * max_freq / scale_cpu;
++
++	/* Assign the table to all CPUs of this policy. */
++	for_each_cpu(i, policy->cpus) {
++		per_cpu(nr_states, i) = nstates;
++		per_cpu(cpu_em, i) = em;
++	}
++
++	pr_info("Registering EM of %*pbl\n", cpumask_pr_args(policy->cpus));
++	em_register_perf_domain(policy->cpus, nstates, &em_cb);
++
++	/* Finish the work when all possible CPUs have been registered. */
++	cpumask_andnot(cpus_to_visit, cpus_to_visit, policy->cpus);
++	if (cpumask_empty(cpus_to_visit))
++		schedule_work(&finish_em_loading_work);
++
++unlock:
++	mutex_unlock(&em_loading_mutex);
++
++	return ret;
++}
++
++static struct notifier_block init_em_dt_notifier = {
++	.notifier_call = init_em_dt_callback,
++};
++
++static void finish_em_loading_workfn(struct work_struct *work)
++{
++	cpufreq_unregister_notifier(&init_em_dt_notifier,
++				    CPUFREQ_POLICY_NOTIFIER);
++	free_cpumask_var(cpus_to_visit);
++
++	/* Let the scheduler know the Energy Model is ready. */
++	rebuild_sched_domains();
++}
++
++static int __init register_cpufreq_notifier(void)
++{
++	int ret;
++
++	if (!alloc_cpumask_var(&cpus_to_visit, GFP_KERNEL))
++		return -ENOMEM;
++
++	cpumask_copy(cpus_to_visit, cpu_possible_mask);
++
++	ret = cpufreq_register_notifier(&init_em_dt_notifier,
++					CPUFREQ_POLICY_NOTIFIER);
++
++	if (ret)
++		free_cpumask_var(cpus_to_visit);
++
++	return ret;
++}
++core_initcall(register_cpufreq_notifier);

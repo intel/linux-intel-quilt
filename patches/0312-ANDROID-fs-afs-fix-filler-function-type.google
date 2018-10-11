@@ -1,0 +1,78 @@
+From bf356754a4f3e0179e4d946853d31ffae0558108 Mon Sep 17 00:00:00 2001
+From: Sami Tolvanen <samitolvanen@google.com>
+Date: Fri, 2 Mar 2018 09:02:16 -0800
+Subject: [PATCH 312/429] ANDROID: fs: afs: fix filler function type
+
+Bug: 67506682
+Change-Id: I76d208c8606ee5af144891d14bd309912d4d788d
+Signed-off-by: Sami Tolvanen <samitolvanen@google.com>
+---
+ fs/afs/file.c     | 14 ++++++++++----
+ fs/afs/internal.h |  2 +-
+ 2 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/fs/afs/file.c b/fs/afs/file.c
+index 7d4f26198573..b95ff424bd08 100644
+--- a/fs/afs/file.c
++++ b/fs/afs/file.c
+@@ -260,12 +260,11 @@ int afs_fetch_data(struct afs_vnode *vnode, struct key *key, struct afs_read *de
+ /*
+  * read page from file, directory or symlink, given a key to use
+  */
+-int afs_page_filler(void *data, struct page *page)
++static int __afs_page_filler(struct key *key, struct page *page)
+ {
+ 	struct inode *inode = page->mapping->host;
+ 	struct afs_vnode *vnode = AFS_FS_I(inode);
+ 	struct afs_read *req;
+-	struct key *key = data;
+ 	int ret;
+ 
+ 	_enter("{%x},{%lu},{%lu}", key_serial(key), inode->i_ino, page->index);
+@@ -372,6 +371,13 @@ int afs_page_filler(void *data, struct page *page)
+ 	return ret;
+ }
+ 
++int afs_page_filler(struct file *data, struct page *page)
++{
++	struct key *key = (struct key *)data;
++
++	return __afs_page_filler(key, page);
++}
++
+ /*
+  * read page from file, directory or symlink, given a file to nominate the key
+  * to be used
+@@ -384,14 +390,14 @@ static int afs_readpage(struct file *file, struct page *page)
+ 	if (file) {
+ 		key = afs_file_key(file);
+ 		ASSERT(key != NULL);
+-		ret = afs_page_filler(key, page);
++		ret = __afs_page_filler(key, page);
+ 	} else {
+ 		struct inode *inode = page->mapping->host;
+ 		key = afs_request_key(AFS_FS_S(inode->i_sb)->cell);
+ 		if (IS_ERR(key)) {
+ 			ret = PTR_ERR(key);
+ 		} else {
+-			ret = afs_page_filler(key, page);
++			ret = __afs_page_filler(key, page);
+ 			key_put(key);
+ 		}
+ 	}
+diff --git a/fs/afs/internal.h b/fs/afs/internal.h
+index 871a228d7f37..9d62a6a2454c 100644
+--- a/fs/afs/internal.h
++++ b/fs/afs/internal.h
+@@ -752,7 +752,7 @@ extern void afs_put_wb_key(struct afs_wb_key *);
+ extern int afs_open(struct inode *, struct file *);
+ extern int afs_release(struct inode *, struct file *);
+ extern int afs_fetch_data(struct afs_vnode *, struct key *, struct afs_read *);
+-extern int afs_page_filler(void *, struct page *);
++extern int afs_page_filler(struct file *, struct page *);
+ extern void afs_put_read(struct afs_read *);
+ 
+ /*
+-- 
+2.19.1
+

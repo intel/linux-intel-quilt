@@ -1,0 +1,137 @@
+From 4e5182ff302d74cd63414906c4ef4882399c8907 Mon Sep 17 00:00:00 2001
+From: Jin Qian <jinqian@google.com>
+Date: Thu, 13 Apr 2017 17:07:58 -0700
+Subject: [PATCH 169/429] ANDROID: uid_sys_stats: reduce update_io_stats
+ overhead
+
+Replaced read_lock with rcu_read_lock to reduce time that preemption
+is disabled.
+
+Added a function to update io stats for specific uid and moved
+hash table lookup, user_namespace out of loops.
+
+Bug: 37319300
+Change-Id: I2b81b5cd3b6399b40d08c3c14b42cad044556970
+Signed-off-by: Jin Qian <jinqian@google.com>
+---
+ drivers/misc/uid_sys_stats.c | 61 ++++++++++++++++++++++++++++++------
+ 1 file changed, 51 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/misc/uid_sys_stats.c b/drivers/misc/uid_sys_stats.c
+index 2f4572fe8fd1..c9ee4f0cd4e4 100644
+--- a/drivers/misc/uid_sys_stats.c
++++ b/drivers/misc/uid_sys_stats.c
+@@ -235,28 +235,28 @@ static void clean_uid_io_last_stats(struct uid_entry *uid_entry,
+ 	io_last->fsync -= task->ioac.syscfs;
+ }
+ 
+-static void update_io_stats_locked(void)
++static void update_io_stats_all_locked(void)
+ {
+ 	struct uid_entry *uid_entry;
+ 	struct task_struct *task, *temp;
+ 	struct io_stats *io_bucket, *io_curr, *io_last;
++	struct user_namespace *user_ns = current_user_ns();
+ 	unsigned long bkt;
+-
+-	BUG_ON(!rt_mutex_is_locked(&uid_lock));
++	uid_t uid;
+ 
+ 	hash_for_each(hash_table, bkt, uid_entry, hash)
+ 		memset(&uid_entry->io[UID_STATE_TOTAL_CURR], 0,
+ 			sizeof(struct io_stats));
+ 
+-	read_lock(&tasklist_lock);
++	rcu_read_lock();
+ 	do_each_thread(temp, task) {
+-		uid_entry = find_or_register_uid(from_kuid_munged(
+-			current_user_ns(), task_uid(task)));
++		uid = from_kuid_munged(user_ns, task_uid(task));
++		uid_entry = find_or_register_uid(uid);
+ 		if (!uid_entry)
+ 			continue;
+ 		add_uid_io_curr_stats(uid_entry, task);
+ 	} while_each_thread(temp, task);
+-	read_unlock(&tasklist_lock);
++	rcu_read_unlock();
+ 
+ 	hash_for_each(hash_table, bkt, uid_entry, hash) {
+ 		io_bucket = &uid_entry->io[uid_entry->state];
+@@ -279,6 +279,47 @@ static void update_io_stats_locked(void)
+ 	}
+ }
+ 
++static void update_io_stats_uid_locked(uid_t target_uid)
++{
++	struct uid_entry *uid_entry;
++	struct task_struct *task, *temp;
++	struct io_stats *io_bucket, *io_curr, *io_last;
++	struct user_namespace *user_ns = current_user_ns();
++
++	uid_entry = find_or_register_uid(target_uid);
++	if (!uid_entry)
++		return;
++
++	memset(&uid_entry->io[UID_STATE_TOTAL_CURR], 0,
++		sizeof(struct io_stats));
++
++	rcu_read_lock();
++	do_each_thread(temp, task) {
++		if (from_kuid_munged(user_ns, task_uid(task)) != target_uid)
++			continue;
++		add_uid_io_curr_stats(uid_entry, task);
++	} while_each_thread(temp, task);
++	rcu_read_unlock();
++
++	io_bucket = &uid_entry->io[uid_entry->state];
++	io_curr = &uid_entry->io[UID_STATE_TOTAL_CURR];
++	io_last = &uid_entry->io[UID_STATE_TOTAL_LAST];
++
++	io_bucket->read_bytes +=
++		io_curr->read_bytes - io_last->read_bytes;
++	io_bucket->write_bytes +=
++		io_curr->write_bytes - io_last->write_bytes;
++	io_bucket->rchar += io_curr->rchar - io_last->rchar;
++	io_bucket->wchar += io_curr->wchar - io_last->wchar;
++	io_bucket->fsync += io_curr->fsync - io_last->fsync;
++
++	io_last->read_bytes = io_curr->read_bytes;
++	io_last->write_bytes = io_curr->write_bytes;
++	io_last->rchar = io_curr->rchar;
++	io_last->wchar = io_curr->wchar;
++	io_last->fsync = io_curr->fsync;
++}
++
+ static int uid_io_show(struct seq_file *m, void *v)
+ {
+ 	struct uid_entry *uid_entry;
+@@ -286,7 +327,7 @@ static int uid_io_show(struct seq_file *m, void *v)
+ 
+ 	rt_mutex_lock(&uid_lock);
+ 
+-	update_io_stats_locked();
++	update_io_stats_all_locked();
+ 
+ 	hash_for_each(hash_table, bkt, uid_entry, hash) {
+ 		seq_printf(m, "%d %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+@@ -361,7 +402,7 @@ static ssize_t uid_procstat_write(struct file *file,
+ 		return count;
+ 	}
+ 
+-	update_io_stats_locked();
++	update_io_stats_uid_locked(uid);
+ 
+ 	uid_entry->state = state;
+ 
+@@ -399,7 +440,7 @@ static int process_notifier(struct notifier_block *self,
+ 	uid_entry->utime += utime;
+ 	uid_entry->stime += stime;
+ 
+-	update_io_stats_locked();
++	update_io_stats_uid_locked(uid);
+ 	clean_uid_io_last_stats(uid_entry, task);
+ 
+ exit:
+-- 
+2.19.1
+
