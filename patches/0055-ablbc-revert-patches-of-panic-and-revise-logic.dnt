@@ -1,0 +1,77 @@
+From 8483e641bc87c3e5b6b261c896a0ac7097ff6313 Mon Sep 17 00:00:00 2001
+From: "Tang, Haoyu" <haoyu.tang@intel.com>
+Date: Sat, 19 May 2018 17:08:40 +0800
+Subject: [PATCH 55/63] ablbc: revert patches of panic and revise logic
+
+Revert "ablbc: panic if fail to call cansend"
+Revert "ablbc: print log target before panic"
+Move setting boot-target before sending SLCAN message
+
+user-space service ioc_reboot send SLCAN reboot message to IOC during
+reboot phase also. cansend is a double safety at here, panic is not
+necessary for failure case.
+
+move the setting of reboot-target before sending SLCAN message in order
+to ensure the correct target set even failing to send SLCAN message.
+
+This reverts commit 1bbadb2ec5c7eb33a56bb77edee6ee73941bb1ea.
+This reverts commit bde2660bf18d560f029f759c1bb182d1b3a74119.
+
+Change-Id: Ic892a88b03c861e00198cb11211c82203f91779e
+Signed-off-by: Tang, Haoyu <haoyu.tang@intel.com>
+---
+ drivers/staging/android/abl/ablbc.c | 24 +++++++-----------------
+ 1 file changed, 7 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/staging/android/abl/ablbc.c b/drivers/staging/android/abl/ablbc.c
+index 1cb31fa1af9a..59154f5e10ef 100644
+--- a/drivers/staging/android/abl/ablbc.c
++++ b/drivers/staging/android/abl/ablbc.c
+@@ -337,10 +337,16 @@ static int ablbc_reboot_notifier_call(struct notifier_block *notifier,
+ 				      unsigned long what, void *data)
+ {
+ 	const char *target = (const char *)data;
+-	int ret = 0;
++	int ret;
+ 
+ 	if (what != SYS_RESTART)
+ 		return NOTIFY_DONE;
++	if (target[0] != '\0') {
++		ret = set_reboot_target(target);
++		if (ret)
++			pr_err("%s: Failed to set reboot target, ret=%d\n",
++				__func__, ret);
++	}
+ 
+ 	ret = execute_slcan_command((const char **)suppress_heartbeat);
+ 	if (ret)
+@@ -349,26 +355,10 @@ static int ablbc_reboot_notifier_call(struct notifier_block *notifier,
+ 	ret = execute_slcan_command((const char **)reboot_request);
+ 	if (ret)
+ 		goto done;
+-	if (target[0] != '\0') {
+-		ret = set_reboot_target(target);
+-		if (ret)
+-			pr_err("%s: Failed to set reboot target, ret=%d\n",
+-				__func__, ret);
+-	}
+ 
+ 	ret = execute_slcan_command((const char **)cold_reset);
+ 
+ done:
+-#ifdef CONFIG_SEND_SLCAN_ENABLE
+-	if (ret) {
+-		if (!target)
+-			pr_emerg("Restarting system\n");
+-		else
+-			pr_emerg("Restarting system with command '%s'\n", target);
+-
+-		panic("ablbc failed to cummnunicate with IOC.");
+-	}
+-#endif
+ 	return NOTIFY_DONE;
+ }
+ 
+-- 
+2.19.1
+

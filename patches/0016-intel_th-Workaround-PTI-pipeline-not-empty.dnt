@@ -1,0 +1,39 @@
+From 1077a1c15998e70e262a9a4df5e5ac6ffd253937 Mon Sep 17 00:00:00 2001
+From: Laurent FERT <laurent.fert@intel.com>
+Date: Mon, 26 Oct 2015 17:54:46 +0100
+Subject: [PATCH 16/63] intel_th: Workaround PTI pipeline not empty
+
+When stopping a capture to PTI, the driver waits for PTI pipeline empty
+bit to be set.
+If this does not happen, the trace hub will be in an inconsistent state
+where it is not outputting any traces but has non-empty pipeline. Such
+state will end up in a global reset if the platform attempts to enter
+low power S0ix mode.
+
+For PTI only and when PTI pipeline is not empty at the end of a capture,
+do a reset of the trace hub.
+
+Signed-off-by: Laurent FERT <laurent.fert@intel.com>
+---
+ drivers/hwtracing/intel_th/gth.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/hwtracing/intel_th/gth.c b/drivers/hwtracing/intel_th/gth.c
+index 91d3ffc779b7..e95301f91627 100644
+--- a/drivers/hwtracing/intel_th/gth.c
++++ b/drivers/hwtracing/intel_th/gth.c
+@@ -521,6 +521,11 @@ static void intel_th_gth_disable(struct intel_th_device *thdev,
+ 	reg = ioread32(gth->base + REG_GTH_SCRPD0);
+ 	reg &= ~output->scratchpad;
+ 	iowrite32(reg, gth->base + REG_GTH_SCRPD0);
++
++	/* Workaround for PTI pipeline empty not set by hardware */
++	if (output->type == GTH_PTI &&
++	    !(BIT(output->port) & ioread32(gth->base + REG_GTH_STAT)))
++		intel_th_reset(thdev);
+ }
+ 
+ /*
+-- 
+2.19.1
+
