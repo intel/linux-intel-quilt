@@ -1,0 +1,208 @@
+From 865103733a72164325b62c202ca0269dd628584a Mon Sep 17 00:00:00 2001
+From: Morten Rasmussen <morten.rasmussen@arm.com>
+Date: Wed, 4 Jul 2018 11:17:40 +0100
+Subject: [PATCH 361/430] UPSTREAM: sched/fair: Add 'group_misfit_task'
+ load-balance type
+
+To maximize throughput in systems with asymmetric CPU capacities (e.g.
+ARM big.LITTLE) load-balancing has to consider task and CPU utilization
+as well as per-CPU compute capacity when load-balancing in addition to
+the current average load based load-balancing policy. Tasks with high
+utilization that are scheduled on a lower capacity CPU need to be
+identified and migrated to a higher capacity CPU if possible to maximize
+throughput.
+
+To implement this additional policy an additional group_type
+(load-balance scenario) is added: 'group_misfit_task'. This represents
+scenarios where a sched_group has one or more tasks that are not
+suitable for its per-CPU capacity. 'group_misfit_task' is only considered
+if the system is not overloaded or imbalanced ('group_imbalanced' or
+'group_overloaded').
+
+Identifying misfit tasks requires the rq lock to be held. To avoid
+taking remote rq locks to examine source sched_groups for misfit tasks,
+each CPU is responsible for tracking misfit tasks themselves and update
+the rq->misfit_task flag. This means checking task utilization when
+tasks are scheduled and on sched_tick.
+
+Change-Id: I68514339e47427b38c0b77341c662e162225ad26
+Signed-off-by: Morten Rasmussen <morten.rasmussen@arm.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: dietmar.eggemann@arm.com
+Cc: gaku.inami.xh@renesas.com
+Cc: valentin.schneider@arm.com
+Cc: vincent.guittot@linaro.org
+Link: http://lkml.kernel.org/r/1530699470-29808-3-git-send-email-morten.rasmussen@arm.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+(cherry picked from commit 3b1baa6496e6b7ad016342a9d256bdfb072ce902 in
+tip/sched/core)
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+---
+ kernel/sched/fair.c  | 54 +++++++++++++++++++++++++++++++++++++-------
+ kernel/sched/sched.h |  2 ++
+ 2 files changed, 48 insertions(+), 8 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 3d3cf1929208..5be89a46fe65 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -693,6 +693,7 @@ static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+ 
+ static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
+ static unsigned long task_h_load(struct task_struct *p);
++static unsigned long capacity_of(int cpu);
+ 
+ /* Give new sched_entity start runnable values to heavy its load in infant time */
+ void init_entity_runnable_average(struct sched_entity *se)
+@@ -1457,7 +1458,6 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ static unsigned long weighted_cpuload(struct rq *rq);
+ static unsigned long source_load(int cpu, int type);
+ static unsigned long target_load(int cpu, int type);
+-static unsigned long capacity_of(int cpu);
+ 
+ /* Cached statistics for all CPUs within a node */
+ struct numa_stats {
+@@ -3724,6 +3724,29 @@ util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p, bool task_sleep)
+ 	WRITE_ONCE(p->se.avg.util_est, ue);
+ }
+ 
++static inline int task_fits_capacity(struct task_struct *p, long capacity)
++{
++	return capacity * 1024 > task_util_est(p) * capacity_margin;
++}
++
++static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
++{
++	if (!static_branch_unlikely(&sched_asym_cpucapacity))
++		return;
++
++	if (!p) {
++		rq->misfit_task_load = 0;
++		return;
++	}
++
++	if (task_fits_capacity(p, capacity_of(cpu_of(rq)))) {
++		rq->misfit_task_load = 0;
++		return;
++	}
++
++	rq->misfit_task_load = task_h_load(p);
++}
++
+ #else /* CONFIG_SMP */
+ 
+ #define UPDATE_TG	0x0
+@@ -3753,6 +3776,7 @@ util_est_enqueue(struct cfs_rq *cfs_rq, struct task_struct *p) {}
+ static inline void
+ util_est_dequeue(struct cfs_rq *cfs_rq, struct task_struct *p,
+ 		 bool task_sleep) {}
++static inline void update_misfit_status(struct task_struct *p, struct rq *rq) {}
+ 
+ #endif /* CONFIG_SMP */
+ 
+@@ -6278,7 +6302,7 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
+ 	/* Bring task utilization in sync with prev_cpu */
+ 	sync_entity_load_avg(&p->se);
+ 
+-	return min_cap * 1024 < task_util(p) * capacity_margin;
++	return !task_fits_capacity(p, min_cap);
+ }
+ 
+ /*
+@@ -6697,9 +6721,12 @@ done: __maybe_unused;
+ 	if (hrtick_enabled(rq))
+ 		hrtick_start_fair(rq, p);
+ 
++	update_misfit_status(p, rq);
++
+ 	return p;
+ 
+ idle:
++	update_misfit_status(NULL, rq);
+ 	new_tasks = idle_balance(rq, rf);
+ 
+ 	/*
+@@ -6905,6 +6932,13 @@ static unsigned long __read_mostly max_load_balance_interval = HZ/10;
+ 
+ enum fbq_type { regular, remote, all };
+ 
++enum group_type {
++	group_other = 0,
++	group_misfit_task,
++	group_imbalanced,
++	group_overloaded,
++};
++
+ #define LBF_ALL_PINNED	0x01
+ #define LBF_NEED_BREAK	0x02
+ #define LBF_DST_PINNED  0x04
+@@ -7478,12 +7512,6 @@ static unsigned long task_h_load(struct task_struct *p)
+ 
+ /********** Helpers for find_busiest_group ************************/
+ 
+-enum group_type {
+-	group_other = 0,
+-	group_imbalanced,
+-	group_overloaded,
+-};
+-
+ /*
+  * sg_lb_stats - stats of a sched_group required for load_balancing
+  */
+@@ -7499,6 +7527,7 @@ struct sg_lb_stats {
+ 	unsigned int group_weight;
+ 	enum group_type group_type;
+ 	int group_no_capacity;
++	unsigned long group_misfit_task_load; /* A CPU has a task too big for its capacity */
+ #ifdef CONFIG_NUMA_BALANCING
+ 	unsigned int nr_numa_running;
+ 	unsigned int nr_preferred_running;
+@@ -7791,6 +7820,9 @@ group_type group_classify(struct sched_group *group,
+ 	if (sg_imbalanced(group))
+ 		return group_imbalanced;
+ 
++	if (sgs->group_misfit_task_load)
++		return group_misfit_task;
++
+ 	return group_other;
+ }
+ 
+@@ -7865,6 +7897,10 @@ static inline void update_sg_lb_stats(struct lb_env *env,
+ 		 */
+ 		if (!nr_running && idle_cpu(i))
+ 			sgs->idle_cpus++;
++
++		if (env->sd->flags & SD_ASYM_CPUCAPACITY &&
++		    sgs->group_misfit_task_load < rq->misfit_task_load)
++			sgs->group_misfit_task_load = rq->misfit_task_load;
+ 	}
+ 
+ 	/* Adjust by relative CPU capacity of the group */
+@@ -9646,6 +9682,8 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+ 
+ 	if (static_branch_unlikely(&sched_numa_balancing))
+ 		task_tick_numa(rq, curr);
++
++	update_misfit_status(curr, rq);
+ }
+ 
+ /*
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index feaf39d70400..9566d6a2ff33 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -843,6 +843,8 @@ struct rq {
+ 
+ 	unsigned char		idle_balance;
+ 
++	unsigned long		misfit_task_load;
++
+ 	/* For active balancing */
+ 	int			active_balance;
+ 	int			push_cpu;
+-- 
+2.19.1
+

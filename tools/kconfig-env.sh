@@ -1,0 +1,10 @@
+export  KERNELVERSION='4.19.0-rc8'
+export  LD=ls
+export  LD=ld
+export  HOSTCC=gcc
+export  CC=gcc
+export  SRCARCH=x86
+export  HOSTCXX=g++
+export  CC_VERSION_TEXT='gcc (Ubuntu 7.3.0-27ubuntu1~18.04) 7.3.0'
+export  srctree=.
+export  ARCH=x86
