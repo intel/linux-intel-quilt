@@ -10,11 +10,11 @@ manifest=$2
 
 echo \# $rc >> series;
 echo -n \# >> series; git log $rc --oneline -n 1 >> series
+mkdir patches;
 
 for b in `cat $manifest`; do 
 	echo \# $b >> series;
 	git checkout $b; 
-	mkdir patches;
 	git format-patch --suffix=.$b $rc..; 
 	ls *.$b >> series;
 	mv *.$b patches;
