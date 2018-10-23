@@ -1,0 +1,83 @@
+From 953a6e44f5463e549ff5ebe760b4e9a866580d7b Mon Sep 17 00:00:00 2001
+From: Dietmar Eggemann <dietmar.eggemann@arm.com>
+Date: Thu, 10 May 2018 15:48:06 +0100
+Subject: [PATCH 381/404] ANDROID: sched/fair: add arch scaling function for
+ max frequency capping
+
+To be able to scale the cpu capacity by this factor introduce a call to
+the new arch scaling function arch_scale_max_freq_capacity() in
+update_cpu_capacity() and provide a default implementation which returns
+SCHED_CAPACITY_SCALE.
+
+Another subsystem (e.g. cpufreq) or architectural or platform specific
+code can overwrite this default implementation, exactly as for frequency
+and cpu invariance. It has to be enabled by the arch by defining
+arch_scale_max_freq_capacity to the actual implementation.
+
+Signed-off-by: Ionela Voinescu <ionela.voinescu@arm.com>
+Signed-off-by: Dietmar Eggemann <dietmar.eggemann@arm.com>
+( Fixed conflict with scaling against the PELT-based scale_rt_capacity )
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I770a8b1f4f7340e9e314f71c64a765bf880f4b4d
+---
+ kernel/sched/fair.c  | 12 ++++++++----
+ kernel/sched/sched.h |  9 +++++++++
+ 2 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 637ae1eae58f..2ced8d17212a 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -8353,10 +8353,9 @@ static inline int get_sd_load_idx(struct sched_domain *sd,
+ 	return load_idx;
+ }
+ 
+-static unsigned long scale_rt_capacity(struct sched_domain *sd, int cpu)
++static unsigned long scale_rt_capacity(int cpu, unsigned long max)
+ {
+ 	struct rq *rq = cpu_rq(cpu);
+-	unsigned long max = arch_scale_cpu_capacity(sd, cpu);
+ 	unsigned long used, free;
+ 	unsigned long irq;
+ 
+@@ -8378,10 +8377,15 @@ static unsigned long scale_rt_capacity(struct sched_domain *sd, int cpu)
+ 
+ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
+ {
+-	unsigned long capacity = scale_rt_capacity(sd, cpu);
++	unsigned long capacity = arch_scale_cpu_capacity(sd, cpu);
+ 	struct sched_group *sdg = sd->groups;
+ 
+-	cpu_rq(cpu)->cpu_capacity_orig = arch_scale_cpu_capacity(sd, cpu);
++	cpu_rq(cpu)->cpu_capacity_orig = capacity;
++
++	capacity *= arch_scale_max_freq_capacity(sd, cpu);
++	capacity >>= SCHED_CAPACITY_SHIFT;
++
++	capacity = scale_rt_capacity(cpu, capacity);
+ 
+ 	if (!capacity)
+ 		capacity = 1;
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index b1baf6d9dabc..69808442598c 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1809,6 +1809,15 @@ unsigned long arch_scale_freq_capacity(int cpu)
+ }
+ #endif
+ 
++#ifndef arch_scale_max_freq_capacity
++struct sched_domain;
++static __always_inline
++unsigned long arch_scale_max_freq_capacity(struct sched_domain *sd, int cpu)
++{
++	return SCHED_CAPACITY_SCALE;
++}
++#endif
++
+ struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+ 	__acquires(rq->lock);
+ 
+-- 
+2.19.1
+
