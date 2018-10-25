@@ -1,0 +1,70 @@
+From cd63987f9a52ceda62e43c837d94d84931277ec9 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Tue, 24 Apr 2018 18:06:56 -0700
+Subject: [PATCH 287/404] ANDROID: sdcardfs: Don't d_drop in d_revalidate
+
+After d_revalidate returns 0, the vfs will call
+d_invalidate, which will call d_drop itself, along
+with other cleanup.
+
+Bug: 78262592
+Change-Id: Idbb30e008c05d62edf2217679cb6a5517d8d1a2c
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+---
+ fs/sdcardfs/dentry.c | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/fs/sdcardfs/dentry.c b/fs/sdcardfs/dentry.c
+index 166f14b2400b..776d549b397b 100644
+--- a/fs/sdcardfs/dentry.c
++++ b/fs/sdcardfs/dentry.c
+@@ -51,7 +51,6 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	 * whether the base obbpath has been changed or not
+ 	 */
+ 	if (is_obbpath_invalid(dentry)) {
+-		d_drop(dentry);
+ 		return 0;
+ 	}
+ 
+@@ -65,7 +64,6 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	if ((lower_dentry->d_flags & DCACHE_OP_REVALIDATE)) {
+ 		err = lower_dentry->d_op->d_revalidate(lower_dentry, flags);
+ 		if (err == 0) {
+-			d_drop(dentry);
+ 			goto out;
+ 		}
+ 	}
+@@ -73,14 +71,12 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	spin_lock(&lower_dentry->d_lock);
+ 	if (d_unhashed(lower_dentry)) {
+ 		spin_unlock(&lower_dentry->d_lock);
+-		d_drop(dentry);
+ 		err = 0;
+ 		goto out;
+ 	}
+ 	spin_unlock(&lower_dentry->d_lock);
+ 
+ 	if (parent_lower_dentry != lower_cur_parent_dentry) {
+-		d_drop(dentry);
+ 		err = 0;
+ 		goto out;
+ 	}
+@@ -94,7 +90,6 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	}
+ 
+ 	if (!qstr_case_eq(&dentry->d_name, &lower_dentry->d_name)) {
+-		__d_drop(dentry);
+ 		err = 0;
+ 	}
+ 
+@@ -113,7 +108,6 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 	if (inode) {
+ 		data = top_data_get(SDCARDFS_I(inode));
+ 		if (!data || data->abandoned) {
+-			d_drop(dentry);
+ 			err = 0;
+ 		}
+ 		if (data)
+-- 
+2.19.1
+

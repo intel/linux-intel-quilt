@@ -1,0 +1,111 @@
+From 19acfd7a47a478df89912f3f0c2633c04fd47b34 Mon Sep 17 00:00:00 2001
+From: Anson Jacob <ansonjacob.aj@gmail.com>
+Date: Fri, 12 Aug 2016 20:38:10 -0400
+Subject: [PATCH 124/404] ANDROID: usb: gadget: f_accessory: Fix for
+ UsbAccessory clean unbind.
+
+Reapplying fix by Darren Whobrey (Change 69674)
+
+Fixes issues: 20545, 59667 and 61390.
+With prior version of f_accessory.c, UsbAccessories would not
+unbind cleanly when application is closed or i/o stopped
+while the usb cable is still connected. The accessory gadget
+driver would be left in an invalid state which was not reset
+on subsequent binding or opening. A reboot was necessary to clear.
+
+In some phones this issues causes the phone to reboot upon
+unplugging the USB cable.
+
+Main problem was that acc_disconnect was being called on I/O error
+which reset disconnected and online.
+
+Minor fix required to properly track setting and unsetting of
+disconnected and online flags. Also added urb Q wakeup's on unbind
+to help unblock waiting threads.
+
+Tested on Nexus 7 grouper. Expected behaviour now observed:
+closing accessory causes blocked i/o to interrupt with IOException.
+Accessory can be restarted following closing of file handle
+and re-opening.
+
+This is a generic fix that applies to all devices.
+
+Change-Id: I4e08b326730dd3a2820c863124cee10f7cb5501e
+Signed-off-by: Darren Whobrey <d.whobrey@mildai.org>
+Signed-off-by: Anson Jacob <ansonjacob.aj@gmail.com>
+---
+ drivers/usb/gadget/function/f_accessory.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/gadget/function/f_accessory.c b/drivers/usb/gadget/function/f_accessory.c
+index efb22a3ffa3f..e0a677a44763 100644
+--- a/drivers/usb/gadget/function/f_accessory.c
++++ b/drivers/usb/gadget/function/f_accessory.c
+@@ -77,9 +77,13 @@ struct acc_dev {
+ 	struct usb_ep *ep_in;
+ 	struct usb_ep *ep_out;
+ 
+-	/* set to 1 when we connect */
++	/* online indicates state of function_set_alt & function_unbind
++	 * set to 1 when we connect
++	 */
+ 	int online:1;
+-	/* Set to 1 when we disconnect.
++
++	/* disconnected indicates state of open & release
++	 * Set to 1 when we disconnect.
+ 	 * Not cleared until our file is closed.
+ 	 */
+ 	int disconnected:1;
+@@ -263,7 +267,6 @@ static struct usb_request *req_get(struct acc_dev *dev, struct list_head *head)
+ 
+ static void acc_set_disconnected(struct acc_dev *dev)
+ {
+-	dev->online = 0;
+ 	dev->disconnected = 1;
+ }
+ 
+@@ -756,7 +759,10 @@ static int acc_release(struct inode *ip, struct file *fp)
+ 	printk(KERN_INFO "acc_release\n");
+ 
+ 	WARN_ON(!atomic_xchg(&_acc_dev->open_excl, 0));
+-	_acc_dev->disconnected = 0;
++	/* indicate that we are disconnected
++	 * still could be online so don't touch online flag
++	 */
++	_acc_dev->disconnected = 1;
+ 	return 0;
+ }
+ 
+@@ -1004,6 +1010,10 @@ acc_function_unbind(struct usb_configuration *c, struct usb_function *f)
+ 	struct usb_request *req;
+ 	int i;
+ 
++	dev->online = 0;		/* clear online flag */
++	wake_up(&dev->read_wq);		/* unblock reads on closure */
++	wake_up(&dev->write_wq);	/* likewise for writes */
++
+ 	while ((req = req_get(dev, &dev->tx_idle)))
+ 		acc_request_free(req, dev->ep_in);
+ 	for (i = 0; i < RX_REQ_MAX; i++)
+@@ -1135,6 +1145,7 @@ static int acc_function_set_alt(struct usb_function *f,
+ 	}
+ 
+ 	dev->online = 1;
++	dev->disconnected = 0; /* if online then not disconnected */
+ 
+ 	/* readers may be blocked waiting for us to go online */
+ 	wake_up(&dev->read_wq);
+@@ -1147,7 +1158,8 @@ static void acc_function_disable(struct usb_function *f)
+ 	struct usb_composite_dev	*cdev = dev->cdev;
+ 
+ 	DBG(cdev, "acc_function_disable\n");
+-	acc_set_disconnected(dev);
++	acc_set_disconnected(dev); /* this now only sets disconnected */
++	dev->online = 0; /* so now need to clear online flag here too */
+ 	usb_ep_disable(dev->ep_in);
+ 	usb_ep_disable(dev->ep_out);
+ 
+-- 
+2.19.1
+

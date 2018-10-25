@@ -1,0 +1,107 @@
+From 0aae98e6ad287279de474981bba1cb1201920de1 Mon Sep 17 00:00:00 2001
+From: Chris Redpath <chris.redpath@arm.com>
+Date: Sat, 21 Oct 2017 15:56:50 +0100
+Subject: [PATCH 377/404] ANDROID: sched: Unconditionally honor sync flag for
+ energy-aware wakeups
+
+Since we don't do energy-aware wakeups when we are overutilized, always
+honoring sync wakeups in this state does not prevent wake-wide mechanics
+overruling the flag as normal.
+
+This patch is based upon previous work to build EAS for android products.
+
+sync-hint code taken from commit 4a5e890ec60d
+"sched/fair: add tunable to force selection at cpu granularity" written
+by Juri Lelli <juri.lelli@arm.com>
+
+Signed-off-by: Chris Redpath <chris.redpath@arm.com>
+(cherry-picked from commit f1ec666a62dec1083ed52fe1ddef093b84373aaf)
+[ Moved the feature to find_energy_efficient_cpu() ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: I4b3d79141fc8e53dc51cd63ac11096c2e3cb10f5
+---
+ include/linux/sched/sysctl.h |  1 +
+ kernel/sched/fair.c          | 15 +++++++++++++--
+ kernel/sysctl.c              |  7 +++++++
+ 3 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/sched/sysctl.h b/include/linux/sched/sysctl.h
+index 3f9ae132037e..77e9fa3c5b49 100644
+--- a/include/linux/sched/sysctl.h
++++ b/include/linux/sched/sysctl.h
+@@ -22,6 +22,7 @@ enum { sysctl_hung_task_timeout_secs = 0 };
+ 
+ extern unsigned int sysctl_sched_latency;
+ extern unsigned int sysctl_sched_min_granularity;
++extern unsigned int sysctl_sched_sync_hint_enable;
+ extern unsigned int sysctl_sched_cstate_aware;
+ extern unsigned int sysctl_sched_wakeup_granularity;
+ extern unsigned int sysctl_sched_child_runs_first;
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 2643f0e0beb2..82bb2a62edd8 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -40,6 +40,11 @@
+ unsigned int sysctl_sched_latency			= 6000000ULL;
+ unsigned int normalized_sysctl_sched_latency		= 6000000ULL;
+ 
++/*
++ * Enable/disable honoring sync flag in energy-aware wakeups.
++ */
++unsigned int sysctl_sched_sync_hint_enable = 1;
++
+ /*
+  * Enable/disable using cstate knowledge in idle sibling selection
+  */
+@@ -6939,7 +6944,7 @@ static DEFINE_PER_CPU(cpumask_t, energy_cpus);
+  * SD_ASYM_CPUCAPACITY is set.
+  */
+ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
+-							struct perf_domain *pd)
++					struct perf_domain *pd, int sync)
+ {
+ 	unsigned long prev_energy = ULONG_MAX, best_energy = ULONG_MAX;
+ 	int weight, cpu, best_energy_cpu = prev_cpu;
+@@ -6947,6 +6952,12 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
+ 	struct sched_domain *sd;
+ 	cpumask_t *candidates;
+ 
++	if (sysctl_sched_sync_hint_enable && sync) {
++		cpu = smp_processor_id();
++		if (cpumask_test_cpu(cpu, &p->cpus_allowed))
++			return cpu;
++	}
++
+ 	sync_entity_load_avg(&p->se);
+ 
+ 	if (!task_util_est(p))
+@@ -7046,7 +7057,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
+ 			struct perf_domain *pd = rcu_dereference(rd->pd);
+ 
+ 			if (pd && !READ_ONCE(rd->overutilized)) {
+-				new_cpu = find_energy_efficient_cpu(p, prev_cpu, pd);
++				new_cpu = find_energy_efficient_cpu(p, prev_cpu, pd, sync);
+ 				goto unlock;
+ 			}
+ 		}
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index 3f85f43a6f4a..ed676ec4ddac 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -346,6 +346,13 @@ static struct ctl_table kern_table[] = {
+ 		.extra1		= &min_sched_granularity_ns,
+ 		.extra2		= &max_sched_granularity_ns,
+ 	},
++	{
++		.procname	= "sched_sync_hint_enable",
++		.data		= &sysctl_sched_sync_hint_enable,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec,
++	},
+ 	{
+ 		.procname	= "sched_wakeup_granularity_ns",
+ 		.data		= &sysctl_sched_wakeup_granularity,
+-- 
+2.19.1
+
