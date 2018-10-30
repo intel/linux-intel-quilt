@@ -1,0 +1,108 @@
+From ebc98ac5a22f5b1e8a161216af461ce19b378758 Mon Sep 17 00:00:00 2001
+From: keunyoung <keunyoung@google.com>
+Date: Wed, 29 Jan 2014 12:41:50 -0800
+Subject: [PATCH 111/388] ANDROID: usb: gadget: f_accessory: fix false
+ disconnect due to a signal sent to the reading process
+
+- In the current implementation, when a signal is sent to the reading process,
+  read is cancelled by calling usb_ep_dequeue, which lead into calling
+  acc_complete_out with ECONNRESET, but the current logic treats it as
+  disconnection, which makes the device inaccessible until cable is actually
+  disconnected.
+- The fix calls disconnect only when ESHUTDOWN error is passed.
+- If data has already arrived while trying cancelling, the data is marked
+  as available, and it will be read out on the next read. This is necessary
+  as USB bulk is assumed to guarantee no data loss.
+
+Signed-off-by: keunyoung <keunyoung@google.com>
+---
+ drivers/usb/gadget/function/f_accessory.c | 32 +++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/gadget/function/f_accessory.c b/drivers/usb/gadget/function/f_accessory.c
+index ef1ffcf88cdc..efb22a3ffa3f 100644
+--- a/drivers/usb/gadget/function/f_accessory.c
++++ b/drivers/usb/gadget/function/f_accessory.c
+@@ -271,8 +271,10 @@ static void acc_complete_in(struct usb_ep *ep, struct usb_request *req)
+ {
+ 	struct acc_dev *dev = _acc_dev;
+ 
+-	if (req->status != 0)
++	if (req->status == -ESHUTDOWN) {
++		pr_debug("acc_complete_in set disconnected");
+ 		acc_set_disconnected(dev);
++	}
+ 
+ 	req_put(dev, &dev->tx_idle, req);
+ 
+@@ -284,8 +286,10 @@ static void acc_complete_out(struct usb_ep *ep, struct usb_request *req)
+ 	struct acc_dev *dev = _acc_dev;
+ 
+ 	dev->rx_done = 1;
+-	if (req->status != 0)
++	if (req->status == -ESHUTDOWN) {
++		pr_debug("acc_complete_out set disconnected");
+ 		acc_set_disconnected(dev);
++	}
+ 
+ 	wake_up(&dev->read_wq);
+ }
+@@ -559,8 +563,10 @@ static ssize_t acc_read(struct file *fp, char __user *buf,
+ 
+ 	pr_debug("acc_read(%zu)\n", count);
+ 
+-	if (dev->disconnected)
++	if (dev->disconnected) {
++		pr_debug("acc_read disconnected");
+ 		return -ENODEV;
++	}
+ 
+ 	if (count > BULK_BUFFER_SIZE)
+ 		count = BULK_BUFFER_SIZE;
+@@ -573,6 +579,12 @@ static ssize_t acc_read(struct file *fp, char __user *buf,
+ 		goto done;
+ 	}
+ 
++	if (dev->rx_done) {
++		// last req cancelled. try to get it.
++		req = dev->rx_req[0];
++		goto copy_data;
++	}
++
+ requeue_req:
+ 	/* queue a request */
+ 	req = dev->rx_req[0];
+@@ -590,9 +602,17 @@ static ssize_t acc_read(struct file *fp, char __user *buf,
+ 	ret = wait_event_interruptible(dev->read_wq, dev->rx_done);
+ 	if (ret < 0) {
+ 		r = ret;
+-		usb_ep_dequeue(dev->ep_out, req);
++		ret = usb_ep_dequeue(dev->ep_out, req);
++		if (ret != 0) {
++			// cancel failed. There can be a data already received.
++			// it will be retrieved in the next read.
++			pr_debug("acc_read: cancelling failed %d", ret);
++		}
+ 		goto done;
+ 	}
++
++copy_data:
++	dev->rx_done = 0;
+ 	if (dev->online) {
+ 		/* If we got a 0-len packet, throw it back and try again. */
+ 		if (req->actual == 0)
+@@ -622,8 +642,10 @@ static ssize_t acc_write(struct file *fp, const char __user *buf,
+ 
+ 	pr_debug("acc_write(%zu)\n", count);
+ 
+-	if (!dev->online || dev->disconnected)
++	if (!dev->online || dev->disconnected) {
++		pr_debug("acc_write disconnected or not online");
+ 		return -ENODEV;
++	}
+ 
+ 	while (count > 0) {
+ 		if (!dev->online) {
+-- 
+2.19.1
+
