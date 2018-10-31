@@ -1,0 +1,67 @@
+From 13ace9e6c1bfd5dd8389920799992d29059e972e Mon Sep 17 00:00:00 2001
+From: Simon Dubray <simonx.dubray@intel.com>
+Date: Tue, 1 Aug 2017 18:22:47 +0200
+Subject: [PATCH 417/422] ANDROID: netfilter: xt_qtaguid: handle properly
+ request sockets
+
+To match rules related to uid/gid for syn recv packets
+we need to get the full socket from request_sock struct.
+
+Bug: 63917742
+Change-Id: I03acb2251319fd800d0e36a6dde30fc1fbb7d1b0
+Signed-off-by: Simon Dubray <simonx.dubray@intel.com>
+---
+ net/netfilter/xt_qtaguid.c | 29 ++++++++++++++++++-----------
+ 1 file changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/net/netfilter/xt_qtaguid.c b/net/netfilter/xt_qtaguid.c
+index a7f4d8b3e9e8..00a0ebbbb609 100644
+--- a/net/netfilter/xt_qtaguid.c
++++ b/net/netfilter/xt_qtaguid.c
+@@ -1597,14 +1597,6 @@ static struct sock *qtaguid_find_sk(const struct sk_buff *skb,
+ 	if (sk) {
+ 		MT_DEBUG("qtaguid: %p->sk_proto=%u "
+ 			 "->sk_state=%d\n", sk, sk->sk_protocol, sk->sk_state);
+-		/*
+-		 * When in TCP_TIME_WAIT the sk is not a "struct sock" but
+-		 * "struct inet_timewait_sock" which is missing fields.
+-		 */
+-		if (!sk_fullsock(sk) || sk->sk_state  == TCP_TIME_WAIT) {
+-			sock_gen_put(sk);
+-			sk = NULL;
+-		}
+ 	}
+ 	return sk;
+ }
+@@ -1697,10 +1689,25 @@ static bool qtaguid_mt(const struct sk_buff *skb, struct xt_action_param *par)
+ 		 */
+ 		sk = qtaguid_find_sk(skb, par);
+ 		/*
+-		 * If we got the socket from the find_sk(), we will need to put
+-		 * it back, as nf_tproxy_get_sock_v4() got it.
++		 * TCP_NEW_SYN_RECV are not "struct sock" but "struct request_sock"
++		 * where we can get a pointer to a full socket to retrieve uid/gid.
++		 * When in TCP_TIME_WAIT, sk is a struct inet_timewait_sock
++		 * which is missing fields and does not contain any reference
++		 * to a full socket, so just ignore the socket.
+ 		 */
+-		got_sock = sk;
++		if (sk && sk->sk_state == TCP_NEW_SYN_RECV) {
++			sock_gen_put(sk);
++			sk = sk_to_full_sk(sk);
++		} else if (sk && (!sk_fullsock(sk) || sk->sk_state == TCP_TIME_WAIT)) {
++			sock_gen_put(sk);
++			sk = NULL;
++		} else {
++			/*
++			 * If we got the socket from the find_sk(), we will need to put
++			 * it back, as nf_tproxy_get_sock_v4() got it.
++			 */
++			got_sock = sk;
++		}
+ 		if (sk)
+ 			atomic64_inc(&qtu_events.match_found_sk_in_ct);
+ 		else
+-- 
+2.19.1
+
