@@ -1,0 +1,105 @@
+From 1ebfca7aca3713160d62d004858a3de1096b13d4 Mon Sep 17 00:00:00 2001
+From: Morten Rasmussen <morten.rasmussen@arm.com>
+Date: Wed, 4 Jul 2018 11:17:39 +0100
+Subject: [PATCH 318/388] UPSTREAM: sched/topology: Add static_key for
+ asymmetric CPU capacity optimizations
+
+The existing asymmetric CPU capacity code should cause minimal overhead
+for others. Putting it behind a static_key, it has been done for SMT
+optimizations, would make it easier to extend and improve without
+causing harm to others moving forward.
+
+Change-Id: Ibed747ab20aeb2338ac2b9766a0105777f277f57
+Signed-off-by: Morten Rasmussen <morten.rasmussen@arm.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: dietmar.eggemann@arm.com
+Cc: gaku.inami.xh@renesas.com
+Cc: valentin.schneider@arm.com
+Cc: vincent.guittot@linaro.org
+Link: http://lkml.kernel.org/r/1530699470-29808-2-git-send-email-morten.rasmussen@arm.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+(cherry picked from commit df054e8445a4011e3d693c2268129c0456108663 in
+tip/sched/core)
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+
+Change-Id: I09e315ff897ffba65c7cb82715ab0d6c20b76e02
+---
+ kernel/sched/fair.c     | 3 +++
+ kernel/sched/sched.h    | 1 +
+ kernel/sched/topology.c | 9 ++++++++-
+ 3 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 725488a1f628..d32867242b83 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -6281,6 +6281,9 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
+ {
+ 	long min_cap, max_cap;
+ 
++	if (!static_branch_unlikely(&sched_asym_cpucapacity))
++		return 0;
++
+ 	min_cap = min(capacity_orig_of(prev_cpu), capacity_orig_of(cpu));
+ 	max_cap = cpu_rq(cpu)->rd->max_cpu_capacity;
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 9683f458aec7..34f79bbd07a2 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1188,6 +1188,7 @@ DECLARE_PER_CPU(int, sd_llc_id);
+ DECLARE_PER_CPU(struct sched_domain_shared *, sd_llc_shared);
+ DECLARE_PER_CPU(struct sched_domain *, sd_numa);
+ DECLARE_PER_CPU(struct sched_domain *, sd_asym);
++extern struct static_key_false sched_asym_cpucapacity;
+ 
+ struct sched_group_capacity {
+ 	atomic_t		ref;
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 5c4d583d53ee..b0cdf5e95bda 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -398,6 +398,7 @@ DEFINE_PER_CPU(int, sd_llc_id);
+ DEFINE_PER_CPU(struct sched_domain_shared *, sd_llc_shared);
+ DEFINE_PER_CPU(struct sched_domain *, sd_numa);
+ DEFINE_PER_CPU(struct sched_domain *, sd_asym);
++DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
+ 
+ static void update_top_cache_domain(int cpu)
+ {
+@@ -1705,6 +1706,7 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	struct rq *rq = NULL;
+ 	int i, ret = -ENOMEM;
+ 	struct sched_domain_topology_level *tl_asym;
++	bool has_asym = false;
+ 
+ 	alloc_state = __visit_domain_allocation_hell(&d, cpu_map);
+ 	if (alloc_state != sa_rootdomain)
+@@ -1720,8 +1722,10 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 		for_each_sd_topology(tl) {
+ 			int dflags = 0;
+ 
+-			if (tl == tl_asym)
++			if (tl == tl_asym) {
+ 				dflags |= SD_ASYM_CPUCAPACITY;
++				has_asym = true;
++			}
+ 
+ 			sd = build_sched_domain(tl, cpu_map, attr, sd, dflags, i);
+ 
+@@ -1773,6 +1777,9 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	}
+ 	rcu_read_unlock();
+ 
++	if (has_asym)
++		static_branch_enable_cpuslocked(&sched_asym_cpucapacity);
++
+ 	if (rq && sched_debug_enabled) {
+ 		pr_info("root domain span: %*pbl (max cpu_capacity = %lu)\n",
+ 			cpumask_pr_args(cpu_map), rq->rd->max_cpu_capacity);
+-- 
+2.19.1
+
