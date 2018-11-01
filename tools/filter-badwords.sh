@@ -10,7 +10,6 @@ manifest=$2
 for b in `cat $manifest`; do
 	git checkout $b
 	git filter-branch -f --msg-filter 'sed "s/\S*\(kojiclear\)\S*//g"' $rc..
-	
 	git filter-branch -f --msg-filter 'sed "s/\S*\(tm.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(sh.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(ra.intel.com\)\S*//g"' $rc..
@@ -30,7 +29,6 @@ for b in `cat $manifest`; do
 	git filter-branch -f --msg-filter 'sed "s/\S*\(ch.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(bj.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(an.intel.com\)\S*//g"' $rc..
-	
 	git filter-branch -f --msg-filter 'sed "s/\S*\(zpn.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(jf.intel.com\)\S*//g"' $rc..
 	git filter-branch -f --msg-filter 'sed "s/\S*\(sc.intel.com\)\S*//g"' $rc..
