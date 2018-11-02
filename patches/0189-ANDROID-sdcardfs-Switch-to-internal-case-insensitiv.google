@@ -1,0 +1,117 @@
+From 8a260cabac4eb3268120bd9cf5174b69b5211b54 Mon Sep 17 00:00:00 2001
+From: Daniel Rosenberg <drosen@google.com>
+Date: Wed, 8 Mar 2017 17:20:02 -0800
+Subject: [PATCH 189/388] ANDROID: sdcardfs: Switch to internal case
+ insensitive compare
+
+There were still a few places where we called into a case
+insensitive lookup that was not defined by sdcardfs.
+Moving them all to the same place will allow us to switch
+the implementation in the future.
+
+Additionally, the check in fixup_perms_recursive did not
+take into account the length of both strings, causing
+extraneous matches when the name we were looking for was
+a prefix of the child name.
+
+Signed-off-by: Daniel Rosenberg <drosen@google.com>
+Change-Id: I45ce768cd782cb4ea1ae183772781387c590ecc2
+---
+ fs/sdcardfs/dentry.c       | 8 ++------
+ fs/sdcardfs/derived_perm.c | 2 +-
+ fs/sdcardfs/packagelist.c  | 6 ++----
+ fs/sdcardfs/sdcardfs.h     | 8 ++++++--
+ 4 files changed, 11 insertions(+), 13 deletions(-)
+
+diff --git a/fs/sdcardfs/dentry.c b/fs/sdcardfs/dentry.c
+index d1eff456cc8a..2797d2fc4227 100644
+--- a/fs/sdcardfs/dentry.c
++++ b/fs/sdcardfs/dentry.c
+@@ -82,11 +82,7 @@ static int sdcardfs_d_revalidate(struct dentry *dentry, unsigned int flags)
+ 		spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
+ 	}
+ 
+-	if (dentry->d_name.len != lower_dentry->d_name.len) {
+-		__d_drop(dentry);
+-		err = 0;
+-	} else if (strncasecmp(dentry->d_name.name, lower_dentry->d_name.name,
+-				dentry->d_name.len) != 0) {
++	if (!qstr_case_eq(&dentry->d_name, &lower_dentry->d_name)) {
+ 		__d_drop(dentry);
+ 		err = 0;
+ 	}
+@@ -165,7 +161,7 @@ static int sdcardfs_cmp_ci(const struct dentry *dentry,
+ 	}
+ 	*/
+ 	if (name->len == len) {
+-		if (strncasecmp(name->name, str, len) == 0)
++		if (str_n_case_eq(name->name, str, len))
+ 			return 0;
+ 	}
+ 	return 1;
+diff --git a/fs/sdcardfs/derived_perm.c b/fs/sdcardfs/derived_perm.c
+index 0f227b95c9e3..69ffbf253645 100644
+--- a/fs/sdcardfs/derived_perm.c
++++ b/fs/sdcardfs/derived_perm.c
+@@ -285,7 +285,7 @@ static void __fixup_perms_recursive(struct dentry *dentry, struct limit_search *
+ 	if (needs_fixup(info->perm)) {
+ 		list_for_each_entry(child, &dentry->d_subdirs, d_child) {
+ 			spin_lock_nested(&child->d_lock, depth + 1);
+-			if (!(limit->flags & BY_NAME) || !strncasecmp(child->d_name.name, limit->name, limit->length)) {
++			if (!(limit->flags & BY_NAME) || qstr_case_eq(&child->d_name, &limit->name)) {
+ 				if (d_inode(child)) {
+ 					get_derived_permission(dentry, child);
+ 					fixup_tmp_permissions(d_inode(child));
+diff --git a/fs/sdcardfs/packagelist.c b/fs/sdcardfs/packagelist.c
+index 5f81284a4f44..d933bffacc7a 100644
+--- a/fs/sdcardfs/packagelist.c
++++ b/fs/sdcardfs/packagelist.c
+@@ -254,8 +254,7 @@ static void fixup_all_perms_name(const struct qstr *key)
+ 	struct sdcardfs_sb_info *sbinfo;
+ 	struct limit_search limit = {
+ 		.flags = BY_NAME,
+-		.name = key->name,
+-		.length = key->len,
++		.name = QSTR_INIT(key->name, key->len),
+ 	};
+ 	list_for_each_entry(sbinfo, &sdcardfs_super_list, list) {
+ 		if (sbinfo_has_sdcard_magic(sbinfo))
+@@ -268,8 +267,7 @@ static void fixup_all_perms_name_userid(const struct qstr *key, userid_t userid)
+ 	struct sdcardfs_sb_info *sbinfo;
+ 	struct limit_search limit = {
+ 		.flags = BY_NAME | BY_USERID,
+-		.name = key->name,
+-		.length = key->len,
++		.name = QSTR_INIT(key->name, key->len),
+ 		.userid = userid,
+ 	};
+ 	list_for_each_entry(sbinfo, &sdcardfs_super_list, list) {
+diff --git a/fs/sdcardfs/sdcardfs.h b/fs/sdcardfs/sdcardfs.h
+index 7740124049cd..a42125ef39f5 100644
+--- a/fs/sdcardfs/sdcardfs.h
++++ b/fs/sdcardfs/sdcardfs.h
+@@ -476,8 +476,7 @@ extern void packagelist_exit(void);
+ #define BY_USERID	(1 << 1)
+ struct limit_search {
+ 	unsigned int flags;
+-	const char *name;
+-	size_t length;
++	struct qstr name;
+ 	userid_t userid;
+ };
+ 
+@@ -618,6 +617,11 @@ static inline bool str_case_eq(const char *s1, const char *s2)
+ 	return !strcasecmp(s1, s2);
+ }
+ 
++static inline bool str_n_case_eq(const char *s1, const char *s2, size_t len)
++{
++	return !strncasecmp(s1, s2, len);
++}
++
+ static inline bool qstr_case_eq(const struct qstr *q1, const struct qstr *q2)
+ {
+ 	return q1->len == q2->len && str_case_eq(q1->name, q2->name);
+-- 
+2.19.1
+
