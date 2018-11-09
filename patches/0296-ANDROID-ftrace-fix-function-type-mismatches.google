@@ -1,0 +1,96 @@
+From 8705cf55a26addcae32a7edeab94f89766e0e9fb Mon Sep 17 00:00:00 2001
+From: Sami Tolvanen <samitolvanen@google.com>
+Date: Thu, 10 May 2018 14:56:41 -0700
+Subject: [PATCH 296/388] ANDROID: ftrace: fix function type mismatches
+
+This change fixes indirect call mismatches with function and function
+graph tracing, which trip Control-Flow Integrity (CFI) checking.
+
+Bug: 79510107
+Bug: 67506682
+Change-Id: I5de08c113fb970ffefedce93c58e0161f22c7ca2
+Signed-off-by: Sami Tolvanen <samitolvanen@google.com>
+---
+ include/linux/ftrace.h |  8 ++++++++
+ kernel/trace/ftrace.c  | 17 +++++++++++------
+ 2 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/include/linux/ftrace.h b/include/linux/ftrace.h
+index a397907e8d72..8ff2bfb22ecf 100644
+--- a/include/linux/ftrace.h
++++ b/include/linux/ftrace.h
+@@ -224,8 +224,16 @@ extern enum ftrace_tracing_type_t ftrace_tracing_type;
+ int register_ftrace_function(struct ftrace_ops *ops);
+ int unregister_ftrace_function(struct ftrace_ops *ops);
+ 
++#ifdef CONFIG_CFI_CLANG
++/* Use a C stub with the correct type for CFI */
++static inline void ftrace_stub(unsigned long a0, unsigned long a1,
++			       struct ftrace_ops *op, struct pt_regs *regs)
++{
++}
++#else
+ extern void ftrace_stub(unsigned long a0, unsigned long a1,
+ 			struct ftrace_ops *op, struct pt_regs *regs);
++#endif
+ 
+ #else /* !CONFIG_FUNCTION_TRACER */
+ /*
+diff --git a/kernel/trace/ftrace.c b/kernel/trace/ftrace.c
+index f536f601bd46..40aec2d6051b 100644
+--- a/kernel/trace/ftrace.c
++++ b/kernel/trace/ftrace.c
+@@ -123,8 +123,9 @@ static void ftrace_ops_list_func(unsigned long ip, unsigned long parent_ip,
+ 				 struct ftrace_ops *op, struct pt_regs *regs);
+ #else
+ /* See comment below, where ftrace_ops_list_func is defined */
+-static void ftrace_ops_no_ops(unsigned long ip, unsigned long parent_ip);
+-#define ftrace_ops_list_func ((ftrace_func_t)ftrace_ops_no_ops)
++static void ftrace_ops_no_ops(unsigned long ip, unsigned long parent_ip,
++			      struct ftrace_ops *op, struct pt_regs *regs);
++#define ftrace_ops_list_func ftrace_ops_no_ops
+ #endif
+ 
+ /*
+@@ -6310,7 +6311,8 @@ static void ftrace_ops_list_func(unsigned long ip, unsigned long parent_ip,
+ 	__ftrace_ops_list_func(ip, parent_ip, NULL, regs);
+ }
+ #else
+-static void ftrace_ops_no_ops(unsigned long ip, unsigned long parent_ip)
++static void ftrace_ops_no_ops(unsigned long ip, unsigned long parent_ip,
++			      struct ftrace_ops *op, struct pt_regs *regs)
+ {
+ 	__ftrace_ops_list_func(ip, parent_ip, NULL, NULL);
+ }
+@@ -6771,14 +6773,17 @@ void ftrace_graph_graph_time_control(bool enable)
+ 	fgraph_graph_time = enable;
+ }
+ 
++void ftrace_graph_return_stub(struct ftrace_graph_ret *trace)
++{
++}
++
+ int ftrace_graph_entry_stub(struct ftrace_graph_ent *trace)
+ {
+ 	return 0;
+ }
+ 
+ /* The callbacks that hook a function */
+-trace_func_graph_ret_t ftrace_graph_return =
+-			(trace_func_graph_ret_t)ftrace_stub;
++trace_func_graph_ret_t ftrace_graph_return = ftrace_graph_return_stub;
+ trace_func_graph_ent_t ftrace_graph_entry = ftrace_graph_entry_stub;
+ static trace_func_graph_ent_t __ftrace_graph_entry = ftrace_graph_entry_stub;
+ 
+@@ -7007,7 +7012,7 @@ void unregister_ftrace_graph(void)
+ 		goto out;
+ 
+ 	ftrace_graph_active--;
+-	ftrace_graph_return = (trace_func_graph_ret_t)ftrace_stub;
++	ftrace_graph_return = ftrace_graph_return_stub;
+ 	ftrace_graph_entry = ftrace_graph_entry_stub;
+ 	__ftrace_graph_entry = ftrace_graph_entry_stub;
+ 	ftrace_shutdown(&graph_ops, FTRACE_STOP_FUNC_RET);
+-- 
+2.19.1
+

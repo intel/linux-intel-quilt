@@ -1,0 +1,1390 @@
+From 83426e3e5a1110894ad3846eb5afa5f561426b08 Mon Sep 17 00:00:00 2001
+From: Patrick Bellasi <patrick.bellasi@arm.com>
+Date: Sat, 21 Oct 2017 18:07:35 +0100
+Subject: [PATCH 356/388] ANDROID: sched: fair/tune: Add schedtune with cgroups
+ interface
+
+Schedtune is the framework we use in Android to allow userspace
+task classification and provides a CGroup controller which has two
+attributes per group.
+
+ * schedtune.boost
+ * schedtune.prefer_idle
+
+Schedtune itself provides task and CPU utilization boosting. EAS in
+the fair scheduler uses boosted utilization and prefer_idle status to
+control the algorithm used for wakeup task placement.
+
+Boosting:
+
+The task utilization signal, which is derived from PELT signals and
+properly scaled to be architecture and frequency invariant, is used by
+EAS as an estimation of the task requirements in terms of CPU bandwidth.
+
+Schedtune allows userspace to assign a percentage boost to each group
+and this boost is used to calculate an additional utilization margin.
+The margin added to the original utilization is:
+ 1. computed based on the "boosting strategy" in use
+ 2. proportional to boost value defined by the "taskgroup" value
+
+The boosted signal is used by EAS for task placement, and boosted CPU
+utilization (if boosted tasks are running) is given when schedutil
+requests utilization.
+
+Prefer_idle:
+
+When this attribute is 1 for a group, this is used as a signal from
+userspace that tasks in this group need to be serviced with the
+minimum latency possible.
+
+Previous versions of schedtune had much more functionality around
+allowing a more tuneable tradeoff between performand and energy,
+however this has not been used a lot up until now. If necessary,
+we can easily resurrect it based upon old code.
+
+Signed-off-by: Patrick Bellasi <patrick.bellasi@arm.com>
+Signed-off-by: Chris Redpath <chris.redpath@arm.com>
+(cherry-picked from commit 159c14f0397790405b9e8435184366b31f2ed15b)
+[ - Removed tracepoints (to be added in a separate patch)
+  - Integrated boosted_cpu_util() with cpu_util_cfs()
+  - Backported Patrick's util_est related fixes from android-4.14 ]
+Signed-off-by: Quentin Perret <quentin.perret@arm.com>
+Change-Id: Ie2fd63d82f604f34bcbc7e1ca9b5af1bdcc037e0
+---
+ Documentation/scheduler/sched-tune.txt | 413 ++++++++++++++++
+ include/linux/cgroup_subsys.h          |   4 +
+ init/Kconfig                           |  23 +
+ kernel/sched/Makefile                  |   1 +
+ kernel/sched/cpufreq_schedutil.c       |   2 +-
+ kernel/sched/fair.c                    | 118 +++++
+ kernel/sched/sched.h                   |   2 +
+ kernel/sched/tune.c                    | 622 +++++++++++++++++++++++++
+ kernel/sched/tune.h                    |  37 ++
+ 9 files changed, 1221 insertions(+), 1 deletion(-)
+ create mode 100644 Documentation/scheduler/sched-tune.txt
+ create mode 100644 kernel/sched/tune.c
+ create mode 100644 kernel/sched/tune.h
+
+diff --git a/Documentation/scheduler/sched-tune.txt b/Documentation/scheduler/sched-tune.txt
+new file mode 100644
+index 000000000000..5df0ea361311
+--- /dev/null
++++ b/Documentation/scheduler/sched-tune.txt
+@@ -0,0 +1,413 @@
++             Central, scheduler-driven, power-performance control
++                               (EXPERIMENTAL)
++
++Abstract
++========
++
++The topic of a single simple power-performance tunable, that is wholly
++scheduler centric, and has well defined and predictable properties has come up
++on several occasions in the past [1,2]. With techniques such as a scheduler
++driven DVFS [3], we now have a good framework for implementing such a tunable.
++This document describes the overall ideas behind its design and implementation.
++
++
++Table of Contents
++=================
++
++1. Motivation
++2. Introduction
++3. Signal Boosting Strategy
++4. OPP selection using boosted CPU utilization
++5. Per task group boosting
++6. Per-task wakeup-placement-strategy Selection
++7. Question and Answers
++   - What about "auto" mode?
++   - What about boosting on a congested system?
++   - How CPUs are boosted when we have tasks with multiple boost values?
++8. References
++
++
++1. Motivation
++=============
++
++Sched-DVFS [3] was a new event-driven cpufreq governor which allows the
++scheduler to select the optimal DVFS operating point (OPP) for running a task
++allocated to a CPU. Later, the cpufreq maintainers introduced a similar
++governor, schedutil. The introduction of schedutil also enables running
++workloads at the most energy efficient OPPs.
++
++However, sometimes it may be desired to intentionally boost the performance of
++a workload even if that could imply a reasonable increase in energy
++consumption. For example, in order to reduce the response time of a task, we
++may want to run the task at a higher OPP than the one that is actually required
++by it's CPU bandwidth demand.
++
++This last requirement is especially important if we consider that one of the
++main goals of the utilization-driven governor component is to replace all
++currently available CPUFreq policies. Since sched-DVFS and schedutil are event
++based, as opposed to the sampling driven governors we currently have, they are
++already more responsive at selecting the optimal OPP to run tasks allocated to
++a CPU. However, just tracking the actual task load demand may not be enough
++from a performance standpoint.  For example, it is not possible to get
++behaviors similar to those provided by the "performance" and "interactive"
++CPUFreq governors.
++
++This document describes an implementation of a tunable, stacked on top of the
++utilization-driven governors which extends their functionality to support task
++performance boosting.
++
++By "performance boosting" we mean the reduction of the time required to
++complete a task activation, i.e. the time elapsed from a task wakeup to its
++next deactivation (e.g. because it goes back to sleep or it terminates).  For
++example, if we consider a simple periodic task which executes the same workload
++for 5[s] every 20[s] while running at a certain OPP, a boosted execution of
++that task must complete each of its activations in less than 5[s].
++
++A previous attempt [5] to introduce such a boosting feature has not been
++successful mainly because of the complexity of the proposed solution. Previous
++versions of the approach described in this document exposed a single simple
++interface to user-space.  This single tunable knob allowed the tuning of
++system wide scheduler behaviours ranging from energy efficiency at one end
++through to incremental performance boosting at the other end.  This first
++tunable affects all tasks. However, that is not useful for Android products
++so in this version only a more advanced extension of the concept is provided
++which uses CGroups to boost the performance of only selected tasks while using
++the energy efficient default for all others.
++
++The rest of this document introduces in more details the proposed solution
++which has been named SchedTune.
++
++
++2. Introduction
++===============
++
++SchedTune exposes a simple user-space interface provided through a new
++CGroup controller 'stune' which provides two power-performance tunables
++per group:
++
++  /<stune cgroup mount point>/schedtune.prefer_idle
++  /<stune cgroup mount point>/schedtune.boost
++
++The CGroup implementation permits arbitrary user-space defined task
++classification to tune the scheduler for different goals depending on the
++specific nature of the task, e.g. background vs interactive vs low-priority.
++
++More details are given in section 5.
++
++2.1 Boosting
++============
++
++The boost value is expressed as an integer in the range [-100..0..100].
++
++A value of 0 (default) configures the CFS scheduler for maximum energy
++efficiency. This means that sched-DVFS runs the tasks at the minimum OPP
++required to satisfy their workload demand.
++
++A value of 100 configures scheduler for maximum performance, which translates
++to the selection of the maximum OPP on that CPU.
++
++A value of -100 configures scheduler for minimum performance, which translates
++to the selection of the minimum OPP on that CPU.
++
++The range between -100, 0 and 100 can be set to satisfy other scenarios suitably.
++For example to satisfy interactive response or depending on other system events
++(battery level etc).
++
++The overall design of the SchedTune module is built on top of "Per-Entity Load
++Tracking" (PELT) signals and sched-DVFS by introducing a bias on the Operating
++Performance Point (OPP) selection.
++
++Each time a task is allocated on a CPU, cpufreq is given the opportunity to tune
++the operating frequency of that CPU to better match the workload demand. The
++selection of the actual OPP being activated is influenced by the boost value
++for the task CGroup.
++
++This simple biasing approach leverages existing frameworks, which means minimal
++modifications to the scheduler, and yet it allows to achieve a range of
++different behaviours all from a single simple tunable knob.
++
++In EAS schedulers, we use boosted task and CPU utilization for energy
++calculation and energy-aware task placement.
++
++2.2 prefer_idle
++===============
++
++This is a flag which indicates to the scheduler that userspace would like
++the scheduler to focus on energy or to focus on performance.
++
++A value of 0 (default) signals to the CFS scheduler that tasks in this group
++can be placed according to the energy-aware wakeup strategy.
++
++A value of 1 signals to the CFS scheduler that tasks in this group should be
++placed to minimise wakeup latency.
++
++The value is combined with the boost value - task placement will not be
++boost aware however CPU OPP selection is still boost aware.
++
++Android platforms typically use this flag for application tasks which the
++user is currently interacting with.
++
++
++3. Signal Boosting Strategy
++===========================
++
++The whole PELT machinery works based on the value of a few load tracking signals
++which basically track the CPU bandwidth requirements for tasks and the capacity
++of CPUs. The basic idea behind the SchedTune knob is to artificially inflate
++some of these load tracking signals to make a task or RQ appears more demanding
++that it actually is.
++
++Which signals have to be inflated depends on the specific "consumer".  However,
++independently from the specific (signal, consumer) pair, it is important to
++define a simple and possibly consistent strategy for the concept of boosting a
++signal.
++
++A boosting strategy defines how the "abstract" user-space defined
++sched_cfs_boost value is translated into an internal "margin" value to be added
++to a signal to get its inflated value:
++
++  margin         := boosting_strategy(sched_cfs_boost, signal)
++  boosted_signal := signal + margin
++
++Different boosting strategies were identified and analyzed before selecting the
++one found to be most effective.
++
++Signal Proportional Compensation (SPC)
++--------------------------------------
++
++In this boosting strategy the sched_cfs_boost value is used to compute a
++margin which is proportional to the complement of the original signal.
++When a signal has a maximum possible value, its complement is defined as
++the delta from the actual value and its possible maximum.
++
++Since the tunable implementation uses signals which have SCHED_LOAD_SCALE as
++the maximum possible value, the margin becomes:
++
++	margin := sched_cfs_boost * (SCHED_LOAD_SCALE - signal)
++
++Using this boosting strategy:
++- a 100% sched_cfs_boost means that the signal is scaled to the maximum value
++- each value in the range of sched_cfs_boost effectively inflates the signal in
++  question by a quantity which is proportional to the maximum value.
++
++For example, by applying the SPC boosting strategy to the selection of the OPP
++to run a task it is possible to achieve these behaviors:
++
++-   0% boosting: run the task at the minimum OPP required by its workload
++- 100% boosting: run the task at the maximum OPP available for the CPU
++-  50% boosting: run at the half-way OPP between minimum and maximum
++
++Which means that, at 50% boosting, a task will be scheduled to run at half of
++the maximum theoretically achievable performance on the specific target
++platform.
++
++A graphical representation of an SPC boosted signal is represented in the
++following figure where:
++ a) "-" represents the original signal
++ b) "b" represents a  50% boosted signal
++ c) "p" represents a 100% boosted signal
++
++
++   ^
++   |  SCHED_LOAD_SCALE
++   +-----------------------------------------------------------------+
++   |pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
++   |
++   |                                             boosted_signal
++   |                                          bbbbbbbbbbbbbbbbbbbbbbbb
++   |
++   |                                            original signal
++   |                  bbbbbbbbbbbbbbbbbbbbbbbb+----------------------+
++   |                                          |
++   |bbbbbbbbbbbbbbbbbb                        |
++   |                                          |
++   |                                          |
++   |                                          |
++   |                  +-----------------------+
++   |                  |
++   |                  |
++   |                  |
++   |------------------+
++   |
++   |
++   +----------------------------------------------------------------------->
++
++The plot above shows a ramped load signal (titled 'original_signal') and it's
++boosted equivalent. For each step of the original signal the boosted signal
++corresponding to a 50% boost is midway from the original signal and the upper
++bound. Boosting by 100% generates a boosted signal which is always saturated to
++the upper bound.
++
++
++4. OPP selection using boosted CPU utilization
++==============================================
++
++It is worth calling out that the implementation does not introduce any new load
++signals. Instead, it provides an API to tune existing signals. This tuning is
++done on demand and only in scheduler code paths where it is sensible to do so.
++The new API calls are defined to return either the default signal or a boosted
++one, depending on the value of sched_cfs_boost. This is a clean an non invasive
++modification of the existing existing code paths.
++
++The signal representing a CPU's utilization is boosted according to the
++previously described SPC boosting strategy. To sched-DVFS, this allows a CPU
++(ie CFS run-queue) to appear more used then it actually is.
++
++Thus, with the sched_cfs_boost enabled we have the following main functions to
++get the current utilization of a CPU:
++
++  cpu_util()
++  boosted_cpu_util()
++
++The new boosted_cpu_util() is similar to the first but returns a boosted
++utilization signal which is a function of the sched_cfs_boost value.
++
++This function is used in the CFS scheduler code paths where sched-DVFS needs to
++decide the OPP to run a CPU at.
++For example, this allows selecting the highest OPP for a CPU which has
++the boost value set to 100%.
++
++
++5. Per task group boosting
++==========================
++
++On battery powered devices there usually are many background services which are
++long running and need energy efficient scheduling. On the other hand, some
++applications are more performance sensitive and require an interactive
++response and/or maximum performance, regardless of the energy cost.
++
++To better service such scenarios, the SchedTune implementation has an extension
++that provides a more fine grained boosting interface.
++
++A new CGroup controller, namely "schedtune", can be enabled which allows to
++defined and configure task groups with different boosting values.
++Tasks that require special performance can be put into separate CGroups.
++The value of the boost associated with the tasks in this group can be specified
++using a single knob exposed by the CGroup controller:
++
++   schedtune.boost
++
++This knob allows the definition of a boost value that is to be used for
++SPC boosting of all tasks attached to this group.
++
++The current schedtune controller implementation is really simple and has these
++main characteristics:
++
++  1) It is only possible to create 1 level depth hierarchies
++
++     The root control groups define the system-wide boost value to be applied
++     by default to all tasks. Its direct subgroups are named "boost groups" and
++     they define the boost value for specific set of tasks.
++     Further nested subgroups are not allowed since they do not have a sensible
++     meaning from a user-space standpoint.
++
++  2) It is possible to define only a limited number of "boost groups"
++
++     This number is defined at compile time and by default configured to 16.
++     This is a design decision motivated by two main reasons:
++     a) In a real system we do not expect utilization scenarios with more then few
++	boost groups. For example, a reasonable collection of groups could be
++        just "background", "interactive" and "performance".
++     b) It simplifies the implementation considerably, especially for the code
++	which has to compute the per CPU boosting once there are multiple
++        RUNNABLE tasks with different boost values.
++
++Such a simple design should allow servicing the main utilization scenarios identified
++so far. It provides a simple interface which can be used to manage the
++power-performance of all tasks or only selected tasks.
++Moreover, this interface can be easily integrated by user-space run-times (e.g.
++Android, ChromeOS) to implement a QoS solution for task boosting based on tasks
++classification, which has been a long standing requirement.
++
++Setup and usage
++---------------
++
++0. Use a kernel with CONFIG_SCHED_TUNE support enabled
++
++1. Check that the "schedtune" CGroup controller is available:
++
++   root@linaro-nano:~# cat /proc/cgroups
++   #subsys_name	hierarchy	num_cgroups	enabled
++   cpuset  	0		1		1
++   cpu     	0		1		1
++   schedtune	0		1		1
++
++2. Mount a tmpfs to create the CGroups mount point (Optional)
++
++   root@linaro-nano:~# sudo mount -t tmpfs cgroups /sys/fs/cgroup
++
++3. Mount the "schedtune" controller
++
++   root@linaro-nano:~# mkdir /sys/fs/cgroup/stune
++   root@linaro-nano:~# sudo mount -t cgroup -o schedtune stune /sys/fs/cgroup/stune
++
++4. Create task groups and configure their specific boost value (Optional)
++
++   For example here we create a "performance" boost group configure to boost
++   all its tasks to 100%
++
++   root@linaro-nano:~# mkdir /sys/fs/cgroup/stune/performance
++   root@linaro-nano:~# echo 100 > /sys/fs/cgroup/stune/performance/schedtune.boost
++
++5. Move tasks into the boost group
++
++   For example, the following moves the tasks with PID $TASKPID (and all its
++   threads) into the "performance" boost group.
++
++   root@linaro-nano:~# echo "TASKPID > /sys/fs/cgroup/stune/performance/cgroup.procs
++
++This simple configuration allows only the threads of the $TASKPID task to run,
++when needed, at the highest OPP in the most capable CPU of the system.
++
++
++6. Per-task wakeup-placement-strategy Selection
++===============================================
++
++Many devices have a number of CFS tasks in use which require an absolute
++minimum wakeup latency, and many tasks for which wakeup latency is not
++important.
++
++For touch-driven environments, removing additional wakeup latency can be
++critical.
++
++When you use the Schedtume CGroup controller, you have access to a second
++parameter which allows a group to be marked such that energy_aware task
++placement is bypassed for tasks belonging to that group.
++
++prefer_idle=0 (default - use energy-aware task placement if available)
++prefer_idle=1 (never use energy-aware task placement for these tasks)
++
++Since the regular wakeup task placement algorithm in CFS is biased for
++performance, this has the effect of restoring minimum wakeup latency
++for the desired tasks whilst still allowing energy-aware wakeup placement
++to save energy for other tasks.
++
++
++7. Question and Answers
++=======================
++
++What about "auto" mode?
++-----------------------
++
++The 'auto' mode as described in [5] can be implemented by interfacing SchedTune
++with some suitable user-space element. This element could use the exposed
++system-wide or cgroup based interface.
++
++How are multiple groups of tasks with different boost values managed?
++---------------------------------------------------------------------
++
++The current SchedTune implementation keeps track of the boosted RUNNABLE tasks
++on a CPU. The CPU utilization seen by the scheduler-driven cpufreq governors
++(and used to select an appropriate OPP) is boosted with a value which is the
++maximum of the boost values of the currently RUNNABLE tasks in its RQ.
++
++This allows cpufreq to boost a CPU only while there are boosted tasks ready
++to run and switch back to the energy efficient mode as soon as the last boosted
++task is dequeued.
++
++
++8. References
++=============
++[1] http://lwn.net/Articles/552889
++[2] http://lkml.org/lkml/2012/5/18/91
++[3] http://lkml.org/lkml/2015/6/26/620
+diff --git a/include/linux/cgroup_subsys.h b/include/linux/cgroup_subsys.h
+index acb77dcff3b4..8996c092568b 100644
+--- a/include/linux/cgroup_subsys.h
++++ b/include/linux/cgroup_subsys.h
+@@ -21,6 +21,10 @@ SUBSYS(cpu)
+ SUBSYS(cpuacct)
+ #endif
+ 
++#if IS_ENABLED(CONFIG_SCHED_TUNE)
++SUBSYS(schedtune)
++#endif
++
+ #if IS_ENABLED(CONFIG_BLK_CGROUP)
+ SUBSYS(io)
+ #endif
+diff --git a/init/Kconfig b/init/Kconfig
+index 01cad95346df..2a9efce3f75d 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -991,6 +991,29 @@ config SCHED_AUTOGROUP
+ 	  desktop applications.  Task group autogeneration is currently based
+ 	  upon task session.
+ 
++config SCHED_TUNE
++	bool "Boosting for CFS tasks (EXPERIMENTAL)"
++	depends on SMP
++	help
++	  This option enables support for task classification using a new
++	  cgroup controller, schedtune. Schedtune allows tasks to be given
++	  a boost value and marked as latency-sensitive or not. This option
++	  provides the "schedtune" controller.
++
++	  This new controller:
++	  1. allows only a two layers hierarchy, where the root defines the
++	     system-wide boost value and its direct childrens define each one a
++	     different "class of tasks" to be boosted with a different value
++	  2. supports up to 16 different task classes, each one which could be
++	     configured with a different boost value
++
++	  Latency-sensitive tasks are not subject to energy-aware wakeup
++	  task placement. The boost value assigned to tasks is used to
++	  influence task placement and CPU frequency selection (if
++	  utilization-driven frequency selection is in use).
++
++	  If unsure, say N.
++
+ config SYSFS_DEPRECATED
+ 	bool "Enable deprecated sysfs features to support old userspace tools"
+ 	depends on SYSFS
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 7fe183404c38..2389350a8268 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -24,6 +24,7 @@ obj-$(CONFIG_SMP) += cpupri.o cpudeadline.o topology.o stop_task.o pelt.o
+ obj-$(CONFIG_SCHED_AUTOGROUP) += autogroup.o
+ obj-$(CONFIG_SCHEDSTATS) += stats.o
+ obj-$(CONFIG_SCHED_DEBUG) += debug.o
++obj-$(CONFIG_SCHED_TUNE) += tune.o
+ obj-$(CONFIG_CGROUP_CPUACCT) += cpuacct.o
+ obj-$(CONFIG_CPU_FREQ) += cpufreq.o
+ obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+index d2236d1166f4..645f54a0c2dc 100644
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -286,7 +286,7 @@ unsigned long schedutil_freq_util(int cpu, unsigned long util_cfs,
+ static unsigned long sugov_get_util(struct sugov_cpu *sg_cpu)
+ {
+ 	struct rq *rq = cpu_rq(sg_cpu->cpu);
+-	unsigned long util = cpu_util_cfs(rq);
++	unsigned long util = boosted_cpu_util(sg_cpu->cpu);
+ 
+ 	sg_cpu->max = arch_scale_cpu_capacity(NULL, sg_cpu->cpu);
+ 	sg_cpu->bw_dl = cpu_bw_dl(rq);
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index e919c31562ab..1db3fdf2dfc3 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -5132,6 +5132,24 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+ 	 */
+ 	util_est_enqueue(&rq->cfs, p);
+ 
++	/*
++	 * The code below (indirectly) updates schedutil which looks at
++	 * the cfs_rq utilization to select a frequency.
++	 * Let's update schedtune here to ensure the boost value of the
++	 * current task is accounted for in the selection of the OPP.
++	 *
++	 * We do it also in the case where we enqueue a throttled task;
++	 * we could argue that a throttled task should not boost a CPU,
++	 * however:
++	 * a) properly implementing CPU boosting considering throttled
++	 *    tasks will increase a lot the complexity of the solution
++	 * b) it's not easy to quantify the benefits introduced by
++	 *    such a more complex solution.
++	 * Thus, for the time being we go for the simple solution and boost
++	 * also for throttled RQs.
++	 */
++	schedtune_enqueue_task(p, cpu_of(rq));
++
+ 	/*
+ 	 * If in_iowait is set, the code below may not trigger any cpufreq
+ 	 * utilization updates, so do it here explicitly with the IOWAIT flag
+@@ -5207,6 +5225,14 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+ 	struct sched_entity *se = &p->se;
+ 	int task_sleep = flags & DEQUEUE_SLEEP;
+ 
++	/*
++	 * The code below (indirectly) updates schedutil which looks at
++	 * the cfs_rq utilization to select a frequency.
++	 * Let's update schedtune here to ensure the boost value of the
++	 * current task is not more accounted for in the selection of the OPP.
++	 */
++	schedtune_dequeue_task(p, cpu_of(rq));
++
+ 	for_each_sched_entity(se) {
+ 		cfs_rq = cfs_rq_of(se);
+ 		dequeue_entity(cfs_rq, se, flags);
+@@ -5733,6 +5759,98 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
+ 	return target;
+ }
+ 
++#ifdef CONFIG_SCHED_TUNE
++struct reciprocal_value schedtune_spc_rdiv;
++
++static long
++schedtune_margin(unsigned long signal, long boost)
++{
++	long long margin = 0;
++
++	/*
++	 * Signal proportional compensation (SPC)
++	 *
++	 * The Boost (B) value is used to compute a Margin (M) which is
++	 * proportional to the complement of the original Signal (S):
++	 *   M = B * (SCHED_CAPACITY_SCALE - S)
++	 * The obtained M could be used by the caller to "boost" S.
++	 */
++	if (boost >= 0) {
++		margin  = SCHED_CAPACITY_SCALE - signal;
++		margin *= boost;
++	} else
++		margin = -signal * boost;
++
++	margin  = reciprocal_divide(margin, schedtune_spc_rdiv);
++
++	if (boost < 0)
++		margin *= -1;
++	return margin;
++}
++
++static inline int
++schedtune_cpu_margin(unsigned long util, int cpu)
++{
++	int boost = schedtune_cpu_boost(cpu);
++
++	if (boost == 0)
++		return 0;
++
++	return schedtune_margin(util, boost);
++}
++
++static inline long
++schedtune_task_margin(struct task_struct *task)
++{
++	int boost = schedtune_task_boost(task);
++	unsigned long util;
++	long margin;
++
++	if (boost == 0)
++		return 0;
++
++	util = task_util_est(task);
++	margin = schedtune_margin(util, boost);
++
++	return margin;
++}
++
++unsigned long
++boosted_cpu_util(int cpu)
++{
++	unsigned long util = cpu_util_cfs(cpu_rq(cpu));
++	long margin = schedtune_cpu_margin(util, cpu);
++
++	return util + margin;
++}
++
++#else /* CONFIG_SCHED_TUNE */
++
++static inline int
++schedtune_cpu_margin(unsigned long util, int cpu)
++{
++	return 0;
++}
++
++static inline int
++schedtune_task_margin(struct task_struct *task)
++{
++	return 0;
++}
++
++#endif /* CONFIG_SCHED_TUNE */
++
++
++
++static inline unsigned long
++boosted_task_util(struct task_struct *task)
++{
++	unsigned long util = task_util_est(task);
++	long margin = schedtune_task_margin(task);
++
++	return util + margin;
++}
++
+ static unsigned long cpu_util_wake(int cpu, struct task_struct *p);
+ 
+ static unsigned long capacity_spare_wake(int cpu, struct task_struct *p)
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index ce83194c274a..16fc88a9b43e 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -80,6 +80,8 @@
+ # define SCHED_WARN_ON(x)	({ (void)(x), 0; })
+ #endif
+ 
++#include "tune.h"
++
+ struct rq;
+ struct cpuidle_state;
+ 
+diff --git a/kernel/sched/tune.c b/kernel/sched/tune.c
+new file mode 100644
+index 000000000000..af6de6d3df6d
+--- /dev/null
++++ b/kernel/sched/tune.c
+@@ -0,0 +1,622 @@
++#include <linux/cgroup.h>
++#include <linux/err.h>
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/printk.h>
++#include <linux/rcupdate.h>
++#include <linux/slab.h>
++
++#include <trace/events/sched.h>
++
++#include "sched.h"
++
++bool schedtune_initialized = false;
++extern struct reciprocal_value schedtune_spc_rdiv;
++
++/*
++ * EAS scheduler tunables for task groups.
++ *
++ * When CGroup support is enabled, we have to synchronize two different
++ * paths:
++ *  - slow path: where CGroups are created/updated/removed
++ *  - fast path: where tasks in a CGroups are accounted
++ *
++ * The slow path tracks (a limited number of) CGroups and maps each on a
++ * "boost_group" index. The fastpath accounts tasks currently RUNNABLE on each
++ * "boost_group".
++ *
++ * Once a new CGroup is created, a boost group idx is assigned and the
++ * corresponding "boost_group" marked as valid on each CPU.
++ * Once a CGroup is release, the corresponding "boost_group" is marked as
++ * invalid on each CPU. The CPU boost value (boost_max) is aggregated by
++ * considering only valid boost_groups with a non null tasks counter.
++ *
++ * .:: Locking strategy
++ *
++ * The fast path uses a spin lock for each CPU boost_group which protects the
++ * tasks counter.
++ *
++ * The "valid" and "boost" values of each CPU boost_group is instead
++ * protected by the RCU lock provided by the CGroups callbacks. Thus, only the
++ * slow path can access and modify the boost_group attribtues of each CPU.
++ * The fast path will catch up the most updated values at the next scheduling
++ * event (i.e. enqueue/dequeue).
++ *
++ *                                                        |
++ *                                             SLOW PATH  |   FAST PATH
++ *                              CGroup add/update/remove  |   Scheduler enqueue/dequeue events
++ *                                                        |
++ *                                                        |
++ *                                                        |     DEFINE_PER_CPU(struct boost_groups)
++ *                                                        |     +--------------+----+---+----+----+
++ *                                                        |     |  idle        |    |   |    |    |
++ *                                                        |     |  boost_max   |    |   |    |    |
++ *                                                        |  +---->lock        |    |   |    |    |
++ *  struct schedtune                  allocated_groups    |  |  |  group[    ] |    |   |    |    |
++ *  +------------------------------+         +-------+    |  |  +--+---------+-+----+---+----+----+
++ *  | idx                          |         |       |    |  |     |  valid  |
++ *  | boots / prefer_idle          |         |       |    |  |     |  boost  |
++ *  | perf_{boost/constraints}_idx | <---------+(*)  |    |  |     |  tasks  | <------------+
++ *  | css                          |         +-------+    |  |     +---------+              |
++ *  +-+----------------------------+         |       |    |  |     |         |              |
++ *    ^                                      |       |    |  |     |         |              |
++ *    |                                      +-------+    |  |     +---------+              |
++ *    |                                      |       |    |  |     |         |              |
++ *    |                                      |       |    |  |     |         |              |
++ *    |                                      +-------+    |  |     +---------+              |
++ *    | zmalloc                              |       |    |  |     |         |              |
++ *    |                                      |       |    |  |     |         |              |
++ *    |                                      +-------+    |  |     +---------+              |
++ *    +                              BOOSTGROUPS_COUNT    |  |     BOOSTGROUPS_COUNT        |
++ *  schedtune_boostgroup_init()                           |  +                              |
++ *                                                        |  schedtune_{en,de}queue_task()  |
++ *                                                        |                                 +
++ *                                                        |          schedtune_tasks_update()
++ *                                                        |
++ */
++
++/* SchdTune tunables for a group of tasks */
++struct schedtune {
++	/* SchedTune CGroup subsystem */
++	struct cgroup_subsys_state css;
++
++	/* Boost group allocated ID */
++	int idx;
++
++	/* Boost value for tasks on that SchedTune CGroup */
++	int boost;
++
++	/* Hint to bias scheduling of tasks on that SchedTune CGroup
++	 * towards idle CPUs */
++	int prefer_idle;
++};
++
++static inline struct schedtune *css_st(struct cgroup_subsys_state *css)
++{
++	return css ? container_of(css, struct schedtune, css) : NULL;
++}
++
++static inline struct schedtune *task_schedtune(struct task_struct *tsk)
++{
++	return css_st(task_css(tsk, schedtune_cgrp_id));
++}
++
++static inline struct schedtune *parent_st(struct schedtune *st)
++{
++	return css_st(st->css.parent);
++}
++
++/*
++ * SchedTune root control group
++ * The root control group is used to defined a system-wide boosting tuning,
++ * which is applied to all tasks in the system.
++ * Task specific boost tuning could be specified by creating and
++ * configuring a child control group under the root one.
++ * By default, system-wide boosting is disabled, i.e. no boosting is applied
++ * to tasks which are not into a child control group.
++ */
++static struct schedtune
++root_schedtune = {
++	.boost	= 0,
++	.prefer_idle = 0,
++};
++
++/*
++ * Maximum number of boost groups to support
++ * When per-task boosting is used we still allow only limited number of
++ * boost groups for two main reasons:
++ * 1. on a real system we usually have only few classes of workloads which
++ *    make sense to boost with different values (e.g. background vs foreground
++ *    tasks, interactive vs low-priority tasks)
++ * 2. a limited number allows for a simpler and more memory/time efficient
++ *    implementation especially for the computation of the per-CPU boost
++ *    value
++ */
++#define BOOSTGROUPS_COUNT 5
++
++/* Array of configured boostgroups */
++static struct schedtune *allocated_group[BOOSTGROUPS_COUNT] = {
++	&root_schedtune,
++	NULL,
++};
++
++/* SchedTune boost groups
++ * Keep track of all the boost groups which impact on CPU, for example when a
++ * CPU has two RUNNABLE tasks belonging to two different boost groups and thus
++ * likely with different boost values.
++ * Since on each system we expect only a limited number of boost groups, here
++ * we use a simple array to keep track of the metrics required to compute the
++ * maximum per-CPU boosting value.
++ */
++struct boost_groups {
++	/* Maximum boost value for all RUNNABLE tasks on a CPU */
++	int boost_max;
++	struct {
++		/* True when this boost group maps an actual cgroup */
++		bool valid;
++		/* The boost for tasks on that boost group */
++		int boost;
++		/* Count of RUNNABLE tasks on that boost group */
++		unsigned tasks;
++	} group[BOOSTGROUPS_COUNT];
++	/* CPU's boost group locking */
++	raw_spinlock_t lock;
++};
++
++/* Boost groups affecting each CPU in the system */
++DEFINE_PER_CPU(struct boost_groups, cpu_boost_groups);
++
++static void
++schedtune_cpu_update(int cpu)
++{
++	struct boost_groups *bg = &per_cpu(cpu_boost_groups, cpu);
++	int boost_max;
++	int idx;
++
++	/* The root boost group is always active */
++	boost_max = bg->group[0].boost;
++	for (idx = 1; idx < BOOSTGROUPS_COUNT; ++idx) {
++
++		/* Ignore non boostgroups not mapping a cgroup */
++		if (!bg->group[idx].valid)
++			continue;
++
++		/*
++		 * A boost group affects a CPU only if it has
++		 * RUNNABLE tasks on that CPU
++		 */
++		if (bg->group[idx].tasks == 0)
++			continue;
++
++		boost_max = max(boost_max, bg->group[idx].boost);
++	}
++
++	/* Ensures boost_max is non-negative when all cgroup boost values
++	 * are neagtive. Avoids under-accounting of cpu capacity which may cause
++	 * task stacking and frequency spikes.*/
++	boost_max = max(boost_max, 0);
++	bg->boost_max = boost_max;
++}
++
++static int
++schedtune_boostgroup_update(int idx, int boost)
++{
++	struct boost_groups *bg;
++	int cur_boost_max;
++	int old_boost;
++	int cpu;
++
++	/* Update per CPU boost groups */
++	for_each_possible_cpu(cpu) {
++		bg = &per_cpu(cpu_boost_groups, cpu);
++
++		/* CGroups are never associated to non active cgroups */
++		BUG_ON(!bg->group[idx].valid);
++
++		/*
++		 * Keep track of current boost values to compute the per CPU
++		 * maximum only when it has been affected by the new value of
++		 * the updated boost group
++		 */
++		cur_boost_max = bg->boost_max;
++		old_boost = bg->group[idx].boost;
++
++		/* Update the boost value of this boost group */
++		bg->group[idx].boost = boost;
++
++		/* Check if this update increase current max */
++		if (boost > cur_boost_max && bg->group[idx].tasks) {
++			bg->boost_max = boost;
++			continue;
++		}
++
++		/* Check if this update has decreased current max */
++		if (cur_boost_max == old_boost && old_boost > boost) {
++			schedtune_cpu_update(cpu);
++			continue;
++		}
++	}
++
++	return 0;
++}
++
++#define ENQUEUE_TASK  1
++#define DEQUEUE_TASK -1
++
++static inline void
++schedtune_tasks_update(struct task_struct *p, int cpu, int idx, int task_count)
++{
++	struct boost_groups *bg = &per_cpu(cpu_boost_groups, cpu);
++	int tasks = bg->group[idx].tasks + task_count;
++
++	/* Update boosted tasks count while avoiding to make it negative */
++	bg->group[idx].tasks = max(0, tasks);
++
++	/* Boost group activation or deactivation on that RQ */
++	if (tasks == 1 || tasks == 0)
++		schedtune_cpu_update(cpu);
++}
++
++/*
++ * NOTE: This function must be called while holding the lock on the CPU RQ
++ */
++void schedtune_enqueue_task(struct task_struct *p, int cpu)
++{
++	struct boost_groups *bg = &per_cpu(cpu_boost_groups, cpu);
++	unsigned long irq_flags;
++	struct schedtune *st;
++	int idx;
++
++	if (unlikely(!schedtune_initialized))
++		return;
++
++	/*
++	 * Boost group accouting is protected by a per-cpu lock and requires
++	 * interrupt to be disabled to avoid race conditions for example on
++	 * do_exit()::cgroup_exit() and task migration.
++	 */
++	raw_spin_lock_irqsave(&bg->lock, irq_flags);
++	rcu_read_lock();
++
++	st = task_schedtune(p);
++	idx = st->idx;
++
++	schedtune_tasks_update(p, cpu, idx, ENQUEUE_TASK);
++
++	rcu_read_unlock();
++	raw_spin_unlock_irqrestore(&bg->lock, irq_flags);
++}
++
++int schedtune_can_attach(struct cgroup_taskset *tset)
++{
++	struct task_struct *task;
++	struct cgroup_subsys_state *css;
++	struct boost_groups *bg;
++	struct rq_flags rq_flags;
++	unsigned int cpu;
++	struct rq *rq;
++	int src_bg; /* Source boost group index */
++	int dst_bg; /* Destination boost group index */
++	int tasks;
++
++	if (unlikely(!schedtune_initialized))
++		return 0;
++
++
++	cgroup_taskset_for_each(task, css, tset) {
++
++		/*
++		 * Lock the CPU's RQ the task is enqueued to avoid race
++		 * conditions with migration code while the task is being
++		 * accounted
++		 */
++		rq = task_rq_lock(task, &rq_flags);
++
++		if (!task->on_rq) {
++			task_rq_unlock(rq, task, &rq_flags);
++			continue;
++		}
++
++		/*
++		 * Boost group accouting is protected by a per-cpu lock and requires
++		 * interrupt to be disabled to avoid race conditions on...
++		 */
++		cpu = cpu_of(rq);
++		bg = &per_cpu(cpu_boost_groups, cpu);
++		raw_spin_lock(&bg->lock);
++
++		dst_bg = css_st(css)->idx;
++		src_bg = task_schedtune(task)->idx;
++
++		/*
++		 * Current task is not changing boostgroup, which can
++		 * happen when the new hierarchy is in use.
++		 */
++		if (unlikely(dst_bg == src_bg)) {
++			raw_spin_unlock(&bg->lock);
++			task_rq_unlock(rq, task, &rq_flags);
++			continue;
++		}
++
++		/*
++		 * This is the case of a RUNNABLE task which is switching its
++		 * current boost group.
++		 */
++
++		/* Move task from src to dst boost group */
++		tasks = bg->group[src_bg].tasks - 1;
++		bg->group[src_bg].tasks = max(0, tasks);
++		bg->group[dst_bg].tasks += 1;
++
++		raw_spin_unlock(&bg->lock);
++		task_rq_unlock(rq, task, &rq_flags);
++
++		/* Update CPU boost group */
++		if (bg->group[src_bg].tasks == 0 || bg->group[dst_bg].tasks == 1)
++			schedtune_cpu_update(task_cpu(task));
++
++	}
++
++	return 0;
++}
++
++void schedtune_cancel_attach(struct cgroup_taskset *tset)
++{
++	/* This can happen only if SchedTune controller is mounted with
++	 * other hierarchies ane one of them fails. Since usually SchedTune is
++	 * mouted on its own hierarcy, for the time being we do not implement
++	 * a proper rollback mechanism */
++	WARN(1, "SchedTune cancel attach not implemented");
++}
++
++/*
++ * NOTE: This function must be called while holding the lock on the CPU RQ
++ */
++void schedtune_dequeue_task(struct task_struct *p, int cpu)
++{
++	struct boost_groups *bg = &per_cpu(cpu_boost_groups, cpu);
++	unsigned long irq_flags;
++	struct schedtune *st;
++	int idx;
++
++	if (unlikely(!schedtune_initialized))
++		return;
++
++	/*
++	 * Boost group accouting is protected by a per-cpu lock and requires
++	 * interrupt to be disabled to avoid race conditions on...
++	 */
++	raw_spin_lock_irqsave(&bg->lock, irq_flags);
++	rcu_read_lock();
++
++	st = task_schedtune(p);
++	idx = st->idx;
++
++	schedtune_tasks_update(p, cpu, idx, DEQUEUE_TASK);
++
++	rcu_read_unlock();
++	raw_spin_unlock_irqrestore(&bg->lock, irq_flags);
++}
++
++int schedtune_cpu_boost(int cpu)
++{
++	struct boost_groups *bg;
++
++	bg = &per_cpu(cpu_boost_groups, cpu);
++	return bg->boost_max;
++}
++
++int schedtune_task_boost(struct task_struct *p)
++{
++	struct schedtune *st;
++	int task_boost;
++
++	if (unlikely(!schedtune_initialized))
++		return 0;
++
++	/* Get task boost value */
++	rcu_read_lock();
++	st = task_schedtune(p);
++	task_boost = st->boost;
++	rcu_read_unlock();
++
++	return task_boost;
++}
++
++int schedtune_prefer_idle(struct task_struct *p)
++{
++	struct schedtune *st;
++	int prefer_idle;
++
++	if (unlikely(!schedtune_initialized))
++		return 0;
++
++	/* Get prefer_idle value */
++	rcu_read_lock();
++	st = task_schedtune(p);
++	prefer_idle = st->prefer_idle;
++	rcu_read_unlock();
++
++	return prefer_idle;
++}
++
++static u64
++prefer_idle_read(struct cgroup_subsys_state *css, struct cftype *cft)
++{
++	struct schedtune *st = css_st(css);
++
++	return st->prefer_idle;
++}
++
++static int
++prefer_idle_write(struct cgroup_subsys_state *css, struct cftype *cft,
++	    u64 prefer_idle)
++{
++	struct schedtune *st = css_st(css);
++	st->prefer_idle = !!prefer_idle;
++
++	return 0;
++}
++
++static s64
++boost_read(struct cgroup_subsys_state *css, struct cftype *cft)
++{
++	struct schedtune *st = css_st(css);
++
++	return st->boost;
++}
++
++static int
++boost_write(struct cgroup_subsys_state *css, struct cftype *cft,
++	    s64 boost)
++{
++	struct schedtune *st = css_st(css);
++
++	if (boost < 0 || boost > 100)
++		return -EINVAL;
++
++	st->boost = boost;
++
++	/* Update CPU boost */
++	schedtune_boostgroup_update(st->idx, st->boost);
++
++	return 0;
++}
++
++static struct cftype files[] = {
++	{
++		.name = "boost",
++		.read_s64 = boost_read,
++		.write_s64 = boost_write,
++	},
++	{
++		.name = "prefer_idle",
++		.read_u64 = prefer_idle_read,
++		.write_u64 = prefer_idle_write,
++	},
++	{ }	/* terminate */
++};
++
++static void
++schedtune_boostgroup_init(struct schedtune *st, int idx)
++{
++	struct boost_groups *bg;
++	int cpu;
++
++	/* Initialize per CPUs boost group support */
++	for_each_possible_cpu(cpu) {
++		bg = &per_cpu(cpu_boost_groups, cpu);
++		bg->group[idx].boost = 0;
++		bg->group[idx].valid = true;
++	}
++
++	/* Keep track of allocated boost groups */
++	allocated_group[idx] = st;
++	st->idx = idx;
++}
++
++static struct cgroup_subsys_state *
++schedtune_css_alloc(struct cgroup_subsys_state *parent_css)
++{
++	struct schedtune *st;
++	int idx;
++
++	if (!parent_css)
++		return &root_schedtune.css;
++
++	/* Allow only single level hierachies */
++	if (parent_css != &root_schedtune.css) {
++		pr_err("Nested SchedTune boosting groups not allowed\n");
++		return ERR_PTR(-ENOMEM);
++	}
++
++	/* Allow only a limited number of boosting groups */
++	for (idx = 1; idx < BOOSTGROUPS_COUNT; ++idx)
++		if (!allocated_group[idx])
++			break;
++	if (idx == BOOSTGROUPS_COUNT) {
++		pr_err("Trying to create more than %d SchedTune boosting groups\n",
++		       BOOSTGROUPS_COUNT);
++		return ERR_PTR(-ENOSPC);
++	}
++
++	st = kzalloc(sizeof(*st), GFP_KERNEL);
++	if (!st)
++		goto out;
++
++	/* Initialize per CPUs boost group support */
++	schedtune_boostgroup_init(st, idx);
++
++	return &st->css;
++
++out:
++	return ERR_PTR(-ENOMEM);
++}
++
++static void
++schedtune_boostgroup_release(struct schedtune *st)
++{
++	struct boost_groups *bg;
++	int cpu;
++
++	/* Reset per CPUs boost group support */
++	for_each_possible_cpu(cpu) {
++		bg = &per_cpu(cpu_boost_groups, cpu);
++		bg->group[st->idx].valid = false;
++		bg->group[st->idx].boost = 0;
++	}
++
++	/* Keep track of allocated boost groups */
++	allocated_group[st->idx] = NULL;
++}
++
++static void
++schedtune_css_free(struct cgroup_subsys_state *css)
++{
++	struct schedtune *st = css_st(css);
++
++	/* Release per CPUs boost group support */
++	schedtune_boostgroup_release(st);
++	kfree(st);
++}
++
++struct cgroup_subsys schedtune_cgrp_subsys = {
++	.css_alloc	= schedtune_css_alloc,
++	.css_free	= schedtune_css_free,
++	.can_attach     = schedtune_can_attach,
++	.cancel_attach  = schedtune_cancel_attach,
++	.legacy_cftypes	= files,
++	.early_init	= 1,
++};
++
++static inline void
++schedtune_init_cgroups(void)
++{
++	struct boost_groups *bg;
++	int cpu;
++
++	/* Initialize the per CPU boost groups */
++	for_each_possible_cpu(cpu) {
++		bg = &per_cpu(cpu_boost_groups, cpu);
++		memset(bg, 0, sizeof(struct boost_groups));
++		bg->group[0].valid = true;
++		raw_spin_lock_init(&bg->lock);
++	}
++
++	pr_info("schedtune: configured to support %d boost groups\n",
++		BOOSTGROUPS_COUNT);
++
++	schedtune_initialized = true;
++}
++
++/*
++ * Initialize the cgroup structures
++ */
++static int
++schedtune_init(void)
++{
++	schedtune_spc_rdiv = reciprocal_value(100);
++	schedtune_init_cgroups();
++	return 0;
++}
++postcore_initcall(schedtune_init);
+diff --git a/kernel/sched/tune.h b/kernel/sched/tune.h
+new file mode 100644
+index 000000000000..bb187c6112a7
+--- /dev/null
++++ b/kernel/sched/tune.h
+@@ -0,0 +1,37 @@
++
++#ifdef CONFIG_SCHED_TUNE
++
++#include <linux/reciprocal_div.h>
++
++/*
++ * System energy normalization constants
++ */
++struct target_nrg {
++	unsigned long min_power;
++	unsigned long max_power;
++	struct reciprocal_value rdiv;
++};
++
++int schedtune_cpu_boost(int cpu);
++int schedtune_task_boost(struct task_struct *tsk);
++
++int schedtune_prefer_idle(struct task_struct *tsk);
++
++void schedtune_enqueue_task(struct task_struct *p, int cpu);
++void schedtune_dequeue_task(struct task_struct *p, int cpu);
++
++unsigned long boosted_cpu_util(int cpu);
++
++#else /* CONFIG_SCHED_TUNE */
++
++#define schedtune_cpu_boost(cpu)  0
++#define schedtune_task_boost(tsk) 0
++
++#define schedtune_prefer_idle(tsk) 0
++
++#define schedtune_enqueue_task(task, cpu) do { } while (0)
++#define schedtune_dequeue_task(task, cpu) do { } while (0)
++
++#define boosted_cpu_util(cpu) cpu_util_cfs(cpu_rq(cpu))
++
++#endif /* CONFIG_SCHED_TUNE */
+-- 
+2.19.1
+
