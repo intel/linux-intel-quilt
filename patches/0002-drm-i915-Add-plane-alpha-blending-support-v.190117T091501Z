@@ -1,0 +1,252 @@
+From b469be4bbee273ad7e74ebcfca06acaa9b8b4e92 Mon Sep 17 00:00:00 2001
+From: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Date: Wed, 15 Aug 2018 12:34:05 +0200
+Subject: [PATCH 2/9] drm/i915: Add plane alpha blending support, v2.
+
+Add plane alpha blending support with the different blend modes.
+This has been tested on a icl to show the correct results,
+on earlier platforms small rounding errors cause issues. But this
+already happens case with fully transparant or fully opaque RGB8888
+fb's.
+
+The recommended HW workaround is to disable alpha blending when the
+plane alpha is 0 (transparant, hide plane) or 0xff (opaque, disable blending).
+This is easy to implement on any platform, so just do that.
+
+The tests for userspace are also available, and pass on gen11.
+
+Changes since v1:
+- Change mistaken < 0xff0 to 0xff00.
+- Only set PLANE_KEYMSK_ALPHA_ENABLE when plane alpha < 0xff00, ignore blend mode.
+- Rework disabling FBC when per pixel alpha is used.
+
+Signed-off-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+[mlankhorst: Change MISSING_CASE default to explicit alpha disable (mattrope)]
+Link: https://patchwork.freedesktop.org/patch/msgid/20180815103405.22679-1-maarten.lankhorst@linux.intel.com
+Reviewed-by: Matt Roper <matthew.d.roper@intel.com>
+
+Tacked-On: OLINUX-3689
+Signed-off-by: kimsehun <se.hun.kim@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h      |  2 ++
+ drivers/gpu/drm/i915/i915_reg.h      |  2 ++
+ drivers/gpu/drm/i915/intel_display.c | 52 +++++++++++++++++++---------
+ drivers/gpu/drm/i915/intel_fbc.c     |  8 +++++
+ drivers/gpu/drm/i915/intel_sprite.c  | 23 ++++++++++--
+ 5 files changed, 69 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index c0633ea208a9..fb6539653859 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -558,6 +558,8 @@ struct intel_fbc {
+ 			int adjusted_y;
+ 
+ 			int y;
++
++			uint16_t pixel_blend_mode;
+ 		} plane;
+ 
+ 		struct {
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 0297014630a5..c69f6278720a 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -6569,8 +6569,10 @@ enum {
+ #define _PLANE_KEYVAL_2_A			0x70294
+ #define _PLANE_KEYMSK_1_A			0x70198
+ #define _PLANE_KEYMSK_2_A			0x70298
++#define  PLANE_KEYMSK_ALPHA_ENABLE		(1 << 31)
+ #define _PLANE_KEYMAX_1_A			0x701a0
+ #define _PLANE_KEYMAX_2_A			0x702a0
++#define  PLANE_KEYMAX_ALPHA_SHIFT		24
+ #define _PLANE_AUX_DIST_1_A			0x701c0
+ #define _PLANE_AUX_DIST_2_A			0x702c0
+ #define _PLANE_AUX_OFFSET_1_A			0x701c4
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 223cda4b380c..d6b368e39ea8 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -3183,6 +3183,10 @@ int skl_check_plane_surface(const struct intel_crtc_state *crtc_state,
+ 		return -EINVAL;
+ 	}
+ 
++	/* HW only has 8 bits pixel precision, disable plane if invisible */
++	if (!(plane_state->base.alpha >> 8))
++		plane_state->base.visible = false;
++
+ 	if (!plane_state->base.visible)
+ 		return 0;
+ 
+@@ -3528,29 +3532,38 @@ static u32 skl_plane_ctl_format(uint32_t pixel_format)
+ 	return 0;
+ }
+ 
+-/*
+- * XXX: For ARBG/ABGR formats we default to expecting scanout buffers
+- * to be already pre-multiplied. We need to add a knob (or a different
+- * DRM_FORMAT) for user-space to configure that.
+- */
+-static u32 skl_plane_ctl_alpha(uint32_t pixel_format)
++static u32 skl_plane_ctl_alpha(const struct intel_plane_state *plane_state)
+ {
+-	switch (pixel_format) {
+-	case DRM_FORMAT_ABGR8888:
+-	case DRM_FORMAT_ARGB8888:
++	if (!plane_state->base.fb->format->has_alpha)
++		return PLANE_CTL_ALPHA_DISABLE;
++
++	switch (plane_state->base.pixel_blend_mode) {
++	case DRM_MODE_BLEND_PIXEL_NONE:
++		return PLANE_CTL_ALPHA_DISABLE;
++	case DRM_MODE_BLEND_PREMULTI:
+ 		return PLANE_CTL_ALPHA_SW_PREMULTIPLY;
++	case DRM_MODE_BLEND_COVERAGE:
++		return PLANE_CTL_ALPHA_HW_PREMULTIPLY;
+ 	default:
++		MISSING_CASE(plane_state->base.pixel_blend_mode);
+ 		return PLANE_CTL_ALPHA_DISABLE;
+ 	}
+ }
+ 
+-static u32 glk_plane_color_ctl_alpha(uint32_t pixel_format)
++static u32 glk_plane_color_ctl_alpha(const struct intel_plane_state *plane_state)
+ {
+-	switch (pixel_format) {
+-	case DRM_FORMAT_ABGR8888:
+-	case DRM_FORMAT_ARGB8888:
++	if (!plane_state->base.fb->format->has_alpha)
++		return PLANE_COLOR_ALPHA_DISABLE;
++
++	switch (plane_state->base.pixel_blend_mode) {
++	case DRM_MODE_BLEND_PIXEL_NONE:
++		return PLANE_COLOR_ALPHA_DISABLE;
++	case DRM_MODE_BLEND_PREMULTI:
+ 		return PLANE_COLOR_ALPHA_SW_PREMULTIPLY;
++	case DRM_MODE_BLEND_COVERAGE:
++		return PLANE_COLOR_ALPHA_HW_PREMULTIPLY;
+ 	default:
++		MISSING_CASE(plane_state->base.pixel_blend_mode);
+ 		return PLANE_COLOR_ALPHA_DISABLE;
+ 	}
+ }
+@@ -3627,7 +3640,7 @@ u32 skl_plane_ctl(const struct intel_crtc_state *crtc_state,
+ 	plane_ctl = PLANE_CTL_ENABLE;
+ 
+ 	if (INTEL_GEN(dev_priv) < 10 && !IS_GEMINILAKE(dev_priv)) {
+-		plane_ctl |= skl_plane_ctl_alpha(fb->format->format);
++		plane_ctl |= skl_plane_ctl_alpha(plane_state);
+ 		plane_ctl |=
+ 			PLANE_CTL_PIPE_GAMMA_ENABLE |
+ 			PLANE_CTL_PIPE_CSC_ENABLE |
+@@ -3669,7 +3682,7 @@ u32 glk_plane_color_ctl(const struct intel_crtc_state *crtc_state,
+ 		plane_color_ctl |= PLANE_COLOR_PIPE_CSC_ENABLE;
+ 	}
+ 	plane_color_ctl |= PLANE_COLOR_PLANE_GAMMA_DISABLE;
+-	plane_color_ctl |= glk_plane_color_ctl_alpha(fb->format->format);
++	plane_color_ctl |= glk_plane_color_ctl_alpha(plane_state);
+ 
+ 	if (fb->format->is_yuv) {
+ 		if (plane_state->base.color_encoding == DRM_COLOR_YCBCR_BT709)
+@@ -13878,7 +13891,7 @@ intel_primary_plane_create(struct drm_i915_private *dev_priv, enum pipe pipe)
+ 			DRM_ERROR("Failed to create decryption property\n");
+ 	}
+ 
+-	if (INTEL_GEN(dev_priv) >= 9)
++	if (INTEL_GEN(dev_priv) >= 9) {
+ 		drm_plane_create_color_properties(&primary->base,
+ 						  BIT(DRM_COLOR_YCBCR_BT601) |
+ 						  BIT(DRM_COLOR_YCBCR_BT709),
+@@ -13887,6 +13900,13 @@ intel_primary_plane_create(struct drm_i915_private *dev_priv, enum pipe pipe)
+ 						  DRM_COLOR_YCBCR_BT709,
+ 						  DRM_COLOR_YCBCR_LIMITED_RANGE);
+ 
++		drm_plane_create_alpha_property(&primary->base);
++		drm_plane_create_blend_mode_property(&primary->base,
++						     BIT(DRM_MODE_BLEND_PIXEL_NONE) |
++						     BIT(DRM_MODE_BLEND_PREMULTI) |
++						     BIT(DRM_MODE_BLEND_COVERAGE));
++	}
++
+ 	drm_plane_helper_add(&primary->base, &intel_plane_helper_funcs);
+ 
+ 	return primary;
+diff --git a/drivers/gpu/drm/i915/intel_fbc.c b/drivers/gpu/drm/i915/intel_fbc.c
+index 01d1d2088f04..c07d69f22e40 100644
+--- a/drivers/gpu/drm/i915/intel_fbc.c
++++ b/drivers/gpu/drm/i915/intel_fbc.c
+@@ -674,6 +674,8 @@ static void intel_fbc_update_state_cache(struct intel_crtc *crtc,
+ 	cache->plane.adjusted_y = plane_state->main.y;
+ 	cache->plane.y = plane_state->base.src.y1 >> 16;
+ 
++	cache->plane.pixel_blend_mode = plane_state->base.pixel_blend_mode;
++
+ 	if (!cache->plane.visible)
+ 		return;
+ 
+@@ -748,6 +750,12 @@ static bool intel_fbc_can_activate(struct intel_crtc *crtc)
+ 		return false;
+ 	}
+ 
++	if (cache->plane.pixel_blend_mode != DRM_MODE_BLEND_PIXEL_NONE &&
++	    cache->fb.format->has_alpha) {
++		fbc->no_fbc_reason = "per-pixel alpha blending is incompatible with FBC";
++		return false;
++	}
++
+ 	/* WaFbcExceedCdClockThreshold:hsw,bdw */
+ 	if ((IS_HASWELL(dev_priv) || IS_BROADWELL(dev_priv)) &&
+ 	    cache->crtc.hsw_bdw_pixel_rate >= dev_priv->cdclk.hw.cdclk * 95 / 100) {
+diff --git a/drivers/gpu/drm/i915/intel_sprite.c b/drivers/gpu/drm/i915/intel_sprite.c
+index 2c0cc897c41e..74d594232843 100644
+--- a/drivers/gpu/drm/i915/intel_sprite.c
++++ b/drivers/gpu/drm/i915/intel_sprite.c
+@@ -319,6 +319,7 @@ skl_update_plane(struct intel_plane *plane,
+ 	uint32_t src_h = drm_rect_height(&plane_state->base.src) >> 16;
+ 	uint32_t val;
+ 	unsigned long irqflags;
++	u32 keymsk = 0, keymax = 0;
+ 
+ #if IS_ENABLED(CONFIG_DRM_I915_GVT)
+ 	if (dev_priv->gvt &&
+@@ -345,10 +346,19 @@ skl_update_plane(struct intel_plane *plane,
+ 
+ 	if (key->flags) {
+ 		I915_WRITE_FW(PLANE_KEYVAL(pipe, plane_id), key->min_value);
+-		I915_WRITE_FW(PLANE_KEYMAX(pipe, plane_id), key->max_value);
+-		I915_WRITE_FW(PLANE_KEYMSK(pipe, plane_id), key->channel_mask);
++
++		keymax |= key->max_value & 0xffffff;
++		keymsk |= key->channel_mask & 0x3ffffff;
+ 	}
+ 
++	keymax |= (plane_state->base.alpha >> 8) << PLANE_KEYMAX_ALPHA_SHIFT;
++
++	if (plane_state->base.alpha < 0xff00)
++		keymsk |= PLANE_KEYMSK_ALPHA_ENABLE;
++
++	I915_WRITE_FW(PLANE_KEYMAX(pipe, plane_id), keymax);
++	I915_WRITE_FW(PLANE_KEYMSK(pipe, plane_id), keymsk);
++
+ 	I915_WRITE_FW(PLANE_OFFSET(pipe, plane_id), (y << 16) | x);
+ 	I915_WRITE_FW(PLANE_STRIDE(pipe, plane_id), stride);
+ 	I915_WRITE_FW(PLANE_SIZE(pipe, plane_id), (src_h << 16) | src_w);
+@@ -1745,6 +1755,15 @@ intel_sprite_plane_create(struct drm_i915_private *dev_priv,
+ 					  DRM_COLOR_YCBCR_BT709,
+ 					  DRM_COLOR_YCBCR_LIMITED_RANGE);
+ 
++	if (INTEL_GEN(dev_priv) >= 9) {
++		drm_plane_create_alpha_property(&intel_plane->base);
++
++		drm_plane_create_blend_mode_property(&intel_plane->base,
++						     BIT(DRM_MODE_BLEND_PIXEL_NONE) |
++						     BIT(DRM_MODE_BLEND_PREMULTI) |
++						     BIT(DRM_MODE_BLEND_COVERAGE));
++	}
++
+ 	drm_plane_helper_add(&intel_plane->base, &intel_plane_helper_funcs);
+ 
+ 	return intel_plane;
+-- 
+2.17.1
+
