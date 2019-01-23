@@ -1,0 +1,252 @@
+From 3e659857f77c5b01ece7cd55cf89a0793a0598aa Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Tue, 26 Nov 2013 20:18:35 -0800
+Subject: [PATCH 09/64] trusty: Add fiq support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Register a custom fiq-return handler with the fiq-glue so the
+monitor mode can atomically re-enable the fiq and return to the
+last mode.
+
+Change-Id: I0016d67edccea096d7f189e223ac73cc20f79ac9
+Signed-off-by: Arve Hjønnevåg <arve@android.com>
+---
+ .../bindings/trusty/trusty-fiq-debugger.txt        |  8 ++
+ .../devicetree/bindings/trusty/trusty-fiq.txt      |  8 ++
+ drivers/trusty/Kconfig                             | 12 +++
+ drivers/trusty/Makefile                            |  2 +
+ drivers/trusty/trusty-fiq-arm.c                    | 42 +++++++++++
+ drivers/trusty/trusty-fiq.c                        | 85 ++++++++++++++++++++++
+ drivers/trusty/trusty-fiq.h                        | 16 ++++
+ 7 files changed, 173 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/trusty/trusty-fiq-debugger.txt
+ create mode 100644 Documentation/devicetree/bindings/trusty/trusty-fiq.txt
+ create mode 100644 drivers/trusty/trusty-fiq-arm.c
+ create mode 100644 drivers/trusty/trusty-fiq.c
+ create mode 100644 drivers/trusty/trusty-fiq.h
+
+diff --git a/Documentation/devicetree/bindings/trusty/trusty-fiq-debugger.txt b/Documentation/devicetree/bindings/trusty/trusty-fiq-debugger.txt
+new file mode 100644
+index 0000000..18329d3
+--- /dev/null
++++ b/Documentation/devicetree/bindings/trusty/trusty-fiq-debugger.txt
+@@ -0,0 +1,8 @@
++Trusty fiq debugger interface
++
++Provides a single fiq for the fiq debugger.
++
++Required properties:
++- compatible: compatible = "android,trusty-fiq-v1-*"; where * is a serial port.
++
++Must be a child of the node that provides fiq support ("android,trusty-fiq-v1").
+diff --git a/Documentation/devicetree/bindings/trusty/trusty-fiq.txt b/Documentation/devicetree/bindings/trusty/trusty-fiq.txt
+new file mode 100644
+index 0000000..de810b9
+--- /dev/null
++++ b/Documentation/devicetree/bindings/trusty/trusty-fiq.txt
+@@ -0,0 +1,8 @@
++Trusty fiq interface
++
++Trusty provides fiq emulation.
++
++Required properties:
++- compatible: "android,trusty-fiq-v1"
++
++Must be a child of the node that provides the trusty std/fast call interface.
+diff --git a/drivers/trusty/Kconfig b/drivers/trusty/Kconfig
+index f577ae8..3c725e2 100644
+--- a/drivers/trusty/Kconfig
++++ b/drivers/trusty/Kconfig
+@@ -8,4 +8,16 @@ config TRUSTY
+ 	tristate "Trusty"
+ 	default n
+ 
++config TRUSTY_FIQ
++	tristate
++	depends on TRUSTY
++
++config TRUSTY_FIQ_ARM
++	tristate
++	depends on TRUSTY
++	depends on ARM
++	select FIQ_GLUE
++	select TRUSTY_FIQ
++	default y
++
+ endmenu
+diff --git a/drivers/trusty/Makefile b/drivers/trusty/Makefile
+index 89acb6f..a01c824 100644
+--- a/drivers/trusty/Makefile
++++ b/drivers/trusty/Makefile
+@@ -4,3 +4,5 @@
+ 
+ obj-$(CONFIG_TRUSTY)		+= trusty.o
+ obj-$(CONFIG_TRUSTY)		+= trusty-irq.o
++obj-$(CONFIG_TRUSTY_FIQ)	+= trusty-fiq.o
++obj-$(CONFIG_TRUSTY_FIQ_ARM)	+= trusty-fiq-arm.o
+diff --git a/drivers/trusty/trusty-fiq-arm.c b/drivers/trusty/trusty-fiq-arm.c
+new file mode 100644
+index 0000000..8c62a00
+--- /dev/null
++++ b/drivers/trusty/trusty-fiq-arm.c
+@@ -0,0 +1,42 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <asm/fiq_glue.h>
++#include <linux/platform_device.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/trusty.h>
++
++#include "trusty-fiq.h"
++
++#define _STRINGIFY(x) #x
++#define STRINGIFY(x) _STRINGIFY(x)
++
++static void __naked trusty_fiq_return(void)
++{
++	asm volatile(
++		".arch_extension sec\n"
++		"mov	r12, r0\n"
++		"ldr	r0, =" STRINGIFY(SMC_FC_FIQ_EXIT) "\n"
++		"smc	#0");
++}
++
++int trusty_fiq_arch_probe(struct platform_device *pdev)
++{
++	return fiq_glue_set_return_handler(trusty_fiq_return);
++}
++
++void trusty_fiq_arch_remove(struct platform_device *pdev)
++{
++	fiq_glue_clear_return_handler(trusty_fiq_return);
++}
+diff --git a/drivers/trusty/trusty-fiq.c b/drivers/trusty/trusty-fiq.c
+new file mode 100644
+index 0000000..1a031c6
+--- /dev/null
++++ b/drivers/trusty/trusty-fiq.c
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/module.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/trusty.h>
++
++#include "trusty-fiq.h"
++
++static int trusty_fiq_remove_child(struct device *dev, void *data)
++{
++	platform_device_unregister(to_platform_device(dev));
++	return 0;
++}
++
++static int trusty_fiq_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	ret = trusty_fiq_arch_probe(pdev);
++	if (ret)
++		goto err_set_fiq_return;
++
++	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
++	if (ret < 0) {
++		dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
++		goto err_add_children;
++	}
++
++	return 0;
++
++err_add_children:
++	device_for_each_child(&pdev->dev, NULL, trusty_fiq_remove_child);
++	trusty_fiq_arch_remove(pdev);
++err_set_fiq_return:
++	return ret;
++}
++
++static int trusty_fiq_remove(struct platform_device *pdev)
++{
++	device_for_each_child(&pdev->dev, NULL, trusty_fiq_remove_child);
++	trusty_fiq_arch_remove(pdev);
++	return 0;
++}
++
++static const struct of_device_id trusty_fiq_of_match[] = {
++	{ .compatible = "android,trusty-fiq-v1", },
++	{},
++};
++
++static struct platform_driver trusty_fiq_driver = {
++	.probe = trusty_fiq_probe,
++	.remove = trusty_fiq_remove,
++	.driver	= {
++		.name = "trusty-fiq",
++		.owner = THIS_MODULE,
++		.of_match_table = trusty_fiq_of_match,
++	},
++};
++
++static int __init trusty_fiq_driver_init(void)
++{
++	return platform_driver_register(&trusty_fiq_driver);
++}
++
++static void __exit trusty_fiq_driver_exit(void)
++{
++	platform_driver_unregister(&trusty_fiq_driver);
++}
++
++subsys_initcall(trusty_fiq_driver_init);
++module_exit(trusty_fiq_driver_exit);
+diff --git a/drivers/trusty/trusty-fiq.h b/drivers/trusty/trusty-fiq.h
+new file mode 100644
+index 0000000..d4ae9a9
+--- /dev/null
++++ b/drivers/trusty/trusty-fiq.h
+@@ -0,0 +1,16 @@
++/*
++ * Copyright (C) 2014 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++int trusty_fiq_arch_probe(struct platform_device *pdev);
++void trusty_fiq_arch_remove(struct platform_device *pdev);
+-- 
+2.7.4
+

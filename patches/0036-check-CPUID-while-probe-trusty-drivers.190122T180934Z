@@ -1,0 +1,144 @@
+From cf0d0c78d8951815116606021675808c77bf4b53 Mon Sep 17 00:00:00 2001
+From: yingbinx <yingbinx.zeng@intel.com>
+Date: Mon, 27 Mar 2017 12:24:04 +0800
+Subject: [PATCH 36/64] check CPUID while probe trusty drivers.
+
+Trusty ipc drivers only work when eVmm is alive.
+So when probe the trusty drivers, we need to call CPUID
+to check if eVmm is already existed.
+
+Change-Id: I295785b0510729aa2e9d212b243d7c242370389f
+Tracked-On: OAM-43859
+Signed-off-by: yingbinx <yingbinx.zeng@intel.com>
+Signed-off-by: weideng <wei.a.deng@intel.com>
+Reviewed-on: #574947
+---
+ drivers/trusty/trusty-ipc.c    |  7 +++++++
+ drivers/trusty/trusty-irq.c    |  6 ++++++
+ drivers/trusty/trusty-log.c    |  6 ++++++
+ drivers/trusty/trusty-virtio.c |  6 ++++++
+ drivers/trusty/trusty.c        |  6 ++++++
+ include/linux/trusty/trusty.h  | 16 ++++++++++++++++
+ 6 files changed, 47 insertions(+)
+
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 9d6f6bf..a05c5f9 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -31,6 +31,7 @@
+ #include <linux/virtio_config.h>
+ 
+ #include <linux/trusty/trusty_ipc.h>
++#include <linux/trusty/trusty.h>
+ 
+ #define MAX_DEVICES			4
+ 
+@@ -1524,6 +1525,12 @@ static int tipc_virtio_probe(struct virtio_device *vdev)
+ 	vq_callback_t *vq_cbs[] = {_rxvq_cb, _txvq_cb};
+ 	const char *vq_names[] = { "rx", "tx" };
+ 
++	err = trusty_check_cpuid();
++	if (err < 0) {
++		dev_err(&vdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		return -EINVAL;
++	}
++
+ 	dev_dbg(&vdev->dev, "%s:\n", __func__);
+ 
+ 	vds = kzalloc(sizeof(*vds), GFP_KERNEL);
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 363b302..afdea66c2 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -587,6 +587,12 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	struct trusty_irq_state *is;
+ 	work_func_t work_func;
+ 
++	ret = trusty_check_cpuid();
++	if (ret < 0) {
++		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		return -EINVAL;
++	}
++
+ 	dev_dbg(&pdev->dev, "%s\n", __func__);
+ 
+ 	is = kzalloc(sizeof(*is), GFP_KERNEL);
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index 4200e90..c977d33 100644
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -254,6 +254,12 @@ static int trusty_log_probe(struct platform_device *pdev)
+ 	phys_addr_t pa;
+ 	struct deadloop_dump *dump;
+ 
++	result = trusty_check_cpuid();
++	if (result < 0) {
++		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		return -EINVAL;
++	}
++
+ 	dev_dbg(&pdev->dev, "%s\n", __func__);
+ 	if (!trusty_supports_logging(pdev->dev.parent)) {
+ 		return -ENXIO;
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index 3d1a9aa..2ce818c 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -628,6 +628,12 @@ static int trusty_virtio_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct trusty_ctx *tctx;
+ 
++	ret = trusty_check_cpuid();
++	if (ret < 0) {
++		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		return -EINVAL;
++	}
++
+ 	dev_info(&pdev->dev, "initializing\n");
+ 
+ 	tctx = kzalloc(sizeof(*tctx), GFP_KERNEL);
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 679c5a9..93c7388 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -450,6 +450,12 @@ static int trusty_probe(struct platform_device *pdev)
+ 	struct trusty_state *s;
+ 	struct device_node *node = pdev->dev.of_node;
+ 
++	ret = trusty_check_cpuid();
++	if (ret < 0) {
++		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		return -EINVAL;
++	}
++
+ 	if (!node) {
+ 		dev_err(&pdev->dev, "of_node required\n");
+ 		return -EINVAL;
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 7459838..7dc2dad 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -69,4 +69,20 @@ int trusty_call32_mem_buf(struct device *dev, u32 smcnr,
+ 			  struct page *page,  u32 size,
+ 			  pgprot_t pgprot);
+ 
++/* CPUID leaf 0x3 is used because eVMM will trap this leaf.*/
++#define EVMM_RUNNING_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
++#define EVMM_RUNNING_SIGNATURE_MON  0x4D4D5645  /* "XMON", ecx */
++
++static inline int trusty_check_cpuid(void)
++{
++	u32 eax, ebx, ecx, edx;
++
++	cpuid(3, &eax, &ebx, &ecx, &edx);
++	if ((ecx != EVMM_RUNNING_SIGNATURE_MON) ||
++	    (edx != EVMM_RUNNING_SIGNATURE_CORP)) {
++		return -EINVAL;
++	}
++
++	return 0;
++}
+ #endif
+-- 
+2.7.4
+

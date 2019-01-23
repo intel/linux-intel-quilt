@@ -1,0 +1,74 @@
+From 9217ea946e986831701f519d53b74d20a1bc5871 Mon Sep 17 00:00:00 2001
+From: weideng <wei.a.deng@intel.com>
+Date: Mon, 20 Jun 2016 14:19:52 +0800
+Subject: [PATCH 22/64] Fix the issue for tipc test case closer1
+
+If the server channel accept the connection and immediately close
+the server channel, the client channel will receive one CONN_RSP
+message and then immediately one DISCONN_REQ message. At this time,
+channel status will maintain in CONNECTED status for one short time
+and dn_wait_for_reply() cannot capture the channel status. This is
+the reason why closer1 will fail. This patch will add one pulse
+variable to capture channel CONNECTED status. And it can work well
+for both UP and SMP mode.
+
+Change-Id: I4aac5af714daa67d3095093907c0b9f26af4d76c
+Signed-off-by: weideng <wei.a.deng@intel.com>
+---
+ drivers/trusty/trusty-ipc.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 7d66e9f..d6765f1 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -38,6 +38,9 @@
+ #define REPLY_TIMEOUT			5000
+ #define TXBUF_TIMEOUT			15000
+ 
++#define PULSE_ACTIVE                    1
++#define PULSE_DEACTIVE                  0
++
+ #define MAX_SRV_NAME_LEN		256
+ #define MAX_DEV_NAME_LEN		32
+ 
+@@ -705,6 +708,7 @@ EXPORT_SYMBOL(tipc_chan_destroy);
+ /***************************************************************************/
+ 
+ struct tipc_dn_chan {
++	int pulse;
+ 	int state;
+ 	struct mutex lock; /* protects rx_msg_queue list and channel state */
+ 	struct tipc_chan *chan;
+@@ -729,9 +733,10 @@ static int dn_wait_for_reply(struct tipc_dn_chan *dn, int timeout)
+ 		ret = -ETIMEDOUT;
+ 	} else {
+ 		/* got reply */
+-		if (dn->state == TIPC_CONNECTED)
++		if (dn->pulse == PULSE_ACTIVE) {
++			dn->pulse = PULSE_DEACTIVE;
+ 			ret = 0;
+-		else if (dn->state == TIPC_DISCONNECTED)
++		} else if (dn->state == TIPC_DISCONNECTED)
+ 			if (!list_empty(&dn->rx_msg_queue))
+ 				ret = 0;
+ 			else
+@@ -775,6 +780,7 @@ static void dn_connected(struct tipc_dn_chan *dn)
+ {
+ 	mutex_lock(&dn->lock);
+ 	dn->state = TIPC_CONNECTED;
++	dn->pulse = PULSE_ACTIVE;
+ 
+ 	/* complete all pending  */
+ 	complete(&dn->reply_comp);
+@@ -883,6 +889,7 @@ static int tipc_open(struct inode *inode, struct file *filp)
+ 	INIT_LIST_HEAD(&dn->rx_msg_queue);
+ 
+ 	dn->state = TIPC_DISCONNECTED;
++	dn->pulse = PULSE_DEACTIVE;
+ 
+ 	dn->chan = vds_create_channel(vds, &_dn_ops, dn);
+ 	if (IS_ERR(dn->chan)) {
+-- 
+2.7.4
+

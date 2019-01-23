@@ -1,0 +1,480 @@
+From 600d9f551eeed846caa6a7d814108e59b7f74c16 Mon Sep 17 00:00:00 2001
+From: "Zhang, Qi" <qi1.zhang@intel.com>
+Date: Tue, 11 Jul 2017 04:42:49 +0000
+Subject: [PATCH 43/64] trusty: add support for parameterized NOP ops
+
+Parameterized NOPs are introduced by Trusty secure side to
+facilitate better SMP concurrency. They are effectively NOP
+calls with parameters that will be routed to appropriate
+handlers on secure side which can be executed concurrently
+on multiple CPUs. Parameterized NOPs are represented by
+trusty_nop structure that has to be initialized by calling
+trusty_nop_init call. This patch creates queue for such
+items,
+adds per CPU work queue to invoke them and adds API to
+enqueue
+and dequeue them.
+
+Change-Id: I7cf32bfdf07727e7d9b0d955ddfb3bf1b52e3a46
+Signed-off-by: Zhong,Fangjian <fangjian.zhong@intel.com>
+Author: Michael Ryleev <gmar@google.com>
+---
+ drivers/trusty/trusty-irq.c   |  96 +-----------------------
+ drivers/trusty/trusty.c       | 169 ++++++++++++++++++++++++++++++++++++++++++
+ include/linux/trusty/smcall.h |   3 +-
+ include/linux/trusty/trusty.h |  17 +++++
+ 4 files changed, 189 insertions(+), 96 deletions(-)
+
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index e60068b..5b4686f 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -41,11 +41,6 @@ struct trusty_irq {
+ 	struct trusty_irq __percpu *percpu_ptr;
+ };
+ 
+-struct trusty_irq_work {
+-	struct trusty_irq_state *is;
+-	struct work_struct work;
+-};
+-
+ struct trusty_irq_irqset {
+ 	struct hlist_head pending;
+ 	struct hlist_head inactive;
+@@ -54,14 +49,12 @@ struct trusty_irq_irqset {
+ struct trusty_irq_state {
+ 	struct device *dev;
+ 	struct device *trusty_dev;
+-	struct trusty_irq_work __percpu *irq_work;
+ 	struct trusty_irq_irqset normal_irqs;
+ 	spinlock_t normal_irqs_lock;
+ 	struct trusty_irq_irqset __percpu *percpu_irqs;
+ 	struct notifier_block trusty_call_notifier;
+ 	/* CPU hotplug instances for online */
+ 	struct hlist_node node;
+-	struct workqueue_struct *wq;
+ };
+ 
+ static enum cpuhp_state trusty_irq_online;
+@@ -183,46 +176,10 @@ static int trusty_irq_call_notify(struct notifier_block *nb,
+ 	return NOTIFY_OK;
+ }
+ 
+-
+-static void trusty_irq_work_func_locked_nop(struct work_struct *work)
+-{
+-	int ret;
+-	struct trusty_irq_state *is =
+-		container_of(work, struct trusty_irq_work, work)->is;
+-
+-	dev_dbg(is->dev, "%s\n", __func__);
+-
+-	ret = trusty_std_call32(is->trusty_dev, SMC_SC_LOCKED_NOP, 0, 0, 0);
+-	if (ret != 0)
+-		dev_err(is->dev, "%s: SMC_SC_LOCKED_NOP failed %d",
+-			__func__, ret);
+-
+-	dev_dbg(is->dev, "%s: done\n", __func__);
+-}
+-
+-static void trusty_irq_work_func(struct work_struct *work)
+-{
+-	int ret;
+-	struct trusty_irq_state *is =
+-		container_of(work, struct trusty_irq_work, work)->is;
+-
+-	dev_dbg(is->dev, "%s\n", __func__);
+-
+-	do {
+-		ret = trusty_std_call32(is->trusty_dev, SMC_SC_NOP, 0, 0, 0);
+-	} while (ret == SM_ERR_NOP_INTERRUPTED);
+-
+-	if (ret != SM_ERR_NOP_DONE)
+-		dev_err(is->dev, "%s: SMC_SC_NOP failed %d", __func__, ret);
+-
+-	dev_dbg(is->dev, "%s: done\n", __func__);
+-}
+-
+ irqreturn_t trusty_irq_handler(int irq, void *data)
+ {
+ 	struct trusty_irq *trusty_irq = data;
+ 	struct trusty_irq_state *is = trusty_irq->is;
+-	struct trusty_irq_work *trusty_irq_work = this_cpu_ptr(is->irq_work);
+ 	struct trusty_irq_irqset *irqset;
+ 
+ 	dev_dbg(is->dev, "%s: irq %d, percpu %d, cpu %d, enable %d\n",
+@@ -248,7 +205,7 @@ irqreturn_t trusty_irq_handler(int irq, void *data)
+ 	}
+ 	spin_unlock(&is->normal_irqs_lock);
+ 
+-	queue_work_on(raw_smp_processor_id(), is->wq, &trusty_irq_work->work);
++	trusty_enqueue_nop(is->trusty_dev, NULL);
+ 
+ 	dev_dbg(is->dev, "%s: irq %d done\n", __func__, irq);
+ 
+@@ -582,10 +539,8 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+ 	int irq;
+-	unsigned int cpu;
+ 	unsigned long irq_flags;
+ 	struct trusty_irq_state *is;
+-	work_func_t work_func;
+ 
+ 	ret = trusty_check_cpuid(NULL);
+ 	if (ret < 0) {
+@@ -601,19 +556,8 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 		goto err_alloc_is;
+ 	}
+ 
+-	is->wq = alloc_workqueue("trusty-irq-wq", WQ_CPU_INTENSIVE, 0);
+-	if (!is->wq) {
+-		ret = -ENOMEM;
+-		goto err_alloc_wq;
+-	}
+-
+ 	is->dev = &pdev->dev;
+ 	is->trusty_dev = is->dev->parent;
+-	is->irq_work = alloc_percpu(struct trusty_irq_work);
+-	if (!is->irq_work) {
+-		ret = -ENOMEM;
+-		goto err_alloc_irq_work;
+-	}
+ 	spin_lock_init(&is->normal_irqs_lock);
+ 	is->percpu_irqs = alloc_percpu(struct trusty_irq_irqset);
+ 	if (!is->percpu_irqs) {
+@@ -632,21 +576,6 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 		goto err_trusty_call_notifier_register;
+ 	}
+ 
+-	if (trusty_get_api_version(is->trusty_dev) < TRUSTY_API_VERSION_SMP)
+-		work_func = trusty_irq_work_func_locked_nop;
+-	else
+-		work_func = trusty_irq_work_func;
+-
+-	for_each_possible_cpu(cpu) {
+-		struct trusty_irq_work *trusty_irq_work;
+-
+-		if (cpu >= 32)
+-			return -EINVAL;
+-		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+-		trusty_irq_work->is = is;
+-		INIT_WORK(&trusty_irq_work->work, work_func);
+-	}
+-
+ 	for (irq = 0; irq >= 0;)
+ 		irq = trusty_irq_init_one(is, irq, false);
+ 
+@@ -670,18 +599,6 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ err_trusty_call_notifier_register:
+ 	free_percpu(is->percpu_irqs);
+ err_alloc_pending_percpu_irqs:
+-	for_each_possible_cpu(cpu) {
+-		struct trusty_irq_work *trusty_irq_work;
+-
+-		if (cpu >= 32)
+-			return -EINVAL;
+-		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+-		flush_work(&trusty_irq_work->work);
+-	}
+-	free_percpu(is->irq_work);
+-err_alloc_irq_work:
+-	destroy_workqueue(is->wq);
+-err_alloc_wq:
+ 	kfree(is);
+ err_alloc_is:
+ 	return ret;
+@@ -689,7 +606,6 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 
+ static int trusty_irq_remove(struct platform_device *pdev)
+ {
+-	unsigned int cpu;
+ 	unsigned long irq_flags;
+ 	struct trusty_irq_state *is = platform_get_drvdata(pdev);
+ 
+@@ -705,16 +621,6 @@ static int trusty_irq_remove(struct platform_device *pdev)
+ 	trusty_call_notifier_unregister(is->trusty_dev,
+ 					&is->trusty_call_notifier);
+ 	free_percpu(is->percpu_irqs);
+-	for_each_possible_cpu(cpu) {
+-		struct trusty_irq_work *trusty_irq_work;
+-
+-		if (cpu >= 32)
+-			return -EINVAL;
+-		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+-		flush_work(&trusty_irq_work->work);
+-	}
+-	free_percpu(is->irq_work);
+-	destroy_workqueue(is->wq);
+ 	kfree(is);
+ 
+ 	return 0;
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 7e55453..4aa4a89 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -27,12 +27,24 @@
+ 
+ #define TRUSTY_VMCALL_SMC 0x74727500
+ 
++struct trusty_state;
++
++struct trusty_work {
++	struct trusty_state *ts;
++	struct work_struct work;
++};
++
+ struct trusty_state {
+ 	struct mutex smc_lock;
+ 	struct atomic_notifier_head notifier;
+ 	struct completion cpu_idle_completion;
+ 	char *version_str;
+ 	u32 api_version;
++	struct device *dev;
++	struct workqueue_struct *nop_wq;
++	struct trusty_work __percpu *nop_works;
++	struct list_head nop_queue;
++	spinlock_t nop_lock; /* protects nop_queue */
+ };
+ 
+ struct trusty_smc_interface {
+@@ -363,9 +375,116 @@ static int trusty_init_api_version(struct trusty_state *s, struct device *dev)
+ 	return 0;
+ }
+ 
++static bool dequeue_nop(struct trusty_state *s, u32 *args)
++{
++	unsigned long flags;
++	struct trusty_nop *nop = NULL;
++
++	spin_lock_irqsave(&s->nop_lock, flags);
++	if (!list_empty(&s->nop_queue)) {
++		nop = list_first_entry(&s->nop_queue,
++					struct trusty_nop, node);
++		list_del_init(&nop->node);
++		args[0] = nop->args[0];
++		args[1] = nop->args[1];
++		args[2] = nop->args[2];
++	} else {
++		args[0] = 0;
++		args[1] = 0;
++		args[2] = 0;
++	}
++	spin_unlock_irqrestore(&s->nop_lock, flags);
++	return nop;
++}
++
++static void locked_nop_work_func(struct work_struct *work)
++{
++	int ret;
++	struct trusty_work *tw = container_of(work, struct trusty_work, work);
++	struct trusty_state *s = tw->ts;
++
++	dev_dbg(s->dev, "%s\n", __func__);
++
++	ret = trusty_std_call32(s->dev, SMC_SC_LOCKED_NOP, 0, 0, 0);
++	if (ret != 0)
++		dev_err(s->dev, "%s: SMC_SC_LOCKED_NOP failed %d",
++			__func__, ret);
++	dev_dbg(s->dev, "%s: done\n", __func__);
++}
++
++static void nop_work_func(struct work_struct *work)
++{
++	int ret;
++	bool next;
++	u32 args[3];
++	struct trusty_work *tw = container_of(work, struct trusty_work, work);
++	struct trusty_state *s = tw->ts;
++
++	dev_dbg(s->dev, "%s:\n", __func__);
++
++	dequeue_nop(s, args);
++	do {
++		dev_dbg(s->dev, "%s: %x %x %x\n",
++			__func__, args[0], args[1], args[2]);
++
++	ret = trusty_std_call32(s->dev, SMC_SC_NOP,
++				args[0], args[1], args[2]);
++
++	next = dequeue_nop(s, args);
++
++	if (ret == SM_ERR_NOP_INTERRUPTED)
++		next = true;
++	else if (ret != SM_ERR_NOP_DONE)
++		dev_err(s->dev, "%s: SMC_SC_NOP failed %d",
++			__func__, ret);
++	} while (next);
++
++	dev_dbg(s->dev, "%s: done\n", __func__);
++}
++
++void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
++{
++	unsigned long flags;
++	struct trusty_work *tw;
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	preempt_disable();
++	tw = this_cpu_ptr(s->nop_works);
++	if (nop) {
++		WARN_ON(s->api_version < TRUSTY_API_VERSION_SMP_NOP);
++
++		spin_lock_irqsave(&s->nop_lock, flags);
++		if (list_empty(&nop->node))
++			list_add_tail(&nop->node, &s->nop_queue);
++		spin_unlock_irqrestore(&s->nop_lock, flags);
++	}
++	queue_work(s->nop_wq, &tw->work);
++	preempt_enable();
++}
++EXPORT_SYMBOL(trusty_enqueue_nop);
++
++void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop)
++{
++	unsigned long flags;
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	if (WARN_ON(!nop))
++		return;
++
++	spin_lock_irqsave(&s->nop_lock, flags);
++	if (!list_empty(&nop->node))
++		list_del_init(&nop->node);
++	spin_unlock_irqrestore(&s->nop_lock, flags);
++}
++EXPORT_SYMBOL(trusty_dequeue_nop);
++
++
++
+ static int trusty_probe(struct platform_device *pdev)
+ {
+ 	int ret;
++	unsigned int cpu;
++	work_func_t work_func;
+ 	struct trusty_state *s;
+ 	struct device_node *node = pdev->dev.of_node;
+ 
+@@ -385,6 +504,11 @@ static int trusty_probe(struct platform_device *pdev)
+ 		ret = -ENOMEM;
+ 		goto err_allocate_state;
+ 	}
++
++	s->dev = &pdev->dev;
++	spin_lock_init(&s->nop_lock);
++	INIT_LIST_HEAD(&s->nop_queue);
++
+ 	mutex_init(&s->smc_lock);
+ 	ATOMIC_INIT_NOTIFIER_HEAD(&s->notifier);
+ 	init_completion(&s->cpu_idle_completion);
+@@ -396,8 +520,43 @@ static int trusty_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		goto err_api_version;
+ 
++	s->nop_wq = alloc_workqueue("trusty-nop-wq", WQ_CPU_INTENSIVE, 0);
++	if (!s->nop_wq) {
++		ret = -ENODEV;
++		dev_err(&pdev->dev, "Failed create trusty-nop-wq\n");
++		goto err_create_nop_wq;
++	}
++
++	s->nop_works = alloc_percpu(struct trusty_work);
++	if (!s->nop_works) {
++		ret = -ENOMEM;
++		dev_err(&pdev->dev, "Failed to allocate works\n");
++		goto err_alloc_works;
++	}
++
++	if (s->api_version < TRUSTY_API_VERSION_SMP)
++		work_func = locked_nop_work_func;
++	else
++		work_func = nop_work_func;
++
++	for_each_possible_cpu(cpu) {
++		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
++
++		tw->ts = s;
++		INIT_WORK(&tw->work, work_func);
++	}
++
+ 	return 0;
+ 
++err_alloc_works:
++	for_each_possible_cpu(cpu) {
++		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
++
++		flush_work(&tw->work);
++	}
++	free_percpu(s->nop_works);
++	destroy_workqueue(s->nop_wq);
++err_create_nop_wq:
+ err_api_version:
+ 	if (s->version_str) {
+ 		device_remove_file(&pdev->dev, &dev_attr_trusty_version);
+@@ -412,11 +571,21 @@ static int trusty_probe(struct platform_device *pdev)
+ 
+ static int trusty_remove(struct platform_device *pdev)
+ {
++	unsigned int cpu;
+ 	struct trusty_state *s = platform_get_drvdata(pdev);
+ 
+ 	dev_dbg(&(pdev->dev), "%s() is called\n", __func__);
+ 
+ 	device_for_each_child(&pdev->dev, NULL, trusty_remove_child);
++
++	for_each_possible_cpu(cpu) {
++		struct trusty_work *tw = per_cpu_ptr(s->nop_works, cpu);
++
++		flush_work(&tw->work);
++	}
++	free_percpu(s->nop_works);
++	destroy_workqueue(s->nop_wq);
++
+ 	mutex_destroy(&s->smc_lock);
+ 	if (s->version_str) {
+ 		device_remove_file(&pdev->dev, &dev_attr_trusty_version);
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index 1160890..fc98b3e 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -120,7 +120,8 @@
+  */
+ #define TRUSTY_API_VERSION_RESTART_FIQ	(1)
+ #define TRUSTY_API_VERSION_SMP		(2)
+-#define TRUSTY_API_VERSION_CURRENT	(2)
++#define TRUSTY_API_VERSION_SMP_NOP	(3)
++#define TRUSTY_API_VERSION_CURRENT	(3)
+ #define SMC_FC_API_VERSION	SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 11)
+ 
+ /* TRUSTED_OS entity calls */
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index aba204b..eaa833b 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -69,6 +69,23 @@ int trusty_call32_mem_buf(struct device *dev, u32 smcnr,
+ 			  struct page *page,  u32 size,
+ 			  pgprot_t pgprot);
+ 
++struct trusty_nop {
++	struct list_head node;
++	u32 args[3];
++};
++
++static inline void trusty_nop_init(struct trusty_nop *nop,
++				   u32 arg0, u32 arg1, u32 arg2) {
++	INIT_LIST_HEAD(&nop->node);
++	nop->args[0] = arg0;
++	nop->args[1] = arg1;
++	nop->args[2] = arg2;
++}
++
++void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop);
++void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop);
++
++
+ /* CPUID leaf 0x3 is used because eVMM will trap this leaf.*/
+ #define EVMM_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
+ #define EVMM_SIGNATURE_VMM  0x4D4D5645  /* "EVMM", ecx */
+-- 
+2.7.4
+

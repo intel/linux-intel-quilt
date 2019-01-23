@@ -1,0 +1,70 @@
+From 9b32cd11f2fce923e1505cfd1553d68e96ad8e6a Mon Sep 17 00:00:00 2001
+From: yingbinx <yingbinx.zeng@intel.com>
+Date: Wed, 22 Feb 2017 14:28:03 +0800
+Subject: [PATCH 33/64] Limit to output trusty/lk log on debug version
+
+  Modified trusty_dump_log() to only output lk side's log on debug version.
+  This is to avoid the condition that tipc drivers will print lots of info/log
+  from lk side at one time to serial console on release version.
+  Details may reference OAM-42979.
+
+Change-Id: I28681a97a037d08a97d13b8314ab05f4f13b2309
+Tracked-On: OAM-43042
+Tracked-On: OAM-42979
+Signed-off-by: yingbinx <yingbinx.zeng@intel.com>
+Signed-off-by: weideng <wei.a.deng@intel.com>
+Reviewed-on: #569747
+---
+ drivers/trusty/trusty-log.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index 8091a596..4200e90 100644
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -63,7 +63,7 @@ static int log_read_line(struct trusty_log_state *s, int put, int get)
+ 	return i;
+ }
+ 
+-static void trusty_dump_logs(struct trusty_log_state *s)
++static void trusty_dump_logs(struct trusty_log_state *s, bool dump_panic_log)
+ {
+ 	struct log_rb *log = s->log;
+ 	uint32_t get, put, alloc;
+@@ -99,7 +99,10 @@ static void trusty_dump_logs(struct trusty_log_state *s)
+ 			get = alloc - log->sz;
+ 			continue;
+ 		}
+-		pr_info("trusty: %s", s->line_buffer);
++
++		if (dump_panic_log)
++			pr_info("trusty: %s", s->line_buffer);
++
+ 		get += read_chars;
+ 	}
+ 	s->get = get;
+@@ -116,7 +119,11 @@ static int trusty_log_call_notify(struct notifier_block *nb,
+ 
+ 	s = container_of(nb, struct trusty_log_state, call_notifier);
+ 	spin_lock_irqsave(&s->lock, flags);
+-	trusty_dump_logs(s);
++#ifdef CONFIG_DEBUG_INFO
++	trusty_dump_logs(s, true);
++#else
++	trusty_dump_logs(s, false);
++#endif
+ 	spin_unlock_irqrestore(&s->lock, flags);
+ 	return NOTIFY_OK;
+ }
+@@ -133,7 +140,7 @@ static int trusty_log_panic_notify(struct notifier_block *nb,
+ 	s = container_of(nb, struct trusty_log_state, panic_notifier);
+ 	pr_info("trusty-log panic notifier - trusty version %s",
+ 		trusty_version_str_get(s->trusty_dev));
+-	trusty_dump_logs(s);
++	trusty_dump_logs(s, true);
+ 	return NOTIFY_OK;
+ }
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,73 @@
+From d976bc364f8ffc5e7f30b091bd5aee84848a9ba5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Thu, 11 Jun 2015 19:51:54 -0700
+Subject: [PATCH 17/64] trusty: Handle fiqs without calling notifier and
+ enabling interrupts
+
+Change-Id: I9c147376bd1596f4ecd1e932b30140c87410c860
+---
+ drivers/trusty/trusty.c       |  2 ++
+ include/linux/trusty/sm_err.h |  1 +
+ include/linux/trusty/smcall.h | 15 ++++++++++++++-
+ 3 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index fcdbba5..4b5d355 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -108,6 +108,8 @@ static ulong trusty_std_call_inner(struct device *dev, ulong smcnr,
+ 		__func__, smcnr, a0, a1, a2);
+ 	while (true) {
+ 		ret = smc(smcnr, a0, a1, a2);
++		while ((s32)ret == SM_ERR_FIQ_INTERRUPTED)
++			ret = smc(SMC_SC_RESTART_FIQ, 0, 0, 0);
+ 		if ((int)ret != SM_ERR_BUSY || !retry)
+ 			break;
+ 
+diff --git a/include/linux/trusty/sm_err.h b/include/linux/trusty/sm_err.h
+index 4ee6758..7de09b4 100644
+--- a/include/linux/trusty/sm_err.h
++++ b/include/linux/trusty/sm_err.h
+@@ -35,5 +35,6 @@
+ #define SM_ERR_NOT_ALLOWED		-9	/* SMC call not allowed */
+ #define SM_ERR_END_OF_INPUT		-10
+ #define SM_ERR_PANIC			-11	/* Secure OS crashed */
++#define SM_ERR_FIQ_INTERRUPTED		-12	/* Got interrupted by FIQ. Call back with SMC_SC_RESTART_FIQ on same CPU */
+ 
+ #endif
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index cdb4ecc..7d8950a 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -58,6 +58,18 @@
+ #define SMC_SC_RESTART_LAST	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 0)
+ #define SMC_SC_NOP		SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 1)
+ 
++/**
++ * SMC_SC_RESTART_FIQ - Re-enter trusty after it was interrupted by an fiq
++ *
++ * No arguments, no return value.
++ *
++ * Re-enter trusty after returning to ns to process an fiq. Must be called iff
++ * trusty returns SM_ERR_FIQ_INTERRUPTED.
++ *
++ * Enable by selecting api version TRUSTY_API_VERSION_RESTART_FIQ (1) or later.
++ */
++#define SMC_SC_RESTART_FIQ	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 2)
++
+ /*
+  * Return from secure os to non-secure os with return value in r1
+  */
+@@ -94,7 +106,8 @@
+  *
+  * This call must be made before any calls that are affected by the api version.
+  */
+-#define TRUSTY_API_VERSION_CURRENT	(0)
++#define TRUSTY_API_VERSION_RESTART_FIQ	(1)
++#define TRUSTY_API_VERSION_CURRENT	(1)
+ #define SMC_FC_API_VERSION	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 11)
+ 
+ /* TRUSTED_OS entity calls */
+-- 
+2.7.4
+

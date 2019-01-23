@@ -1,0 +1,223 @@
+From 4f38d98ddc133c81663b4ce5e5d1a1b340c7ff26 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Fri, 23 Jan 2015 17:55:48 -0800
+Subject: [PATCH 18/64] trusty: Add smp support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add an unlocked nop call to allow multiple cpus to enter trusty.
+Other standard calls are still serialized to avoid return codes
+getting mixed up.
+A new return code is used to indicate that the standard call is
+running on another cpu.
+
+Change-Id: I0eecb88fb28989e3f4942659d109eee8863f3227
+Signed-off-by: Arve Hjønnevåg <arve@android.com>
+---
+ drivers/trusty/trusty-irq.c   | 31 ++++++++++++++++++++++++++++---
+ drivers/trusty/trusty.c       | 27 ++++++++++++++++++++++++---
+ include/linux/trusty/sm_err.h |  3 +++
+ include/linux/trusty/smcall.h | 17 +++++++++++++++--
+ 4 files changed, 70 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index ae9535a..1f14f7f 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -154,7 +154,7 @@ static int trusty_irq_call_notify(struct notifier_block *nb,
+ }
+ 
+ 
+-static void trusty_irq_work_func(struct work_struct *work)
++static void trusty_irq_work_func_locked_nop(struct work_struct *work)
+ {
+ 	int ret;
+ 	struct trusty_irq_state *is =
+@@ -162,8 +162,27 @@ static void trusty_irq_work_func(struct work_struct *work)
+ 
+ 	dev_dbg(is->dev, "%s\n", __func__);
+ 
+-	ret = trusty_std_call32(is->trusty_dev, SMC_SC_NOP, 0, 0, 0);
++	ret = trusty_std_call32(is->trusty_dev, SMC_SC_LOCKED_NOP, 0, 0, 0);
+ 	if (ret != 0)
++		dev_err(is->dev, "%s: SMC_SC_LOCKED_NOP failed %d",
++			__func__, ret);
++
++	dev_dbg(is->dev, "%s: done\n", __func__);
++}
++
++static void trusty_irq_work_func(struct work_struct *work)
++{
++	int ret;
++	struct trusty_irq_state *is =
++		container_of(work, struct trusty_irq_work, work)->is;
++
++	dev_dbg(is->dev, "%s\n", __func__);
++
++	do {
++		ret = trusty_std_call32(is->trusty_dev, SMC_SC_NOP, 0, 0, 0);
++	} while (ret == SM_ERR_NOP_INTERRUPTED);
++
++	if (ret != SM_ERR_NOP_DONE)
+ 		dev_err(is->dev, "%s: SMC_SC_NOP failed %d", __func__, ret);
+ 
+ 	dev_dbg(is->dev, "%s: done\n", __func__);
+@@ -397,6 +416,7 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	unsigned int cpu;
+ 	unsigned long irq_flags;
+ 	struct trusty_irq_state *is;
++	work_func_t work_func;
+ 
+ 	dev_dbg(&pdev->dev, "%s\n", __func__);
+ 
+@@ -431,12 +451,17 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 		goto err_trusty_call_notifier_register;
+ 	}
+ 
++	if (trusty_get_api_version(is->trusty_dev) < TRUSTY_API_VERSION_SMP)
++		work_func = trusty_irq_work_func_locked_nop;
++	else
++		work_func = trusty_irq_work_func;
++
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq_work *trusty_irq_work;
+ 
+ 		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+ 		trusty_irq_work->is = is;
+-		INIT_WORK(&trusty_irq_work->work, trusty_irq_work_func);
++		INIT_WORK(&trusty_irq_work->work, work_func);
+ 	}
+ 
+ 	for (irq = 0; irq >= 0;)
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 4b5d355..2a7aeb4 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -28,6 +28,7 @@
+ struct trusty_state {
+ 	struct mutex smc_lock;
+ 	struct atomic_notifier_head notifier;
++	struct completion cpu_idle_completion;
+ 	char *version_str;
+ 	u32 api_version;
+ };
+@@ -161,6 +162,17 @@ static ulong trusty_std_call_helper(struct device *dev, ulong smcnr,
+ 	return ret;
+ }
+ 
++static void trusty_std_call_cpu_idle(struct trusty_state *s)
++{
++	int ret;
++
++	ret = wait_for_completion_timeout(&s->cpu_idle_completion, HZ * 10);
++	if (!ret) {
++		pr_warn("%s: timed out waiting for cpu idle to clear, retry anyway\n",
++			__func__);
++	}
++}
++
+ s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
+ {
+ 	int ret;
+@@ -169,15 +181,20 @@ s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
+ 	BUG_ON(SMC_IS_FASTCALL(smcnr));
+ 	BUG_ON(SMC_IS_SMC64(smcnr));
+ 
+-	mutex_lock(&s->smc_lock);
++	if (smcnr != SMC_SC_NOP) {
++		mutex_lock(&s->smc_lock);
++		reinit_completion(&s->cpu_idle_completion);
++	}
+ 
+ 	dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) started\n",
+ 		__func__, smcnr, a0, a1, a2);
+ 
+ 	ret = trusty_std_call_helper(dev, smcnr, a0, a1, a2);
+-	while (ret == SM_ERR_INTERRUPTED) {
++	while (ret == SM_ERR_INTERRUPTED || ret == SM_ERR_CPU_IDLE) {
+ 		dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) interrupted\n",
+ 			__func__, smcnr, a0, a1, a2);
++		if (ret == SM_ERR_CPU_IDLE)
++			trusty_std_call_cpu_idle(s);
+ 		ret = trusty_std_call_helper(dev, SMC_SC_RESTART_LAST, 0, 0, 0);
+ 	}
+ 	dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) returned 0x%x\n",
+@@ -185,7 +202,10 @@ s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
+ 
+ 	WARN_ONCE(ret == SM_ERR_PANIC, "trusty crashed");
+ 
+-	mutex_unlock(&s->smc_lock);
++	if (smcnr == SMC_SC_NOP)
++		complete(&s->cpu_idle_completion);
++	else
++		mutex_unlock(&s->smc_lock);
+ 
+ 	return ret;
+ }
+@@ -315,6 +335,7 @@ static int trusty_probe(struct platform_device *pdev)
+ 	}
+ 	mutex_init(&s->smc_lock);
+ 	ATOMIC_INIT_NOTIFIER_HEAD(&s->notifier);
++	init_completion(&s->cpu_idle_completion);
+ 	platform_set_drvdata(pdev, s);
+ 
+ 	trusty_init_version(s, &pdev->dev);
+diff --git a/include/linux/trusty/sm_err.h b/include/linux/trusty/sm_err.h
+index 7de09b4..32ee08e 100644
+--- a/include/linux/trusty/sm_err.h
++++ b/include/linux/trusty/sm_err.h
+@@ -36,5 +36,8 @@
+ #define SM_ERR_END_OF_INPUT		-10
+ #define SM_ERR_PANIC			-11	/* Secure OS crashed */
+ #define SM_ERR_FIQ_INTERRUPTED		-12	/* Got interrupted by FIQ. Call back with SMC_SC_RESTART_FIQ on same CPU */
++#define SM_ERR_CPU_IDLE			-13	/* SMC call waiting for another CPU */
++#define SM_ERR_NOP_INTERRUPTED		-14	/* Got interrupted. Call back with new SMC_SC_NOP */
++#define SM_ERR_NOP_DONE			-15	/* Cpu idle after SMC_SC_NOP (not an error) */
+ 
+ #endif
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index 7d8950a..2e43803 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -56,7 +56,7 @@
+ 
+ /* FC = Fast call, SC = Standard call */
+ #define SMC_SC_RESTART_LAST	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 0)
+-#define SMC_SC_NOP		SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 1)
++#define SMC_SC_LOCKED_NOP	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 1)
+ 
+ /**
+  * SMC_SC_RESTART_FIQ - Re-enter trusty after it was interrupted by an fiq
+@@ -70,6 +70,18 @@
+  */
+ #define SMC_SC_RESTART_FIQ	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 2)
+ 
++/**
++ * SMC_SC_NOP - Enter trusty to run pending work.
++ *
++ * No arguments.
++ *
++ * Returns SM_ERR_NOP_INTERRUPTED or SM_ERR_NOP_DONE.
++ * If SM_ERR_NOP_INTERRUPTED is returned, the call must be repeated.
++ *
++ * Enable by selecting api version TRUSTY_API_VERSION_SMP (2) or later.
++ */
++#define SMC_SC_NOP		SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 3)
++
+ /*
+  * Return from secure os to non-secure os with return value in r1
+  */
+@@ -107,7 +119,8 @@
+  * This call must be made before any calls that are affected by the api version.
+  */
+ #define TRUSTY_API_VERSION_RESTART_FIQ	(1)
+-#define TRUSTY_API_VERSION_CURRENT	(1)
++#define TRUSTY_API_VERSION_SMP		(2)
++#define TRUSTY_API_VERSION_CURRENT	(2)
+ #define SMC_FC_API_VERSION	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 11)
+ 
+ /* TRUSTED_OS entity calls */
+-- 
+2.7.4
+

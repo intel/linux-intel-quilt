@@ -1,0 +1,95 @@
+From 8623c32cfcced1e27172a3f68eb3246fbe975edc Mon Sep 17 00:00:00 2001
+From: yingbinx <yingbinx.zeng@intel.com>
+Date: Tue, 9 May 2017 13:45:06 +0800
+Subject: [PATCH 38/64] trusty: Fix the warnings for eywa building
+
+Several warnings are generated while we build for eywa with ARCH i386.
+The patch is to fix the warnings.
+Tested by tipc test cases and CTS, all are pass.
+
+Change-Id: I2710dd94dfb635f12f5b482a894891bcf725f6be
+Tracked-On: OAM-45413
+Signed-off-by: yingbinx <yingbinx.zeng@intel.com>
+Signed-off-by: weideng <wei.a.deng@intel.com>
+Reviewed-on: #581978
+---
+ drivers/trusty/trusty-log.c    | 10 +++++++---
+ drivers/trusty/trusty-virtio.c |  2 +-
+ include/linux/trusty/trusty.h  |  7 +++++++
+ 3 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index c977d33..0f00d00 100644
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -26,7 +26,11 @@
+ #define TRUSTY_LOG_SIZE (PAGE_SIZE * 2)
+ #define TRUSTY_LINE_BUFFER_SIZE 256
+ 
++#ifdef CONFIG_64BIT
+ static uint64_t g_vmm_debug_buf;
++#else
++static uint32_t g_vmm_debug_buf;
++#endif
+ 
+ struct trusty_log_state {
+ 	struct device *dev;
+@@ -286,7 +290,7 @@ static int trusty_log_probe(struct platform_device *pdev)
+ 	pa = page_to_phys(s->log_pages);
+ 	result = trusty_std_call32(s->trusty_dev,
+ 				   SMC_SC_SHARED_LOG_ADD,
+-				   (u32)(pa), (u32)(pa >> 32),
++				   (u32)(pa), (u32)HIULINT(pa),
+ 				   TRUSTY_LOG_SIZE);
+ 	if (result < 0) {
+ 		pr_err("trusty std call (SMC_SC_SHARED_LOG_ADD) failed: %d %pa\n",
+@@ -354,7 +358,7 @@ static int trusty_log_probe(struct platform_device *pdev)
+ 	trusty_call_notifier_unregister(s->trusty_dev, &s->call_notifier);
+ error_call_notifier:
+ 	trusty_std_call32(s->trusty_dev, SMC_SC_SHARED_LOG_RM,
+-			  (u32)pa, (u32)(pa >> 32), 0);
++			  (u32)pa, (u32)HIULINT(pa), 0);
+ error_std_call:
+ 	__free_pages(s->log_pages, get_order(TRUSTY_LOG_SIZE));
+ error_alloc_log:
+@@ -378,7 +382,7 @@ static int trusty_log_remove(struct platform_device *pdev)
+ 	trusty_call_notifier_unregister(s->trusty_dev, &s->call_notifier);
+ 
+ 	result = trusty_std_call32(s->trusty_dev, SMC_SC_SHARED_LOG_RM,
+-				   (u32)pa, (u32)(pa >> 32), 0);
++				   (u32)pa, (u32)HIULINT(pa), 0);
+ 	if (result) {
+ 		pr_err("trusty std call (SMC_SC_SHARED_LOG_RM) failed: %d\n",
+ 		       result);
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index 2368c10..6cb1ec7 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -322,7 +322,7 @@ static struct virtqueue *_find_vq(struct virtio_device *vdev,
+ 	/* da field is only 32 bit wide. Use previously unused 'reserved' field
+ 	 * to store top 32 bits of 64-bit address
+ 	 */
+-	tvr->vr_descr->pa = (u32)(pa >> 32);
++	tvr->vr_descr->pa = (u32)HIULINT(pa);
+ 
+ 	dev_info(&vdev->dev, "vring%d: va(pa)  %p(%llx) qsz %d notifyid %d\n",
+ 		 id, tvr->vaddr, (u64)tvr->paddr, tvr->elem_num, tvr->notifyid);
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 7dc2dad..f7b0a14 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -85,4 +85,11 @@ static inline int trusty_check_cpuid(void)
+ 
+ 	return 0;
+ }
++
++/* High 32 bits of unsigned 64-bit integer*/
++#ifdef CONFIG_64BIT
++#define HIULINT(x) ((x) >> 32)
++#else
++#define HIULINT(x) 0
++#endif
+ #endif
+-- 
+2.7.4
+

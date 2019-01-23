@@ -1,0 +1,182 @@
+From 684db6d09055daaa252615aabc8946ddfdccf8ad Mon Sep 17 00:00:00 2001
+From: "Zhang, Qi" <qi1.zhang@intel.com>
+Date: Wed, 28 Jun 2017 06:26:15 +0000
+Subject: [PATCH 40/64] check vmm signature for vmm dump
+
+Change-Id: Ibc0e1ebf561b0b4278bb5f2d92d173685810aa22
+Signed-off-by: Zhang, Qi <qi1.zhang@intel.com>
+---
+ drivers/trusty/trusty-ipc.c    |  2 +-
+ drivers/trusty/trusty-irq.c    |  2 +-
+ drivers/trusty/trusty-log.c    | 55 ++++++++++++++++++++++--------------------
+ drivers/trusty/trusty-virtio.c |  2 +-
+ drivers/trusty/trusty.c        |  2 +-
+ include/linux/trusty/trusty.h  | 14 +++++++----
+ 6 files changed, 42 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 68f677f..93003b4 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -1525,7 +1525,7 @@ static int tipc_virtio_probe(struct virtio_device *vdev)
+ 	vq_callback_t *vq_cbs[] = {_rxvq_cb, _txvq_cb};
+ 	const char *vq_names[] = { "rx", "tx" };
+ 
+-	err = trusty_check_cpuid();
++	err = trusty_check_cpuid(NULL);
+ 	if (err < 0) {
+ 		dev_err(&vdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
+ 		return -EINVAL;
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index afdea66c2..d17162c 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -587,7 +587,7 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	struct trusty_irq_state *is;
+ 	work_func_t work_func;
+ 
+-	ret = trusty_check_cpuid();
++	ret = trusty_check_cpuid(NULL);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
+ 		return -EINVAL;
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index 0f00d00..c5a85cc 100644
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -255,10 +255,11 @@ static int trusty_log_probe(struct platform_device *pdev)
+ {
+ 	struct trusty_log_state *s;
+ 	int result;
++	u32 vmm_signature;
+ 	phys_addr_t pa;
+ 	struct deadloop_dump *dump;
+ 
+-	result = trusty_check_cpuid();
++	result = trusty_check_cpuid(&vmm_signature);
+ 	if (result < 0) {
+ 		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
+ 		return -EINVAL;
+@@ -316,33 +317,35 @@ static int trusty_log_probe(struct platform_device *pdev)
+ 		goto error_panic_notifier;
+ 	}
+ 
+-	/* allocate debug buffer for vmm panic dump */
+-	g_vmm_debug_buf = __get_free_pages(GFP_KERNEL | __GFP_ZERO, 2);
+-	if (!g_vmm_debug_buf) {
+-		result = -ENOMEM;
+-		goto error_alloc_vmm;
+-	}
+-
+-	dump = (struct deadloop_dump *)g_vmm_debug_buf;
+-	dump->version_of_this_struct = VMM_DUMP_VERSION;
+-	dump->size_of_this_struct = sizeof(struct deadloop_dump);
+-	dump->is_valid = false;
++	if(vmm_signature == EVMM_SIGNATURE_VMM) {
++		/* allocate debug buffer for vmm panic dump */
++		g_vmm_debug_buf = __get_free_pages(GFP_KERNEL | __GFP_ZERO, 2);
++		if (!g_vmm_debug_buf) {
++			result = -ENOMEM;
++			goto error_alloc_vmm;
++		}
+ 
+-	/* shared the buffer to vmm by VMCALL */
+-	result = trusty_vmm_dump_init(dump);
+-	if (result < 0) {
+-		dev_err(&pdev->dev,
+-			"failed to share the dump buffer to VMM\n");
+-		goto error_vmm_panic_notifier;
+-	}
++		dump = (struct deadloop_dump *)g_vmm_debug_buf;
++		dump->version_of_this_struct = VMM_DUMP_VERSION;
++		dump->size_of_this_struct = sizeof(struct deadloop_dump);
++		dump->is_valid = false;
++
++		/* shared the buffer to vmm by VMCALL */
++		result = trusty_vmm_dump_init(dump);
++		if (result < 0) {
++			dev_err(&pdev->dev,
++				"failed to share the dump buffer to VMM\n");
++			goto error_vmm_panic_notifier;
++		}
+ 
+-	/* register the panic notifier for vmm */
+-	result = atomic_notifier_chain_register(&panic_notifier_list,
+-				&trusty_vmm_panic_nb);
+-	if (result < 0) {
+-		dev_err(&pdev->dev,
+-			"failed to register vmm panic notifier\n");
+-		goto error_vmm_panic_notifier;
++		/* register the panic notifier for vmm */
++		result = atomic_notifier_chain_register(&panic_notifier_list,
++					&trusty_vmm_panic_nb);
++		if (result < 0) {
++			dev_err(&pdev->dev,
++				"failed to register vmm panic notifier\n");
++			goto error_vmm_panic_notifier;
++		}
+ 	}
+ 
+ 	platform_set_drvdata(pdev, s);
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index 6cb1ec7..6bbf80c 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -629,7 +629,7 @@ static int trusty_virtio_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct trusty_ctx *tctx;
+ 
+-	ret = trusty_check_cpuid();
++	ret = trusty_check_cpuid(NULL);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
+ 		return -EINVAL;
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 647031d..8e7e715 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -524,7 +524,7 @@ static int trusty_probe(struct platform_device *pdev)
+ 	struct trusty_state *s;
+ 	struct device_node *node = pdev->dev.of_node;
+ 
+-	ret = trusty_check_cpuid();
++	ret = trusty_check_cpuid(NULL);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
+ 		return -EINVAL;
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index f7b0a14..aba204b 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -70,19 +70,23 @@ int trusty_call32_mem_buf(struct device *dev, u32 smcnr,
+ 			  pgprot_t pgprot);
+ 
+ /* CPUID leaf 0x3 is used because eVMM will trap this leaf.*/
+-#define EVMM_RUNNING_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
+-#define EVMM_RUNNING_SIGNATURE_MON  0x4D4D5645  /* "XMON", ecx */
++#define EVMM_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
++#define EVMM_SIGNATURE_VMM  0x4D4D5645  /* "EVMM", ecx */
+ 
+-static inline int trusty_check_cpuid(void)
++static inline int trusty_check_cpuid(u32 *vmm_signature)
+ {
+ 	u32 eax, ebx, ecx, edx;
+ 
+ 	cpuid(3, &eax, &ebx, &ecx, &edx);
+-	if ((ecx != EVMM_RUNNING_SIGNATURE_MON) ||
+-	    (edx != EVMM_RUNNING_SIGNATURE_CORP)) {
++	if ((ecx != EVMM_SIGNATURE_VMM) ||
++	    (edx != EVMM_SIGNATURE_CORP)) {
+ 		return -EINVAL;
+ 	}
+ 
++	if(vmm_signature) {
++		*vmm_signature = ecx;
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.7.4
+

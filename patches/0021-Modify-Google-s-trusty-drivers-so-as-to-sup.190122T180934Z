@@ -1,0 +1,896 @@
+From ff806c7d9ebb97798c317ab246a15df0b428f8af Mon Sep 17 00:00:00 2001
+From: weideng <wei.a.deng@intel.com>
+Date: Fri, 28 Oct 2016 13:46:37 +0800
+Subject: [PATCH 21/64] Modify Google's trusty drivers so as to support Intel
+ platform
+
+Previously, Google's trusty drivers can just work on ARM platform. With
+this patch, the trusty drivers can then support Intel platform so as to
+implement IPC functionality between android and lk. This patch is
+implemented by Intel, and it has been verified by tipc-test32
+test cases which are also provided by Google.
+
+Change-Id: I7076ee23eb1eb8f1102feca4b299b34873f7f861
+Author: chunmei <chunmei.liu@intel.com>
+Signed-off-by: kwang13 <kai.z.wang@intel.com>
+Signed-off-by: chunmei <chunmei.liu@intel.com>
+Signed-off-by: weideng <wei.a.deng@intel.com>
+---
+ drivers/trusty/Kconfig         |   2 +-
+ drivers/trusty/trusty-ipc.c    |   9 +-
+ drivers/trusty/trusty-irq.c    | 102 +++++++++++++++---
+ drivers/trusty/trusty-log.c    |   2 +
+ drivers/trusty/trusty-mem.c    | 115 ++++++++++----------
+ drivers/trusty/trusty-virtio.c |  15 ++-
+ drivers/trusty/trusty.c        | 236 +++++++++++++++++++++++++++++++----------
+ include/linux/trusty/trusty.h  |   2 +-
+ 8 files changed, 348 insertions(+), 135 deletions(-)
+
+diff --git a/drivers/trusty/Kconfig b/drivers/trusty/Kconfig
+index 052cd8e..0b6b88e 100644
+--- a/drivers/trusty/Kconfig
++++ b/drivers/trusty/Kconfig
+@@ -29,7 +29,7 @@ config TRUSTY_FIQ_ARM64
+ 	default y
+ 
+ config TRUSTY_LOG
+-	tristate
++	tristate "Trusty Log support"
+ 	depends on TRUSTY
+ 	default y
+ 
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 06e0263..7d66e9f 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -33,6 +33,8 @@
+ 
+ #define MAX_DEVICES			4
+ 
++#define VIRTIO_ID_TRUSTY_IPC   13 /* virtio trusty ipc */
++
+ #define REPLY_TIMEOUT			5000
+ #define TXBUF_TIMEOUT			15000
+ 
+@@ -172,7 +174,10 @@ static int _match_data(int id, void *p, void *data)
+ 
+ static void *_alloc_shareable_mem(size_t sz, phys_addr_t *ppa, gfp_t gfp)
+ {
+-	return alloc_pages_exact(sz, gfp);
++	void *buf_va;
++	buf_va = alloc_pages_exact(sz, gfp);
++	*ppa = virt_to_phys(buf_va);
++	return buf_va;
+ }
+ 
+ static void _free_shareable_mem(size_t sz, void *va, phys_addr_t pa)
+@@ -1597,7 +1602,7 @@ static void tipc_virtio_remove(struct virtio_device *vdev)
+ 	_cleanup_vq(vds->txvq);
+ 	_free_msg_buf_list(&vds->free_buf_list);
+ 
+-	vdev->config->del_vqs(vds->vdev);
++	vdev->config->del_vqs(vdev);
+ 
+ 	kref_put(&vds->refcount, _free_vds);
+ }
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 8d6e8af..b325bff 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -12,6 +12,7 @@
+  *
+  */
+ 
++#include <linux/module.h>
+ #include <linux/cpu.h>
+ #include <linux/interrupt.h>
+ #include <linux/irq.h>
+@@ -22,6 +23,8 @@
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
++#include <linux/irqdomain.h>
++#include <linux/of_irq.h>
+ #include <linux/trusty/smcall.h>
+ #include <linux/trusty/sm_err.h>
+ #include <linux/trusty/trusty.h>
+@@ -56,6 +59,24 @@ struct trusty_irq_state {
+ 	struct notifier_block cpu_notifier;
+ };
+ 
++#define TRUSTY_VMCALL_PENDING_INTR 0x74727505
++static inline void set_pending_intr_to_lk(uint8_t vector)
++{
++	__asm__ __volatile__(
++		"vmcall"
++		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
++	);
++}
++
++#define TRUSTY_VMCALL_IRQ_DONE 0x74727506
++static inline void irq_register_done(void)
++{
++	__asm__ __volatile__(
++		"vmcall"
++		::"a"(TRUSTY_VMCALL_IRQ_DONE)
++	);
++}
++
+ static void trusty_irq_enable_pending_irqs(struct trusty_irq_state *is,
+ 					   struct trusty_irq_irqset *irqset,
+ 					   bool percpu)
+@@ -201,6 +222,8 @@ irqreturn_t trusty_irq_handler(int irq, void *data)
+ 		__func__, irq, trusty_irq->irq, smp_processor_id(),
+ 		trusty_irq->enable);
+ 
++	set_pending_intr_to_lk(irq+0x30);
++
+ 	if (trusty_irq->percpu) {
+ 		disable_percpu_irq(irq);
+ 		irqset = this_cpu_ptr(is->percpu_irqs);
+@@ -348,6 +371,39 @@ static int trusty_irq_create_irq_mapping(struct trusty_irq_state *is, int irq)
+ 	return (!ret) ? -EINVAL : ret;
+ }
+ 
++static inline void trusty_irq_unmask(struct irq_data *data)
++{
++	return;
++}
++
++static inline void trusty_irq_mask(struct irq_data *data)
++{
++	return;
++}
++
++static void trusty_irq_enable(struct irq_data *data)
++{
++	return;
++}
++
++static void trusty_irq_disable(struct irq_data *data)
++{
++	return;
++}
++
++void trusty_irq_eoi(struct irq_data *data)
++{
++	return;
++}
++static struct irq_chip trusty_irq_chip = {
++		.name = "TRUSY-IRQ",
++		.irq_mask = trusty_irq_mask,
++		.irq_unmask = trusty_irq_unmask,
++		.irq_enable = trusty_irq_enable,
++		.irq_disable = trusty_irq_disable,
++		.irq_eoi = trusty_irq_eoi,
++};
++
+ static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int tirq)
+ {
+ 	int ret;
+@@ -357,12 +413,7 @@ static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int tirq)
+ 
+ 	dev_dbg(is->dev, "%s: irq %d\n", __func__, tirq);
+ 
+-	irq = trusty_irq_create_irq_mapping(is, tirq);
+-	if (irq < 0) {
+-		dev_err(is->dev,
+-			"trusty_irq_create_irq_mapping failed (%d)\n", irq);
+-		return irq;
+-	}
++	irq = tirq;
+ 
+ 	trusty_irq = kzalloc(sizeof(*trusty_irq), GFP_KERNEL);
+ 	if (!trusty_irq)
+@@ -376,8 +427,17 @@ static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int tirq)
+ 	hlist_add_head(&trusty_irq->node, &is->normal_irqs.inactive);
+ 	spin_unlock_irqrestore(&is->normal_irqs_lock, irq_flags);
+ 
++	ret = irq_alloc_desc_at(irq, 0);
++	if (ret >= 0)
++		irq_set_chip_and_handler_name(irq, &trusty_irq_chip, handle_edge_irq, "trusty-irq");
++	else if (ret != -EEXIST) {
++		dev_err(is->dev, "can't allocate irq desc %d\n", ret);
++		goto err_request_irq;
++	}
++
+ 	ret = request_irq(irq, trusty_irq_handler, IRQF_NO_THREAD,
+-			  "trusty", trusty_irq);
++			  "trusty-irq", trusty_irq);
++
+ 	if (ret) {
+ 		dev_err(is->dev, "request_irq failed %d\n", ret);
+ 		goto err_request_irq;
+@@ -416,6 +476,8 @@ static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int tirq)
+ 		struct trusty_irq *trusty_irq;
+ 		struct trusty_irq_irqset *irqset;
+ 
++		if (cpu >= 32)
++			return -EINVAL;
+ 		trusty_irq = per_cpu_ptr(trusty_irq_handler_data, cpu);
+ 		irqset = per_cpu_ptr(is->percpu_irqs, cpu);
+ 
+@@ -439,6 +501,8 @@ static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int tirq)
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq *trusty_irq;
+ 
++		if (cpu >= 32)
++			return -EINVAL;
+ 		trusty_irq = per_cpu_ptr(trusty_irq_handler_data, cpu);
+ 		hlist_del(&trusty_irq->node);
+ 	}
+@@ -462,11 +526,11 @@ static int trusty_irq_init_one(struct trusty_irq_state *is,
+ 	irq = trusty_smc_get_next_irq(is, irq, per_cpu);
+ 	if (irq < 0)
+ 		return irq;
+-
++	dev_info(is->dev, "irq from lk = %d\n", irq);
+ 	if (per_cpu)
+-		ret = trusty_irq_init_per_cpu_irq(is, irq);
++		ret = trusty_irq_init_per_cpu_irq(is, irq-0x30);
+ 	else
+-		ret = trusty_irq_init_normal_irq(is, irq);
++		ret = trusty_irq_init_normal_irq(is, irq-0x30);
+ 
+ 	if (ret) {
+ 		dev_warn(is->dev,
+@@ -481,7 +545,6 @@ static void trusty_irq_free_irqs(struct trusty_irq_state *is)
+ {
+ 	struct trusty_irq *irq;
+ 	struct hlist_node *n;
+-	unsigned int cpu;
+ 
+ 	hlist_for_each_entry_safe(irq, n, &is->normal_irqs.inactive, node) {
+ 		dev_dbg(is->dev, "%s: irq %d\n", __func__, irq->irq);
+@@ -489,6 +552,7 @@ static void trusty_irq_free_irqs(struct trusty_irq_state *is)
+ 		hlist_del(&irq->node);
+ 		kfree(irq);
+ 	}
++/*
+ 	hlist_for_each_entry_safe(irq, n,
+ 				  &this_cpu_ptr(is->percpu_irqs)->inactive,
+ 				  node) {
+@@ -504,7 +568,7 @@ static void trusty_irq_free_irqs(struct trusty_irq_state *is)
+ 			hlist_del(&irq_tmp->node);
+ 		}
+ 		free_percpu(trusty_irq_handler_data);
+-	}
++	} */
+ }
+ 
+ static int trusty_irq_probe(struct platform_device *pdev)
+@@ -557,16 +621,18 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq_work *trusty_irq_work;
+ 
++		if (cpu >= 32)
++			return -EINVAL;
+ 		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+ 		trusty_irq_work->is = is;
+ 		INIT_WORK(&trusty_irq_work->work, work_func);
+ 	}
+ 
+ 	for (irq = 0; irq >= 0;)
+-		irq = trusty_irq_init_one(is, irq, true);
+-	for (irq = 0; irq >= 0;)
+ 		irq = trusty_irq_init_one(is, irq, false);
+ 
++	irq_register_done();
++
+ 	is->cpu_notifier.notifier_call = trusty_irq_cpu_notify;
+ 	ret = register_hotcpu_notifier(&is->cpu_notifier);
+ 	if (ret) {
+@@ -597,6 +663,8 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq_work *trusty_irq_work;
+ 
++		if (cpu >= 32)
++			return -EINVAL;
+ 		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+ 		flush_work(&trusty_irq_work->work);
+ 	}
+@@ -632,6 +700,8 @@ static int trusty_irq_remove(struct platform_device *pdev)
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq_work *trusty_irq_work;
+ 
++		if (cpu >= 32)
++			return -EINVAL;
+ 		trusty_irq_work = per_cpu_ptr(is->irq_work, cpu);
+ 		flush_work(&trusty_irq_work->work);
+ 	}
+@@ -657,3 +727,7 @@ static struct platform_driver trusty_irq_driver = {
+ };
+ 
+ module_platform_driver(trusty_irq_driver);
++
++
++MODULE_LICENSE("GPL v2");
++
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index e8dcced..112287c 100644
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -11,6 +11,7 @@
+  * GNU General Public License for more details.
+  *
+  */
++#include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/trusty/smcall.h>
+ #include <linux/trusty/trusty.h>
+@@ -272,3 +273,4 @@ static struct platform_driver trusty_log_driver = {
+ };
+ 
+ module_platform_driver(trusty_log_driver);
++MODULE_LICENSE("GPL");
+diff --git a/drivers/trusty/trusty-mem.c b/drivers/trusty/trusty-mem.c
+index c55ace2..1317ec7 100644
+--- a/drivers/trusty/trusty-mem.c
++++ b/drivers/trusty/trusty-mem.c
+@@ -11,66 +11,68 @@
+  * GNU General Public License for more details.
+  *
+  */
+-
++#include <linux/module.h>
+ #include <linux/types.h>
+ #include <linux/printk.h>
+ #include <linux/trusty/trusty.h>
+ #include <linux/trusty/smcall.h>
++#include <linux/version.h>
++
++/* Normal memory */
++#define NS_MAIR_NORMAL_CACHED_WB_RWA       0xFF /* inner and outer write back read/write allocate */
++#define NS_MAIR_NORMAL_CACHED_WT_RA        0xAA /* inner and outer write through read allocate */
++#define NS_MAIR_NORMAL_CACHED_WB_RA        0xEE /* inner and outer wriet back, read allocate */
++#define NS_MAIR_NORMAL_UNCACHED            0x44 /* uncached */
+ 
+ static int get_mem_attr(struct page *page, pgprot_t pgprot)
+ {
+-#if defined(CONFIG_ARM64)
+-	uint64_t mair;
+-	uint attr_index = (pgprot_val(pgprot) & PTE_ATTRINDX_MASK) >> 2;
+-
+-	asm ("mrs %0, mair_el1\n" : "=&r" (mair));
+-	return (mair >> (attr_index * 8)) & 0xff;
+-
+-#elif defined(CONFIG_ARM_LPAE)
+-	uint32_t mair;
+-	uint attr_index = ((pgprot_val(pgprot) & L_PTE_MT_MASK) >> 2);
+-
+-	if (attr_index >= 4) {
+-		attr_index -= 4;
+-		asm volatile("mrc p15, 0, %0, c10, c2, 1\n" : "=&r" (mair));
+-	} else {
+-		asm volatile("mrc p15, 0, %0, c10, c2, 0\n" : "=&r" (mair));
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
++	/* The porting to CHT kernel (3.14.55) is in the #else clause.
++	** For BXT kernel (4.1.0), the function get_page_memtype() is static.
++	**
++	** The orignal google code (for arm) getst the cache states and page
++	** flags from input parameter "pgprot", which is not prefered in x86.
++	** In x86, both cache states and page flags should be got from input
++	** parameter "page". But, since current caller of trusty_call32_mem_buf()
++	** always allocate memory in kernel heap, it is also ok to use hardcode
++	** here.
++	**
++	** The memory allocated in kernel heap should be CACHED. The reason to
++	** return UNCACHED here is to pass the check in LK sm_decode_ns_memory_attr()
++	** with SMP, which only allow UNCACHED.
++	*/
++	return NS_MAIR_NORMAL_UNCACHED;
++#else
++	unsigned long type;
++	int ret_mem_attr = 0;
++
++	type = get_page_memtype(page);
++	/*
++	* -1 from get_page_memtype() implies RAM page is in its
++	* default state and not reserved, and hence of type WB
++	*/
++	if (type == -1) {
++		type = _PAGE_CACHE_MODE_WB;
+ 	}
+-	return (mair >> (attr_index * 8)) & 0xff;
+-
+-#elif defined(CONFIG_ARM)
+-	/* check memory type */
+-	switch (pgprot_val(pgprot) & L_PTE_MT_MASK) {
+-	case L_PTE_MT_WRITEALLOC:
+-		/* Normal: write back write allocate */
+-		return 0xFF;
+-
+-	case L_PTE_MT_BUFFERABLE:
+-		/* Normal: non-cacheble */
+-		return 0x44;
+-
+-	case L_PTE_MT_WRITEBACK:
+-		/* Normal: writeback, read allocate */
+-		return 0xEE;
+-
+-	case L_PTE_MT_WRITETHROUGH:
+-		/* Normal: write through */
+-		return 0xAA;
+-
+-	case L_PTE_MT_UNCACHED:
+-		/* strongly ordered */
+-		return 0x00;
+-
+-	case L_PTE_MT_DEV_SHARED:
+-	case L_PTE_MT_DEV_NONSHARED:
+-		/* device */
+-		return 0x04;
++	switch (type) {
++	case _PAGE_CACHE_MODE_UC_MINUS:
++		/* uncacheable */
++		ret_mem_attr = NS_MAIR_NORMAL_UNCACHED;
++		break;
++	case _PAGE_CACHE_MODE_WB:
++		/*  writeback */
++		ret_mem_attr = NS_MAIR_NORMAL_CACHED_WB_RWA;
++		break;
++	case _PAGE_CACHE_MODE_WC:
++		/* write combined */
++		ret_mem_attr = NS_MAIR_NORMAL_UNCACHED;
++		break;
+ 
+ 	default:
+-		return -EINVAL;
++		printk(KERN_ERR "%s(): invalid type: 0x%x\n", __func__, type);
++		ret_mem_attr = -EINVAL;
+ 	}
+-#else
+-	return 0;
++	return ret_mem_attr;
+ #endif
+ }
+ 
+@@ -90,18 +92,10 @@ int trusty_encode_page_info(struct ns_mem_page_info *inf,
+ 	mem_attr = get_mem_attr(page, pgprot);
+ 	if (mem_attr < 0)
+ 		return mem_attr;
+-
+-	/* add other attributes */
+-#if defined(CONFIG_ARM64) || defined(CONFIG_ARM_LPAE)
+-	pte |= pgprot_val(pgprot);
+-#elif defined(CONFIG_ARM)
+-	if (pgprot_val(pgprot) & L_PTE_USER)
++	if (pgprot_val(pgprot) & _PAGE_USER)
+ 		pte |= (1 << 6);
+-	if (pgprot_val(pgprot) & L_PTE_RDONLY)
++	if (!(pgprot_val(pgprot) & _PAGE_RW))
+ 		pte |= (1 << 7);
+-	if (pgprot_val(pgprot) & L_PTE_SHARED)
+-		pte |= (3 << 8); /* inner sharable */
+-#endif
+ 
+ 	inf->attr = (pte & 0x0000FFFFFFFFFFFFull) | ((uint64_t)mem_attr << 48);
+ 	return 0;
+@@ -131,4 +125,5 @@ int trusty_call32_mem_buf(struct device *dev, u32 smcnr,
+ 					 (u32)(pg_inf.attr >> 32), size);
+ 	}
+ }
+-
++EXPORT_SYMBOL(trusty_call32_mem_buf);
++MODULE_LICENSE("GPL");
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index fabbf29..f00c4ec 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -206,22 +206,23 @@ static void trusty_virtio_reset(struct virtio_device *vdev)
+ 	dev_dbg(&vdev->dev, "reset vdev_id=%d\n", tvdev->notifyid);
+ 	trusty_std_call32(tctx->dev->parent, SMC_SC_VDEV_RESET,
+ 			  tvdev->notifyid, 0, 0);
++	vdev->config->set_status(vdev, 0);
+ }
+ 
+ static u64 trusty_virtio_get_features(struct virtio_device *vdev)
+ {
+ 	struct trusty_vdev *tvdev = vdev_to_tvdev(vdev);
+-	return tvdev->vdev_descr->dfeatures;
++	return ((u64)tvdev->vdev_descr->dfeatures) & 0x00000000FFFFFFFFULL;
+ }
+ 
+ static int trusty_virtio_finalize_features(struct virtio_device *vdev)
+ {
+ 	struct trusty_vdev *tvdev = vdev_to_tvdev(vdev);
+-	
++
+ 	/* Make sure we don't have any features > 32 bits! */
+ 	BUG_ON((u32)vdev->features != vdev->features);
+ 
+-	tvdev->vdev_descr->gfeatures = vdev->features;
++	tvdev->vdev_descr->gfeatures = (u32)(vdev->features);
+ 	return 0;
+ }
+ 
+@@ -381,6 +382,12 @@ static const struct virtio_config_ops trusty_virtio_config_ops = {
+ 	.bus_name = trusty_virtio_bus_name,
+ };
+ 
++void virtio_vdev_release(struct device *dev)
++{
++	dev_dbg(dev, "%s() is called\n", __func__);
++	return;
++}
++
+ static int trusty_virtio_add_device(struct trusty_ctx *tctx,
+ 				    struct fw_rsc_vdev *vdev_descr,
+ 				    struct fw_rsc_vdev_vring *vr_descr,
+@@ -400,6 +407,7 @@ static int trusty_virtio_add_device(struct trusty_ctx *tctx,
+ 	/* setup vdev */
+ 	tvdev->tctx = tctx;
+ 	tvdev->vdev.dev.parent = tctx->dev;
++	tvdev->vdev.dev.release = virtio_vdev_release;
+ 	tvdev->vdev.id.device  = vdev_descr->id;
+ 	tvdev->vdev.config = &trusty_virtio_config_ops;
+ 	tvdev->vdev_descr = vdev_descr;
+@@ -677,6 +685,7 @@ static const struct of_device_id trusty_of_match[] = {
+ 	{
+ 		.compatible = "android,trusty-virtio-v1",
+ 	},
++	{},
+ };
+ 
+ MODULE_DEVICE_TABLE(of, trusty_of_match);
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 6fcd548..12a9022 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -12,7 +12,6 @@
+  *
+  */
+ 
+-#include <asm/compiler.h>
+ #include <linux/delay.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -20,11 +19,14 @@
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/stat.h>
++#include <linux/smp.h>
+ #include <linux/string.h>
+ #include <linux/trusty/smcall.h>
+ #include <linux/trusty/sm_err.h>
+ #include <linux/trusty/trusty.h>
+ 
++#define TRUSTY_VMCALL_SMC 0x74727500
++
+ struct trusty_state {
+ 	struct mutex smc_lock;
+ 	struct atomic_notifier_head notifier;
+@@ -33,56 +35,57 @@ struct trusty_state {
+ 	u32 api_version;
+ };
+ 
+-#ifdef CONFIG_ARM64
+-#define SMC_ARG0		"x0"
+-#define SMC_ARG1		"x1"
+-#define SMC_ARG2		"x2"
+-#define SMC_ARG3		"x3"
+-#define SMC_ARCH_EXTENSION	""
+-#define SMC_REGISTERS_TRASHED	"x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", \
+-				"x12", "x13", "x14", "x15", "x16", "x17"
+-#else
+-#define SMC_ARG0		"r0"
+-#define SMC_ARG1		"r1"
+-#define SMC_ARG2		"r2"
+-#define SMC_ARG3		"r3"
+-#define SMC_ARCH_EXTENSION	".arch_extension sec\n"
+-#define SMC_REGISTERS_TRASHED	"ip"
+-#endif
++struct trusty_smc_interface {
++	struct device *dev;
++	ulong args[5];
++};
+ 
+ static inline ulong smc(ulong r0, ulong r1, ulong r2, ulong r3)
+ {
+-	register ulong _r0 asm(SMC_ARG0) = r0;
+-	register ulong _r1 asm(SMC_ARG1) = r1;
+-	register ulong _r2 asm(SMC_ARG2) = r2;
+-	register ulong _r3 asm(SMC_ARG3) = r3;
+-
+-	asm volatile(
+-		__asmeq("%0", SMC_ARG0)
+-		__asmeq("%1", SMC_ARG1)
+-		__asmeq("%2", SMC_ARG2)
+-		__asmeq("%3", SMC_ARG3)
+-		__asmeq("%4", SMC_ARG0)
+-		__asmeq("%5", SMC_ARG1)
+-		__asmeq("%6", SMC_ARG2)
+-		__asmeq("%7", SMC_ARG3)
+-		SMC_ARCH_EXTENSION
+-		"smc	#0"	/* switch to secure world */
+-		: "=r" (_r0), "=r" (_r1), "=r" (_r2), "=r" (_r3)
+-		: "r" (_r0), "r" (_r1), "r" (_r2), "r" (_r3)
+-		: SMC_REGISTERS_TRASHED);
+-	return _r0;
++	__asm__ __volatile__(
++	"vmcall; \n"
++	:"=D"(r0)
++	:"a"(TRUSTY_VMCALL_SMC), "D"(r0), "S"(r1), "d"(r2), "b"(r3)
++	);
++	return r0;
+ }
+ 
+-s32 trusty_fast_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
++static void trusty_fast_call32_remote(void *args)
+ {
++	struct trusty_smc_interface *p_args = args;
++	struct device *dev = p_args->dev;
++	ulong smcnr = p_args->args[0];
++	ulong a0 = p_args->args[1];
++	ulong a1 = p_args->args[2];
++	ulong a2 = p_args->args[3];
+ 	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
+ 
+ 	BUG_ON(!s);
+ 	BUG_ON(!SMC_IS_FASTCALL(smcnr));
+ 	BUG_ON(SMC_IS_SMC64(smcnr));
+ 
+-	return smc(smcnr, a0, a1, a2);
++	p_args->args[4] = smc(smcnr, a0, a1, a2);
++}
++
++s32 trusty_fast_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
++{
++	int cpu = 0;
++	int ret = 0;
++	struct trusty_smc_interface s;
++	s.dev = dev;
++	s.args[0] = smcnr;
++	s.args[1] = a0;
++	s.args[2] = a1;
++	s.args[3] = a2;
++	s.args[4] = 0;
++
++	ret = smp_call_function_single(cpu, trusty_fast_call32_remote, (void *)&s, 1);
++
++	if (ret) {
++		pr_err("%s: smp_call_function_single failed: %d\n", __func__, ret);
++	}
++
++	return s.args[4];
+ }
+ EXPORT_SYMBOL(trusty_fast_call32);
+ 
+@@ -122,21 +125,59 @@ static ulong trusty_std_call_inner(struct device *dev, ulong smcnr,
+ 	return ret;
+ }
+ 
++static void trusty_std_call_inner_wrapper_remote(void *args)
++{
++	struct trusty_smc_interface *p_args = args;
++	struct device *dev = p_args->dev;
++	ulong smcnr = p_args->args[0];
++	ulong a0 = p_args->args[1];
++	ulong a1 = p_args->args[2];
++	ulong a2 = p_args->args[3];
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++	ulong ret;
++	unsigned long flags;
++
++	local_irq_save(flags);
++	atomic_notifier_call_chain(&s->notifier, TRUSTY_CALL_PREPARE,
++					   NULL);
++	ret = trusty_std_call_inner(dev, smcnr, a0, a1, a2);
++	atomic_notifier_call_chain(&s->notifier, TRUSTY_CALL_RETURNED,
++					   NULL);
++	local_irq_restore(flags);
++
++	p_args->args[4] = ret;
++}
++
++static ulong trusty_std_call_inner_wrapper(struct device *dev, ulong smcnr,
++				   ulong a0, ulong a1, ulong a2)
++{
++	int cpu = 0;
++	int ret = 0;
++	struct trusty_smc_interface s;
++	s.dev = dev;
++	s.args[0] = smcnr;
++	s.args[1] = a0;
++	s.args[2] = a1;
++	s.args[3] = a2;
++	s.args[4] = 0;
++
++	ret = smp_call_function_single(cpu, trusty_std_call_inner_wrapper_remote, (void *)&s, 1);
++
++	if (ret) {
++		pr_err("%s: smp_call_function_single failed: %d\n", __func__, ret);
++	}
++
++	return s.args[4];
++}
++
+ static ulong trusty_std_call_helper(struct device *dev, ulong smcnr,
+ 				    ulong a0, ulong a1, ulong a2)
+ {
+ 	ulong ret;
+ 	int sleep_time = 1;
+-	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
+ 
+ 	while (true) {
+-		local_irq_disable();
+-		atomic_notifier_call_chain(&s->notifier, TRUSTY_CALL_PREPARE,
+-					   NULL);
+-		ret = trusty_std_call_inner(dev, smcnr, a0, a1, a2);
+-		atomic_notifier_call_chain(&s->notifier, TRUSTY_CALL_RETURNED,
+-					   NULL);
+-		local_irq_enable();
++		ret = trusty_std_call_inner_wrapper(dev, smcnr, a0, a1, a2);
+ 
+ 		if ((int)ret != SM_ERR_BUSY)
+ 			break;
+@@ -173,6 +214,9 @@ static void trusty_std_call_cpu_idle(struct trusty_state *s)
+ 	}
+ }
+ 
++/* must set CONFIG_DEBUG_ATOMIC_SLEEP=n
++** otherwise mutex_lock() will fail and crash
++*/
+ s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
+ {
+ 	int ret;
+@@ -230,6 +274,7 @@ EXPORT_SYMBOL(trusty_call_notifier_unregister);
+ 
+ static int trusty_remove_child(struct device *dev, void *data)
+ {
++	dev_dbg(dev, "%s() is called()\n", __func__);
+ 	platform_device_unregister(to_platform_device(dev));
+ 	return 0;
+ }
+@@ -265,6 +310,8 @@ static void trusty_init_version(struct trusty_state *s, struct device *dev)
+ 	version_str_len = ret;
+ 
+ 	s->version_str = kmalloc(version_str_len + 1, GFP_KERNEL);
++	if (!s->version_str)
++		goto err_get_size;
+ 	for (i = 0; i < version_str_len; i++) {
+ 		ret = trusty_fast_call32(dev, SMC_FC_GET_VERSION_STR, i, 0, 0);
+ 		if (ret < 0)
+@@ -344,15 +391,8 @@ static int trusty_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		goto err_api_version;
+ 
+-	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+-	if (ret < 0) {
+-		dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
+-		goto err_add_children;
+-	}
+-
+ 	return 0;
+ 
+-err_add_children:
+ err_api_version:
+ 	if (s->version_str) {
+ 		device_remove_file(&pdev->dev, &dev_attr_trusty_version);
+@@ -369,6 +409,8 @@ static int trusty_remove(struct platform_device *pdev)
+ {
+ 	struct trusty_state *s = platform_get_drvdata(pdev);
+ 
++	dev_dbg(&(pdev->dev), "%s() is called\n", __func__);
++
+ 	device_for_each_child(&pdev->dev, NULL, trusty_remove_child);
+ 	mutex_destroy(&s->smc_lock);
+ 	if (s->version_str) {
+@@ -394,15 +436,101 @@ static struct platform_driver trusty_driver = {
+ 	},
+ };
+ 
++void	trusty_dev_release(struct device *dev)
++{
++	dev_dbg(dev, "%s() is called()\n", __func__);
++	return;
++}
++
++static struct device_node trusty_irq_node = {
++	.name = "trusty-irq",
++	.sibling = NULL,
++};
++
++static struct device_node trusty_virtio_node = {
++	.name = "trusty-virtio",
++	.sibling = &trusty_irq_node,
++};
++
++static struct device_node trusty_log_node = {
++	.name = "trusty-log",
++	.sibling = &trusty_virtio_node,
++};
++
++
++static struct device_node trusty_node = {
++	.name = "trusty",
++	.child = &trusty_log_node,
++};
++
++static struct platform_device trusty_platform_dev = {
++	.name = "trusty",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.of_node = &trusty_node,
++	},
++};
++static struct platform_device trusty_platform_dev_log = {
++	.name = "trusty-log",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.parent = &trusty_platform_dev.dev,
++		.of_node = &trusty_log_node,
++	},
++};
++
++static struct platform_device trusty_platform_dev_virtio = {
++	.name = "trusty-virtio",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.parent = &trusty_platform_dev.dev,
++		.of_node = &trusty_virtio_node,
++	},
++};
++
++static struct platform_device trusty_platform_dev_irq = {
++	.name = "trusty-irq",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.parent = &trusty_platform_dev.dev,
++		.of_node = &trusty_irq_node,
++	},
++};
++
++static struct platform_device *trusty_devices[] __initdata = {
++	&trusty_platform_dev,
++	&trusty_platform_dev_log,
++	&trusty_platform_dev_virtio,
++	&trusty_platform_dev_irq
++};
+ static int __init trusty_driver_init(void)
+ {
++	int ret = 0;
++
++	ret = platform_add_devices(trusty_devices, ARRAY_SIZE(trusty_devices));
++	if (ret) {
++		printk(KERN_ERR "%s(): platform_add_devices() failed, ret %d\n", __func__, ret);
++		return ret;
++	}
+ 	return platform_driver_register(&trusty_driver);
+ }
+ 
+ static void __exit trusty_driver_exit(void)
+ {
+ 	platform_driver_unregister(&trusty_driver);
++	platform_device_unregister(&trusty_platform_dev);
+ }
+ 
+ subsys_initcall(trusty_driver_init);
+ module_exit(trusty_driver_exit);
++
++MODULE_LICENSE("GPL");
++
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 24fe210..7459838 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -20,7 +20,7 @@
+ #include <linux/pagemap.h>
+ 
+ 
+-#ifdef CONFIG_TRUSTY
++#if IS_ENABLED(CONFIG_TRUSTY)
+ s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2);
+ s32 trusty_fast_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2);
+ #ifdef CONFIG_64BIT
+-- 
+2.7.4
+

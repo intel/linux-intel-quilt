@@ -1,0 +1,497 @@
+From cb51581d0e47049cf8cdf42d5b0bde6411ecff5c Mon Sep 17 00:00:00 2001
+From: "Zhang, Qi" <qi1.zhang@intel.com>
+Date: Tue, 11 Jul 2017 05:03:20 +0000
+Subject: [PATCH 45/64] trusty: add support for SM Wall object
+
+SM Wall is a shared memory buffer established between secure and
+non-secure side that allows for secure side to publish in efficient
+manner certain state that non-secure side might acts.
+
+This patch adds support for such buffer in a generic way, an API to
+setup such buffer with secure side and an API to locate it's content
+based on well object known id's.
+
+Change-Id: Ibc4d43bdb7f47e803939461ece2ed848fda5738d
+Signed-off-by: Zhong,Fangjian <fangjian.zhong@intel.com>
+Author: Michael Ryleev <gmar@google.com>
+Author: Zhong,Fangjian <fangjian.zhong@intel.com>
+---
+ drivers/trusty/Makefile       |   1 +
+ drivers/trusty/trusty-irq.c   |  20 -----
+ drivers/trusty/trusty-wall.c  | 199 ++++++++++++++++++++++++++++++++++++++++++
+ drivers/trusty/trusty.c       |  22 ++++-
+ include/linux/trusty/smcall.h |  21 ++++-
+ include/linux/trusty/smwall.h |  90 +++++++++++++++++++
+ include/linux/trusty/trusty.h |  13 +++
+ 7 files changed, 343 insertions(+), 23 deletions(-)
+ create mode 100644 drivers/trusty/trusty-wall.c
+ create mode 100644 include/linux/trusty/smwall.h
+
+diff --git a/drivers/trusty/Makefile b/drivers/trusty/Makefile
+index 9ca451e..c1afb14 100644
+--- a/drivers/trusty/Makefile
++++ b/drivers/trusty/Makefile
+@@ -11,3 +11,4 @@ obj-$(CONFIG_TRUSTY_LOG)	+= trusty-log.o
+ obj-$(CONFIG_TRUSTY)		+= trusty-mem.o
+ obj-$(CONFIG_TRUSTY_VIRTIO)	+= trusty-virtio.o
+ obj-$(CONFIG_TRUSTY_VIRTIO_IPC)	+= trusty-ipc.o
++obj-$(CONFIG_TRUSTY)		+= trusty-wall.o
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 5b4686f..eda0bff 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -59,24 +59,6 @@ struct trusty_irq_state {
+ 
+ static enum cpuhp_state trusty_irq_online;
+ 
+-#define TRUSTY_VMCALL_PENDING_INTR 0x74727505
+-static inline void set_pending_intr_to_lk(uint8_t vector)
+-{
+-	__asm__ __volatile__(
+-		"vmcall"
+-		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
+-	);
+-}
+-
+-#define TRUSTY_VMCALL_IRQ_DONE 0x74727506
+-static inline void irq_register_done(void)
+-{
+-	__asm__ __volatile__(
+-		"vmcall"
+-		::"a"(TRUSTY_VMCALL_IRQ_DONE)
+-	);
+-}
+-
+ static void trusty_irq_enable_pending_irqs(struct trusty_irq_state *is,
+ 					   struct trusty_irq_irqset *irqset,
+ 					   bool percpu)
+@@ -580,8 +562,6 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 		irq = trusty_irq_init_one(is, irq, false);
+ 
+ 	ret = trusty_irq_cpu_notif_add(is);
+-	irq_register_done();
+-
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "register_cpu_notifier failed %d\n", ret);
+ 		goto err_register_hotcpu_notifier;
+diff --git a/drivers/trusty/trusty-wall.c b/drivers/trusty/trusty-wall.c
+new file mode 100644
+index 0000000..3c33d72
+--- /dev/null
++++ b/drivers/trusty/trusty-wall.c
+@@ -0,0 +1,199 @@
++/*
++ * Copyright (C) 2017 Intel, Inc.
++ * Copyright (C) 2016 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/smwall.h>
++#include <linux/trusty/trusty.h>
++
++
++void *trusty_wall_base(struct device *dev)
++{
++	struct trusty_wall_dev_state *s;
++
++	s = platform_get_drvdata(to_platform_device(dev));
++
++	if (NULL == s)
++		return NULL;
++
++	return s->va;
++}
++EXPORT_SYMBOL(trusty_wall_base);
++
++void *trusty_wall_per_cpu_item_ptr(struct device *dev, unsigned int cpu,
++		u32 item_id, size_t exp_sz)
++{
++	uint i;
++	struct sm_wall_toc *toc;
++	struct sm_wall_toc_item *item;
++	struct trusty_wall_dev_state *s;
++
++	s = platform_get_drvdata(to_platform_device(dev));
++
++	if (!s->va) {
++		dev_dbg(s->dev, "No smwall buffer is set\n");
++		return NULL;
++	}
++
++	toc = (struct sm_wall_toc *)s->va;
++	if (toc->version != SM_WALL_TOC_VER) {
++		dev_err(s->dev, "Unexpected toc version: %d\n", toc->version);
++		return NULL;
++	}
++
++	if (cpu >= toc->cpu_num) {
++		dev_err(s->dev, "Unsupported cpu (%d) requested\n", cpu);
++		return NULL;
++	}
++
++	item = (struct sm_wall_toc_item *)((uintptr_t)toc +
++			toc->per_cpu_toc_offset);
++	for (i = 0; i < toc->per_cpu_num_items; i++, item++) {
++		if (item->id != item_id)
++			continue;
++
++		if (item->size != exp_sz) {
++			dev_err(s->dev,
++					"Size mismatch (%zd vs. %zd) for item_id %d\n",
++					(size_t)item->size, exp_sz, item_id);
++			return NULL;
++		}
++
++		return s->va + toc->per_cpu_base_offset +
++			cpu * toc->per_cpu_region_size + item->offset;
++	}
++	return NULL;
++}
++EXPORT_SYMBOL(trusty_wall_per_cpu_item_ptr);
++
++static int trusty_wall_setup(struct trusty_wall_dev_state *s)
++{
++	int ret;
++	void *va;
++	size_t sz;
++
++	/* check if wall feature is supported by Trusted OS */
++	ret = trusty_fast_call32(s->trusty_dev, SMC_FC_GET_WALL_SIZE, 0, 0, 0);
++	if (ret == SM_ERR_UNDEFINED_SMC || ret == SM_ERR_NOT_SUPPORTED) {
++		/* wall is not supported */
++		dev_notice(s->dev, "smwall: is not supported by Trusted OS\n");
++		return 0;
++	} else if (ret < 0) {
++		dev_err(s->dev, "smwall: failed (%d) to query buffer size\n",
++				ret);
++		return ret;
++	} else if (ret == 0) {
++		dev_notice(s->dev, "smwall: zero-sized buffer requested\n");
++		return 0;
++	}
++	sz = (size_t)ret;
++
++	/* allocate memory for shared buffer */
++	va = alloc_pages_exact(sz, GFP_KERNEL | __GFP_ZERO);
++	if (!va) {
++		dev_err(s->dev, "smwall: failed to allocate buffer\n");
++		return -ENOMEM;
++	}
++
++	/* call into Trusted OS to setup wall */
++	ret = trusty_call32_mem_buf(s->trusty_dev, SMC_SC_SETUP_WALL,
++			virt_to_page(va), sz, PAGE_KERNEL);
++	if (ret < 0) {
++		dev_err(s->dev, "smwall: TEE returned (%d)\n", ret);
++		free_pages_exact(va, sz);
++		return -ENODEV;
++	}
++
++	dev_info(s->dev, "smwall: initialized %zu bytes\n", sz);
++
++	s->va = va;
++	s->sz = sz;
++
++	return 0;
++}
++
++static void trusty_wall_destroy(struct trusty_wall_dev_state *s)
++{
++	int ret;
++
++	ret = trusty_std_call32(s->trusty_dev, SMC_SC_DESTROY_WALL, 0, 0, 0);
++	if (ret) {
++		/**
++		 * It should never happen, but if it happens, it is
++		 * unsafe to free buffer so we have to leak memory
++		 */
++		dev_err(s->dev, "Failed (%d) to destroy the wall buffer\n",
++			ret);
++	} else {
++		free_pages_exact(s->va, s->sz);
++	}
++}
++
++static int trusty_wall_probe(struct platform_device *pdev)
++{
++	int ret;
++	struct trusty_wall_dev_state *s;
++
++	dev_dbg(&pdev->dev, "%s\n", __func__);
++
++	s = kzalloc(sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++
++	s->dev = &pdev->dev;
++	s->trusty_dev = s->dev->parent;
++	platform_set_drvdata(pdev, s);
++
++	ret = trusty_wall_setup(s);
++	if (ret < 0) {
++		dev_warn(s->dev, "Failed (%d) to setup the wall\n", ret);
++		kfree(s);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int trusty_wall_remove(struct platform_device *pdev)
++{
++	struct trusty_wall_dev_state *s = platform_get_drvdata(pdev);
++
++	trusty_wall_destroy(s);
++
++	return 0;
++}
++
++static const struct of_device_id trusty_wall_of_match[] = {
++	{ .compatible = "android, trusty-wall-v1", },
++	{},
++};
++
++MODULE_DEVICE_TABLE(of, trusty_wall_of_match);
++
++static struct platform_driver trusty_wall_driver = {
++	.probe = trusty_wall_probe,
++	.remove = trusty_wall_remove,
++	.driver = {
++		.name = "trusty-wall",
++		.owner = THIS_MODULE,
++		.of_match_table = trusty_wall_of_match,
++	},
++};
++
++module_platform_driver(trusty_wall_driver);
++
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("Trusty smwall driver");
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 4aa4a89..0b3e758 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -22,6 +22,7 @@
+ #include <linux/smp.h>
+ #include <linux/string.h>
+ #include <linux/trusty/smcall.h>
++#include <linux/trusty/smwall.h>
+ #include <linux/trusty/sm_err.h>
+ #include <linux/trusty/trusty.h>
+ 
+@@ -610,12 +611,17 @@ static struct platform_driver trusty_driver = {
+ 	},
+ };
+ 
+-void	trusty_dev_release(struct device *dev)
++void trusty_dev_release(struct device *dev)
+ {
+ 	dev_dbg(dev, "%s() is called()\n", __func__);
+ 	return;
+ }
+ 
++static struct device_node trusty_wall_node = {
++	.name = "trusty-wall",
++	.sibling = NULL,
++};
++
+ static struct device_node trusty_irq_node = {
+ 	.name = "trusty-irq",
+ 	.sibling = NULL,
+@@ -679,11 +685,23 @@ static struct platform_device trusty_platform_dev_irq = {
+ 	},
+ };
+ 
++static struct platform_device trusty_platform_dev_wall = {
++	.name = "trusty-wall",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.parent = &trusty_platform_dev.dev,
++		.of_node = &trusty_wall_node,
++	},
++};
++
+ static struct platform_device *trusty_devices[] __initdata = {
+ 	&trusty_platform_dev,
+ 	&trusty_platform_dev_log,
+ 	&trusty_platform_dev_virtio,
+-	&trusty_platform_dev_irq
++	&trusty_platform_dev_irq,
++	&trusty_platform_dev_wall
+ };
+ static int __init trusty_driver_init(void)
+ {
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index 037b3fa4..ee5dda2 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 2013-2014 Google Inc. All rights reserved
++ * Copyright (c) 2013-2016 Google Inc. All rights reserved
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining
+  * a copy of this software and associated documentation files
+@@ -124,6 +124,25 @@
+ #define TRUSTY_API_VERSION_CURRENT	(3)
+ #define SMC_FC_API_VERSION	SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 11)
+ 
++/*
++ * SM Wall is a shared memory buffer established between secure and non-secure
++ * side that allows for secure side to publish certain state that non-secure
++ * side might acts on. One known example is a state of per CPU timer on
++ * platforms that require migration to broadcast timer in deep idle states.
++ *
++ * SMC_FC_GET_WALL_SIZE - retrieves the size of memory buffer that will be
++ * required to setup the SM Wall object.
++ *
++ * SMC_SC_SETUP_WALL - specifies location, size and attributes of memory buffer
++ * allocated by non-secure side to setup the SM Wall object.
++ *
++ * SMC_SC_DESTROY_WALL - notifies secure side that previously specifies SM Wall
++ * object should be released usually as part of normal shutdown sequence.
++ */
++#define SMC_FC_GET_WALL_SIZE	SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 12)
++#define SMC_SC_SETUP_WALL	SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR,  12)
++#define SMC_SC_DESTROY_WALL	SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR,  13)
++
+ /* TRUSTED_OS entity calls */
+ #define SMC_SC_VIRTIO_GET_DESCR	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 20)
+ #define SMC_SC_VIRTIO_START	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 21)
+diff --git a/include/linux/trusty/smwall.h b/include/linux/trusty/smwall.h
+new file mode 100644
+index 0000000..370d8b3
+--- /dev/null
++++ b/include/linux/trusty/smwall.h
+@@ -0,0 +1,90 @@
++/*
++ * Copyright (c) 2016 Google Inc. All rights reserved
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#ifndef __LINUX_TRUSTY_SMWALL_H
++#define __LINUX_TRUSTY_SMWALL_H
++
++/**
++ * DOC: Introduction
++ *
++ * SM Wall buffer is formatted by secure side to contain the location of
++ * objects it exports:
++ *
++ * In general it starts with sm_wall_toc header struct followed
++ * by array of sm_wall_toc_item objects describing location of
++ * individual objects within SM Wall buffer.
++ */
++
++/* current version of TOC structure */
++#define SM_WALL_TOC_VER   1
++
++/**
++ * struct sm_wall_toc_item - describes individual table of content item
++ * @id:           item id
++ * @offset:       item offset relative to appropriate base. For global items
++ * it is relative to SM wall buffer base address. For per cpu item, this is an
++ * offset within each individual per cpu region.
++ * @size:         item size
++ * @reserved:     reserved: must be set to zero
++ */
++struct sm_wall_toc_item {
++	u32 id;
++	u32 offset;
++	u32 size;
++	u32 reserved;
++};
++
++/**
++ * struct sm_wall_toc - describes sm_wall table of content structure
++ * @version:             current toc structure version
++ * @cpu_num:             number of cpus supported
++ * @per_cpu_toc_offset:  offset of the start of per_cpu item table relative to
++ *                       SM wall buffer base address.
++ * @per_cpu_num_items:   number of per cpu toc items located at position
++ *                       specified by @per_cpu_toc_offset.
++ * @per_cpu_base_offset: offset of the start of a sequence of per cpu data
++ *                       regions (@cpu_num total) relative to SM wall buffer
++ *                       base address.
++ * @per_cpu_region_size: size of each per cpu data region.
++ * @global_toc_offset:   offset of the start of global item table relative to
++ *                       SM wall buffer base address.
++ * @global_num_items:    number of items in global item table
++ */
++struct sm_wall_toc {
++	u32 version;
++	u32 cpu_num;
++	u32 per_cpu_toc_offset;
++	u32 per_cpu_num_items;
++	u32 per_cpu_base_offset;
++	u32 per_cpu_region_size;
++	u32 global_toc_offset;
++	u32 global_num_items;
++};
++
++struct trusty_wall_dev_state {
++	struct device *dev;
++	struct device *trusty_dev;
++	void   *va;
++	size_t sz;
++};
++
++#endif /* __LINUX_TRUSTY_SMWALL_H */
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index eaa833b..029b098 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -85,6 +85,19 @@ static inline void trusty_nop_init(struct trusty_nop *nop,
+ void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop);
+ void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop);
+ 
++#define TRUSTY_VMCALL_PENDING_INTR 0x74727505
++static inline void set_pending_intr_to_lk(uint8_t vector)
++{
++	__asm__ __volatile__(
++		"vmcall"
++		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
++	);
++}
++
++void trusty_update_wall_info(struct device *dev, void *va, size_t sz);
++void *trusty_wall_base(struct device *dev);
++void *trusty_wall_per_cpu_item_ptr(struct device *dev, unsigned int cpu,
++				   u32 item_id, size_t exp_sz);
+ 
+ /* CPUID leaf 0x3 is used because eVMM will trap this leaf.*/
+ #define EVMM_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
+-- 
+2.7.4
+

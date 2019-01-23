@@ -1,0 +1,143 @@
+From 60acbfa2ed62ac6f29512d373f1a401dc80fd22e Mon Sep 17 00:00:00 2001
+From: Pawel Furtak <pawel.furtak@intel.com>
+Date: Tue, 15 Jan 2019 17:11:49 +0100
+Subject: [PATCH 03/64] ASoC: Skl: Virt: Add locks to substreams list
+
+Protect substream list access with additional locks
+to prevent concurrency issues.
+
+Change-Id: Id1f488e7f1553d2ce3b8fe5cad7b37532f30e200
+Tracked-On: OAM-74848
+Signed-off-by: Pawel Furtak <pawel.furtak@intel.com>
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+Tested-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.c | 27 ++++++++++++++++++++++----
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.h |  2 ++
+ 2 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 642a1c0..66a57d5 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -351,6 +351,7 @@ static void vfe_not_handle_rx(struct virtqueue *vq)
+ 
+ static void vfe_posn_update(struct work_struct *work)
+ {
++	struct snd_pcm_substream *substream;
+ 	struct vfe_hw_pos_request *pos_req;
+ 	struct virtqueue *vq;
+ 	unsigned long irq_flags;
+@@ -369,15 +370,22 @@ static void vfe_posn_update(struct work_struct *work)
+ 		if (pos_req == NULL)
+ 			break;
+ 
++		spin_lock_irqsave(&vfe->substream_info_lock, irq_flags);
+ 		substr_info = vfe_find_substream_info_by_pcm(vfe,
+ 			pos_req->pcm_id, pos_req->stream_dir);
+ 
+ 		// substream may be already closed on FE side
+-		if (!substr_info)
++		if (!substr_info) {
++			spin_unlock_irqrestore(&vfe->substream_info_lock,
++				irq_flags);
+ 			goto send_back_msg;
++		}
+ 
+ 		substr_info->hw_ptr = pos_req->stream_pos;
+-		snd_pcm_period_elapsed(substr_info->substream);
++		substream = substr_info->substream;
++		spin_unlock_irqrestore(&vfe->substream_info_lock, irq_flags);
++
++		snd_pcm_period_elapsed(substream);
+ 
+ send_back_msg:
+ 		vfe_send_pos_request(vfe, pos_req);
+@@ -418,7 +426,8 @@ int vfe_pcm_open(struct snd_pcm_substream *substream)
+ {
+ 	struct vfe_substream_info *substr_info;
+ 	struct vfe_msg_header msg_header;
+-	struct vfe_pcm_result vbe_result;
++	struct vfe_pcm_result vbe_result = { .ret = -EIO };
++	unsigned long irq_flags;
+ 	int ret;
+ 	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+ 
+@@ -438,6 +447,9 @@ int vfe_pcm_open(struct snd_pcm_substream *substream)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (vbe_result.ret < 0)
++		return vbe_result.ret;
++
+ 	substr_info = kzalloc(sizeof(*substr_info), GFP_KERNEL);
+ 	if (!substr_info)
+ 		return -ENOMEM;
+@@ -446,7 +458,9 @@ int vfe_pcm_open(struct snd_pcm_substream *substream)
+ 	substr_info->substream = substream;
+ 	substr_info->direction = substream->stream;
+ 
++	spin_lock_irqsave(&vfe->substream_info_lock, irq_flags);
+ 	list_add(&substr_info->list, &vfe->substr_info_list);
++	spin_unlock_irqrestore(&vfe->substream_info_lock, irq_flags);
+ 
+ 	return vbe_result.ret;
+ }
+@@ -456,6 +470,7 @@ int vfe_pcm_close(struct snd_pcm_substream *substream)
+ 	struct vfe_substream_info *sstream_info;
+ 	struct vfe_msg_header msg_header;
+ 	struct vfe_pcm_result vbe_result;
++	unsigned long irq_flags;
+ 	int ret;
+ 	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+ 
+@@ -463,12 +478,14 @@ int vfe_pcm_close(struct snd_pcm_substream *substream)
+ 	if (ret)
+ 		return 0;
+ 
++	spin_lock_irqsave(&vfe->substream_info_lock, irq_flags);
+ 	sstream_info = vfe_find_substream_info(vfe, substream);
+ 
+ 	if (sstream_info) {
+ 		list_del(&sstream_info->list);
+ 		kfree(sstream_info);
+ 	}
++	spin_unlock_irqrestore(&vfe->substream_info_lock, irq_flags);
+ 
+ 	msg_header = vfe_get_pcm_msg_header(VFE_MSG_PCM_CLOSE, substream);
+ 
+@@ -573,7 +590,7 @@ snd_pcm_uframes_t vfe_pcm_pointer(struct snd_pcm_substream *substream)
+ 	struct vfe_substream_info *substr_info =
+ 		vfe_find_substream_info(vfe, substream);
+ 
+-	return substr_info->hw_ptr;
++	return substr_info ? substr_info->hw_ptr : 0;
+ }
+ 
+ static const char *const vfe_skl_vq_names[SKL_VIRTIO_NUM_OF_VQS] = {
+@@ -866,6 +883,8 @@ static int vfe_init(struct virtio_device *vdev)
+ 	vdev->priv = vfe;
+ 
+ 	INIT_LIST_HEAD(&vfe->kcontrols_list);
++
++	spin_lock_init(&vfe->substream_info_lock);
+ 	INIT_LIST_HEAD(&vfe->substr_info_list);
+ 
+ 	/* find virt queue for vfe to send/receive IPC message. */
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index 4b8e09e..5656d0b 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -51,6 +51,8 @@ struct snd_skl_vfe {
+ 	struct virtqueue           *ipc_not_tx_vq;
+ 
+ 	struct list_head kcontrols_list;
++
++	spinlock_t substream_info_lock;
+ 	struct list_head substr_info_list;
+ 
+ 	int (*send_dsp_ipc_msg)(struct snd_skl_vfe *vfe,
+-- 
+2.7.4
+

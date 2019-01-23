@@ -1,0 +1,287 @@
+From 8fddce2c9b02f5f137c8405be3398f410fbcfad2 Mon Sep 17 00:00:00 2001
+From: "Qi, Yadong" <yadong.qi@intel.com>
+Date: Fri, 2 Feb 2018 13:12:40 +0800
+Subject: [PATCH 52/64] trusty: detect vmm when load trusty driver
+
+Use hypervisor_cpuid_base() to detect VMM which support Trusty.
+Currently, there are 2 hypervisors support trusty: CWP and EVMM.
+Use different hypercall to implement SMC for EVMM and CWP.
+
+Change-Id: I45a9c69862c785aba3d2911ca439b5e3d8cf0cf6
+Signed-off-by: Qi, Yadong <yadong.qi@intel.com>
+Tracked-On: OAM-56970
+---
+ drivers/trusty/trusty-ipc.c    |  4 ++--
+ drivers/trusty/trusty-irq.c    |  4 ++--
+ drivers/trusty/trusty-log.c    | 10 ++++----
+ drivers/trusty/trusty-timer.c  |  4 ++--
+ drivers/trusty/trusty-virtio.c |  4 ++--
+ drivers/trusty/trusty-wall.c   |  4 ++--
+ drivers/trusty/trusty.c        | 52 +++++++++++++++++++++++++++++++++---------
+ include/linux/trusty/trusty.h  | 33 +++++++++++++++------------
+ 8 files changed, 74 insertions(+), 41 deletions(-)
+
+diff --git a/drivers/trusty/trusty-ipc.c b/drivers/trusty/trusty-ipc.c
+index 93003b4..a2bc3fc 100644
+--- a/drivers/trusty/trusty-ipc.c
++++ b/drivers/trusty/trusty-ipc.c
+@@ -1525,9 +1525,9 @@ static int tipc_virtio_probe(struct virtio_device *vdev)
+ 	vq_callback_t *vq_cbs[] = {_rxvq_cb, _txvq_cb};
+ 	const char *vq_names[] = { "rx", "tx" };
+ 
+-	err = trusty_check_cpuid(NULL);
++	err = trusty_detect_vmm();
+ 	if (err < 0) {
+-		dev_err(&vdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&vdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 04df531..af2af6e 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -539,9 +539,9 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	unsigned long irq_flags;
+ 	struct trusty_irq_state *is;
+ 
+-	ret = trusty_check_cpuid(NULL);
++	ret = trusty_detect_vmm();
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+index b58715c..d2446a1 100755
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -259,13 +259,13 @@ static int trusty_log_probe(struct platform_device *pdev)
+ {
+ 	struct trusty_log_state *s;
+ 	int result;
+-	u32 vmm_signature;
++	int vmm_id;
+ 	phys_addr_t pa;
+ 	struct deadloop_dump *dump;
+ 
+-	result = trusty_check_cpuid(&vmm_signature);
+-	if (result < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++	vmm_id = trusty_detect_vmm();
++	if (vmm_id < 0) {
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -321,7 +321,7 @@ static int trusty_log_probe(struct platform_device *pdev)
+ 		goto error_panic_notifier;
+ 	}
+ 
+-	if(vmm_signature == EVMM_SIGNATURE_VMM) {
++	if(vmm_id == VMM_ID_EVMM) {
+ 		/* allocate debug buffer for vmm panic dump */
+ 		g_vmm_debug_buf = __get_free_pages(GFP_KERNEL | __GFP_ZERO, 2);
+ 		if (!g_vmm_debug_buf) {
+diff --git a/drivers/trusty/trusty-timer.c b/drivers/trusty/trusty-timer.c
+index 43e4326..5d4466d 100644
+--- a/drivers/trusty/trusty-timer.c
++++ b/drivers/trusty/trusty-timer.c
+@@ -100,9 +100,9 @@ static int trusty_timer_probe(struct platform_device *pdev)
+ 	struct trusty_timer_dev_state *s;
+ 	struct trusty_timer *tt;
+ 
+-	ret = trusty_check_cpuid(NULL);
++	ret = trusty_detect_vmm();
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index b2418d7..743a478 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -641,9 +641,9 @@ static int trusty_virtio_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct trusty_ctx *tctx;
+ 
+-	ret = trusty_check_cpuid(NULL);
++	ret = trusty_detect_vmm();
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/trusty/trusty-wall.c b/drivers/trusty/trusty-wall.c
+index 6436848..2345f56 100644
+--- a/drivers/trusty/trusty-wall.c
++++ b/drivers/trusty/trusty-wall.c
+@@ -147,9 +147,9 @@ static int trusty_wall_probe(struct platform_device *pdev)
+ 	int ret;
+ 	struct trusty_wall_dev_state *s;
+ 
+-	ret = trusty_check_cpuid(NULL);
++	ret = trusty_detect_vmm();
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index d4eeb40..98c8664 100755
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -26,7 +26,8 @@
+ #include <linux/trusty/sm_err.h>
+ #include <linux/trusty/trusty.h>
+ 
+-#define TRUSTY_VMCALL_SMC 0x74727500
++#define EVMM_SMC_HC_ID 0x74727500
++#define CWP_SMC_HC_ID  0x80000071
+ 
+ struct trusty_state;
+ 
+@@ -53,13 +54,28 @@ struct trusty_smc_interface {
+ 	ulong args[5];
+ };
+ 
+-static inline ulong smc(ulong r0, ulong r1, ulong r2, ulong r3)
++static ulong (*smc)(ulong, ulong, ulong, ulong);
++
++#define asm_smc_vmcall(smc_id, rdi, rsi, rdx, rbx) \
++do { \
++	__asm__ __volatile__( \
++	"vmcall; \n" \
++	: "=D"(rdi) \
++	: "r"(smc_id), "D"(rdi), "S"(rsi), "d"(rdx), "b"(rbx) \
++	); \
++} while (0)
++
++static inline ulong smc_evmm(ulong r0, ulong r1, ulong r2, ulong r3)
+ {
+-	__asm__ __volatile__(
+-	"vmcall; \n"
+-	: "=D"(r0)
+-	: "a"(TRUSTY_VMCALL_SMC), "D"(r0), "S"(r1), "d"(r2), "b"(r3)
+-	);
++	register unsigned long smc_id asm("rax") = EVMM_SMC_HC_ID;
++	asm_smc_vmcall(smc_id, r0, r1, r2, r3);
++	return r0;
++}
++
++static inline ulong smc_cwp(ulong r0, ulong r1, ulong r2, ulong r3)
++{
++	register unsigned long smc_id asm("r8") = CWP_SMC_HC_ID;
++	asm_smc_vmcall(smc_id, r0, r1, r2, r3);
+ 	return r0;
+ }
+ 
+@@ -443,6 +459,19 @@ static void nop_work_func(struct work_struct *work)
+ 	dev_dbg(s->dev, "%s: done\n", __func__);
+ }
+ 
++static void trusty_init_smc(int vmm_id)
++{
++	if (vmm_id == VMM_ID_EVMM) {
++		smc = smc_evmm;
++	} else if (vmm_id == VMM_ID_CWP) {
++		smc = smc_cwp;
++	} else {
++		pr_err("%s: No smc supports VMM[%d](sig:%s)!",
++				__func__, vmm_id, vmm_signature[vmm_id]);
++		BUG();
++	}
++}
++
+ void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop)
+ {
+ 	unsigned long flags;
+@@ -479,8 +508,6 @@ void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop)
+ }
+ EXPORT_SYMBOL(trusty_dequeue_nop);
+ 
+-
+-
+ static int trusty_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+@@ -489,11 +516,14 @@ static int trusty_probe(struct platform_device *pdev)
+ 	struct trusty_state *s;
+ 	struct device_node *node = pdev->dev.of_node;
+ 
+-	ret = trusty_check_cpuid(NULL);
++	ret = trusty_detect_vmm();
+ 	if (ret < 0) {
+-		dev_err(&pdev->dev, "CPUID Error: Cannot find eVmm in trusty driver initialization!");
++		dev_err(&pdev->dev, "Cannot detect VMM which supports trusty!");
+ 		return -EINVAL;
+ 	}
++	dev_dbg(&pdev->dev, "Detected VMM: sig=%s\n", vmm_signature[ret]);
++
++	trusty_init_smc(ret);
+ 
+ 	if (!node) {
+ 		dev_err(&pdev->dev, "of_node required\n");
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 3189c7e..48e1ea7 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -18,6 +18,7 @@
+ #include <linux/trusty/sm_err.h>
+ #include <linux/device.h>
+ #include <linux/pagemap.h>
++#include <asm/hypervisor.h>
+ 
+ 
+ #if IS_ENABLED(CONFIG_TRUSTY)
+@@ -90,25 +91,27 @@ void *trusty_wall_base(struct device *dev);
+ void *trusty_wall_per_cpu_item_ptr(struct device *dev, unsigned int cpu,
+ 				   u32 item_id, size_t exp_sz);
+ 
+-/* CPUID leaf 0x3 is used because eVMM will trap this leaf.*/
+-#define EVMM_SIGNATURE_CORP 0x43544E49  /* "INTC", edx */
+-#define EVMM_SIGNATURE_VMM  0x4D4D5645  /* "EVMM", ecx */
+-
+-static inline int trusty_check_cpuid(u32 *vmm_signature)
+-{
+-	u32 eax, ebx, ecx, edx;
++enum {
++	VMM_ID_EVMM = 0,
++	VMM_ID_CWP,
++	VMM_SUPPORTED_NUM
++};
+ 
+-	cpuid(3, &eax, &ebx, &ecx, &edx);
+-	if ((ecx != EVMM_SIGNATURE_VMM) ||
+-	    (edx != EVMM_SIGNATURE_CORP)) {
+-		return -EINVAL;
+-	}
++static const char *vmm_signature[] = {
++	[VMM_ID_EVMM] = "EVMMEVMMEVMM",
++	[VMM_ID_CWP]  = "CWPCWPCWP\0\0"
++};
+ 
+-	if(vmm_signature) {
+-		*vmm_signature = ecx;
++/* Detect VMM and return vmm_id */
++static inline int trusty_detect_vmm(void)
++{
++	int i;
++	for (i = 0; i < VMM_SUPPORTED_NUM; i++) {
++		if (hypervisor_cpuid_base(vmm_signature[i], 0))
++			return i;
+ 	}
+ 
+-	return 0;
++	return -EINVAL;
+ }
+ 
+ /* High 32 bits of unsigned 64-bit integer*/
+-- 
+2.7.4
+
