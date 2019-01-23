@@ -1,0 +1,146 @@
+From 13a0947b13d2388e3b37e90d83baf60e118a6125 Mon Sep 17 00:00:00 2001
+From: Michael Ryleev <gmar@google.com>
+Date: Mon, 12 Dec 2016 14:18:25 +0000
+Subject: [PATCH 26/64] trusty: move async works off system workqueue
+
+Trusty async works might be very CPU intensive, move
+all Trusty works to separate workqueues.
+
+Change-Id: I78a906bc0963beea9b20ad8d8599a31b34546376
+Signed-off-by: Michael Ryleev <gmar@google.com>
+Signed-off-by: weideng <wei.a.deng@intel.com>
+Reviewed-by: mark gross <mgross@linux.intel.com>
+---
+ drivers/trusty/trusty-irq.c    | 12 +++++++++++-
+ drivers/trusty/trusty-virtio.c | 29 +++++++++++++++++++++++++++--
+ 2 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index aeb0918..5a74d75 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -57,6 +57,7 @@ struct trusty_irq_state {
+ 	struct trusty_irq_irqset __percpu *percpu_irqs;
+ 	struct notifier_block trusty_call_notifier;
+ 	struct notifier_block cpu_notifier;
++	struct workqueue_struct *wq;
+ };
+ 
+ #define TRUSTY_VMCALL_PENDING_INTR 0x74727505
+@@ -239,7 +240,7 @@ irqreturn_t trusty_irq_handler(int irq, void *data)
+ 	}
+ 	spin_unlock(&is->normal_irqs_lock);
+ 
+-	schedule_work_on(raw_smp_processor_id(), &trusty_irq_work->work);
++	queue_work_on(raw_smp_processor_id(), is->wq, &trusty_irq_work->work);
+ 
+ 	dev_dbg(is->dev, "%s: irq %d done\n", __func__, irq);
+ 
+@@ -588,6 +589,12 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 		goto err_alloc_is;
+ 	}
+ 
++	is->wq = alloc_workqueue("trusty-irq-wq", WQ_CPU_INTENSIVE, 0);
++	if (!is->wq) {
++		ret = -ENOMEM;
++		goto err_alloc_wq;
++	}
++
+ 	is->dev = &pdev->dev;
+ 	is->trusty_dev = is->dev->parent;
+ 	is->irq_work = alloc_percpu(struct trusty_irq_work);
+@@ -668,6 +675,8 @@ static int trusty_irq_probe(struct platform_device *pdev)
+ 	}
+ 	free_percpu(is->irq_work);
+ err_alloc_irq_work:
++	destroy_workqueue(is->wq);
++err_alloc_wq:
+ 	kfree(is);
+ err_alloc_is:
+ 	return ret;
+@@ -704,6 +713,7 @@ static int trusty_irq_remove(struct platform_device *pdev)
+ 		flush_work(&trusty_irq_work->work);
+ 	}
+ 	free_percpu(is->irq_work);
++	destroy_workqueue(is->wq);
+ 	kfree(is);
+ 
+ 	return 0;
+diff --git a/drivers/trusty/trusty-virtio.c b/drivers/trusty/trusty-virtio.c
+index eb4c0d3..eaeb020 100644
+--- a/drivers/trusty/trusty-virtio.c
++++ b/drivers/trusty/trusty-virtio.c
+@@ -46,6 +46,8 @@ struct trusty_ctx {
+ 	struct notifier_block	call_notifier;
+ 	struct list_head	vdev_list;
+ 	struct mutex		mlock; /* protects vdev_list */
++	struct workqueue_struct	*kick_wq;
++	struct workqueue_struct	*check_wq;
+ };
+ 
+ struct trusty_vring {
+@@ -97,7 +99,7 @@ static int trusty_call_notify(struct notifier_block *nb,
+ 		return NOTIFY_DONE;
+ 
+ 	tctx = container_of(nb, struct trusty_ctx, call_notifier);
+-	schedule_work(&tctx->check_vqs);
++	queue_work(tctx->check_wq, &tctx->check_vqs);
+ 
+ 	return NOTIFY_OK;
+ }
+@@ -143,7 +145,7 @@ static bool trusty_virtio_notify(struct virtqueue *vq)
+ 	struct trusty_ctx *tctx = tvdev->tctx;
+ 
+ 	atomic_set(&tvr->needs_kick, 1);
+-	schedule_work(&tctx->kick_vqs);
++	queue_work(tctx->kick_wq, &tctx->kick_vqs);
+ 
+ 	return true;
+ }
+@@ -641,6 +643,21 @@ static int trusty_virtio_probe(struct platform_device *pdev)
+ 	INIT_WORK(&tctx->kick_vqs, kick_vqs);
+ 	platform_set_drvdata(pdev, tctx);
+ 
++	tctx->check_wq = alloc_workqueue("trusty-check-wq", WQ_UNBOUND, 0);
++	if (!tctx->check_wq) {
++		ret = -ENODEV;
++		dev_err(&pdev->dev, "Failed create trusty-check-wq\n");
++		goto err_create_check_wq;
++	}
++
++	tctx->kick_wq = alloc_workqueue("trusty-kick-wq",
++					WQ_UNBOUND | WQ_CPU_INTENSIVE, 0);
++	if (!tctx->kick_wq) {
++		ret = -ENODEV;
++		dev_err(&pdev->dev, "Failed create trusty-kick-wq\n");
++		goto err_create_kick_wq;
++	}
++
+ 	ret = trusty_virtio_add_devices(tctx);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "Failed to add virtio devices\n");
+@@ -651,6 +668,10 @@ static int trusty_virtio_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_add_devices:
++	destroy_workqueue(tctx->kick_wq);
++err_create_kick_wq:
++	destroy_workqueue(tctx->check_wq);
++err_create_check_wq:
+ 	kfree(tctx);
+ 	return ret;
+ }
+@@ -670,6 +691,10 @@ static int trusty_virtio_remove(struct platform_device *pdev)
+ 	trusty_virtio_remove_devices(tctx);
+ 	cancel_work_sync(&tctx->kick_vqs);
+ 
++	/* destroy workqueues */
++	destroy_workqueue(tctx->kick_wq);
++	destroy_workqueue(tctx->check_wq);
++
+ 	/* notify remote that shared area goes away */
+ 	trusty_virtio_stop(tctx, tctx->shared_va, tctx->shared_sz);
+ 
+-- 
+2.7.4
+

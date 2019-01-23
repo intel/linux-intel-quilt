@@ -1,0 +1,233 @@
+From 92031cfc73759e629ad0d076411c78d0aec2310c Mon Sep 17 00:00:00 2001
+From: Michael Ryleev <gmar@google.com>
+Date: Fri, 26 Jun 2015 13:47:02 -0700
+Subject: [PATCH 19/64] trusty-irq: Add support for secure interrupt mapping
+
+Trusty TEE is using flat IRQ space to identify its
+interrupts which does not match to IRQ domain model
+introduced on the Linux side. This CL adds support
+for optional "interrupt-templates" and "interrupt-ranges"
+properties that can be used to define correspondence
+between secure and non-secure IRQ IDs.
+
+Change-Id: Idb298760f2f21f0b8507eafa72600cca7ab8ac64
+Signed-off-by: Michael Ryleev <gmar@google.com>
+---
+ .../devicetree/bindings/trusty/trusty-irq.txt      |  59 ++++++++++++
+ drivers/trusty/trusty-irq.c                        | 106 ++++++++++++++++++++-
+ 2 files changed, 161 insertions(+), 4 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/trusty/trusty-irq.txt b/Documentation/devicetree/bindings/trusty/trusty-irq.txt
+index 85fe1f1..5aefeb8 100644
+--- a/Documentation/devicetree/bindings/trusty/trusty-irq.txt
++++ b/Documentation/devicetree/bindings/trusty/trusty-irq.txt
+@@ -5,4 +5,63 @@ Trusty requires non-secure irqs to be forwarded to the secure OS.
+ Required properties:
+ - compatible: "android,trusty-irq-v1"
+ 
++Optional properties:
++
++- interrupt-templates: is an optional property that works together
++  with "interrupt-ranges" to specify secure side to kernel IRQs mapping.
++
++  It is a list of entries, each one of which defines a group of interrupts
++  having common properties, and has the following format:
++    < phandle irq_id_pos [templ_data]>
++      phandle - phandle of interrupt controller this template is for
++      irq_id_pos - the position of irq id in interrupt specifier array
++                   for interrupt controller referenced by phandle.
++      templ_data - is an array of u32 values (could be empty) in the same
++                   format as interrupt specifier for interrupt controller
++                   referenced by phandle but with omitted irq id field.
++
++- interrupt-ranges: list of entries that specifies secure side to kernel
++  IRQs mapping.
++
++  Each entry in the "interrupt-ranges" list has the following format:
++    <beg end templ_idx>
++      beg - first entry in this range
++      end - last entry in this range
++      templ_idx  - index of entry in "interrupt-templates" property
++                   that must be used as a template for all interrupts
++                   in this range
++
++Example:
++{
++	gic: interrupt-controller@50041000 {
++		compatible = "arm,gic-400";
++		#interrupt-cells = <3>;
++		interrupt-controller;
++		...
++	};
++	...
++	IPI: interrupt-controller {
++		compatible = "android,CustomIPI";
++		#interrupt-cells = <1>;
++		interrupt-controller;
++	};
++	...
++	trusty {
++		compatible = "android,trusty-smc-v1";
++		ranges;
++		#address-cells = <2>;
++		#size-cells = <2>;
++
++		irq {
++			compatible = "android,trusty-irq-v1";
++			interrupt-templates = <&IPI 0>,
++					      <&gic 1 GIC_PPI 0>,
++					      <&gic 1 GIC_SPI 0>;
++			interrupt-ranges = < 0  15 0>,
++					   <16  31 1>,
++					   <32 223 2>;
++		};
++	}
++}
++
+ Must be a child of the node that provides the trusty std/fast call interface.
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 1f14f7f..8d6e8af 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -15,8 +15,10 @@
+ #include <linux/cpu.h>
+ #include <linux/interrupt.h>
+ #include <linux/irq.h>
++#include <linux/irqdomain.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_irq.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/string.h>
+@@ -266,13 +268,101 @@ static int trusty_irq_cpu_notify(struct notifier_block *nb,
+ 	return NOTIFY_OK;
+ }
+ 
+-static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int irq)
++static int trusty_irq_create_irq_mapping(struct trusty_irq_state *is, int irq)
+ {
+ 	int ret;
++	int index;
++	u32 irq_pos;
++	u32 templ_idx;
++	u32 range_base;
++	u32 range_end;
++	struct of_phandle_args oirq;
++
++	/* check if "interrupt-ranges" property is present */
++	if (!of_find_property(is->dev->of_node, "interrupt-ranges", NULL)) {
++		/* fallback to old behavior to be backward compatible with
++		 * systems that do not need IRQ domains.
++		 */
++		return irq;
++	}
++
++	/* find irq range */
++	for (index = 0;; index += 3) {
++		ret = of_property_read_u32_index(is->dev->of_node,
++						 "interrupt-ranges",
++						 index, &range_base);
++		if (ret)
++			return ret;
++
++		ret = of_property_read_u32_index(is->dev->of_node,
++						 "interrupt-ranges",
++						 index + 1, &range_end);
++		if (ret)
++			return ret;
++
++		if (irq >= range_base && irq <= range_end)
++			break;
++	}
++
++	/*  read the rest of range entry: template index and irq_pos */
++	ret = of_property_read_u32_index(is->dev->of_node,
++					 "interrupt-ranges",
++					 index + 2, &templ_idx);
++	if (ret)
++		return ret;
++
++	/* read irq template */
++	ret = of_parse_phandle_with_args(is->dev->of_node,
++					 "interrupt-templates",
++					 "#interrupt-cells",
++					 templ_idx, &oirq);
++	if (ret)
++		return ret;
++
++	WARN_ON(!oirq.np);
++	WARN_ON(!oirq.args_count);
++
++	/*
++	 * An IRQ template is a non empty array of u32 values describing group
++	 * of interrupts having common properties. The u32 entry with index
++	 * zero contains the position of irq_id in interrupt specifier array
++	 * followed by data representing interrupt specifier array with irq id
++	 * field omitted, so to convert irq template to interrupt specifier
++	 * array we have to move down one slot the first irq_pos entries and
++	 * replace the resulting gap with real irq id.
++	 */
++	irq_pos = oirq.args[0];
++
++	if (irq_pos >= oirq.args_count) {
++		dev_err(is->dev, "irq pos is out of range: %d\n", irq_pos);
++		return -EINVAL;
++	}
++
++	for (index = 1; index <= irq_pos; index++)
++		oirq.args[index - 1] = oirq.args[index];
++
++	oirq.args[irq_pos] = irq - range_base;
++
++	ret = irq_create_of_mapping(&oirq);
++
++	return (!ret) ? -EINVAL : ret;
++}
++
++static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int tirq)
++{
++	int ret;
++	int irq;
+ 	unsigned long irq_flags;
+ 	struct trusty_irq *trusty_irq;
+ 
+-	dev_dbg(is->dev, "%s: irq %d\n", __func__, irq);
++	dev_dbg(is->dev, "%s: irq %d\n", __func__, tirq);
++
++	irq = trusty_irq_create_irq_mapping(is, tirq);
++	if (irq < 0) {
++		dev_err(is->dev,
++			"trusty_irq_create_irq_mapping failed (%d)\n", irq);
++		return irq;
++	}
+ 
+ 	trusty_irq = kzalloc(sizeof(*trusty_irq), GFP_KERNEL);
+ 	if (!trusty_irq)
+@@ -302,13 +392,21 @@ static int trusty_irq_init_normal_irq(struct trusty_irq_state *is, int irq)
+ 	return ret;
+ }
+ 
+-static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int irq)
++static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int tirq)
+ {
+ 	int ret;
++	int irq;
+ 	unsigned int cpu;
+ 	struct trusty_irq __percpu *trusty_irq_handler_data;
+ 
+-	dev_dbg(is->dev, "%s: irq %d\n", __func__, irq);
++	dev_dbg(is->dev, "%s: irq %d\n", __func__, tirq);
++
++	irq = trusty_irq_create_irq_mapping(is, tirq);
++	if (irq <= 0) {
++		dev_err(is->dev,
++			"trusty_irq_create_irq_mapping failed (%d)\n", irq);
++		return irq;
++	}
+ 
+ 	trusty_irq_handler_data = alloc_percpu(struct trusty_irq);
+ 	if (!trusty_irq_handler_data)
+-- 
+2.7.4
+

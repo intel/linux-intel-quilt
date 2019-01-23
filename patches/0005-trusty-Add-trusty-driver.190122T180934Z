@@ -1,0 +1,559 @@
+From 34a874bb246ca9dbc3bb0e1c2a06d2f117d9f8a6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Mon, 18 Nov 2013 20:46:48 -0800
+Subject: [PATCH 05/64] trusty: Add trusty driver
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+includes: Add arm64 support
+
+includes: Add trusty_fast_call64 api on 64 bit systems.
+
+includes: move probe to subsys_initcall
+
+Child devices of trusty like FIQ-based debuggers and watchdogs may
+want to probe early, move trusty from module init to subsys init
+to allow it and its children to probe earlier.
+
+includes: Retry std_calls on SM_ERR_BUSY
+
+If the trusty spinlock is held, or if the strex fails for another
+reason, trusty returns SM_ERR_BUSY. Add retry code to handle this.
+
+Without this retry code, std_calls can fail. If the previous smc
+call had returned SM_ERR_INTERRUPTED, this failure would cause
+the driver to get out of sync with trusty. All later calls would
+then fail with SM_ERR_INTERLEAVED_SMC.
+
+Change-Id: Idc0bbe78b557bc5d95dbec448e4085e3ab9111b4
+Signed-off-by: Arve Hjønnevåg <arve@android.com>
+---
+ .../devicetree/bindings/trusty/trusty-smc.txt      |   6 +
+ drivers/Kconfig                                    |   2 +
+ drivers/Makefile                                   |   1 +
+ drivers/trusty/Kconfig                             |  11 +
+ drivers/trusty/Makefile                            |   5 +
+ drivers/trusty/trusty.c                            | 258 +++++++++++++++++++++
+ include/linux/trusty/sm_err.h                      |  39 ++++
+ include/linux/trusty/smcall.h                      |  75 ++++++
+ include/linux/trusty/trusty.h                      |  46 ++++
+ 9 files changed, 443 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/trusty/trusty-smc.txt
+ create mode 100644 drivers/trusty/Kconfig
+ create mode 100644 drivers/trusty/Makefile
+ create mode 100644 drivers/trusty/trusty.c
+ create mode 100644 include/linux/trusty/sm_err.h
+ create mode 100644 include/linux/trusty/smcall.h
+ create mode 100644 include/linux/trusty/trusty.h
+
+diff --git a/Documentation/devicetree/bindings/trusty/trusty-smc.txt b/Documentation/devicetree/bindings/trusty/trusty-smc.txt
+new file mode 100644
+index 0000000..1b39ad3
+--- /dev/null
++++ b/Documentation/devicetree/bindings/trusty/trusty-smc.txt
+@@ -0,0 +1,6 @@
++Trusty smc interface
++
++Trusty is running in secure mode on the same (arm) cpu(s) as the current os.
++
++Required properties:
++- compatible: "android,trusty-smc-v1"
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index c94b20a..a3070e9 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -79,6 +79,8 @@ source "drivers/hwmon/Kconfig"
+ 
+ source "drivers/thermal/Kconfig"
+ 
++source "drivers/trusty/Kconfig"
++
+ source "drivers/watchdog/Kconfig"
+ 
+ source "drivers/ssb/Kconfig"
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 78ef69c..6c5071a 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -120,6 +120,7 @@ obj-$(CONFIG_W1)		+= w1/
+ obj-y				+= power/
+ obj-$(CONFIG_HWMON)		+= hwmon/
+ obj-$(CONFIG_THERMAL)		+= thermal/
++obj-$(CONFIG_TRUSTY)		+= trusty/
+ obj-$(CONFIG_WATCHDOG)		+= watchdog/
+ obj-$(CONFIG_MD)		+= md/
+ obj-$(CONFIG_BT)		+= bluetooth/
+diff --git a/drivers/trusty/Kconfig b/drivers/trusty/Kconfig
+new file mode 100644
+index 0000000..f577ae8
+--- /dev/null
++++ b/drivers/trusty/Kconfig
+@@ -0,0 +1,11 @@
++#
++# Trusty
++#
++
++menu "Trusty"
++
++config TRUSTY
++	tristate "Trusty"
++	default n
++
++endmenu
+diff --git a/drivers/trusty/Makefile b/drivers/trusty/Makefile
+new file mode 100644
+index 0000000..1d77805
+--- /dev/null
++++ b/drivers/trusty/Makefile
+@@ -0,0 +1,5 @@
++#
++# Makefile for trusty components
++#
++
++obj-$(CONFIG_TRUSTY)		+= trusty.o
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+new file mode 100644
+index 0000000..59ecf60
+--- /dev/null
++++ b/drivers/trusty/trusty.c
+@@ -0,0 +1,258 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <asm/compiler.h>
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/sm_err.h>
++#include <linux/trusty/trusty.h>
++
++struct trusty_state {
++	struct mutex smc_lock;
++};
++
++#ifdef CONFIG_ARM64
++#define SMC_ARG0		"x0"
++#define SMC_ARG1		"x1"
++#define SMC_ARG2		"x2"
++#define SMC_ARG3		"x3"
++#define SMC_ARCH_EXTENSION	""
++#define SMC_REGISTERS_TRASHED	"x4","x5","x6","x7","x8","x9","x10","x11", \
++				"x12","x13","x14","x15","x16","x17"
++#else
++#define SMC_ARG0		"r0"
++#define SMC_ARG1		"r1"
++#define SMC_ARG2		"r2"
++#define SMC_ARG3		"r3"
++#define SMC_ARCH_EXTENSION	".arch_extension sec\n"
++#define SMC_REGISTERS_TRASHED	"ip"
++#endif
++
++static inline ulong smc(ulong r0, ulong r1, ulong r2, ulong r3)
++{
++	register ulong _r0 asm(SMC_ARG0) = r0;
++	register ulong _r1 asm(SMC_ARG1) = r1;
++	register ulong _r2 asm(SMC_ARG2) = r2;
++	register ulong _r3 asm(SMC_ARG3) = r3;
++
++	asm volatile(
++		__asmeq("%0", SMC_ARG0)
++		__asmeq("%1", SMC_ARG1)
++		__asmeq("%2", SMC_ARG2)
++		__asmeq("%3", SMC_ARG3)
++		__asmeq("%4", SMC_ARG0)
++		__asmeq("%5", SMC_ARG1)
++		__asmeq("%6", SMC_ARG2)
++		__asmeq("%7", SMC_ARG3)
++		SMC_ARCH_EXTENSION
++		"smc	#0"	/* switch to secure world */
++		: "=r" (_r0), "=r" (_r1), "=r" (_r2), "=r" (_r3)
++		: "r" (_r0), "r" (_r1), "r" (_r2), "r" (_r3)
++		: SMC_REGISTERS_TRASHED);
++	return _r0;
++}
++
++s32 trusty_fast_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
++{
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	BUG_ON(!s);
++	BUG_ON(!SMC_IS_FASTCALL(smcnr));
++	BUG_ON(SMC_IS_SMC64(smcnr));
++
++	return smc(smcnr, a0, a1, a2);
++}
++EXPORT_SYMBOL(trusty_fast_call32);
++
++#ifdef CONFIG_64BIT
++s64 trusty_fast_call64(struct device *dev, u64 smcnr, u64 a0, u64 a1, u64 a2)
++{
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	BUG_ON(!s);
++	BUG_ON(!SMC_IS_FASTCALL(smcnr));
++	BUG_ON(!SMC_IS_SMC64(smcnr));
++
++	return smc(smcnr, a0, a1, a2);
++}
++#endif
++
++static ulong trusty_std_call_inner(struct device *dev, ulong smcnr,
++				   ulong a0, ulong a1, ulong a2)
++{
++	ulong ret;
++	int retry = 5;
++
++	dev_dbg(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx)\n",
++		__func__, smcnr, a0, a1, a2);
++	while (true) {
++		ret = smc(smcnr, a0, a1, a2);
++		if ((int)ret != SM_ERR_BUSY || !retry)
++			break;
++
++		dev_dbg(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx) returned busy, retry\n",
++			__func__, smcnr, a0, a1, a2);
++		retry--;
++	}
++
++	return ret;
++}
++
++static ulong trusty_std_call_helper(struct device *dev, ulong smcnr,
++				    ulong a0, ulong a1, ulong a2)
++{
++	ulong ret;
++	int sleep_time = 1;
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	while (true) {
++		ret = trusty_std_call_inner(dev, smcnr, a0, a1, a2);
++		if ((int)ret != SM_ERR_BUSY)
++			break;
++
++		if (sleep_time == 256)
++			dev_warn(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx) returned busy\n",
++				 __func__, smcnr, a0, a1, a2);
++		dev_dbg(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx) returned busy, wait %d ms\n",
++			__func__, smcnr, a0, a1, a2, sleep_time);
++
++		msleep(sleep_time);
++		if (sleep_time < 1000)
++			sleep_time <<= 1;
++
++		dev_dbg(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx) retry\n",
++			__func__, smcnr, a0, a1, a2);
++	}
++
++	if (sleep_time > 256)
++		dev_warn(dev, "%s(0x%lx 0x%lx 0x%lx 0x%lx) busy cleared\n",
++			 __func__, smcnr, a0, a1, a2);
++
++	return ret;
++}
++
++s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2)
++{
++	int ret;
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	BUG_ON(SMC_IS_FASTCALL(smcnr));
++	BUG_ON(SMC_IS_SMC64(smcnr));
++
++	mutex_lock(&s->smc_lock);
++
++	dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) started\n",
++		__func__, smcnr, a0, a1, a2);
++
++	ret = trusty_std_call_helper(dev, smcnr, a0, a1, a2);
++	while (ret == SM_ERR_INTERRUPTED) {
++		dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) interrupted\n",
++			__func__, smcnr, a0, a1, a2);
++		ret = trusty_std_call_helper(dev, SMC_SC_RESTART_LAST, 0, 0, 0);
++	}
++	dev_dbg(dev, "%s(0x%x 0x%x 0x%x 0x%x) returned 0x%x\n",
++		__func__, smcnr, a0, a1, a2, ret);
++
++	WARN_ONCE(ret == SM_ERR_PANIC, "trusty crashed");
++
++	mutex_unlock(&s->smc_lock);
++
++	return ret;
++}
++EXPORT_SYMBOL(trusty_std_call32);
++
++static int trusty_remove_child(struct device *dev, void *data)
++{
++	platform_device_unregister(to_platform_device(dev));
++	return 0;
++}
++
++static int trusty_probe(struct platform_device *pdev)
++{
++	int ret;
++	struct trusty_state *s;
++	struct device_node *node = pdev->dev.of_node;
++
++	if (!node) {
++		dev_err(&pdev->dev, "of_node required\n");
++		return -EINVAL;
++	}
++
++	s = kzalloc(sizeof(*s), GFP_KERNEL);
++	if (!s) {
++		ret = -ENOMEM;
++		goto err_allocate_state;
++	}
++	mutex_init(&s->smc_lock);
++	platform_set_drvdata(pdev, s);
++
++	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
++	if (ret < 0) {
++		dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
++		goto err_add_children;
++	}
++
++	return 0;
++
++err_add_children:
++	device_for_each_child(&pdev->dev, NULL, trusty_remove_child);
++	mutex_destroy(&s->smc_lock);
++	kfree(s);
++err_allocate_state:
++	return ret;
++}
++
++static int trusty_remove(struct platform_device *pdev)
++{
++	struct trusty_state *s = platform_get_drvdata(pdev);
++
++	device_for_each_child(&pdev->dev, NULL, trusty_remove_child);
++	mutex_destroy(&s->smc_lock);
++	kfree(s);
++	return 0;
++}
++
++static const struct of_device_id trusty_of_match[] = {
++	{ .compatible = "android,trusty-smc-v1", },
++	{},
++};
++
++static struct platform_driver trusty_driver = {
++	.probe = trusty_probe,
++	.remove = trusty_remove,
++	.driver	= {
++		.name = "trusty",
++		.owner = THIS_MODULE,
++		.of_match_table = trusty_of_match,
++	},
++};
++
++static int __init trusty_driver_init(void)
++{
++	return platform_driver_register(&trusty_driver);
++}
++
++static void __exit trusty_driver_exit(void)
++{
++	platform_driver_unregister(&trusty_driver);
++}
++
++subsys_initcall(trusty_driver_init);
++module_exit(trusty_driver_exit);
+diff --git a/include/linux/trusty/sm_err.h b/include/linux/trusty/sm_err.h
+new file mode 100644
+index 0000000..4ee6758
+--- /dev/null
++++ b/include/linux/trusty/sm_err.h
+@@ -0,0 +1,39 @@
++/*
++ * Copyright (c) 2013 Google Inc. All rights reserved
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#ifndef __LINUX_TRUSTY_SM_ERR_H
++#define __LINUX_TRUSTY_SM_ERR_H
++
++/* Errors from the secure monitor */
++#define SM_ERR_UNDEFINED_SMC		0xFFFFFFFF /* Unknown SMC (defined by ARM DEN 0028A(0.9.0) */
++#define SM_ERR_INVALID_PARAMETERS	-2
++#define SM_ERR_INTERRUPTED		-3	/* Got interrupted. Call back with restart SMC */
++#define SM_ERR_UNEXPECTED_RESTART	-4	/* Got an restart SMC when we didn't expect it */
++#define SM_ERR_BUSY			-5	/* Temporarily busy. Call back with original args */
++#define SM_ERR_INTERLEAVED_SMC		-6	/* Got a trusted_service SMC when a restart SMC is required */
++#define SM_ERR_INTERNAL_FAILURE		-7	/* Unknown error */
++#define SM_ERR_NOT_SUPPORTED		-8
++#define SM_ERR_NOT_ALLOWED		-9	/* SMC call not allowed */
++#define SM_ERR_END_OF_INPUT		-10
++#define SM_ERR_PANIC			-11	/* Secure OS crashed */
++
++#endif
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+new file mode 100644
+index 0000000..278a4b2
+--- /dev/null
++++ b/include/linux/trusty/smcall.h
+@@ -0,0 +1,75 @@
++/*
++ * Copyright (c) 2013-2014 Google Inc. All rights reserved
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#ifndef __LINUX_TRUSTY_SMCALL_H
++#define __LINUX_TRUSTY_SMCALL_H
++
++#define SMC_NUM_ENTITIES	64
++#define SMC_NUM_ARGS		4
++#define SMC_NUM_PARAMS		(SMC_NUM_ARGS - 1)
++
++#define SMC_IS_FASTCALL(smc_nr)	((smc_nr) & 0x80000000)
++#define SMC_IS_SMC64(smc_nr)	((smc_nr) & 0x40000000)
++#define SMC_ENTITY(smc_nr)	(((smc_nr) & 0x3F000000) >> 24)
++#define SMC_FUNCTION(smc_nr)	((smc_nr) & 0x0000FFFF)
++
++#define SMC_NR(entity, fn, fastcall, smc64) ((((fastcall) & 0x1) << 31) | \
++					     (((smc64) & 0x1) << 30) | \
++					     (((entity) & 0x3F) << 24) | \
++					     ((fn) & 0xFFFF) \
++					    )
++
++#define SMC_FASTCALL_NR(entity, fn)	SMC_NR((entity), (fn), 1, 0)
++#define SMC_STDCALL_NR(entity, fn)	SMC_NR((entity), (fn), 0, 0)
++#define SMC_FASTCALL64_NR(entity, fn)	SMC_NR((entity), (fn), 1, 1)
++#define SMC_STDCALL64_NR(entity, fn)	SMC_NR((entity), (fn), 0, 1)
++
++#define	SMC_ENTITY_ARCH			0	/* ARM Architecture calls */
++#define	SMC_ENTITY_CPU			1	/* CPU Service calls */
++#define	SMC_ENTITY_SIP			2	/* SIP Service calls */
++#define	SMC_ENTITY_OEM			3	/* OEM Service calls */
++#define	SMC_ENTITY_STD			4	/* Standard Service calls */
++#define	SMC_ENTITY_RESERVED		5	/* Reserved for future use */
++#define	SMC_ENTITY_TRUSTED_APP		48	/* Trusted Application calls */
++#define	SMC_ENTITY_TRUSTED_OS		50	/* Trusted OS calls */
++#define	SMC_ENTITY_SECURE_MONITOR	60	/* Trusted OS calls internal to secure monitor */
++
++/* FC = Fast call, SC = Standard call */
++#define SMC_SC_RESTART_LAST	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 0)
++#define SMC_SC_NOP		SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 1)
++
++/*
++ * Return from secure os to non-secure os with return value in r1
++ */
++#define SMC_SC_NS_RETURN	SMC_STDCALL_NR  (SMC_ENTITY_SECURE_MONITOR, 0)
++
++#define SMC_FC_RESERVED		SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 0)
++#define SMC_FC_FIQ_EXIT		SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 1)
++#define SMC_FC_REQUEST_FIQ	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 2)
++#define SMC_FC_GET_NEXT_IRQ	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 3)
++
++#define SMC_FC_CPU_SUSPEND	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 7)
++#define SMC_FC_CPU_RESUME	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 8)
++
++#define SMC_FC_AARCH_SWITCH	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 9)
++
++#endif /* __LINUX_TRUSTY_SMCALL_H */
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+new file mode 100644
+index 0000000..30d4300
+--- /dev/null
++++ b/include/linux/trusty/trusty.h
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++#ifndef __LINUX_TRUSTY_TRUSTY_H
++#define __LINUX_TRUSTY_TRUSTY_H
++
++#include <linux/kernel.h>
++#include <linux/trusty/sm_err.h>
++
++#ifdef CONFIG_TRUSTY
++s32 trusty_std_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2);
++s32 trusty_fast_call32(struct device *dev, u32 smcnr, u32 a0, u32 a1, u32 a2);
++#ifdef CONFIG_64BIT
++s64 trusty_fast_call64(struct device *dev, u64 smcnr, u64 a0, u64 a1, u64 a2);
++#endif
++#else
++static inline s32 trusty_std_call32(struct device *dev, u32 smcnr,
++				    u32 a0, u32 a1, u32 a2)
++{
++	return SM_ERR_UNDEFINED_SMC;
++}
++static inline s32 trusty_fast_call32(struct device *dev, u32 smcnr,
++				     u32 a0, u32 a1, u32 a2)
++{
++	return SM_ERR_UNDEFINED_SMC;
++}
++#ifdef CONFIG_64BIT
++static inline s64 trusty_fast_call64(struct device *dev,
++				     u64 smcnr, u64 a0, u64 a1, u64 a2)
++{
++	return SM_ERR_UNDEFINED_SMC;
++}
++#endif
++#endif
++
++#endif
+-- 
+2.7.4
+

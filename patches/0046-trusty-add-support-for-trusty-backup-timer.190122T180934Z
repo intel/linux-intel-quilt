@@ -1,0 +1,301 @@
+From b47ae1bededf3cd5bee34a1f48124a116f0e5bbb Mon Sep 17 00:00:00 2001
+From: "Zhong,Fangjian" <fangjian.zhong@intel.com>
+Date: Tue, 11 Jul 2017 05:09:10 +0000
+Subject: [PATCH 46/64] trusty: add support for trusty backup timer
+
+On some platforms, in certain cpu idle modes, Trusty might
+lose the state of secure timer that it is using for work
+scheduling. In such cases, non-secure side would typically
+migrate such timers to alternative implementations that
+does not lose their state.Ideally, secure side should
+have similar mechanizm, but it might not be always
+feasible due to hardware limitations.
+
+This patch introduces a generic workaround for this
+issue but adding backup non-secure timers that is used
+to kick cpus out of deep idle modes when appropriate.
+
+Change-Id: I7ce18d45db67cc650f7875395451da7a2ed1ab2d
+Signed-off-by: Zhong,Fangjian <fangjian.zhong@intel.com>
+Author: Michael Ryleev <gmar@google.com>
+Author: Zhong,Fangjian <fangjian.zhong@intel.com>
+---
+ drivers/trusty/Kconfig        |  13 ++++
+ drivers/trusty/Makefile       |   1 +
+ drivers/trusty/trusty-timer.c | 166 ++++++++++++++++++++++++++++++++++++++++++
+ drivers/trusty/trusty.c       |  19 ++++-
+ include/linux/trusty/smwall.h |  14 ++++
+ 5 files changed, 212 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/trusty/trusty-timer.c
+
+diff --git a/drivers/trusty/Kconfig b/drivers/trusty/Kconfig
+index 0b6b88e..7b58db5 100644
+--- a/drivers/trusty/Kconfig
++++ b/drivers/trusty/Kconfig
+@@ -49,4 +49,17 @@ config TRUSTY_VIRTIO_IPC
+ 	  If you choose to build a module, it'll be called trusty-ipc.
+ 	  Say N if unsure.
+ 
++config TRUSTY_BACKUP_TIMER
++	tristate "Trusty backup timer"
++	depends on TRUSTY
++	default y
++	help
++	  This module adds support for Trusty backup timer. Trusty backup
++	  timer might be required on platforms that might loose state of
++	  secure timer in deep idle state.
++
++	  If you choose to build a module, it'll be called trusty-timer.
++	  Say N if unsure.
++
++
+ endmenu
+diff --git a/drivers/trusty/Makefile b/drivers/trusty/Makefile
+index c1afb14..69a7868 100644
+--- a/drivers/trusty/Makefile
++++ b/drivers/trusty/Makefile
+@@ -12,3 +12,4 @@ obj-$(CONFIG_TRUSTY)		+= trusty-mem.o
+ obj-$(CONFIG_TRUSTY_VIRTIO)	+= trusty-virtio.o
+ obj-$(CONFIG_TRUSTY_VIRTIO_IPC)	+= trusty-ipc.o
+ obj-$(CONFIG_TRUSTY)		+= trusty-wall.o
++obj-$(CONFIG_TRUSTY_BACKUP_TIMER) += trusty-timer.o
+diff --git a/drivers/trusty/trusty-timer.c b/drivers/trusty/trusty-timer.c
+new file mode 100644
+index 0000000..0998e02
+--- /dev/null
++++ b/drivers/trusty/trusty-timer.c
+@@ -0,0 +1,166 @@
++/*
++ * Copyright (C) 2017 Intel, Inc.
++ * Copyright (C) 2016 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++#include <linux/hrtimer.h>
++#include <linux/module.h>
++#include <linux/notifier.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/smwall.h>
++#include <linux/trusty/trusty.h>
++
++struct trusty_timer {
++	struct sec_timer_state *sts;
++	struct hrtimer tm;
++};
++
++struct trusty_timer_dev_state {
++	struct device *dev;
++	struct device *smwall_dev;
++	struct device *trusty_dev;
++	struct notifier_block call_notifier;
++	struct trusty_timer timer;
++};
++
++static enum hrtimer_restart trusty_timer_cb(struct hrtimer *tm)
++{
++	struct trusty_timer_dev_state *s;
++
++	s = container_of(tm, struct trusty_timer_dev_state, timer.tm);
++
++	set_pending_intr_to_lk(0x31);
++	trusty_enqueue_nop(s->trusty_dev, NULL);
++
++	return HRTIMER_NORESTART;
++}
++
++static int trusty_timer_call_notify(struct notifier_block *nb,
++		unsigned long action, void *data)
++{
++	struct trusty_timer *tt;
++	struct sec_timer_state *sts;
++	struct trusty_timer_dev_state *s;
++
++	if (action != TRUSTY_CALL_RETURNED)
++		return NOTIFY_DONE;
++
++	s = container_of(nb, struct trusty_timer_dev_state, call_notifier);
++
++	/* this notifier is executed in non-preemptible context */
++	tt = &s->timer;
++	sts = tt->sts;
++
++	if (sts->tv_ns > sts->cv_ns) {
++		hrtimer_cancel(&tt->tm);
++	} else if (sts->cv_ns > sts->tv_ns) {
++		/* need to set/reset timer */
++		hrtimer_start(&tt->tm, ns_to_ktime(sts->cv_ns - sts->tv_ns),
++				HRTIMER_MODE_REL_PINNED);
++	}
++
++	sts->cv_ns = 0ULL;
++	sts->tv_ns = 0ULL;
++
++	return NOTIFY_OK;
++}
++
++static int trusty_timer_probe(struct platform_device *pdev)
++{
++	int ret;
++	unsigned int cpu;
++	struct trusty_timer_dev_state *s;
++	struct trusty_timer *tt;
++
++	dev_dbg(&pdev->dev, "%s\n", __func__);
++
++	if (!trusty_wall_base(pdev->dev.parent)) {
++		dev_notice(&pdev->dev, "smwall: is not setup by parent\n");
++		return -ENODEV;
++	}
++
++	s = kzalloc(sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++
++	s->dev = &pdev->dev;
++	s->smwall_dev = s->dev->parent;
++	s->trusty_dev = s->smwall_dev->parent;
++	platform_set_drvdata(pdev, s);
++
++	tt = &s->timer;
++
++	hrtimer_init(&tt->tm, CLOCK_BOOTTIME, HRTIMER_MODE_REL_PINNED);
++	tt->tm.function = trusty_timer_cb;
++	tt->sts =
++		trusty_wall_per_cpu_item_ptr(s->smwall_dev, 0,
++				SM_WALL_PER_CPU_SEC_TIMER_ID,
++				sizeof(*tt->sts));
++	WARN_ON(!tt->sts);
++
++
++	/* register notifier */
++	s->call_notifier.notifier_call = trusty_timer_call_notify;
++	ret = trusty_call_notifier_register(s->trusty_dev, &s->call_notifier);
++	if (ret < 0) {
++		dev_err(&pdev->dev, "Failed to register call notifier\n");
++		kfree(s);
++		return ret;
++	}
++
++	dev_info(s->dev, "initialized\n");
++
++	return 0;
++
++}
++
++static int trusty_timer_remove(struct platform_device *pdev)
++{
++	unsigned int cpu;
++	struct trusty_timer_dev_state *s = platform_get_drvdata(pdev);
++	struct trusty_timer *tt;
++
++
++	dev_dbg(&pdev->dev, "%s\n", __func__);
++
++	/* unregister notifier */
++	trusty_call_notifier_unregister(s->trusty_dev, &s->call_notifier);
++
++	tt = &s->timer;
++	hrtimer_cancel(&tt->tm);
++
++	/* free state */
++	kfree(s);
++	return 0;
++}
++
++static const struct of_device_id trusty_test_of_match[] = {
++	{ .compatible = "android,trusty-timer-v1", },
++	{},
++};
++
++static struct platform_driver trusty_timer_driver = {
++	.probe = trusty_timer_probe,
++	.remove = trusty_timer_remove,
++	.driver = {
++		.name = "trusty-timer",
++		.owner = THIS_MODULE,
++		.of_match_table = trusty_test_of_match,
++	},
++};
++
++module_platform_driver(trusty_timer_driver);
++
++MODULE_LICENSE("GPL v2");
++MODULE_DESCRIPTION("Trusty timer driver");
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 0b3e758..1568849 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -617,6 +617,11 @@ void trusty_dev_release(struct device *dev)
+ 	return;
+ }
+ 
++static struct device_node trusty_timer_node = {
++	.name = "trusty-timer",
++	.sibling = NULL,
++};
++
+ static struct device_node trusty_wall_node = {
+ 	.name = "trusty-wall",
+ 	.sibling = NULL,
+@@ -696,12 +701,24 @@ static struct platform_device trusty_platform_dev_wall = {
+ 	},
+ };
+ 
++static struct platform_device trusty_platform_dev_timer = {
++	.name = "trusty-timer",
++	.id   = -1,
++	.num_resources = 0,
++	.dev = {
++		.release = trusty_dev_release,
++		.parent = &trusty_platform_dev_wall.dev,
++		.of_node = &trusty_timer_node,
++	},
++};
++
+ static struct platform_device *trusty_devices[] __initdata = {
+ 	&trusty_platform_dev,
+ 	&trusty_platform_dev_log,
+ 	&trusty_platform_dev_virtio,
+ 	&trusty_platform_dev_irq,
+-	&trusty_platform_dev_wall
++	&trusty_platform_dev_wall,
++	&trusty_platform_dev_timer
+ };
+ static int __init trusty_driver_init(void)
+ {
+diff --git a/include/linux/trusty/smwall.h b/include/linux/trusty/smwall.h
+index 370d8b3..66368de 100644
+--- a/include/linux/trusty/smwall.h
++++ b/include/linux/trusty/smwall.h
+@@ -87,4 +87,18 @@ struct trusty_wall_dev_state {
+ 	size_t sz;
+ };
+ 
++/* ID's of well known wall objects */
++#define SM_WALL_PER_CPU_SEC_TIMER_ID  1
++
++/**
++ * struct sec_timer_state - structure to hold secute timer state
++ * @tv_ns:      If non-zero this field contains snapshot of timers
++ *              current time (ns).
++ * @cv_ns:      next timer event configured (ns)
++ */
++struct sec_timer_state {
++	u64 tv_ns;
++	u64 cv_ns;
++};
++
+ #endif /* __LINUX_TRUSTY_SMWALL_H */
+-- 
+2.7.4
+

@@ -1,0 +1,242 @@
+From f77a92fa7a080410ebd5d090d8340369b9a4815d Mon Sep 17 00:00:00 2001
+From: yingbinx <yingbinx.zeng@intel.com>
+Date: Thu, 10 Aug 2017 06:57:08 +0000
+Subject: [PATCH 47/64] trusty kernel driver code refine
+
+Merge the code refine change form kerenl 4.4 code.
+Use define CONFIG_X86 to sperate IA code and ARM code.
+Use NR_CPUS to replace the hardcode value.
+Inprove the debug log.
+
+Change-Id: I11075d594e6b119913cc38d79fe5fa3032ca254e
+Tracked-On: OAM-48360
+Signed-off-by: yingbinx <yingbinx.zeng@intel.com>
+Signed-off-by: Sheng, W <w.sheng@intel.com>
+---
+ drivers/trusty/trusty-irq.c   |  4 +--
+ drivers/trusty/trusty-log.c   |  6 +++-
+ drivers/trusty/trusty-mem.c   | 71 +++++++++++++++++++++++++++++++++++++++++--
+ drivers/trusty/trusty.c       |  4 +--
+ include/linux/trusty/trusty.h |  2 ++
+ 5 files changed, 80 insertions(+), 7 deletions(-)
+ mode change 100644 => 100755 drivers/trusty/trusty-log.c
+ mode change 100644 => 100755 drivers/trusty/trusty-mem.c
+ mode change 100644 => 100755 drivers/trusty/trusty.c
+
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index eda0bff..b576729 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -405,7 +405,7 @@ static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int tirq)
+ 		struct trusty_irq *trusty_irq;
+ 		struct trusty_irq_irqset *irqset;
+ 
+-		if (cpu >= 32)
++		if (cpu >= NR_CPUS)
+ 			return -EINVAL;
+ 		trusty_irq = per_cpu_ptr(trusty_irq_handler_data, cpu);
+ 		irqset = per_cpu_ptr(is->percpu_irqs, cpu);
+@@ -430,7 +430,7 @@ static int trusty_irq_init_per_cpu_irq(struct trusty_irq_state *is, int tirq)
+ 	for_each_possible_cpu(cpu) {
+ 		struct trusty_irq *trusty_irq;
+ 
+-		if (cpu >= 32)
++		if (cpu >= NR_CPUS)
+ 			return -EINVAL;
+ 		trusty_irq = per_cpu_ptr(trusty_irq_handler_data, cpu);
+ 		hlist_del(&trusty_irq->node);
+diff --git a/drivers/trusty/trusty-log.c b/drivers/trusty/trusty-log.c
+old mode 100644
+new mode 100755
+index c5a85cc..b58715c
+--- a/drivers/trusty/trusty-log.c
++++ b/drivers/trusty/trusty-log.c
+@@ -156,10 +156,12 @@ static void trusty_vmm_dump_header(struct deadloop_dump *dump)
+ 		return;
+ 
+ 	header = &(dump->header);
++	pr_info("-----------VMM PANIC HEADER-----------\n");
+ 	pr_info("VMM version = %s\n", header->vmm_version);
+ 	pr_info("Signature = %s\n", header->signature);
+ 	pr_info("Error_info = %s\n", header->error_info);
+ 	pr_info("Cpuid = %d\n", header->cpuid);
++	pr_info("-----------END OF VMM PANIC HEADER-----------\n");
+ }
+ 
+ static void trusty_vmm_dump_data(struct deadloop_dump *dump)
+@@ -172,6 +174,7 @@ static void trusty_vmm_dump_data(struct deadloop_dump *dump)
+ 
+ 	dump_data = &(dump->data);
+ 
++	pr_info("-----------VMM PANIC DATA INFO-----------\n");
+ 	pstr = (char *)dump_data->data;
+ 	for (p = pstr; p < ((char *)dump_data->data + dump_data->length); p++) {
+ 		if (*p == '\r') {
+@@ -187,12 +190,13 @@ static void trusty_vmm_dump_data(struct deadloop_dump *dump)
+ 		*p = 0x00;
+ 		pr_info("%s\n", pstr);
+ 	}
++	pr_info("-----------END OF VMM PANIC DATA INFO-----------\n");
+ }
+ 
+ static int trusty_vmm_panic_notify(struct notifier_block *nb,
+ 				   unsigned long action, void *data)
+ {
+-	struct deadloop_dump *dump_info;
++	struct deadloop_dump *dump_info = NULL;
+ 
+ 	if (g_vmm_debug_buf) {
+ 		dump_info = (struct deadloop_dump *)g_vmm_debug_buf;
+diff --git a/drivers/trusty/trusty-mem.c b/drivers/trusty/trusty-mem.c
+old mode 100644
+new mode 100755
+index 1317ec7..fc299e3
+--- a/drivers/trusty/trusty-mem.c
++++ b/drivers/trusty/trusty-mem.c
+@@ -26,7 +26,58 @@
+ 
+ static int get_mem_attr(struct page *page, pgprot_t pgprot)
+ {
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
++#if defined(CONFIG_ARM64)
++	uint64_t mair;
++	uint attr_index = (pgprot_val(pgprot) & PTE_ATTRINDX_MASK) >> 2;
++
++	asm ("mrs %0, mair_el1\n" : "=&r" (mair));
++	return (mair >> (attr_index * 8)) & 0xff;
++
++#elif defined(CONFIG_ARM_LPAE)
++	uint32_t mair;
++	uint attr_index = ((pgprot_val(pgprot) & L_PTE_MT_MASK) >> 2);
++
++	if (attr_index >= 4) {
++		attr_index -= 4;
++		asm volatile("mrc p15, 0, %0, c10, c2, 1\n" : "=&r" (mair));
++	} else {
++		asm volatile("mrc p15, 0, %0, c10, c2, 0\n" : "=&r" (mair));
++	}
++	return (mair >> (attr_index * 8)) & 0xff;
++
++#elif defined(CONFIG_ARM)
++	/* check memory type */
++	switch (pgprot_val(pgprot) & L_PTE_MT_MASK) {
++	case L_PTE_MT_WRITEALLOC:
++		/* Normal: write back write allocate */
++		return 0xFF;
++
++	case L_PTE_MT_BUFFERABLE:
++		/* Normal: non-cacheble */
++		return 0x44;
++
++	case L_PTE_MT_WRITEBACK:
++		/* Normal: writeback, read allocate */
++		return 0xEE;
++
++	case L_PTE_MT_WRITETHROUGH:
++		/* Normal: write through */
++		return 0xAA;
++
++	case L_PTE_MT_UNCACHED:
++		/* strongly ordered */
++		return 0x00;
++
++	case L_PTE_MT_DEV_SHARED:
++	case L_PTE_MT_DEV_NONSHARED:
++		/* device */
++		return 0x04;
++
++	default:
++		return -EINVAL;
++	}
++#elif defined(CONFIG_X86)
++	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
+ 	/* The porting to CHT kernel (3.14.55) is in the #else clause.
+ 	** For BXT kernel (4.1.0), the function get_page_memtype() is static.
+ 	**
+@@ -42,7 +93,7 @@ static int get_mem_attr(struct page *page, pgprot_t pgprot)
+ 	** with SMP, which only allow UNCACHED.
+ 	*/
+ 	return NS_MAIR_NORMAL_UNCACHED;
+-#else
++	#else
+ 	unsigned long type;
+ 	int ret_mem_attr = 0;
+ 
+@@ -73,6 +124,9 @@ static int get_mem_attr(struct page *page, pgprot_t pgprot)
+ 		ret_mem_attr = -EINVAL;
+ 	}
+ 	return ret_mem_attr;
++	#endif
++#else
++	return 0;
+ #endif
+ }
+ 
+@@ -92,10 +146,23 @@ int trusty_encode_page_info(struct ns_mem_page_info *inf,
+ 	mem_attr = get_mem_attr(page, pgprot);
+ 	if (mem_attr < 0)
+ 		return mem_attr;
++
++	/* add other attributes */
++#if defined(CONFIG_ARM64) || defined(CONFIG_ARM_LPAE)
++	pte |= pgprot_val(pgprot);
++#elif defined(CONFIG_ARM)
++	if (pgprot_val(pgprot) & L_PTE_USER)
++		pte |= (1 << 6);
++	if (pgprot_val(pgprot) & L_PTE_RDONLY)
++		pte |= (1 << 7);
++	if (pgprot_val(pgprot) & L_PTE_SHARED)
++		pte |= (3 << 8); /* inner sharable */
++#elif defined(CONFIG_X86)
+ 	if (pgprot_val(pgprot) & _PAGE_USER)
+ 		pte |= (1 << 6);
+ 	if (!(pgprot_val(pgprot) & _PAGE_RW))
+ 		pte |= (1 << 7);
++#endif
+ 
+ 	inf->attr = (pte & 0x0000FFFFFFFFFFFFull) | ((uint64_t)mem_attr << 48);
+ 	return 0;
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+old mode 100644
+new mode 100755
+index 1568849..d4eeb40
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -209,7 +209,7 @@ static long trusty_std_call32_work(void *args)
+ 
+ 	BUG_ON(!args);
+ 
+-	work_args = args;
++	work_args = (struct trusty_std_call32_args *)args;
+ 	dev = work_args->dev;
+ 	s = platform_get_drvdata(to_platform_device(dev));
+ 
+@@ -332,7 +332,7 @@ static void trusty_init_version(struct trusty_state *s, struct device *dev)
+ 	}
+ 	s->version_str[i] = '\0';
+ 
+-	dev_info(dev, "trusty version: Built: %s\n", s->version_str);
++	dev_info(dev, "trusty version: %s\n", s->version_str);
+ 
+ 	ret = device_create_file(dev, &dev_attr_trusty_version);
+ 	if (ret)
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 029b098..1e9b455 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -88,10 +88,12 @@ void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop);
+ #define TRUSTY_VMCALL_PENDING_INTR 0x74727505
+ static inline void set_pending_intr_to_lk(uint8_t vector)
+ {
++#ifdef CONFIG_X86
+ 	__asm__ __volatile__(
+ 		"vmcall"
+ 		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
+ 	);
++#endif
+ }
+ 
+ void trusty_update_wall_info(struct device *dev, void *va, size_t sz);
+-- 
+2.7.4
+

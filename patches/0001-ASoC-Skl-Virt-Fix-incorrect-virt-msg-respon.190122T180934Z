@@ -1,0 +1,135 @@
+From 92a0f11af472a8a1ead5b1aeb01010e2484b5c5d Mon Sep 17 00:00:00 2001
+From: Pawel Furtak <pawel.furtak@intel.com>
+Date: Sat, 12 Jan 2019 14:10:44 +0100
+Subject: [PATCH 01/64] ASoC: Skl: Virt: Fix incorrect virt msg response
+ handling
+
+Copying message response back to sender buffer may result in
+stack corruption (e.g. if send function exits because of timeout).
+This patch adds extra checks to avoid such situation.
+
+Change-Id: Ibc3c3b790348264c9efe6723c67379c76a9f13d1
+Tracked-On: OAM-74848
+Signed-off-by: Pawel Furtak <pawel.furtak@intel.com>
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+Tested-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virtio-common.h |  7 ++++++
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.c     | 29 +++++++++++++++-------
+ 2 files changed, 27 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-common.h b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+index d25b598..98941bf 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-common.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+@@ -52,6 +52,12 @@ struct vfe_msg_header {
+ 	} desc;
+ };
+ 
++enum vfe_ipc_msg_status {
++	VFE_MSG_PENDING = 0,
++	VFE_MSG_TIMED_OUT,
++	VFE_MSG_COMPLETED,
++};
++
+ struct vfe_ipc_msg {
+ 	struct vfe_msg_header header;
+ 
+@@ -60,6 +66,7 @@ struct vfe_ipc_msg {
+ 	int rx_size;
+ 	void *rx_data;
+ 
++	atomic_t status;
+ 	wait_queue_head_t *waitq;
+ 	bool *completed;
+ 
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index d406e6a..4efda25 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -164,20 +164,23 @@ static int vfe_send_msg(struct snd_skl_vfe *vfe,
+ 	if (msg->rx_buf)
+ 		sg_set_buf(&sgs[2], msg->rx_buf, rx_size);
+ 
+-	ret = vfe_send_virtio_msg(vfe, vfe->ipc_not_tx_vq, sgs, 3, msg, true);
+-	if (ret < 0)
+-		return ret;
+-
+-	// If response is expected, wait for it
+ 	if (rx_data) {
+ 		init_waitqueue_head(&waitq);
+ 
+ 		msg->waitq = &waitq;
+ 		msg->completed = &completed;
++	}
++
++	ret = vfe_send_virtio_msg(vfe, vfe->ipc_not_tx_vq, sgs, 3, msg, true);
++	if (ret < 0)
++		return ret;
+ 
++	// If response is expected, wait for it
++	if (rx_data) {
+ 		ret = wait_event_timeout(waitq, completed,
+ 				msecs_to_jiffies(VFE_MSG_MSEC_TIMEOUT));
+ 		if (ret == 0) {
++			atomic_set(&msg->status, VFE_MSG_TIMED_OUT);
+ 			dev_err(&vfe->vdev->dev, "Response from backend timed out\n");
+ 			return -ETIMEDOUT;
+ 		}
+@@ -286,16 +289,19 @@ static void vfe_cmd_handle_rx(struct virtqueue *vq)
+ static void vfe_not_tx_done(struct virtqueue *vq)
+ {
+ 	struct snd_skl_vfe *vfe = vq->vdev->priv;
++	enum vfe_ipc_msg_status msg_status;
+ 	struct vfe_ipc_msg *msg;
+ 	unsigned int buflen = 0;
+ 
+ 	while ((msg = virtqueue_get_buf(vfe->ipc_not_tx_vq, &buflen))
+ 			!= NULL) {
+ 
+-		kfree(msg->tx_buf);
++		msg_status = atomic_read(&msg->status);
++		if (msg_status != VFE_MSG_PENDING)
++			goto free_msg;
++
+ 		if (msg->rx_buf) {
+ 			memcpy(msg->rx_data, msg->rx_buf, msg->rx_size);
+-			kfree(msg->rx_buf);
+ 		}
+ 
+ 		if (msg->waitq && msg->completed) {
+@@ -303,6 +309,9 @@ static void vfe_not_tx_done(struct virtqueue *vq)
+ 			wake_up(msg->waitq);
+ 		}
+ 
++free_msg:
++		kfree(msg->tx_buf);
++		kfree(msg->rx_buf);
+ 		kfree(msg);
+ 	}
+ }
+@@ -331,16 +340,18 @@ static void vfe_posn_update(struct work_struct *work)
+ 	vq = vfe->ipc_not_rx_vq;
+ 
+ 	while ((pos_req = virtqueue_get_buf(vq, &buflen)) != NULL) {
+-		vfe_send_pos_request(vfe, pos_req);
+ 		substr_info = vfe_find_substream_info_by_pcm(vfe,
+ 			pos_req->pcm_id, pos_req->stream_dir);
+ 
+ 		// substream may be already closed on FE side
+ 		if (!substr_info)
+-			return;
++			goto send_back_msg;
+ 
+ 		substr_info->hw_ptr = pos_req->stream_pos;
+ 		snd_pcm_period_elapsed(substr_info->substream);
++
++send_back_msg:
++		vfe_send_pos_request(vfe, pos_req);
+ 	}
+ }
+ 
+-- 
+2.7.4
+

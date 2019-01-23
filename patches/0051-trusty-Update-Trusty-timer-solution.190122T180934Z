@@ -1,0 +1,152 @@
+From f0a0a8b170c234c0bd257911977aa2877686b020 Mon Sep 17 00:00:00 2001
+From: "Zhang, Qi" <qi1.zhang@intel.com>
+Date: Tue, 12 Dec 2017 15:16:21 +0800
+Subject: [PATCH 51/64] trusty: Update Trusty timer solution
+
+1. Add new customized SMC calls
+2. Move send pending interrupt implementation to trusty-irq.c
+3. Invokes new added standard SMC call to inject timer interrupt to
+secure side
+
+Change-Id: I6c9a94c8ff50f42b58abd2e2b2dd5efd26c126e2
+Signed-off-by: Zhong,Fangjian <fangjian.zhong@intel.com>
+---
+ drivers/trusty/trusty-irq.c   |  9 +++++++++
+ drivers/trusty/trusty-timer.c | 38 ++++++++++++++++++++++++++++++++++++--
+ include/linux/trusty/trusty.h | 11 -----------
+ 3 files changed, 45 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/trusty/trusty-irq.c b/drivers/trusty/trusty-irq.c
+index 868a31c..04df531 100644
+--- a/drivers/trusty/trusty-irq.c
++++ b/drivers/trusty/trusty-irq.c
+@@ -59,6 +59,15 @@ struct trusty_irq_state {
+ 
+ static enum cpuhp_state trusty_irq_online;
+ 
++#define TRUSTY_VMCALL_PENDING_INTR 0x74727505
++static inline void set_pending_intr_to_lk(uint8_t vector)
++{
++	__asm__ __volatile__(
++		"vmcall"
++		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
++		);
++}
++
+ static void trusty_irq_enable_pending_irqs(struct trusty_irq_state *is,
+ 					   struct trusty_irq_irqset *irqset,
+ 					   bool percpu)
+diff --git a/drivers/trusty/trusty-timer.c b/drivers/trusty/trusty-timer.c
+index e88dc5f..43e4326 100644
+--- a/drivers/trusty/trusty-timer.c
++++ b/drivers/trusty/trusty-timer.c
+@@ -24,6 +24,7 @@
+ struct trusty_timer {
+ 	struct sec_timer_state *sts;
+ 	struct hrtimer tm;
++	struct work_struct work;
+ };
+ 
+ struct trusty_timer_dev_state {
+@@ -32,16 +33,33 @@ struct trusty_timer_dev_state {
+ 	struct device *trusty_dev;
+ 	struct notifier_block call_notifier;
+ 	struct trusty_timer timer;
++	struct workqueue_struct *workqueue;
+ };
+ 
++/* Max entity defined as SMC_NUM_ENTITIES(64) */
++#define	SMC_ENTITY_SMC_X86	63	/* Used for customized SMC calls */
++
++#define	SMC_SC_LK_TIMER	SMC_STDCALL_NR(SMC_ENTITY_SMC_X86, 0)
++
++static void timer_work_func(struct work_struct *work)
++{
++	int ret;
++	struct trusty_timer_dev_state *s;
++
++	s = container_of(work, struct trusty_timer_dev_state, timer.work);
++
++	ret = trusty_std_call32(s->trusty_dev, SMC_SC_LK_TIMER, 0, 0, 0);
++	if (ret != 0)
++		dev_err(s->dev, "%s failed %d\n", __func__, ret);
++}
++
+ static enum hrtimer_restart trusty_timer_cb(struct hrtimer *tm)
+ {
+ 	struct trusty_timer_dev_state *s;
+ 
+ 	s = container_of(tm, struct trusty_timer_dev_state, timer.tm);
+ 
+-	set_pending_intr_to_lk(0x31);
+-	trusty_enqueue_nop(s->trusty_dev, NULL);
++	queue_work(s->workqueue, &s->timer.work);
+ 
+ 	return HRTIMER_NORESTART;
+ }
+@@ -114,6 +132,12 @@ static int trusty_timer_probe(struct platform_device *pdev)
+ 				sizeof(*tt->sts));
+ 	WARN_ON(!tt->sts);
+ 
++	s->workqueue = alloc_workqueue("trusty-timer-wq", WQ_CPU_INTENSIVE, 0);
++	if (!s->workqueue) {
++		ret = -ENODEV;
++		dev_err(&pdev->dev, "Failed to allocate work queue\n");
++		goto err_allocate_work_queue;
++	}
+ 
+ 	/* register notifier */
+ 	s->call_notifier.notifier_call = trusty_timer_call_notify;
+@@ -124,10 +148,18 @@ static int trusty_timer_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	INIT_WORK(&s->timer.work, timer_work_func);
++
+ 	dev_info(s->dev, "initialized\n");
+ 
+ 	return 0;
+ 
++err_register_call_notifier:
++	destroy_workqueue(s->workqueue);
++err_allocate_work_queue:
++	kfree(s);
++	return ret;
++
+ }
+ 
+ static int trusty_timer_remove(struct platform_device *pdev)
+@@ -144,6 +176,8 @@ static int trusty_timer_remove(struct platform_device *pdev)
+ 	tt = &s->timer;
+ 	hrtimer_cancel(&tt->tm);
+ 
++	flush_work(&tt->work);
++	destroy_workqueue(s->workqueue);
+ 	/* free state */
+ 	kfree(s);
+ 	return 0;
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index 1e9b455..3189c7e 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -85,17 +85,6 @@ static inline void trusty_nop_init(struct trusty_nop *nop,
+ void trusty_enqueue_nop(struct device *dev, struct trusty_nop *nop);
+ void trusty_dequeue_nop(struct device *dev, struct trusty_nop *nop);
+ 
+-#define TRUSTY_VMCALL_PENDING_INTR 0x74727505
+-static inline void set_pending_intr_to_lk(uint8_t vector)
+-{
+-#ifdef CONFIG_X86
+-	__asm__ __volatile__(
+-		"vmcall"
+-		::"a"(TRUSTY_VMCALL_PENDING_INTR), "b"(vector)
+-	);
+-#endif
+-}
+-
+ void trusty_update_wall_info(struct device *dev, void *va, size_t sz);
+ void *trusty_wall_base(struct device *dev);
+ void *trusty_wall_per_cpu_item_ptr(struct device *dev, unsigned int cpu,
+-- 
+2.7.4
+

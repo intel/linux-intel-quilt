@@ -1,0 +1,266 @@
+From 9b5c9eaace653231c0efc9f5f2c48e824b526467 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Mon, 14 Apr 2014 17:18:40 -0700
+Subject: [PATCH 10/64] trusty: arm64 fiq support
+
+Change-Id: I907fbaa2b9d1697b204dad6c16d9027ef3bb0a58
+---
+ drivers/trusty/Kconfig                 |   8 ++
+ drivers/trusty/Makefile                |   1 +
+ drivers/trusty/trusty-fiq-arm64-glue.S |  54 +++++++++++++
+ drivers/trusty/trusty-fiq-arm64.c      | 140 +++++++++++++++++++++++++++++++++
+ include/linux/trusty/smcall.h          |   4 +
+ 5 files changed, 207 insertions(+)
+ create mode 100644 drivers/trusty/trusty-fiq-arm64-glue.S
+ create mode 100644 drivers/trusty/trusty-fiq-arm64.c
+
+diff --git a/drivers/trusty/Kconfig b/drivers/trusty/Kconfig
+index 3c725e2..fc1061d 100644
+--- a/drivers/trusty/Kconfig
++++ b/drivers/trusty/Kconfig
+@@ -20,4 +20,12 @@ config TRUSTY_FIQ_ARM
+ 	select TRUSTY_FIQ
+ 	default y
+ 
++config TRUSTY_FIQ_ARM64
++	tristate
++	depends on TRUSTY
++	depends on ARM64
++	select FIQ_GLUE
++	select TRUSTY_FIQ
++	default y
++
+ endmenu
+diff --git a/drivers/trusty/Makefile b/drivers/trusty/Makefile
+index a01c824..e162a40 100644
+--- a/drivers/trusty/Makefile
++++ b/drivers/trusty/Makefile
+@@ -6,3 +6,4 @@ obj-$(CONFIG_TRUSTY)		+= trusty.o
+ obj-$(CONFIG_TRUSTY)		+= trusty-irq.o
+ obj-$(CONFIG_TRUSTY_FIQ)	+= trusty-fiq.o
+ obj-$(CONFIG_TRUSTY_FIQ_ARM)	+= trusty-fiq-arm.o
++obj-$(CONFIG_TRUSTY_FIQ_ARM64)	+= trusty-fiq-arm64.o trusty-fiq-arm64-glue.o
+diff --git a/drivers/trusty/trusty-fiq-arm64-glue.S b/drivers/trusty/trusty-fiq-arm64-glue.S
+new file mode 100644
+index 0000000..6994b3a
+--- /dev/null
++++ b/drivers/trusty/trusty-fiq-arm64-glue.S
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <asm/asm-offsets.h>
++#include <asm/ptrace.h>
++#include <linux/linkage.h>
++#include <linux/trusty/smcall.h>
++
++.macro	push	reg1,reg2,remregs:vararg
++	.ifnb \remregs
++	push \remregs
++	.endif
++	stp	\reg1, \reg2, [sp, #-16]!
++.endm
++
++.macro	pop	reg1,reg2,remregs:vararg
++	ldp	\reg1, \reg2, [sp], #16
++	.ifnb \remregs
++	pop \remregs
++	.endif
++.endm
++
++ENTRY(trusty_fiq_glue_arm64)
++	sub	sp, sp, #S_FRAME_SIZE - S_LR
++	push	x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, \
++		x14, x15, x16, x17, x18, x19, x20, x21, x22, x23, x24, x25, \
++		x26, x27, x28, x29
++	ldr	x0, =SMC_FC64_GET_FIQ_REGS
++	smc	#0
++	stp	x0, x1, [sp, #S_PC] /* original pc, cpsr */
++	tst	x1, PSR_MODE_MASK
++	csel	x2, x2, x3, eq		/* sp el0, sp el1 */
++	stp	x30, x2, [sp, #S_LR]	/* lr, original sp */
++	mov	x0, sp
++	mov	x1, x3
++	bl	trusty_fiq_handler
++	pop	x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, \
++		x14, x15, x16, x17, x18, x19, x20, x21, x22, x23, x24, x25, \
++		x26, x27, x28, x29
++	ldr	x30, [sp], #S_FRAME_SIZE - S_LR	/* load LR and restore SP */
++	ldr	x0, =SMC_FC_FIQ_EXIT
++	smc	#0
++	b	.	/* should not get here */
+diff --git a/drivers/trusty/trusty-fiq-arm64.c b/drivers/trusty/trusty-fiq-arm64.c
+new file mode 100644
+index 0000000..df05a98
+--- /dev/null
++++ b/drivers/trusty/trusty-fiq-arm64.c
+@@ -0,0 +1,140 @@
++/*
++ * Copyright (C) 2013 Google, Inc.
++ *
++ * This software is licensed under the terms of the GNU General Public
++ * License version 2, as published by the Free Software Foundation, and
++ * may be copied, distributed, and modified under those terms.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#include <linux/percpu.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/trusty/smcall.h>
++#include <linux/trusty/trusty.h>
++
++#include <asm/fiq_glue.h>
++
++#include "trusty-fiq.h"
++
++extern void trusty_fiq_glue_arm64(void);
++
++static struct device *trusty_dev;
++static DEFINE_PER_CPU(void *, fiq_stack);
++static struct fiq_glue_handler *current_handler;
++static DEFINE_MUTEX(fiq_glue_lock);
++
++void trusty_fiq_handler(struct pt_regs *regs, void *svc_sp)
++{
++	current_handler->fiq(current_handler, regs, svc_sp);
++}
++
++static void smp_nop_call(void *info)
++{
++	/* If this call is reached, the fiq handler is not currently running */
++}
++
++static void fiq_glue_clear_handler(void)
++{
++	int cpu;
++	int ret;
++	void *stack;
++
++	for_each_possible_cpu(cpu) {
++		stack = per_cpu(fiq_stack, cpu);
++		if (!stack)
++			continue;
++
++		ret = trusty_fast_call64(trusty_dev, SMC_FC64_SET_FIQ_HANDLER,
++					 cpu, 0, 0);
++		if (ret) {
++			pr_err("%s: SMC_FC_SET_FIQ_HANDLER(%d, 0, 0) failed 0x%x, skip free stack\n",
++			       __func__, cpu, ret);
++			continue;
++		}
++
++		per_cpu(fiq_stack, cpu) = NULL;
++		smp_call_function_single(cpu, smp_nop_call, NULL, true);
++		free_pages((unsigned long)stack, THREAD_SIZE_ORDER);
++	}
++}
++
++int fiq_glue_register_handler(struct fiq_glue_handler *handler)
++{
++	int ret;
++	int cpu;
++	void *stack;
++	unsigned long irqflags;
++
++	if (!handler || !handler->fiq)
++		return -EINVAL;
++
++	mutex_lock(&fiq_glue_lock);
++
++	if (!trusty_dev) {
++		ret = -ENODEV;
++		goto err_no_trusty;
++	}
++	if (current_handler) {
++		ret = -EBUSY;
++		goto err_busy;
++	}
++
++	current_handler = handler;
++
++	for_each_possible_cpu(cpu) {
++		stack = (void *)__get_free_pages(GFP_KERNEL, THREAD_SIZE_ORDER);
++		if (WARN_ON(!stack)) {
++			ret = -ENOMEM;
++			goto err_alloc_fiq_stack;
++		}
++		per_cpu(fiq_stack, cpu) = stack;
++		stack += THREAD_START_SP;
++
++		local_irq_save(irqflags);
++		ret = trusty_fast_call64(trusty_dev, SMC_FC64_SET_FIQ_HANDLER,
++					 cpu, (uintptr_t)trusty_fiq_glue_arm64,
++					 (uintptr_t)stack);
++		local_irq_restore(irqflags);
++		if (ret) {
++			pr_err("%s: SMC_FC_SET_FIQ_HANDLER(%d, %p, %p) failed 0x%x\n",
++			       __func__, cpu, trusty_fiq_glue_arm64,
++			       stack, ret);
++			ret = -EINVAL;
++			goto err_set_fiq_handler;
++		}
++	}
++
++	mutex_unlock(&fiq_glue_lock);
++	return 0;
++
++err_set_fiq_handler:
++err_alloc_fiq_stack:
++	fiq_glue_clear_handler();
++err_busy:
++err_no_trusty:
++	mutex_unlock(&fiq_glue_lock);
++	return ret;
++}
++
++int trusty_fiq_arch_probe(struct platform_device *pdev)
++{
++	mutex_lock(&fiq_glue_lock);
++	trusty_dev = pdev->dev.parent;
++	mutex_unlock(&fiq_glue_lock);
++
++	return 0;
++}
++
++void trusty_fiq_arch_remove(struct platform_device *pdev)
++{
++	mutex_lock(&fiq_glue_lock);
++	fiq_glue_clear_handler();
++	trusty_dev = NULL;
++	mutex_unlock(&fiq_glue_lock);
++}
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index 4344683..e870497 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -66,6 +66,10 @@
+ #define SMC_FC_FIQ_EXIT		SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 1)
+ #define SMC_FC_REQUEST_FIQ	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 2)
+ #define SMC_FC_GET_NEXT_IRQ	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 3)
++#define SMC_FC_FIQ_ENTER	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 4)
++
++#define SMC_FC64_SET_FIQ_HANDLER SMC_FASTCALL64_NR(SMC_ENTITY_SECURE_MONITOR, 5)
++#define SMC_FC64_GET_FIQ_REGS	SMC_FASTCALL64_NR (SMC_ENTITY_SECURE_MONITOR, 6)
+ 
+ #define SMC_FC_CPU_SUSPEND	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 7)
+ #define SMC_FC_CPU_RESUME	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 8)
+-- 
+2.7.4
+

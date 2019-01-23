@@ -1,0 +1,128 @@
+From 5786f3865253bd28efdd076bef2ddf3de9595016 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Arve=20Hj=C3=B8nnev=C3=A5g?= <arve@android.com>
+Date: Thu, 11 Jun 2015 19:34:28 -0700
+Subject: [PATCH 16/64] trusty: Select api version
+
+Select api version in probe, and store it in trusty_state.
+This enables new return codes from trusty, and will later be used
+to enable a nop stdcall that does not take smc_lock.
+
+Change-Id: I8011325265da818725ef65f094bf820402878eb5
+---
+ drivers/trusty/trusty.c       | 35 +++++++++++++++++++++++++++++++++++
+ include/linux/trusty/smcall.h | 19 +++++++++++++++++++
+ include/linux/trusty/trusty.h |  1 +
+ 3 files changed, 55 insertions(+)
+
+diff --git a/drivers/trusty/trusty.c b/drivers/trusty/trusty.c
+index 16c595b..fcdbba5 100644
+--- a/drivers/trusty/trusty.c
++++ b/drivers/trusty/trusty.c
+@@ -29,6 +29,7 @@ struct trusty_state {
+ 	struct mutex smc_lock;
+ 	struct atomic_notifier_head notifier;
+ 	char *version_str;
++	u32 api_version;
+ };
+ 
+ #ifdef CONFIG_ARM64
+@@ -265,6 +266,35 @@ static void trusty_init_version(struct trusty_state *s, struct device *dev)
+ 	dev_err(dev, "failed to get version: %d\n", ret);
+ }
+ 
++u32 trusty_get_api_version(struct device *dev)
++{
++	struct trusty_state *s = platform_get_drvdata(to_platform_device(dev));
++
++	return s->api_version;
++}
++EXPORT_SYMBOL(trusty_get_api_version);
++
++static int trusty_init_api_version(struct trusty_state *s, struct device *dev)
++{
++	u32 api_version;
++	api_version = trusty_fast_call32(dev, SMC_FC_API_VERSION,
++					 TRUSTY_API_VERSION_CURRENT, 0, 0);
++	if (api_version == SM_ERR_UNDEFINED_SMC)
++		api_version = 0;
++
++	if (api_version > TRUSTY_API_VERSION_CURRENT) {
++		dev_err(dev, "unsupported api version %u > %u\n",
++			api_version, TRUSTY_API_VERSION_CURRENT);
++		return -EINVAL;
++	}
++
++	dev_info(dev, "selected api version: %u (requested %u)\n",
++		 api_version, TRUSTY_API_VERSION_CURRENT);
++	s->api_version = api_version;
++
++	return 0;
++}
++
+ static int trusty_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+@@ -287,6 +317,10 @@ static int trusty_probe(struct platform_device *pdev)
+ 
+ 	trusty_init_version(s, &pdev->dev);
+ 
++	ret = trusty_init_api_version(s, &pdev->dev);
++	if (ret < 0)
++		goto err_api_version;
++
+ 	ret = of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "Failed to add children: %d\n", ret);
+@@ -296,6 +330,7 @@ static int trusty_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_add_children:
++err_api_version:
+ 	if (s->version_str) {
+ 		device_remove_file(&pdev->dev, &dev_attr_trusty_version);
+ 		kfree(s->version_str);
+diff --git a/include/linux/trusty/smcall.h b/include/linux/trusty/smcall.h
+index a2be2e3..cdb4ecc 100644
+--- a/include/linux/trusty/smcall.h
++++ b/include/linux/trusty/smcall.h
+@@ -78,6 +78,25 @@
+ #define SMC_FC_AARCH_SWITCH	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 9)
+ #define SMC_FC_GET_VERSION_STR	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 10)
+ 
++/**
++ * SMC_FC_API_VERSION - Find and select supported API version.
++ *
++ * @r1: Version supported by client.
++ *
++ * Returns version supported by trusty.
++ *
++ * If multiple versions are supported, the client should start by calling
++ * SMC_FC_API_VERSION with the largest version it supports. Trusty will then
++ * return a version it supports. If the client does not support the version
++ * returned by trusty and the version returned is less than the version
++ * requested, repeat the call with the largest supported version less than the
++ * last returned version.
++ *
++ * This call must be made before any calls that are affected by the api version.
++ */
++#define TRUSTY_API_VERSION_CURRENT	(0)
++#define SMC_FC_API_VERSION	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 11)
++
+ /* TRUSTED_OS entity calls */
+ #define SMC_SC_VIRTIO_GET_DESCR	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 20)
+ #define SMC_SC_VIRTIO_START	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 21)
+diff --git a/include/linux/trusty/trusty.h b/include/linux/trusty/trusty.h
+index d084d9d..24fe210 100644
+--- a/include/linux/trusty/trusty.h
++++ b/include/linux/trusty/trusty.h
+@@ -56,6 +56,7 @@ int trusty_call_notifier_register(struct device *dev,
+ int trusty_call_notifier_unregister(struct device *dev,
+ 				    struct notifier_block *n);
+ const char *trusty_version_str_get(struct device *dev);
++u32 trusty_get_api_version(struct device *dev);
+ 
+ struct ns_mem_page_info {
+ 	uint64_t attr;
+-- 
+2.7.4
+
