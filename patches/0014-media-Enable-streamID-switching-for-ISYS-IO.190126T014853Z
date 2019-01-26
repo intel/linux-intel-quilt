@@ -1,0 +1,201 @@
+From d6b1f111f2fc9ad8c2d319b730555f6f8841b1fe Mon Sep 17 00:00:00 2001
+From: Meng Wei <wei.meng@intel.com>
+Date: Mon, 3 Dec 2018 16:53:27 +0800
+Subject: [PATCH 14/32] media: Enable streamID switching for ISYS IOMMU
+
+Enable streamID switching for ISYS IOMMU
+
+Change-Id: Ibc3e0b0f883f06991006f99f159d04e270878516
+Tracked-On: PKT-1691
+Signed-off-by: mingdaxu <mingda.xu@intel.com>
+---
+ drivers/media/pci/intel/ipu-fw-isys.c    |  4 ++
+ drivers/media/pci/intel/ipu-fw-isys.h    | 45 ++++++++++++++++
+ drivers/media/pci/intel/ipu-isys-video.c | 68 +++++++++++++++++++++++-
+ drivers/media/pci/intel/ipu-isys.h       |  4 ++
+ 4 files changed, 120 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/pci/intel/ipu-fw-isys.c b/drivers/media/pci/intel/ipu-fw-isys.c
+index e68e03e3a752..130d2ca4a438 100644
+--- a/drivers/media/pci/intel/ipu-fw-isys.c
++++ b/drivers/media/pci/intel/ipu-fw-isys.c
+@@ -156,6 +156,10 @@ ipu_fw_isys_dump_stream_cfg(struct device *dev,
+ 			stream_cfg->output_pins[i].send_irq);
+ 		dev_dbg(dev, "Reserve compression %d\n",
+ 			stream_cfg->output_pins[i].reserve_compression);
++		dev_dbg(dev, "snoopable %d\n",
++			stream_cfg->output_pins[i].snoopable);
++		dev_dbg(dev, "sensor type %d\n",
++			stream_cfg->output_pins[i].sensor_type);
+ 		dev_dbg(dev, "----------------\n");
+ 	}
+ 
+diff --git a/drivers/media/pci/intel/ipu-fw-isys.h b/drivers/media/pci/intel/ipu-fw-isys.h
+index 7b49648c263f..2853e1e1c9d9 100644
+--- a/drivers/media/pci/intel/ipu-fw-isys.h
++++ b/drivers/media/pci/intel/ipu-fw-isys.h
+@@ -148,6 +148,51 @@ enum ipu_fw_isys_stream_source {
+ 	N_IPU_FW_ISYS_STREAM_SRC
+ };
+ 
++#if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
++enum ipu_fw_isys_sensor_type {
++	/* non-snoopable to PSYS */
++	IPU_FW_ISYS_VC1_SENSOR_DATA	= 0,
++	/* non-snoopable for PDAF */
++	IPU_FW_ISYS_VC1_SENSOR_PDAF,
++	/* snoopable to CPU */
++	IPU_FW_ISYS_VC0_SENSOR_METADATA,
++	/* snoopable to CPU */
++	IPU_FW_ISYS_VC0_SENSOR_DATA,
++	N_IPU_FW_ISYS_SENSOR_TYPE
++};
++
++enum ipu_fw_isys_sensor_info {
++	/* VC1 */
++	IPU_FW_ISYS_SENSOR_DATA_1 = 1,
++	IPU_FW_ISYS_SENSOR_DATA_2 = 2,
++	IPU_FW_ISYS_SENSOR_DATA_3 = 3,
++	IPU_FW_ISYS_SENSOR_DATA_4 = 4,
++	IPU_FW_ISYS_SENSOR_DATA_5 = 5,
++	IPU_FW_ISYS_SENSOR_DATA_6 = 6,
++	IPU_FW_ISYS_SENSOR_DATA_7 = 7,
++	IPU_FW_ISYS_SENSOR_DATA_8 = 8,
++	IPU_FW_ISYS_SENSOR_DATA_9 = 9,
++	IPU_FW_ISYS_SENSOR_DATA_10 = 10,
++	IPU_FW_ISYS_SENSOR_PDAF_1 = 11,
++	IPU_FW_ISYS_SENSOR_PDAF_2 = 12,
++	/* VC0 */
++	IPU_FW_ISYS_SENSOR_METADATA = 13,
++	IPU_FW_ISYS_SENSOR_DATA_11 = 14,
++	IPU_FW_ISYS_SENSOR_DATA_12 = 15,
++	IPU_FW_ISYS_SENSOR_DATA_13 = 16,
++	IPU_FW_ISYS_SENSOR_DATA_14 = 17,
++	IPU_FW_ISYS_SENSOR_DATA_15 = 18,
++	IPU_FW_ISYS_SENSOR_DATA_16 = 19,
++	N_IPU_FW_ISYS_SENSOR_INFO,
++	IPU_FW_ISYS_VC1_SENSOR_DATA_START = IPU_FW_ISYS_SENSOR_DATA_1,
++	IPU_FW_ISYS_VC1_SENSOR_DATA_END = IPU_FW_ISYS_SENSOR_DATA_10,
++	IPU_FW_ISYS_VC0_SENSOR_DATA_START = IPU_FW_ISYS_SENSOR_DATA_11,
++	IPU_FW_ISYS_VC0_SENSOR_DATA_END = IPU_FW_ISYS_SENSOR_DATA_16,
++	IPU_FW_ISYS_VC1_SENSOR_PDAF_START = IPU_FW_ISYS_SENSOR_PDAF_1,
++	IPU_FW_ISYS_VC1_SENSOR_PDAF_END = IPU_FW_ISYS_SENSOR_PDAF_2,
++};
++#endif
++
+ #define IPU_FW_ISYS_STREAM_SRC_CSI2_PORT0 IPU_FW_ISYS_STREAM_SRC_PORT_0
+ #define IPU_FW_ISYS_STREAM_SRC_CSI2_PORT1 IPU_FW_ISYS_STREAM_SRC_PORT_1
+ #define IPU_FW_ISYS_STREAM_SRC_CSI2_PORT2 IPU_FW_ISYS_STREAM_SRC_PORT_2
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index 57d96a2cde88..d3815d37b608 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -961,6 +961,10 @@ static void csi_short_packet_prepare_firmware_stream_cfg(
+ 	output_info->pt = IPU_ISYS_SHORT_PACKET_PT;
+ 	output_info->ft = IPU_ISYS_SHORT_PACKET_FT;
+ 	output_info->send_irq = 1;
++#if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
++	output_info->snoopable = true;
++	output_info->sensor_type = IPU_FW_ISYS_SENSOR_METADATA;
++#endif
+ }
+ 
+ void ipu_isys_prepare_firmware_stream_cfg_default(
+@@ -969,9 +973,12 @@ void ipu_isys_prepare_firmware_stream_cfg_default(
+ {
+ 	struct ipu_isys_pipeline *ip =
+ 	    to_ipu_isys_pipeline(av->vdev.entity.pipe);
+-
+ 	struct ipu_isys_queue *aq = &av->aq;
+ 	struct ipu_fw_isys_output_pin_info_abi *pin_info;
++#if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
++	struct ipu_isys *isys = av->isys;
++	unsigned int type_index;
++#endif
+ 	int pin = cfg->nof_output_pins++;
+ 
+ 	aq->fw_output = pin;
+@@ -995,6 +1002,65 @@ void ipu_isys_prepare_firmware_stream_cfg_default(
+ 	pin_info->ft = av->pfmt->css_pixelformat;
+ 	pin_info->send_irq = 1;
+ 	cfg->vc = ip->vc;
++
++#if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
++	switch (pin_info->pt) {
++	/* non-snoopable sensor data to PSYS */
++	case IPU_FW_ISYS_PIN_TYPE_RAW_DUAL_SOC:
++	case IPU_FW_ISYS_PIN_TYPE_RAW_NS:
++	case IPU_FW_ISYS_PIN_TYPE_RAW_S:
++		type_index = IPU_FW_ISYS_VC1_SENSOR_DATA;
++		pin_info->sensor_type = isys->sensor_types[type_index]++;
++		pin_info->snoopable = false;
++
++		if (isys->sensor_types[type_index] >
++				IPU_FW_ISYS_VC1_SENSOR_DATA_END)
++			isys->sensor_types[type_index] =
++				IPU_FW_ISYS_VC1_SENSOR_DATA_START;
++
++		break;
++	/* non-snoopable PDAF data */
++	case IPU_FW_ISYS_PIN_TYPE_PAF_FF:
++		type_index = IPU_FW_ISYS_VC1_SENSOR_PDAF;
++		pin_info->sensor_type = isys->sensor_types[type_index]++;
++		pin_info->snoopable = false;
++
++		if (isys->sensor_types[type_index] >
++				IPU_FW_ISYS_VC1_SENSOR_PDAF_END)
++			isys->sensor_types[type_index] =
++				IPU_FW_ISYS_VC1_SENSOR_PDAF_START;
++
++		break;
++	/* snoopable META/Stats data to CPU */
++	case IPU_FW_ISYS_PIN_TYPE_METADATA_0:
++	case IPU_FW_ISYS_PIN_TYPE_METADATA_1:
++	case IPU_FW_ISYS_PIN_TYPE_AWB_STATS:
++	case IPU_FW_ISYS_PIN_TYPE_AF_STATS:
++	case IPU_FW_ISYS_PIN_TYPE_HIST_STATS:
++		pin_info->sensor_type = IPU_FW_ISYS_SENSOR_METADATA;
++		pin_info->snoopable = true;
++		break;
++	/* snoopable sensor data to CPU */
++	case IPU_FW_ISYS_PIN_TYPE_MIPI:
++	case IPU_FW_ISYS_PIN_TYPE_RAW_SOC:
++		type_index = IPU_FW_ISYS_VC0_SENSOR_DATA;
++		pin_info->sensor_type = isys->sensor_types[type_index]++;
++		pin_info->snoopable = true;
++
++		if (isys->sensor_types[type_index] >
++				IPU_FW_ISYS_VC0_SENSOR_DATA_END)
++			isys->sensor_types[type_index] =
++				IPU_FW_ISYS_VC0_SENSOR_DATA_START;
++
++		break;
++	default:
++		dev_err(&av->isys->adev->dev,
++			"Unknown pin type, use metadata type as default\n");
++
++		pin_info->sensor_type = IPU_FW_ISYS_SENSOR_METADATA;
++		pin_info->snoopable = true;
++	}
++#endif
+ }
+ 
+ static unsigned int ipu_isys_get_compression_scheme(u32 code)
+diff --git a/drivers/media/pci/intel/ipu-isys.h b/drivers/media/pci/intel/ipu-isys.h
+index 30d3b9b53a2e..847961062c9f 100644
+--- a/drivers/media/pci/intel/ipu-isys.h
++++ b/drivers/media/pci/intel/ipu-isys.h
+@@ -109,6 +109,10 @@ struct ipu_isys {
+ 	bool csi2_cse_ipc_not_supported;
+ 	unsigned int video_opened;
+ 	unsigned int stream_opened;
++#if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
++	unsigned int sensor_types[N_IPU_FW_ISYS_SENSOR_TYPE];
++#endif
++
+ 	struct dentry *debugfsdir;
+ 	struct mutex mutex;	/* Serialise isys video open/release related */
+ 	struct mutex stream_mutex;	/* Stream start, stop, queueing reqs */
+-- 
+2.17.1
+
