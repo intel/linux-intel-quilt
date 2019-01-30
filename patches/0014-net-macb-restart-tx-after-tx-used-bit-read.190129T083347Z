@@ -1,0 +1,74 @@
+From 5ea9c08a8692099916cdbd59281ee5863d3b30a9 Mon Sep 17 00:00:00 2001
+From: Claudiu Beznea <claudiu.beznea@microchip.com>
+Date: Mon, 17 Dec 2018 10:02:42 +0000
+Subject: [PATCH 014/580] net: macb: restart tx after tx used bit read
+
+[ Upstream commit 4298388574dae6168fa8940b3edc7ba965e8a7ab ]
+
+On some platforms (currently detected only on SAMA5D4) TX might stuck
+even the pachets are still present in DMA memories and TX start was
+issued for them. This happens due to race condition between MACB driver
+updating next TX buffer descriptor to be used and IP reading the same
+descriptor. In such a case, the "TX USED BIT READ" interrupt is asserted.
+GEM/MACB user guide specifies that if a "TX USED BIT READ" interrupt
+is asserted TX must be restarted. Restart TX if used bit is read and
+packets are present in software TX queue. Packets are removed from software
+TX queue if TX was successful for them (see macb_tx_interrupt()).
+
+Signed-off-by: Claudiu Beznea <claudiu.beznea@microchip.com>
+Acked-by: Nicolas Ferre <nicolas.ferre@microchip.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/cadence/macb_main.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 58b9744c4058..240fd36b5074 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -61,7 +61,8 @@
+ #define MACB_TX_ERR_FLAGS	(MACB_BIT(ISR_TUND)			\
+ 					| MACB_BIT(ISR_RLE)		\
+ 					| MACB_BIT(TXERR))
+-#define MACB_TX_INT_FLAGS	(MACB_TX_ERR_FLAGS | MACB_BIT(TCOMP))
++#define MACB_TX_INT_FLAGS	(MACB_TX_ERR_FLAGS | MACB_BIT(TCOMP)	\
++					| MACB_BIT(TXUBR))
+ 
+ /* Max length of transmit frame must be a multiple of 8 bytes */
+ #define MACB_TX_LEN_ALIGN	8
+@@ -1313,6 +1314,21 @@ static void macb_hresp_error_task(unsigned long data)
+ 	netif_tx_start_all_queues(dev);
+ }
+ 
++static void macb_tx_restart(struct macb_queue *queue)
++{
++	unsigned int head = queue->tx_head;
++	unsigned int tail = queue->tx_tail;
++	struct macb *bp = queue->bp;
++
++	if (bp->caps & MACB_CAPS_ISR_CLEAR_ON_WRITE)
++		queue_writel(queue, ISR, MACB_BIT(TXUBR));
++
++	if (head == tail)
++		return;
++
++	macb_writel(bp, NCR, macb_readl(bp, NCR) | MACB_BIT(TSTART));
++}
++
+ static irqreturn_t macb_interrupt(int irq, void *dev_id)
+ {
+ 	struct macb_queue *queue = dev_id;
+@@ -1370,6 +1386,9 @@ static irqreturn_t macb_interrupt(int irq, void *dev_id)
+ 		if (status & MACB_BIT(TCOMP))
+ 			macb_tx_interrupt(queue);
+ 
++		if (status & MACB_BIT(TXUBR))
++			macb_tx_restart(queue);
++
+ 		/* Link change detection isn't possible with RMII, so we'll
+ 		 * add that if/when we get our hands on a full-blown MII PHY.
+ 		 */
+-- 
+2.17.1
+

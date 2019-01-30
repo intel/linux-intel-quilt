@@ -1,0 +1,141 @@
+From 1cb5a0333a5d2b3e79c318751d71a080a7869a88 Mon Sep 17 00:00:00 2001
+From: Frank Rowand <frank.rowand@sony.com>
+Date: Tue, 18 Dec 2018 11:40:02 -0800
+Subject: [PATCH 312/580] of: of_node_get()/of_node_put() nodes held in phandle
+ cache
+
+commit b8a9ac1a5b99a2fcbed19fd29d2d59270c281a31 upstream.
+
+The phandle cache contains struct device_node pointers.  The refcount
+of the pointers was not incremented while in the cache, allowing use
+after free error after kfree() of the node.  Add the proper increment
+and decrement of the use count.
+
+Fixes: 0b3ce78e90fc ("of: cache phandle nodes to reduce cost of of_find_node_by_phandle()")
+Cc: stable@vger.kernel.org # v4.17+
+Signed-off-by: Frank Rowand <frank.rowand@sony.com>
+Signed-off-by: Rob Herring <robh@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/of/base.c | 70 +++++++++++++++++++++++++++++++----------------
+ 1 file changed, 46 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/of/base.c b/drivers/of/base.c
+index 70f5fd08891b..0470cbbed560 100644
+--- a/drivers/of/base.c
++++ b/drivers/of/base.c
+@@ -115,9 +115,6 @@ int __weak of_node_to_nid(struct device_node *np)
+ }
+ #endif
+ 
+-static struct device_node **phandle_cache;
+-static u32 phandle_cache_mask;
+-
+ /*
+  * Assumptions behind phandle_cache implementation:
+  *   - phandle property values are in a contiguous range of 1..n
+@@ -126,6 +123,44 @@ static u32 phandle_cache_mask;
+  *   - the phandle lookup overhead reduction provided by the cache
+  *     will likely be less
+  */
++
++static struct device_node **phandle_cache;
++static u32 phandle_cache_mask;
++
++/*
++ * Caller must hold devtree_lock.
++ */
++static void __of_free_phandle_cache(void)
++{
++	u32 cache_entries = phandle_cache_mask + 1;
++	u32 k;
++
++	if (!phandle_cache)
++		return;
++
++	for (k = 0; k < cache_entries; k++)
++		of_node_put(phandle_cache[k]);
++
++	kfree(phandle_cache);
++	phandle_cache = NULL;
++}
++
++int of_free_phandle_cache(void)
++{
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&devtree_lock, flags);
++
++	__of_free_phandle_cache();
++
++	raw_spin_unlock_irqrestore(&devtree_lock, flags);
++
++	return 0;
++}
++#if !defined(CONFIG_MODULES)
++late_initcall_sync(of_free_phandle_cache);
++#endif
++
+ void of_populate_phandle_cache(void)
+ {
+ 	unsigned long flags;
+@@ -135,8 +170,7 @@ void of_populate_phandle_cache(void)
+ 
+ 	raw_spin_lock_irqsave(&devtree_lock, flags);
+ 
+-	kfree(phandle_cache);
+-	phandle_cache = NULL;
++	__of_free_phandle_cache();
+ 
+ 	for_each_of_allnodes(np)
+ 		if (np->phandle && np->phandle != OF_PHANDLE_ILLEGAL)
+@@ -154,30 +188,15 @@ void of_populate_phandle_cache(void)
+ 		goto out;
+ 
+ 	for_each_of_allnodes(np)
+-		if (np->phandle && np->phandle != OF_PHANDLE_ILLEGAL)
++		if (np->phandle && np->phandle != OF_PHANDLE_ILLEGAL) {
++			of_node_get(np);
+ 			phandle_cache[np->phandle & phandle_cache_mask] = np;
++		}
+ 
+ out:
+ 	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+ }
+ 
+-int of_free_phandle_cache(void)
+-{
+-	unsigned long flags;
+-
+-	raw_spin_lock_irqsave(&devtree_lock, flags);
+-
+-	kfree(phandle_cache);
+-	phandle_cache = NULL;
+-
+-	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+-
+-	return 0;
+-}
+-#if !defined(CONFIG_MODULES)
+-late_initcall_sync(of_free_phandle_cache);
+-#endif
+-
+ void __init of_core_init(void)
+ {
+ 	struct device_node *np;
+@@ -1155,8 +1174,11 @@ struct device_node *of_find_node_by_phandle(phandle handle)
+ 	if (!np) {
+ 		for_each_of_allnodes(np)
+ 			if (np->phandle == handle) {
+-				if (phandle_cache)
++				if (phandle_cache) {
++					/* will put when removed from cache */
++					of_node_get(np);
+ 					phandle_cache[masked_handle] = np;
++				}
+ 				break;
+ 			}
+ 	}
+-- 
+2.17.1
+

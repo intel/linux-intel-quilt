@@ -1,0 +1,53 @@
+From 0cb4f6559087e99c14f129bc1332c40e84fd0559 Mon Sep 17 00:00:00 2001
+From: Theodore Ts'o <tytso@mit.edu>
+Date: Wed, 19 Dec 2018 14:36:58 -0500
+Subject: [PATCH 112/580] ext4: check for shutdown and r/o file system in
+ ext4_write_inode()
+
+commit 18f2c4fcebf2582f96cbd5f2238f4f354a0e4847 upstream.
+
+If the file system has been shut down or is read-only, then
+ext4_write_inode() needs to bail out early.
+
+Also use jbd2_complete_transaction() instead of ext4_force_commit() so
+we only force a commit if it is needed.
+
+Signed-off-by: Theodore Ts'o <tytso@mit.edu>
+Cc: stable@kernel.org
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/ext4/inode.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index bcf08801f935..36abbdafb26e 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -5369,9 +5369,13 @@ int ext4_write_inode(struct inode *inode, struct writeback_control *wbc)
+ {
+ 	int err;
+ 
+-	if (WARN_ON_ONCE(current->flags & PF_MEMALLOC))
++	if (WARN_ON_ONCE(current->flags & PF_MEMALLOC) ||
++	    sb_rdonly(inode->i_sb))
+ 		return 0;
+ 
++	if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
++		return -EIO;
++
+ 	if (EXT4_SB(inode->i_sb)->s_journal) {
+ 		if (ext4_journal_current_handle()) {
+ 			jbd_debug(1, "called recursively, non-PF_MEMALLOC!\n");
+@@ -5387,7 +5391,8 @@ int ext4_write_inode(struct inode *inode, struct writeback_control *wbc)
+ 		if (wbc->sync_mode != WB_SYNC_ALL || wbc->for_sync)
+ 			return 0;
+ 
+-		err = ext4_force_commit(inode->i_sb);
++		err = jbd2_complete_transaction(EXT4_SB(inode->i_sb)->s_journal,
++						EXT4_I(inode)->i_sync_tid);
+ 	} else {
+ 		struct ext4_iloc iloc;
+ 
+-- 
+2.17.1
+

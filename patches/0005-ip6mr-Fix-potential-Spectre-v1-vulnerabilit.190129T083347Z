@@ -1,0 +1,62 @@
+From 32403fd3b529a6e226f41314aa901a192be19af1 Mon Sep 17 00:00:00 2001
+From: "Gustavo A. R. Silva" <gustavo@embeddedor.com>
+Date: Tue, 11 Dec 2018 14:10:08 -0600
+Subject: [PATCH 005/580] ip6mr: Fix potential Spectre v1 vulnerability
+
+[ Upstream commit 69d2c86766da2ded2b70281f1bf242cb0d58a778 ]
+
+vr.mifi is indirectly controlled by user-space, hence leading to
+a potential exploitation of the Spectre variant 1 vulnerability.
+
+This issue was detected with the help of Smatch:
+
+net/ipv6/ip6mr.c:1845 ip6mr_ioctl() warn: potential spectre issue 'mrt->vif_table' [r] (local cap)
+net/ipv6/ip6mr.c:1919 ip6mr_compat_ioctl() warn: potential spectre issue 'mrt->vif_table' [r] (local cap)
+
+Fix this by sanitizing vr.mifi before using it to index mrt->vif_table'
+
+Notice that given that speculation windows are large, the policy is
+to kill the speculation on the first load and not worry if it can be
+completed with a dependent load/store [1].
+
+[1] https://marc.info/?l=linux-kernel&m=152449131114778&w=2
+
+Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/ipv6/ip6mr.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/net/ipv6/ip6mr.c b/net/ipv6/ip6mr.c
+index d0b7e0249c13..fb70bbd9e6d1 100644
+--- a/net/ipv6/ip6mr.c
++++ b/net/ipv6/ip6mr.c
+@@ -52,6 +52,8 @@
+ #include <net/ip6_checksum.h>
+ #include <linux/netconf.h>
+ 
++#include <linux/nospec.h>
++
+ struct ip6mr_rule {
+ 	struct fib_rule		common;
+ };
+@@ -1831,6 +1833,7 @@ int ip6mr_ioctl(struct sock *sk, int cmd, void __user *arg)
+ 			return -EFAULT;
+ 		if (vr.mifi >= mrt->maxvif)
+ 			return -EINVAL;
++		vr.mifi = array_index_nospec(vr.mifi, mrt->maxvif);
+ 		read_lock(&mrt_lock);
+ 		vif = &mrt->vif_table[vr.mifi];
+ 		if (VIF_EXISTS(mrt, vr.mifi)) {
+@@ -1905,6 +1908,7 @@ int ip6mr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
+ 			return -EFAULT;
+ 		if (vr.mifi >= mrt->maxvif)
+ 			return -EINVAL;
++		vr.mifi = array_index_nospec(vr.mifi, mrt->maxvif);
+ 		read_lock(&mrt_lock);
+ 		vif = &mrt->vif_table[vr.mifi];
+ 		if (VIF_EXISTS(mrt, vr.mifi)) {
+-- 
+2.17.1
+

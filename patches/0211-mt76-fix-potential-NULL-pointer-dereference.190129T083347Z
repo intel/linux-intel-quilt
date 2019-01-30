@@ -1,0 +1,49 @@
+From 2e212750829792dcf723861d919ae622d78ea27e Mon Sep 17 00:00:00 2001
+From: Lorenzo Bianconi <lorenzo.bianconi@redhat.com>
+Date: Fri, 16 Nov 2018 17:19:21 +0100
+Subject: [PATCH 211/580] mt76: fix potential NULL pointer dereference in
+ mt76_stop_tx_queues
+
+[ Upstream commit 7c250f4612ae97aa04500c0d0cff69bb87046e3a ]
+
+Starting from mac80211 commit adf8ed01e4fd ("mac80211: add an optional
+TXQ for other PS-buffered frames") and commit 0eeb2b674f05 ("mac80211:
+add an option for station management TXQ") a new per-sta queue has been
+introduced for bufferable management frames.
+sta->txq[IEEE80211_NUM_TIDS] is initialized just if the driver reports
+the following hw flags:
+- IEEE80211_HW_STA_MMPDU_TXQ
+- IEEE80211_HW_BUFF_MMPDU_TXQ
+This can produce a NULL pointer dereference in mt76_stop_tx_queues
+since mt76 iterates on all available sta tx queues assuming they are
+initialized by mac80211. This issue has been spotted analyzing the code
+(it has not triggered any crash yet)
+
+Signed-off-by: Lorenzo Bianconi <lorenzo.bianconi@redhat.com>
+Signed-off-by: Kalle Valo <kvalo@codeaurora.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/wireless/mediatek/mt76/tx.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/mediatek/mt76/tx.c b/drivers/net/wireless/mediatek/mt76/tx.c
+index af48d43bb7dc..20447fdce4c3 100644
+--- a/drivers/net/wireless/mediatek/mt76/tx.c
++++ b/drivers/net/wireless/mediatek/mt76/tx.c
+@@ -385,7 +385,12 @@ void mt76_stop_tx_queues(struct mt76_dev *dev, struct ieee80211_sta *sta,
+ 
+ 	for (i = 0; i < ARRAY_SIZE(sta->txq); i++) {
+ 		struct ieee80211_txq *txq = sta->txq[i];
+-		struct mt76_txq *mtxq = (struct mt76_txq *) txq->drv_priv;
++		struct mt76_txq *mtxq;
++
++		if (!txq)
++			continue;
++
++		mtxq = (struct mt76_txq *)txq->drv_priv;
+ 
+ 		spin_lock_bh(&mtxq->hwq->lock);
+ 		mtxq->send_bar = mtxq->aggr && send_bar;
+-- 
+2.17.1
+

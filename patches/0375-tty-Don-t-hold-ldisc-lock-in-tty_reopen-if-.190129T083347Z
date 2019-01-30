@@ -1,0 +1,71 @@
+From a13520e0d5f5cf2ad805a68b97e391194ada2047 Mon Sep 17 00:00:00 2001
+From: Dmitry Safonov <dima@arista.com>
+Date: Wed, 9 Jan 2019 01:17:40 +0000
+Subject: [PATCH 375/580] tty: Don't hold ldisc lock in tty_reopen() if ldisc
+ present
+
+commit d3736d82e8169768218ee0ef68718875918091a0 upstream.
+
+Try to get reference for ldisc during tty_reopen().
+If ldisc present, we don't need to do tty_ldisc_reinit() and lock the
+write side for line discipline semaphore.
+Effectively, it optimizes fast-path for tty_reopen(), but more
+importantly it won't interrupt ongoing IO on the tty as no ldisc change
+is needed.
+Fixes user-visible issue when tty_reopen() interrupted login process for
+user with a long password, observed and reported by Lukas.
+
+Fixes: c96cf923a98d ("tty: Don't block on IO when ldisc change is pending")
+Fixes: 83d817f41070 ("tty: Hold tty_ldisc_lock() during tty_reopen()")
+Cc: Jiri Slaby <jslaby@suse.com>
+Reported-by: Lukas F. Hartmann <lukas@mntmn.com>
+Tested-by: Lukas F. Hartmann <lukas@mntmn.com>
+Cc: stable <stable@vger.kernel.org>
+Signed-off-by: Dmitry Safonov <dima@arista.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/tty/tty_io.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/tty/tty_io.c b/drivers/tty/tty_io.c
+index c92b112a28d6..052ec16a4e84 100644
+--- a/drivers/tty/tty_io.c
++++ b/drivers/tty/tty_io.c
+@@ -1255,7 +1255,8 @@ static void tty_driver_remove_tty(struct tty_driver *driver, struct tty_struct *
+ static int tty_reopen(struct tty_struct *tty)
+ {
+ 	struct tty_driver *driver = tty->driver;
+-	int retval;
++	struct tty_ldisc *ld;
++	int retval = 0;
+ 
+ 	if (driver->type == TTY_DRIVER_TYPE_PTY &&
+ 	    driver->subtype == PTY_TYPE_MASTER)
+@@ -1267,13 +1268,18 @@ static int tty_reopen(struct tty_struct *tty)
+ 	if (test_bit(TTY_EXCLUSIVE, &tty->flags) && !capable(CAP_SYS_ADMIN))
+ 		return -EBUSY;
+ 
+-	retval = tty_ldisc_lock(tty, 5 * HZ);
+-	if (retval)
+-		return retval;
++	ld = tty_ldisc_ref_wait(tty);
++	if (ld) {
++		tty_ldisc_deref(ld);
++	} else {
++		retval = tty_ldisc_lock(tty, 5 * HZ);
++		if (retval)
++			return retval;
+ 
+-	if (!tty->ldisc)
+-		retval = tty_ldisc_reinit(tty, tty->termios.c_line);
+-	tty_ldisc_unlock(tty);
++		if (!tty->ldisc)
++			retval = tty_ldisc_reinit(tty, tty->termios.c_line);
++		tty_ldisc_unlock(tty);
++	}
+ 
+ 	if (retval == 0)
+ 		tty->count++;
+-- 
+2.17.1
+

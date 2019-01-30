@@ -1,0 +1,72 @@
+From 598e57e029290be3e7f8f87ff908091a5a22ed2f Mon Sep 17 00:00:00 2001
+From: David Rientjes <rientjes@google.com>
+Date: Wed, 2 Jan 2019 13:01:43 -0800
+Subject: [PATCH 478/580] net, skbuff: do not prefer skb allocation fails early
+
+[ Upstream commit f8c468e8537925e0c4607263f498a1b7c0c8982e ]
+
+Commit dcda9b04713c ("mm, tree wide: replace __GFP_REPEAT by
+__GFP_RETRY_MAYFAIL with more useful semantic") replaced __GFP_REPEAT in
+alloc_skb_with_frags() with __GFP_RETRY_MAYFAIL when the allocation may
+directly reclaim.
+
+The previous behavior would require reclaim up to 1 << order pages for
+skb aligned header_len of order > PAGE_ALLOC_COSTLY_ORDER before failing,
+otherwise the allocations in alloc_skb() would loop in the page allocator
+looking for memory.  __GFP_RETRY_MAYFAIL makes both allocations failable
+under memory pressure, including for the HEAD allocation.
+
+This can cause, among many other things, write() to fail with ENOTCONN
+during RPC when under memory pressure.
+
+These allocations should succeed as they did previous to dcda9b04713c
+even if it requires calling the oom killer and additional looping in the
+page allocator to find memory.  There is no way to specify the previous
+behavior of __GFP_REPEAT, but it's unlikely to be necessary since the
+previous behavior only guaranteed that 1 << order pages would be reclaimed
+before failing for order > PAGE_ALLOC_COSTLY_ORDER.  That reclaim is not
+guaranteed to be contiguous memory, so repeating for such large orders is
+usually not beneficial.
+
+Removing the setting of __GFP_RETRY_MAYFAIL to restore the previous
+behavior, specifically not allowing alloc_skb() to fail for small orders
+and oom kill if necessary rather than allowing RPCs to fail.
+
+Fixes: dcda9b04713c ("mm, tree wide: replace __GFP_REPEAT by __GFP_RETRY_MAYFAIL with more useful semantic")
+Signed-off-by: David Rientjes <rientjes@google.com>
+Reviewed-by: Eric Dumazet <edumazet@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/core/skbuff.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index abbbd7fd17fe..589ec5b9ec5f 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -5258,7 +5258,6 @@ struct sk_buff *alloc_skb_with_frags(unsigned long header_len,
+ 	unsigned long chunk;
+ 	struct sk_buff *skb;
+ 	struct page *page;
+-	gfp_t gfp_head;
+ 	int i;
+ 
+ 	*errcode = -EMSGSIZE;
+@@ -5268,12 +5267,8 @@ struct sk_buff *alloc_skb_with_frags(unsigned long header_len,
+ 	if (npages > MAX_SKB_FRAGS)
+ 		return NULL;
+ 
+-	gfp_head = gfp_mask;
+-	if (gfp_head & __GFP_DIRECT_RECLAIM)
+-		gfp_head |= __GFP_RETRY_MAYFAIL;
+-
+ 	*errcode = -ENOBUFS;
+-	skb = alloc_skb(header_len, gfp_head);
++	skb = alloc_skb(header_len, gfp_mask);
+ 	if (!skb)
+ 		return NULL;
+ 
+-- 
+2.17.1
+

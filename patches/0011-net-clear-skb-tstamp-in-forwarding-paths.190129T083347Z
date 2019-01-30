@@ -1,0 +1,57 @@
+From 281731c8170accbec0f56e31b94bee62c0fcf2a4 Mon Sep 17 00:00:00 2001
+From: Eric Dumazet <edumazet@google.com>
+Date: Fri, 14 Dec 2018 06:46:49 -0800
+Subject: [PATCH 011/580] net: clear skb->tstamp in forwarding paths
+
+[ Upstream commit 8203e2d844d34af247a151d8ebd68553a6e91785 ]
+
+Sergey reported that forwarding was no longer working
+if fq packet scheduler was used.
+
+This is caused by the recent switch to EDT model, since incoming
+packets might have been timestamped by __net_timestamp()
+
+__net_timestamp() uses ktime_get_real(), while fq expects packets
+using CLOCK_MONOTONIC base.
+
+The fix is to clear skb->tstamp in forwarding paths.
+
+Fixes: 80b14dee2bea ("net: Add a new socket option for a future transmit time.")
+Fixes: fb420d5d91c1 ("tcp/fq: move back to CLOCK_MONOTONIC")
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Sergey Matyukevich <geomatsi@gmail.com>
+Tested-by: Sergey Matyukevich <geomatsi@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/ipv4/ip_forward.c | 1 +
+ net/ipv6/ip6_output.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/net/ipv4/ip_forward.c b/net/ipv4/ip_forward.c
+index 32662e9e5d21..d5984d31ab93 100644
+--- a/net/ipv4/ip_forward.c
++++ b/net/ipv4/ip_forward.c
+@@ -72,6 +72,7 @@ static int ip_forward_finish(struct net *net, struct sock *sk, struct sk_buff *s
+ 	if (unlikely(opt->optlen))
+ 		ip_forward_options(skb);
+ 
++	skb->tstamp = 0;
+ 	return dst_output(net, sk, skb);
+ }
+ 
+diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
+index 2694def1e72c..0bb87f3a10c7 100644
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -378,6 +378,7 @@ static inline int ip6_forward_finish(struct net *net, struct sock *sk,
+ 	__IP6_INC_STATS(net, ip6_dst_idev(dst), IPSTATS_MIB_OUTFORWDATAGRAMS);
+ 	__IP6_ADD_STATS(net, ip6_dst_idev(dst), IPSTATS_MIB_OUTOCTETS, skb->len);
+ 
++	skb->tstamp = 0;
+ 	return dst_output(net, sk, skb);
+ }
+ 
+-- 
+2.17.1
+

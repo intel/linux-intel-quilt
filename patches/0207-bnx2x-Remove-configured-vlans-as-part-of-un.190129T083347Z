@@ -1,0 +1,115 @@
+From 53471f0d893dd2c52f21872a59b5a3e9da8e2d81 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Wed, 12 Dec 2018 08:57:01 -0800
+Subject: [PATCH 207/580] bnx2x: Remove configured vlans as part of unload
+ sequence.
+
+[ Upstream commit 04f05230c5c13b1384f66f5186a68d7499e34622 ]
+
+Vlans are not getting removed when drivers are unloaded. The recent storm
+firmware versions had added safeguards against re-configuring an already
+configured vlan. As a result, PF inner reload flows (e.g., mtu change)
+might trigger an assertion.
+This change is going to remove vlans (same as we do for MACs) when doing
+a chip cleanup during unload.
+
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ .../net/ethernet/broadcom/bnx2x/bnx2x_main.c  | 34 +++++++++++++++----
+ .../net/ethernet/broadcom/bnx2x/bnx2x_sp.h    |  4 ++-
+ 2 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+index b05c1d0f829b..20e5cda6555e 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+@@ -8462,6 +8462,7 @@ int bnx2x_set_vlan_one(struct bnx2x *bp, u16 vlan,
+ 	/* Fill a user request section if needed */
+ 	if (!test_bit(RAMROD_CONT, ramrod_flags)) {
+ 		ramrod_param.user_req.u.vlan.vlan = vlan;
++		__set_bit(BNX2X_VLAN, &ramrod_param.user_req.vlan_mac_flags);
+ 		/* Set the command: ADD or DEL */
+ 		if (set)
+ 			ramrod_param.user_req.cmd = BNX2X_VLAN_MAC_ADD;
+@@ -8482,6 +8483,27 @@ int bnx2x_set_vlan_one(struct bnx2x *bp, u16 vlan,
+ 	return rc;
+ }
+ 
++static int bnx2x_del_all_vlans(struct bnx2x *bp)
++{
++	struct bnx2x_vlan_mac_obj *vlan_obj = &bp->sp_objs[0].vlan_obj;
++	unsigned long ramrod_flags = 0, vlan_flags = 0;
++	struct bnx2x_vlan_entry *vlan;
++	int rc;
++
++	__set_bit(RAMROD_COMP_WAIT, &ramrod_flags);
++	__set_bit(BNX2X_VLAN, &vlan_flags);
++	rc = vlan_obj->delete_all(bp, vlan_obj, &vlan_flags, &ramrod_flags);
++	if (rc)
++		return rc;
++
++	/* Mark that hw forgot all entries */
++	list_for_each_entry(vlan, &bp->vlan_reg, link)
++		vlan->hw = false;
++	bp->vlan_cnt = 0;
++
++	return 0;
++}
++
+ int bnx2x_del_all_macs(struct bnx2x *bp,
+ 		       struct bnx2x_vlan_mac_obj *mac_obj,
+ 		       int mac_type, bool wait_for_comp)
+@@ -9320,6 +9342,11 @@ void bnx2x_chip_cleanup(struct bnx2x *bp, int unload_mode, bool keep_link)
+ 		BNX2X_ERR("Failed to schedule DEL commands for UC MACs list: %d\n",
+ 			  rc);
+ 
++	/* Remove all currently configured VLANs */
++	rc = bnx2x_del_all_vlans(bp);
++	if (rc < 0)
++		BNX2X_ERR("Failed to delete all VLANs\n");
++
+ 	/* Disable LLH */
+ 	if (!CHIP_IS_E1(bp))
+ 		REG_WR(bp, NIG_REG_LLH0_FUNC_EN + port*8, 0);
+@@ -13016,13 +13043,6 @@ static void bnx2x_vlan_configure(struct bnx2x *bp, bool set_rx_mode)
+ 
+ int bnx2x_vlan_reconfigure_vid(struct bnx2x *bp)
+ {
+-	struct bnx2x_vlan_entry *vlan;
+-
+-	/* The hw forgot all entries after reload */
+-	list_for_each_entry(vlan, &bp->vlan_reg, link)
+-		vlan->hw = false;
+-	bp->vlan_cnt = 0;
+-
+ 	/* Don't set rx mode here. Our caller will do it. */
+ 	bnx2x_vlan_configure(bp, false);
+ 
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_sp.h b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_sp.h
+index 0bf2fd470819..7a6e82db4231 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_sp.h
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_sp.h
+@@ -265,6 +265,7 @@ enum {
+ 	BNX2X_ETH_MAC,
+ 	BNX2X_ISCSI_ETH_MAC,
+ 	BNX2X_NETQ_ETH_MAC,
++	BNX2X_VLAN,
+ 	BNX2X_DONT_CONSUME_CAM_CREDIT,
+ 	BNX2X_DONT_CONSUME_CAM_CREDIT_DEST,
+ };
+@@ -272,7 +273,8 @@ enum {
+ #define BNX2X_VLAN_MAC_CMP_MASK	(1 << BNX2X_UC_LIST_MAC | \
+ 				 1 << BNX2X_ETH_MAC | \
+ 				 1 << BNX2X_ISCSI_ETH_MAC | \
+-				 1 << BNX2X_NETQ_ETH_MAC)
++				 1 << BNX2X_NETQ_ETH_MAC | \
++				 1 << BNX2X_VLAN)
+ #define BNX2X_VLAN_MAC_CMP_FLAGS(flags) \
+ 	((flags) & BNX2X_VLAN_MAC_CMP_MASK)
+ 
+-- 
+2.17.1
+

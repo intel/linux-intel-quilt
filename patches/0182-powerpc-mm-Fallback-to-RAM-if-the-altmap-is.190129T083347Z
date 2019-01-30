@@ -1,0 +1,91 @@
+From 54568ab2e11f2744674ced22763939245a16ace2 Mon Sep 17 00:00:00 2001
+From: Oliver O'Halloran <oohall@gmail.com>
+Date: Fri, 7 Dec 2018 02:17:14 +1100
+Subject: [PATCH 182/580] powerpc/mm: Fallback to RAM if the altmap is unusable
+
+[ Upstream commit 9ef34630a4614ee1cd478f9859ebea55d55f10ec ]
+
+The "altmap" is used to provide a pool of memory that is reserved for
+the vmemmap backing of hot-plugged memory. This is useful when adding
+large amount of ZONE_DEVICE memory to a system with a limited amount of
+normal memory.
+
+On ppc64 we use huge pages to map the vmemmap which requires the backing
+storage to be contigious and aligned to the hugepage size. The altmap
+implementation allows for the altmap provider to reserve a few PFNs at
+the start of the range for it's own uses and when this occurs the
+first chunk of the altmap is not usable for hugepage mappings. On hash
+there is no sane way to fall back to a normal sized page mapping so we
+fail the allocation. This results in memory hotplug failing with
+ENOMEM when the new range doesn't fall into an existing vmemmap block.
+
+This patch handles this case by falling back to using system memory
+rather than failing if we cannot allocate from the altmap. This
+fallback should only ever be used for the first vmemmap block so it
+should not cause excess memory consumption.
+
+Fixes: 7b73d978a5d0 ("mm: pass the vmem_altmap to vmemmap_populate")
+Signed-off-by: Oliver O'Halloran <oohall@gmail.com>
+Signed-off-by: Michael Ellerman <mpe@ellerman.id.au>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ arch/powerpc/mm/init_64.c | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/arch/powerpc/mm/init_64.c b/arch/powerpc/mm/init_64.c
+index 7a9886f98b0c..a5091c034747 100644
+--- a/arch/powerpc/mm/init_64.c
++++ b/arch/powerpc/mm/init_64.c
+@@ -188,15 +188,20 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end, int node,
+ 	pr_debug("vmemmap_populate %lx..%lx, node %d\n", start, end, node);
+ 
+ 	for (; start < end; start += page_size) {
+-		void *p;
++		void *p = NULL;
+ 		int rc;
+ 
+ 		if (vmemmap_populated(start, page_size))
+ 			continue;
+ 
++		/*
++		 * Allocate from the altmap first if we have one. This may
++		 * fail due to alignment issues when using 16MB hugepages, so
++		 * fall back to system memory if the altmap allocation fail.
++		 */
+ 		if (altmap)
+ 			p = altmap_alloc_block_buf(page_size, altmap);
+-		else
++		if (!p)
+ 			p = vmemmap_alloc_block_buf(page_size, node);
+ 		if (!p)
+ 			return -ENOMEM;
+@@ -255,8 +260,15 @@ void __ref vmemmap_free(unsigned long start, unsigned long end,
+ {
+ 	unsigned long page_size = 1 << mmu_psize_defs[mmu_vmemmap_psize].shift;
+ 	unsigned long page_order = get_order(page_size);
++	unsigned long alt_start = ~0, alt_end = ~0;
++	unsigned long base_pfn;
+ 
+ 	start = _ALIGN_DOWN(start, page_size);
++	if (altmap) {
++		alt_start = altmap->base_pfn;
++		alt_end = altmap->base_pfn + altmap->reserve +
++			  altmap->free + altmap->alloc + altmap->align;
++	}
+ 
+ 	pr_debug("vmemmap_free %lx...%lx\n", start, end);
+ 
+@@ -280,8 +292,9 @@ void __ref vmemmap_free(unsigned long start, unsigned long end,
+ 		page = pfn_to_page(addr >> PAGE_SHIFT);
+ 		section_base = pfn_to_page(vmemmap_section_start(start));
+ 		nr_pages = 1 << page_order;
++		base_pfn = PHYS_PFN(addr);
+ 
+-		if (altmap) {
++		if (base_pfn >= alt_start && base_pfn < alt_end) {
+ 			vmem_altmap_free(altmap, nr_pages);
+ 		} else if (PageReserved(page)) {
+ 			/* allocated from bootmem */
+-- 
+2.17.1
+

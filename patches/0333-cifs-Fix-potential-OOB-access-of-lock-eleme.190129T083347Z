@@ -1,0 +1,69 @@
+From 2a71a47e03ffa7aa68893406f8134977cb164b59 Mon Sep 17 00:00:00 2001
+From: Ross Lagerwall <ross.lagerwall@citrix.com>
+Date: Tue, 8 Jan 2019 18:30:57 +0000
+Subject: [PATCH 333/580] cifs: Fix potential OOB access of lock element array
+
+commit b9a74cde94957d82003fb9f7ab4777938ca851cd upstream.
+
+If maxBuf is small but non-zero, it could result in a zero sized lock
+element array which we would then try and access OOB.
+
+Signed-off-by: Ross Lagerwall <ross.lagerwall@citrix.com>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+CC: Stable <stable@vger.kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/cifs/file.c     | 8 ++++----
+ fs/cifs/smb2file.c | 4 ++--
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/fs/cifs/file.c b/fs/cifs/file.c
+index 8d41ca7bfcf1..7b637fc27990 100644
+--- a/fs/cifs/file.c
++++ b/fs/cifs/file.c
+@@ -1120,10 +1120,10 @@ cifs_push_mandatory_locks(struct cifsFileInfo *cfile)
+ 
+ 	/*
+ 	 * Accessing maxBuf is racy with cifs_reconnect - need to store value
+-	 * and check it for zero before using.
++	 * and check it before using.
+ 	 */
+ 	max_buf = tcon->ses->server->maxBuf;
+-	if (!max_buf) {
++	if (max_buf < (sizeof(struct smb_hdr) + sizeof(LOCKING_ANDX_RANGE))) {
+ 		free_xid(xid);
+ 		return -EINVAL;
+ 	}
+@@ -1460,10 +1460,10 @@ cifs_unlock_range(struct cifsFileInfo *cfile, struct file_lock *flock,
+ 
+ 	/*
+ 	 * Accessing maxBuf is racy with cifs_reconnect - need to store value
+-	 * and check it for zero before using.
++	 * and check it before using.
+ 	 */
+ 	max_buf = tcon->ses->server->maxBuf;
+-	if (!max_buf)
++	if (max_buf < (sizeof(struct smb_hdr) + sizeof(LOCKING_ANDX_RANGE)))
+ 		return -EINVAL;
+ 
+ 	max_num = (max_buf - sizeof(struct smb_hdr)) /
+diff --git a/fs/cifs/smb2file.c b/fs/cifs/smb2file.c
+index 4ed10dd086e6..2fc3d31967ee 100644
+--- a/fs/cifs/smb2file.c
++++ b/fs/cifs/smb2file.c
+@@ -122,10 +122,10 @@ smb2_unlock_range(struct cifsFileInfo *cfile, struct file_lock *flock,
+ 
+ 	/*
+ 	 * Accessing maxBuf is racy with cifs_reconnect - need to store value
+-	 * and check it for zero before using.
++	 * and check it before using.
+ 	 */
+ 	max_buf = tcon->ses->server->maxBuf;
+-	if (!max_buf)
++	if (max_buf < sizeof(struct smb2_lock_element))
+ 		return -EINVAL;
+ 
+ 	max_num = max_buf / sizeof(struct smb2_lock_element);
+-- 
+2.17.1
+

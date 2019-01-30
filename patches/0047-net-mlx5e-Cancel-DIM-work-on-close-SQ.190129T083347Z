@@ -1,0 +1,39 @@
+From 78512e346836e27d0711a636160fb70749f379f7 Mon Sep 17 00:00:00 2001
+From: Tal Gilboa <talgi@mellanox.com>
+Date: Thu, 22 Nov 2018 14:20:45 +0200
+Subject: [PATCH 047/580] net/mlx5e: Cancel DIM work on close SQ
+
+[ Upstream commit fa2bf86bab4bbc61e5678a42a14e40075093a98f ]
+
+TXQ SQ closure is followed by closing the corresponding CQ. A pending
+DIM work would try to modify the now non-existing CQ.
+This would trigger an error:
+[85535.835926] mlx5_core 0000:af:00.0: mlx5_cmd_check:769:(pid 124399):
+MODIFY_CQ(0x403) op_mod(0x0) failed, status bad resource state(0x9), syndrome (0x1d7771)
+
+Fix by making sure to cancel any pending DIM work before destroying the SQ.
+
+Fixes: cbce4f444798 ("net/mlx5e: Enable adaptive-TX moderation")
+Signed-off-by: Tal Gilboa <talgi@mellanox.com>
+Reviewed-by: Tariq Toukan <tariqt@mellanox.com>
+Signed-off-by: Saeed Mahameed <saeedm@mellanox.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/mellanox/mlx5/core/en_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+index faa84b45e20a..fddb6001e3a7 100644
+--- a/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
++++ b/drivers/net/ethernet/mellanox/mlx5/core/en_main.c
+@@ -1383,6 +1383,7 @@ static void mlx5e_close_txqsq(struct mlx5e_txqsq *sq)
+ 	struct mlx5_core_dev *mdev = c->mdev;
+ 	struct mlx5_rate_limit rl = {0};
+ 
++	cancel_work_sync(&sq->dim.work);
+ 	mlx5e_destroy_sq(mdev, sq->sqn);
+ 	if (sq->rate_limit) {
+ 		rl.rate = sq->rate_limit;
+-- 
+2.17.1
+

@@ -1,0 +1,70 @@
+From db2ca348c80c462e0f896287366df8b090b486a6 Mon Sep 17 00:00:00 2001
+From: Yonglong Liu <liuyonglong@huawei.com>
+Date: Sat, 15 Dec 2018 11:53:26 +0800
+Subject: [PATCH 222/580] net: hns: Avoid net reset caused by pause frames
+ storm
+
+[ Upstream commit a57275d35576fdd89d8c771eedf1e7cf97e0dfa6 ]
+
+There will be a large number of MAC pause frames on the net,
+which caused tx timeout of net device. And then the net device
+was reset to try to recover it. So that is not useful, and will
+cause some other problems.
+
+So need doubled ndev->watchdog_timeo if device watchdog occurred
+until watchdog_timeo up to 40s and then try resetting to recover
+it.
+
+When collecting dfx information such as hardware registers when tx timeout.
+Some registers for count were cleared when read. So need move this task
+before update net state which also read the count registers.
+
+Signed-off-by: Yonglong Liu <liuyonglong@huawei.com>
+Signed-off-by: Peng Li <lipeng321@huawei.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/hisilicon/hns/hns_enet.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/hisilicon/hns/hns_enet.c b/drivers/net/ethernet/hisilicon/hns/hns_enet.c
+index 03d959c7a39f..8a53c82c72b4 100644
+--- a/drivers/net/ethernet/hisilicon/hns/hns_enet.c
++++ b/drivers/net/ethernet/hisilicon/hns/hns_enet.c
+@@ -1509,11 +1509,19 @@ static int hns_nic_net_stop(struct net_device *ndev)
+ }
+ 
+ static void hns_tx_timeout_reset(struct hns_nic_priv *priv);
++#define HNS_TX_TIMEO_LIMIT (40 * HZ)
+ static void hns_nic_net_timeout(struct net_device *ndev)
+ {
+ 	struct hns_nic_priv *priv = netdev_priv(ndev);
+ 
+-	hns_tx_timeout_reset(priv);
++	if (ndev->watchdog_timeo < HNS_TX_TIMEO_LIMIT) {
++		ndev->watchdog_timeo *= 2;
++		netdev_info(ndev, "watchdog_timo changed to %d.\n",
++			    ndev->watchdog_timeo);
++	} else {
++		ndev->watchdog_timeo = HNS_NIC_TX_TIMEOUT;
++		hns_tx_timeout_reset(priv);
++	}
+ }
+ 
+ static int hns_nic_do_ioctl(struct net_device *netdev, struct ifreq *ifr,
+@@ -2076,11 +2084,11 @@ static void hns_nic_service_task(struct work_struct *work)
+ 		= container_of(work, struct hns_nic_priv, service_task);
+ 	struct hnae_handle *h = priv->ae_handle;
+ 
++	hns_nic_reset_subtask(priv);
+ 	hns_nic_update_link_status(priv->netdev);
+ 	h->dev->ops->update_led_status(h);
+ 	hns_nic_update_stats(priv->netdev);
+ 
+-	hns_nic_reset_subtask(priv);
+ 	hns_nic_service_event_complete(priv);
+ }
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,61 @@
+From 13e554feddbd4ed8a3c1168036c696fa08fc05f2 Mon Sep 17 00:00:00 2001
+From: "Lendacky, Thomas" <Thomas.Lendacky@amd.com>
+Date: Mon, 17 Dec 2018 14:39:16 +0000
+Subject: [PATCH 271/580] dma-direct: do not include SME mask in the DMA
+ supported check
+
+commit c92a54cfa0257e8ffd66b2a17d49e9c0bd4b769f upstream.
+
+The dma_direct_supported() function intends to check the DMA mask against
+specific values. However, the phys_to_dma() function includes the SME
+encryption mask, which defeats the intended purpose of the check. This
+results in drivers that support less than 48-bit DMA (SME encryption mask
+is bit 47) from being able to set the DMA mask successfully when SME is
+active, which results in the driver failing to initialize.
+
+Change the function used to check the mask from phys_to_dma() to
+__phys_to_dma() so that the SME encryption mask is not part of the check.
+
+Fixes: c1d0af1a1d5d ("kernel/dma/direct: take DMA offset into account in dma_direct_supported")
+Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ kernel/dma/direct.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/dma/direct.c b/kernel/dma/direct.c
+index de87b0282e74..1d2f147f737d 100644
+--- a/kernel/dma/direct.c
++++ b/kernel/dma/direct.c
+@@ -168,7 +168,12 @@ int dma_direct_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
+ int dma_direct_supported(struct device *dev, u64 mask)
+ {
+ #ifdef CONFIG_ZONE_DMA
+-	if (mask < phys_to_dma(dev, DMA_BIT_MASK(ARCH_ZONE_DMA_BITS)))
++	/*
++	 * This check needs to be against the actual bit mask value, so
++	 * use __phys_to_dma() here so that the SME encryption mask isn't
++	 * part of the check.
++	 */
++	if (mask < __phys_to_dma(dev, DMA_BIT_MASK(ARCH_ZONE_DMA_BITS)))
+ 		return 0;
+ #else
+ 	/*
+@@ -176,8 +181,12 @@ int dma_direct_supported(struct device *dev, u64 mask)
+ 	 * to be able to satisfy them - either by not supporting more physical
+ 	 * memory, or by providing a ZONE_DMA32.  If neither is the case, the
+ 	 * architecture needs to use an IOMMU instead of the direct mapping.
++	 *
++	 * This check needs to be against the actual bit mask value, so
++	 * use __phys_to_dma() here so that the SME encryption mask isn't
++	 * part of the check.
+ 	 */
+-	if (mask < phys_to_dma(dev, DMA_BIT_MASK(32)))
++	if (mask < __phys_to_dma(dev, DMA_BIT_MASK(32)))
+ 		return 0;
+ #endif
+ 	/*
+-- 
+2.17.1
+

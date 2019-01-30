@@ -1,0 +1,97 @@
+From 98876c46efd0cda22eabc15187fca86ca056d4f5 Mon Sep 17 00:00:00 2001
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+Date: Mon, 17 Dec 2018 15:05:41 +0200
+Subject: [PATCH 231/580] net: macb: add missing barriers when reading
+ descriptors
+
+[ Upstream commit 6e0af298066f3b6d99f58989bb0dca6f764b4c6d ]
+
+When reading buffer descriptors on RX or on TX completion, an
+RX_USED/TX_USED bit is checked first to ensure that the descriptors have
+been populated, i.e. the ownership has been transferred. However, there
+are no memory barriers to ensure that the data protected by the
+RX_USED/TX_USED bit is up-to-date with respect to that bit.
+
+Specifically:
+
+- TX timestamp descriptors may be loaded before ctrl is loaded for the
+  TX_USED check, which is racy as the descriptors may be updated between
+  the loads, causing old timestamp descriptor data to be used.
+
+- RX ctrl may be loaded before addr is loaded for the RX_USED check,
+  which is racy as a new frame may be written between the loads, causing
+  old ctrl descriptor data to be used.
+  This issue exists for both macb_rx() and gem_rx() variants.
+
+Fix the races by adding DMA read memory barriers on those paths and
+reordering the reads in macb_rx().
+
+I have not observed any actual problems in practice caused by these
+being missing, though.
+
+Tested on a ZynqMP based system.
+
+Fixes: 89e5785fc8a6 ("[PATCH] Atmel MACB ethernet driver")
+Signed-off-by: Anssi Hannula <anssi.hannula@bitwise.fi>
+Cc: Nicolas Ferre <nicolas.ferre@microchip.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/cadence/macb_main.c | 13 ++++++++++---
+ drivers/net/ethernet/cadence/macb_ptp.c  |  2 ++
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index b8b37afc5dc3..8f4b2f9a8e07 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -1001,11 +1001,15 @@ static int gem_rx(struct macb_queue *queue, int budget)
+ 
+ 		rxused = (desc->addr & MACB_BIT(RX_USED)) ? true : false;
+ 		addr = macb_get_addr(bp, desc);
+-		ctrl = desc->ctrl;
+ 
+ 		if (!rxused)
+ 			break;
+ 
++		/* Ensure ctrl is at least as up-to-date as rxused */
++		dma_rmb();
++
++		ctrl = desc->ctrl;
++
+ 		queue->rx_tail++;
+ 		count++;
+ 
+@@ -1180,11 +1184,14 @@ static int macb_rx(struct macb_queue *queue, int budget)
+ 		/* Make hw descriptor updates visible to CPU */
+ 		rmb();
+ 
+-		ctrl = desc->ctrl;
+-
+ 		if (!(desc->addr & MACB_BIT(RX_USED)))
+ 			break;
+ 
++		/* Ensure ctrl is at least as up-to-date as addr */
++		dma_rmb();
++
++		ctrl = desc->ctrl;
++
+ 		if (ctrl & MACB_BIT(RX_SOF)) {
+ 			if (first_frag != -1)
+ 				discard_partial_frame(queue, first_frag, tail);
+diff --git a/drivers/net/ethernet/cadence/macb_ptp.c b/drivers/net/ethernet/cadence/macb_ptp.c
+index cd5296b84229..a6dc47edc4cf 100644
+--- a/drivers/net/ethernet/cadence/macb_ptp.c
++++ b/drivers/net/ethernet/cadence/macb_ptp.c
+@@ -319,6 +319,8 @@ int gem_ptp_txstamp(struct macb_queue *queue, struct sk_buff *skb,
+ 	desc_ptp = macb_ptp_desc(queue->bp, desc);
+ 	tx_timestamp = &queue->tx_timestamps[head];
+ 	tx_timestamp->skb = skb;
++	/* ensure ts_1/ts_2 is loaded after ctrl (TX_USED check) */
++	dma_rmb();
+ 	tx_timestamp->desc_ptp.ts_1 = desc_ptp->ts_1;
+ 	tx_timestamp->desc_ptp.ts_2 = desc_ptp->ts_2;
+ 	/* move head */
+-- 
+2.17.1
+

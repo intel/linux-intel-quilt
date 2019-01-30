@@ -1,0 +1,120 @@
+From 753abe2a63398267abeed0e358181865eae5976b Mon Sep 17 00:00:00 2001
+From: "Gustavo A. R. Silva" <gustavo@embeddedor.com>
+Date: Wed, 9 Jan 2019 17:39:06 -0600
+Subject: [PATCH 576/580] ipmi: msghandler: Fix potential Spectre v1
+ vulnerabilities
+
+commit a7102c7461794a5bb31af24b08e9e0f50038897a upstream.
+
+channel and addr->channel are indirectly controlled by user-space,
+hence leading to a potential exploitation of the Spectre variant 1
+vulnerability.
+
+These issues were detected with the help of Smatch:
+
+drivers/char/ipmi/ipmi_msghandler.c:1381 ipmi_set_my_address() warn: potential spectre issue 'user->intf->addrinfo' [w] (local cap)
+drivers/char/ipmi/ipmi_msghandler.c:1401 ipmi_get_my_address() warn: potential spectre issue 'user->intf->addrinfo' [r] (local cap)
+drivers/char/ipmi/ipmi_msghandler.c:1421 ipmi_set_my_LUN() warn: potential spectre issue 'user->intf->addrinfo' [w] (local cap)
+drivers/char/ipmi/ipmi_msghandler.c:1441 ipmi_get_my_LUN() warn: potential spectre issue 'user->intf->addrinfo' [r] (local cap)
+drivers/char/ipmi/ipmi_msghandler.c:2260 check_addr() warn: potential spectre issue 'intf->addrinfo' [r] (local cap)
+
+Fix this by sanitizing channel and addr->channel before using them to
+index user->intf->addrinfo and intf->addrinfo, correspondingly.
+
+Notice that given that speculation windows are large, the policy is
+to kill the speculation on the first load and not worry if it can be
+completed with a dependent load/store [1].
+
+[1] https://lore.kernel.org/lkml/20180423164740.GY17484@dhcp22.suse.cz/
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Gustavo A. R. Silva <gustavo@embeddedor.com>
+Signed-off-by: Corey Minyard <cminyard@mvista.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/char/ipmi/ipmi_msghandler.c | 26 ++++++++++++++++++--------
+ 1 file changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/char/ipmi/ipmi_msghandler.c b/drivers/char/ipmi/ipmi_msghandler.c
+index a32e573b2d1d..de67f220b7a9 100644
+--- a/drivers/char/ipmi/ipmi_msghandler.c
++++ b/drivers/char/ipmi/ipmi_msghandler.c
+@@ -29,6 +29,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/workqueue.h>
+ #include <linux/uuid.h>
++#include <linux/nospec.h>
+ 
+ #define PFX "IPMI message handler: "
+ 
+@@ -1297,10 +1298,12 @@ int ipmi_set_my_address(struct ipmi_user *user,
+ 	if (!user)
+ 		return -ENODEV;
+ 
+-	if (channel >= IPMI_MAX_CHANNELS)
++	if (channel >= IPMI_MAX_CHANNELS) {
+ 		rv = -EINVAL;
+-	else
++	} else {
++		channel = array_index_nospec(channel, IPMI_MAX_CHANNELS);
+ 		user->intf->addrinfo[channel].address = address;
++	}
+ 	release_ipmi_user(user, index);
+ 
+ 	return rv;
+@@ -1317,10 +1320,12 @@ int ipmi_get_my_address(struct ipmi_user *user,
+ 	if (!user)
+ 		return -ENODEV;
+ 
+-	if (channel >= IPMI_MAX_CHANNELS)
++	if (channel >= IPMI_MAX_CHANNELS) {
+ 		rv = -EINVAL;
+-	else
++	} else {
++		channel = array_index_nospec(channel, IPMI_MAX_CHANNELS);
+ 		*address = user->intf->addrinfo[channel].address;
++	}
+ 	release_ipmi_user(user, index);
+ 
+ 	return rv;
+@@ -1337,10 +1342,12 @@ int ipmi_set_my_LUN(struct ipmi_user *user,
+ 	if (!user)
+ 		return -ENODEV;
+ 
+-	if (channel >= IPMI_MAX_CHANNELS)
++	if (channel >= IPMI_MAX_CHANNELS) {
+ 		rv = -EINVAL;
+-	else
++	} else {
++		channel = array_index_nospec(channel, IPMI_MAX_CHANNELS);
+ 		user->intf->addrinfo[channel].lun = LUN & 0x3;
++	}
+ 	release_ipmi_user(user, index);
+ 
+ 	return 0;
+@@ -1357,10 +1364,12 @@ int ipmi_get_my_LUN(struct ipmi_user *user,
+ 	if (!user)
+ 		return -ENODEV;
+ 
+-	if (channel >= IPMI_MAX_CHANNELS)
++	if (channel >= IPMI_MAX_CHANNELS) {
+ 		rv = -EINVAL;
+-	else
++	} else {
++		channel = array_index_nospec(channel, IPMI_MAX_CHANNELS);
+ 		*address = user->intf->addrinfo[channel].lun;
++	}
+ 	release_ipmi_user(user, index);
+ 
+ 	return rv;
+@@ -2184,6 +2193,7 @@ static int check_addr(struct ipmi_smi  *intf,
+ {
+ 	if (addr->channel >= IPMI_MAX_CHANNELS)
+ 		return -EINVAL;
++	addr->channel = array_index_nospec(addr->channel, IPMI_MAX_CHANNELS);
+ 	*lun = intf->addrinfo[addr->channel].lun;
+ 	*saddr = intf->addrinfo[addr->channel].address;
+ 	return 0;
+-- 
+2.17.1
+

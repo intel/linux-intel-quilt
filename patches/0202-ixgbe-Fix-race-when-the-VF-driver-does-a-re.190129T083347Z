@@ -1,0 +1,65 @@
+From 27f59f342f7c04a1f96f4b586d67e73b620f4f71 Mon Sep 17 00:00:00 2001
+From: Ross Lagerwall <ross.lagerwall@citrix.com>
+Date: Wed, 5 Dec 2018 13:54:26 +0000
+Subject: [PATCH 202/580] ixgbe: Fix race when the VF driver does a reset
+
+[ Upstream commit 96d1a731611f711f0cb82cea93363ae2ea8cb028 ]
+
+When the VF driver does a reset, it (at least the Linux one) writes to
+the VFCTRL register to issue a reset and then immediately sends a reset
+message using the mailbox API. This is racy because when the PF driver
+detects that the VFCTRL register reset pin has been asserted, it clears
+the mailbox memory. Depending on ordering, the reset message sent by
+the VF could be cleared by the PF driver. It then responds to the
+cleared message with a NACK which causes the VF driver to malfunction.
+Fix this by deferring clearing the mailbox memory until the reset
+message is received.
+
+Fixes: 939b701ad633 ("ixgbe: fix driver behaviour after issuing VFLR")
+Signed-off-by: Ross Lagerwall <ross.lagerwall@citrix.com>
+Tested-by: Andrew Bowers <andrewx.bowers@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c b/drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c
+index eea63a99f29c..f6ffd9fb2079 100644
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_sriov.c
+@@ -699,7 +699,6 @@ static inline void ixgbe_vf_reset_event(struct ixgbe_adapter *adapter, u32 vf)
+ 	u8 num_tcs = adapter->hw_tcs;
+ 	u32 reg_val;
+ 	u32 queue;
+-	u32 word;
+ 
+ 	/* remove VLAN filters beloning to this VF */
+ 	ixgbe_clear_vf_vlans(adapter, vf);
+@@ -754,6 +753,14 @@ static inline void ixgbe_vf_reset_event(struct ixgbe_adapter *adapter, u32 vf)
+ 		}
+ 	}
+ 
++	IXGBE_WRITE_FLUSH(hw);
++}
++
++static void ixgbe_vf_clear_mbx(struct ixgbe_adapter *adapter, u32 vf)
++{
++	struct ixgbe_hw *hw = &adapter->hw;
++	u32 word;
++
+ 	/* Clear VF's mailbox memory */
+ 	for (word = 0; word < IXGBE_VFMAILBOX_SIZE; word++)
+ 		IXGBE_WRITE_REG_ARRAY(hw, IXGBE_PFMBMEM(vf), word, 0);
+@@ -827,6 +834,8 @@ static int ixgbe_vf_reset_msg(struct ixgbe_adapter *adapter, u32 vf)
+ 	/* reset the filters for the device */
+ 	ixgbe_vf_reset_event(adapter, vf);
+ 
++	ixgbe_vf_clear_mbx(adapter, vf);
++
+ 	/* set vf mac address */
+ 	if (!is_zero_ether_addr(vf_mac))
+ 		ixgbe_set_vf_mac(adapter, vf, vf_mac);
+-- 
+2.17.1
+

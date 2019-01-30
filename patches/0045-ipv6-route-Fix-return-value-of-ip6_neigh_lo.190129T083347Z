@@ -1,0 +1,46 @@
+From ccc8b37473276bf7552369ff86406f90d947c2f6 Mon Sep 17 00:00:00 2001
+From: Stefano Brivio <sbrivio@redhat.com>
+Date: Wed, 2 Jan 2019 13:29:27 +0100
+Subject: [PATCH 045/580] ipv6: route: Fix return value of ip6_neigh_lookup()
+ on neigh_create() error
+
+[ Upstream commit 7adf3246092f5e87ed0fa610e8088fae416c581f ]
+
+In ip6_neigh_lookup(), we must not return errors coming from
+neigh_create(): if creation of a neighbour entry fails, the lookup should
+return NULL, in the same way as it's done in __neigh_lookup().
+
+Otherwise, callers legitimately checking for a non-NULL return value of
+the lookup function might dereference an invalid pointer.
+
+For instance, on neighbour table overflow, ndisc_router_discovery()
+crashes ndisc_update() by passing ERR_PTR(-ENOBUFS) as 'neigh' argument.
+
+Reported-by: Jianlin Shi <jishi@redhat.com>
+Fixes: f8a1b43b709d ("net/ipv6: Create a neigh_lookup for FIB entries")
+Signed-off-by: Stefano Brivio <sbrivio@redhat.com>
+Reviewed-by: David Ahern <dsahern@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/ipv6/route.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index a33681dc4796..08c4516ae4a4 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -210,7 +210,9 @@ struct neighbour *ip6_neigh_lookup(const struct in6_addr *gw,
+ 	n = __ipv6_neigh_lookup(dev, daddr);
+ 	if (n)
+ 		return n;
+-	return neigh_create(&nd_tbl, daddr, dev);
++
++	n = neigh_create(&nd_tbl, daddr, dev);
++	return IS_ERR(n) ? NULL : n;
+ }
+ 
+ static struct neighbour *ip6_dst_neigh_lookup(const struct dst_entry *dst,
+-- 
+2.17.1
+

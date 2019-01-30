@@ -1,0 +1,48 @@
+From c1f90eb019714c51f191f2c1abbfda7ebfaf7c35 Mon Sep 17 00:00:00 2001
+From: Anand Jain <anand.jain@oracle.com>
+Date: Sun, 11 Nov 2018 22:22:18 +0800
+Subject: [PATCH 125/580] btrfs: dev-replace: go back to suspend state if
+ another EXCL_OP is running
+
+commit 05c49e6bc1e8866ecfd674ebeeb58cdbff9145c2 upstream.
+
+In a secnario where balance and replace co-exists as below,
+
+  - start balance
+  - pause balance
+  - start replace
+  - reboot
+
+and when system restarts, balance resumes first. Then the replace is
+attempted to restart but will fail as the EXCL_OP lock is already held
+by the balance. If so place the replace state back to
+BTRFS_IOCTL_DEV_REPLACE_STATE_SUSPENDED state.
+
+Fixes: 010a47bde9420 ("btrfs: add proper safety check before resuming dev-replace")
+CC: stable@vger.kernel.org # 4.18+
+Signed-off-by: Anand Jain <anand.jain@oracle.com>
+Reviewed-by: David Sterba <dsterba@suse.com>
+Signed-off-by: David Sterba <dsterba@suse.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/btrfs/dev-replace.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/fs/btrfs/dev-replace.c b/fs/btrfs/dev-replace.c
+index 8eb9307b6394..b2b283e48439 100644
+--- a/fs/btrfs/dev-replace.c
++++ b/fs/btrfs/dev-replace.c
+@@ -900,6 +900,10 @@ int btrfs_resume_dev_replace_async(struct btrfs_fs_info *fs_info)
+ 	 * dev-replace to start anyway.
+ 	 */
+ 	if (test_and_set_bit(BTRFS_FS_EXCL_OP, &fs_info->flags)) {
++		btrfs_dev_replace_write_lock(dev_replace);
++		dev_replace->replace_state =
++					BTRFS_IOCTL_DEV_REPLACE_STATE_SUSPENDED;
++		btrfs_dev_replace_write_unlock(dev_replace);
+ 		btrfs_info(fs_info,
+ 		"cannot resume dev-replace, other exclusive operation running");
+ 		return 0;
+-- 
+2.17.1
+

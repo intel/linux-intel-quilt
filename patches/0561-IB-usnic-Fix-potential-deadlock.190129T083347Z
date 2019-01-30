@@ -1,0 +1,63 @@
+From 6fa75685aa3ade4de264c06c26aa7b90cdec34f3 Mon Sep 17 00:00:00 2001
+From: Parvi Kaustubhi <pkaustub@cisco.com>
+Date: Tue, 11 Dec 2018 14:15:42 -0800
+Subject: [PATCH 561/580] IB/usnic: Fix potential deadlock
+
+[ Upstream commit 8036e90f92aae2784b855a0007ae2d8154d28b3c ]
+
+Acquiring the rtnl lock while holding usdev_lock could result in a
+deadlock.
+
+For example:
+
+usnic_ib_query_port()
+| mutex_lock(&us_ibdev->usdev_lock)
+ | ib_get_eth_speed()
+  | rtnl_lock()
+
+rtnl_lock()
+| usnic_ib_netdevice_event()
+ | mutex_lock(&us_ibdev->usdev_lock)
+
+This commit moves the usdev_lock acquisition after the rtnl lock has been
+released.
+
+This is safe to do because usdev_lock is not protecting anything being
+accessed in ib_get_eth_speed(). Hence, the correct order of holding locks
+(rtnl -> usdev_lock) is not violated.
+
+Signed-off-by: Parvi Kaustubhi <pkaustub@cisco.com>
+Signed-off-by: Jason Gunthorpe <jgg@mellanox.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/infiniband/hw/usnic/usnic_ib_verbs.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/infiniband/hw/usnic/usnic_ib_verbs.c b/drivers/infiniband/hw/usnic/usnic_ib_verbs.c
+index 9973ac893635..3db232429630 100644
+--- a/drivers/infiniband/hw/usnic/usnic_ib_verbs.c
++++ b/drivers/infiniband/hw/usnic/usnic_ib_verbs.c
+@@ -334,13 +334,16 @@ int usnic_ib_query_port(struct ib_device *ibdev, u8 port,
+ 
+ 	usnic_dbg("\n");
+ 
+-	mutex_lock(&us_ibdev->usdev_lock);
+ 	if (ib_get_eth_speed(ibdev, port, &props->active_speed,
+-			     &props->active_width)) {
+-		mutex_unlock(&us_ibdev->usdev_lock);
++			     &props->active_width))
+ 		return -EINVAL;
+-	}
+ 
++	/*
++	 * usdev_lock is acquired after (and not before) ib_get_eth_speed call
++	 * because acquiring rtnl_lock in ib_get_eth_speed, while holding
++	 * usdev_lock could lead to a deadlock.
++	 */
++	mutex_lock(&us_ibdev->usdev_lock);
+ 	/* props being zeroed by the caller, avoid zeroing it here */
+ 
+ 	props->lid = 0;
+-- 
+2.17.1
+

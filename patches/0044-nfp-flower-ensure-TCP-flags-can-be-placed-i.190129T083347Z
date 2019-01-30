@@ -1,0 +1,65 @@
+From 2210c2737e196a369e033de590d605247c2fb476 Mon Sep 17 00:00:00 2001
+From: Pieter Jansen van Vuuren <pieter.jansenvanvuuren@netronome.com>
+Date: Mon, 10 Dec 2018 15:03:43 -0800
+Subject: [PATCH 044/580] nfp: flower: ensure TCP flags can be placed in IPv6
+ frame
+
+[ Upstream commit 290974d434783624c13a9530a23c45f9c5ffe018 ]
+
+Previously we did not ensure tcp flags have a place to be stored
+when using IPv6. We correct this by including IPv6 key layer when
+we match tcp flags and the IPv6 key layer has not been included
+already.
+
+Fixes: 07e1671cfca5 ("nfp: flower: refactor shared ip header in match offload")
+Signed-off-by: Pieter Jansen van Vuuren <pieter.jansenvanvuuren@netronome.com>
+Reviewed-by: Jakub Kicinski <jakub.kicinski@netronome.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ .../ethernet/netronome/nfp/flower/offload.c   | 28 +++++++++++++++----
+ 1 file changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/netronome/nfp/flower/offload.c b/drivers/net/ethernet/netronome/nfp/flower/offload.c
+index bd19624f10cf..90148dbb261b 100644
+--- a/drivers/net/ethernet/netronome/nfp/flower/offload.c
++++ b/drivers/net/ethernet/netronome/nfp/flower/offload.c
+@@ -375,13 +375,29 @@ nfp_flower_calculate_key_layers(struct nfp_app *app,
+ 		    !(tcp_flags & (TCPHDR_FIN | TCPHDR_SYN | TCPHDR_RST)))
+ 			return -EOPNOTSUPP;
+ 
+-		/* We need to store TCP flags in the IPv4 key space, thus
+-		 * we need to ensure we include a IPv4 key layer if we have
+-		 * not done so already.
++		/* We need to store TCP flags in the either the IPv4 or IPv6 key
++		 * space, thus we need to ensure we include a IPv4/IPv6 key
++		 * layer if we have not done so already.
+ 		 */
+-		if (!(key_layer & NFP_FLOWER_LAYER_IPV4)) {
+-			key_layer |= NFP_FLOWER_LAYER_IPV4;
+-			key_size += sizeof(struct nfp_flower_ipv4);
++		if (!key_basic)
++			return -EOPNOTSUPP;
++
++		if (!(key_layer & NFP_FLOWER_LAYER_IPV4) &&
++		    !(key_layer & NFP_FLOWER_LAYER_IPV6)) {
++			switch (key_basic->n_proto) {
++			case cpu_to_be16(ETH_P_IP):
++				key_layer |= NFP_FLOWER_LAYER_IPV4;
++				key_size += sizeof(struct nfp_flower_ipv4);
++				break;
++
++			case cpu_to_be16(ETH_P_IPV6):
++				key_layer |= NFP_FLOWER_LAYER_IPV6;
++				key_size += sizeof(struct nfp_flower_ipv6);
++				break;
++
++			default:
++				return -EOPNOTSUPP;
++			}
+ 		}
+ 	}
+ 
+-- 
+2.17.1
+

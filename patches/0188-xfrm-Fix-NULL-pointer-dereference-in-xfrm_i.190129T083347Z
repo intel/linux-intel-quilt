@@ -1,0 +1,59 @@
+From 083d552a890cb7998395ad92f6aacccd082d8f37 Mon Sep 17 00:00:00 2001
+From: Steffen Klassert <steffen.klassert@secunet.com>
+Date: Thu, 22 Nov 2018 07:26:24 +0100
+Subject: [PATCH 188/580] xfrm: Fix NULL pointer dereference in xfrm_input when
+ skb_dst_force clears the dst_entry.
+
+[ Upstream commit 0152eee6fc3b84298bb6a79961961734e8afa5b8 ]
+
+Since commit 222d7dbd258d ("net: prevent dst uses after free")
+skb_dst_force() might clear the dst_entry attached to the skb.
+The xfrm code doesn't expect this to happen, so we crash with
+a NULL pointer dereference in this case.
+
+Fix it by checking skb_dst(skb) for NULL after skb_dst_force()
+and drop the packet in case the dst_entry was cleared. We also
+move the skb_dst_force() to a codepath that is not used when
+the transformation was offloaded, because in this case we
+don't have a dst_entry attached to the skb.
+
+The output and forwarding path was already fixed by
+commit 9e1437937807 ("xfrm: Fix NULL pointer dereference when
+skb_dst_force clears the dst_entry.")
+
+Fixes: 222d7dbd258d ("net: prevent dst uses after free")
+Reported-by: Jean-Philippe Menil <jpmenil@gmail.com>
+Signed-off-by: Steffen Klassert <steffen.klassert@secunet.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/xfrm/xfrm_input.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/net/xfrm/xfrm_input.c b/net/xfrm/xfrm_input.c
+index be3520e429c9..790b514f86b6 100644
+--- a/net/xfrm/xfrm_input.c
++++ b/net/xfrm/xfrm_input.c
+@@ -346,6 +346,12 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
+ 
+ 		skb->sp->xvec[skb->sp->len++] = x;
+ 
++		skb_dst_force(skb);
++		if (!skb_dst(skb)) {
++			XFRM_INC_STATS(net, LINUX_MIB_XFRMINERROR);
++			goto drop;
++		}
++
+ lock:
+ 		spin_lock(&x->lock);
+ 
+@@ -385,7 +391,6 @@ int xfrm_input(struct sk_buff *skb, int nexthdr, __be32 spi, int encap_type)
+ 		XFRM_SKB_CB(skb)->seq.input.low = seq;
+ 		XFRM_SKB_CB(skb)->seq.input.hi = seq_hi;
+ 
+-		skb_dst_force(skb);
+ 		dev_hold(skb->dev);
+ 
+ 		if (crypto_done)
+-- 
+2.17.1
+

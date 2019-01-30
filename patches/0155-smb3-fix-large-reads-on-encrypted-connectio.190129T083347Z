@@ -1,0 +1,45 @@
+From ba77e8c7f7044394c213e1221e630943c3379a6b Mon Sep 17 00:00:00 2001
+From: Paul Aurich <paul@darkrain42.org>
+Date: Mon, 31 Dec 2018 14:13:34 -0800
+Subject: [PATCH 155/580] smb3: fix large reads on encrypted connections
+
+commit 6d2f84eee098540ae857998fe32f29b9e2cd9613 upstream.
+
+When passing a large read to receive_encrypted_read(), ensure that the
+demultiplex_thread knows that a MID was processed.  Without this, those
+operations never complete.
+
+This is a similar issue/fix to lease break handling:
+commit 7af929d6d05ba5564139718e30d5bc96bdbc716a
+("smb3: fix lease break problem introduced by compounding")
+
+CC: Stable <stable@vger.kernel.org> # 4.19+
+Fixes: b24df3e30cbf ("cifs: update receive_encrypted_standard to handle compounded responses")
+Signed-off-by: Paul Aurich <paul@darkrain42.org>
+Tested-by: Yves-Alexis Perez <corsac@corsac.net>
+Signed-off-by: Steve French <stfrench@microsoft.com>
+Reviewed-by: Ronnie Sahlberg <lsahlber@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ fs/cifs/smb2ops.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/fs/cifs/smb2ops.c b/fs/cifs/smb2ops.c
+index 812da3e56a22..f44bb4a304e9 100644
+--- a/fs/cifs/smb2ops.c
++++ b/fs/cifs/smb2ops.c
+@@ -3184,8 +3184,10 @@ smb3_receive_transform(struct TCP_Server_Info *server,
+ 	}
+ 
+ 	/* TODO: add support for compounds containing READ. */
+-	if (pdu_length > CIFSMaxBufSize + MAX_HEADER_SIZE(server))
++	if (pdu_length > CIFSMaxBufSize + MAX_HEADER_SIZE(server)) {
++		*num_mids = 1;
+ 		return receive_encrypted_read(server, &mids[0]);
++	}
+ 
+ 	return receive_encrypted_standard(server, mids, bufs, num_mids);
+ }
+-- 
+2.17.1
+

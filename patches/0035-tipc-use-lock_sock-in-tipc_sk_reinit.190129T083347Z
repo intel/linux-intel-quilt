@@ -1,0 +1,50 @@
+From 2ce6d5aeafba9066eec0f93e85f463549f362dae Mon Sep 17 00:00:00 2001
+From: Cong Wang <xiyou.wangcong@gmail.com>
+Date: Mon, 10 Dec 2018 11:49:55 -0800
+Subject: [PATCH 035/580] tipc: use lock_sock() in tipc_sk_reinit()
+
+[ Upstream commit 15ef70e286176165d28b0b8a969b422561a68dfc ]
+
+lock_sock() must be used in process context to be race-free with
+other lock_sock() callers, for example, tipc_release(). Otherwise
+using the spinlock directly can't serialize a parallel tipc_release().
+
+As it is blocking, we have to hold the sock refcnt before
+rhashtable_walk_stop() and release it after rhashtable_walk_start().
+
+Fixes: 07f6c4bc048a ("tipc: convert tipc reference table to use generic rhashtable")
+Reported-by: Dmitry Vyukov <dvyukov@google.com>
+Cc: Ying Xue <ying.xue@windriver.com>
+Cc: Jon Maloy <jon.maloy@ericsson.com>
+Signed-off-by: Cong Wang <xiyou.wangcong@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/tipc/socket.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/net/tipc/socket.c b/net/tipc/socket.c
+index 9f3acd570a12..ece09dfeac52 100644
+--- a/net/tipc/socket.c
++++ b/net/tipc/socket.c
+@@ -2686,11 +2686,15 @@ void tipc_sk_reinit(struct net *net)
+ 		rhashtable_walk_start(&iter);
+ 
+ 		while ((tsk = rhashtable_walk_next(&iter)) && !IS_ERR(tsk)) {
+-			spin_lock_bh(&tsk->sk.sk_lock.slock);
++			sock_hold(&tsk->sk);
++			rhashtable_walk_stop(&iter);
++			lock_sock(&tsk->sk);
+ 			msg = &tsk->phdr;
+ 			msg_set_prevnode(msg, tipc_own_addr(net));
+ 			msg_set_orignode(msg, tipc_own_addr(net));
+-			spin_unlock_bh(&tsk->sk.sk_lock.slock);
++			release_sock(&tsk->sk);
++			rhashtable_walk_start(&iter);
++			sock_put(&tsk->sk);
+ 		}
+ 
+ 		rhashtable_walk_stop(&iter);
+-- 
+2.17.1
+

@@ -1,0 +1,64 @@
+From 6e48c0fc14af6ca06a793130c25476aee8a92955 Mon Sep 17 00:00:00 2001
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+Date: Mon, 17 Dec 2018 15:05:40 +0200
+Subject: [PATCH 230/580] net: macb: fix dropped RX frames due to a race
+
+[ Upstream commit 8159ecab0db9095902d4c73605fb8787f5c7d653 ]
+
+Bit RX_USED set to 0 in the address field allows the controller to write
+data to the receive buffer descriptor.
+
+The driver does not ensure the ctrl field is ready (cleared) when the
+controller sees the RX_USED=0 written by the driver. The ctrl field might
+only be cleared after the controller has already updated it according to
+a newly received frame, causing the frame to be discarded in gem_rx() due
+to unexpected ctrl field contents.
+
+A message is logged when the above scenario occurs:
+
+  macb ff0b0000.ethernet eth0: not whole frame pointed by descriptor
+
+Fix the issue by ensuring that when the controller sees RX_USED=0 the
+ctrl field is already cleared.
+
+This issue was observed on a ZynqMP based system.
+
+Fixes: 4df95131ea80 ("net/macb: change RX path for GEM")
+Signed-off-by: Anssi Hannula <anssi.hannula@bitwise.fi>
+Tested-by: Claudiu Beznea <claudiu.beznea@microchip.com>
+Cc: Nicolas Ferre <nicolas.ferre@microchip.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/cadence/macb_main.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 2de9197df074..b8b37afc5dc3 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -935,14 +935,19 @@ static void gem_rx_refill(struct macb_queue *queue)
+ 
+ 			if (entry == bp->rx_ring_size - 1)
+ 				paddr |= MACB_BIT(RX_WRAP);
+-			macb_set_addr(bp, desc, paddr);
+ 			desc->ctrl = 0;
++			/* Setting addr clears RX_USED and allows reception,
++			 * make sure ctrl is cleared first to avoid a race.
++			 */
++			dma_wmb();
++			macb_set_addr(bp, desc, paddr);
+ 
+ 			/* properly align Ethernet header */
+ 			skb_reserve(skb, NET_IP_ALIGN);
+ 		} else {
+-			desc->addr &= ~MACB_BIT(RX_USED);
+ 			desc->ctrl = 0;
++			dma_wmb();
++			desc->addr &= ~MACB_BIT(RX_USED);
+ 		}
+ 	}
+ 
+-- 
+2.17.1
+

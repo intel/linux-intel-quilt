@@ -1,0 +1,49 @@
+From ba364929ff0c02d8a2362fe049dc076b393814b2 Mon Sep 17 00:00:00 2001
+From: Florian Westphal <fw@strlen.de>
+Date: Tue, 11 Dec 2018 07:45:29 +0100
+Subject: [PATCH 204/580] netfilter: nat: can't use dst_hold on noref dst
+
+[ Upstream commit 542fbda0f08f1cbbc250f9e59f7537649651d0c8 ]
+
+The dst entry might already have a zero refcount, waiting on rcu list
+to be free'd.  Using dst_hold() transitions its reference count to 1, and
+next dst release will try to free it again -- resulting in a double free:
+
+  WARNING: CPU: 1 PID: 0 at include/net/dst.h:239 nf_xfrm_me_harder+0xe7/0x130 [nf_nat]
+  RIP: 0010:nf_xfrm_me_harder+0xe7/0x130 [nf_nat]
+  Code: 48 8b 5c 24 60 65 48 33 1c 25 28 00 00 00 75 53 48 83 c4 68 5b 5d 41 5c c3 85 c0 74 0d 8d 48 01 f0 0f b1 0a 74 86 85 c0 75 f3 <0f> 0b e9 7b ff ff ff 29 c6 31 d2 b9 20 00 48 00 4c 89 e7 e8 31 27
+  Call Trace:
+  nf_nat_ipv4_out+0x78/0x90 [nf_nat_ipv4]
+  nf_hook_slow+0x36/0xd0
+  ip_output+0x9f/0xd0
+  ip_forward+0x328/0x440
+  ip_rcv+0x8a/0xb0
+
+Use dst_hold_safe instead and bail out if we cannot take a reference.
+
+Fixes: a4c2fd7f7891 ("net: remove DST_NOCACHE flag")
+Reported-by: Martin Zaharinov <micron10@gmail.com>
+Signed-off-by: Florian Westphal <fw@strlen.de>
+Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/netfilter/nf_nat_core.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/net/netfilter/nf_nat_core.c b/net/netfilter/nf_nat_core.c
+index e2b196054dfc..2268b10a9dcf 100644
+--- a/net/netfilter/nf_nat_core.c
++++ b/net/netfilter/nf_nat_core.c
+@@ -117,7 +117,8 @@ int nf_xfrm_me_harder(struct net *net, struct sk_buff *skb, unsigned int family)
+ 	dst = skb_dst(skb);
+ 	if (dst->xfrm)
+ 		dst = ((struct xfrm_dst *)dst)->route;
+-	dst_hold(dst);
++	if (!dst_hold_safe(dst))
++		return -EHOSTUNREACH;
+ 
+ 	if (sk && !net_eq(net, sock_net(sk)))
+ 		sk = NULL;
+-- 
+2.17.1
+

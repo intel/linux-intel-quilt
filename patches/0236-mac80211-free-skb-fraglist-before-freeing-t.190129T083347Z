@@ -1,0 +1,44 @@
+From ff014712e5d3b5de40514118846e8fa260a788a2 Mon Sep 17 00:00:00 2001
+From: Sara Sharon <sara.sharon@intel.com>
+Date: Sat, 15 Dec 2018 11:03:06 +0200
+Subject: [PATCH 236/580] mac80211: free skb fraglist before freeing the skb
+
+[ Upstream commit 34b1e0e9efe101822e83cc62d22443ed3867ae7a ]
+
+mac80211 uses the frag list to build AMSDU. When freeing
+the skb, it may not be really freed, since someone is still
+holding a reference to it.
+In that case, when TCP skb is being retransmitted, the
+pointer to the frag list is being reused, while the data
+in there is no longer valid.
+Since we will never get frag list from the network stack,
+as mac80211 doesn't advertise the capability, we can safely
+free and nullify it before releasing the SKB.
+
+Signed-off-by: Sara Sharon <sara.sharon@intel.com>
+Signed-off-by: Luca Coelho <luciano.coelho@intel.com>
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ net/mac80211/status.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/net/mac80211/status.c b/net/mac80211/status.c
+index 7fa10d06cc51..534a604b75c2 100644
+--- a/net/mac80211/status.c
++++ b/net/mac80211/status.c
+@@ -556,6 +556,11 @@ static void ieee80211_report_used_skb(struct ieee80211_local *local,
+ 	}
+ 
+ 	ieee80211_led_tx(local);
++
++	if (skb_has_frag_list(skb)) {
++		kfree_skb_list(skb_shinfo(skb)->frag_list);
++		skb_shinfo(skb)->frag_list = NULL;
++	}
+ }
+ 
+ /*
+-- 
+2.17.1
+

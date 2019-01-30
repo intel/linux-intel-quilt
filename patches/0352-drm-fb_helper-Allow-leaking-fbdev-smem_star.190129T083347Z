@@ -1,0 +1,139 @@
+From 7398668b31108214179f74311e263b4eab275d2e Mon Sep 17 00:00:00 2001
+From: Neil Armstrong <narmstrong@baylibre.com>
+Date: Fri, 28 Sep 2018 14:05:55 +0200
+Subject: [PATCH 352/580] drm/fb_helper: Allow leaking fbdev smem_start
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 4be9bd10e22dfc7fc101c5cf5969ef2d3a042d8a upstream.
+
+Since "drm/fb: Stop leaking physical address", the default behaviour of
+the DRM fbdev emulation is to set the smem_base to 0 and pass the new
+FBINFO_HIDE_SMEM_START flag.
+
+The main reason is to avoid leaking physical addresse to user-space, and
+it follows a general move over the kernel code to avoid user-space to
+manipulate physical addresses and then use some other mechanisms like
+dma-buf to transfer physical buffer handles over multiple subsystems.
+
+But, a lot of devices depends on closed sources binaries to enable
+OpenGL hardware acceleration that uses this smem_start value to
+pass physical addresses to out-of-tree modules in order to render
+into these physical adresses. These should use dma-buf buffers allocated
+from the DRM display device instead and stop relying on fbdev overallocation
+to gather DMA memory (some HW vendors delivers GBM and Wayland capable
+binaries, but older unsupported devices won't have these new binaries
+and are doomed until an Open Source solution like Lima finalizes).
+
+Since these devices heavily depends on this kind of software and because
+the smem_start population was available for years, it's a breakage to
+stop leaking smem_start without any alternative solutions.
+
+This patch adds a Kconfig depending on the EXPERT config and an unsafe
+kernel module parameter tainting the kernel when enabled.
+
+A clear comment and Kconfig help text was added to clarify why and when
+this patch should be reverted, but in the meantime it's a necessary
+feature to keep.
+
+Cc: Dave Airlie <airlied@gmail.com>
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Cc: Bartlomiej Zolnierkiewicz <b.zolnierkie@samsung.com>
+Cc: Noralf Trønnes <noralf@tronnes.org>
+Cc: Maxime Ripard <maxime.ripard@bootlin.com>
+Cc: Eric Anholt <eric@anholt.net>
+Cc: Lucas Stach <l.stach@pengutronix.de>
+Cc: Rob Clark <robdclark@gmail.com>
+Cc: Ben Skeggs <skeggsb@gmail.com>
+Cc: Christian König <christian.koenig@amd.com>
+Signed-off-by: Neil Armstrong <narmstrong@baylibre.com>
+Reviewed-by: Maxime Ripard <maxime.ripard@bootlin.com>
+Tested-by: Maxime Ripard <maxime.ripard@bootlin.com>
+Acked-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Acked-by: Dave Airlie <airlied@gmail.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/1538136355-15383-1-git-send-email-narmstrong@baylibre.com
+Signed-off-by: Maxime Ripard <maxime.ripard@bootlin.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/gpu/drm/Kconfig         | 20 ++++++++++++++++++++
+ drivers/gpu/drm/drm_fb_helper.c | 25 +++++++++++++++++++++++++
+ 2 files changed, 45 insertions(+)
+
+diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
+index cb88528e7b10..e44e567bd789 100644
+--- a/drivers/gpu/drm/Kconfig
++++ b/drivers/gpu/drm/Kconfig
+@@ -110,6 +110,26 @@ config DRM_FBDEV_OVERALLOC
+ 	  is 100. Typical values for double buffering will be 200,
+ 	  triple buffering 300.
+ 
++config DRM_FBDEV_LEAK_PHYS_SMEM
++	bool "Shamelessly allow leaking of fbdev physical address (DANGEROUS)"
++	depends on DRM_FBDEV_EMULATION && EXPERT
++	default n
++	help
++	  In order to keep user-space compatibility, we want in certain
++	  use-cases to keep leaking the fbdev physical address to the
++	  user-space program handling the fbdev buffer.
++	  This affects, not only, Amlogic, Allwinner or Rockchip devices
++	  with ARM Mali GPUs using an userspace Blob.
++	  This option is not supported by upstream developers and should be
++	  removed as soon as possible and be considered as a broken and
++	  legacy behaviour from a modern fbdev device driver.
++
++	  Please send any bug reports when using this to your proprietary
++	  software vendor that requires this.
++
++	  If in doubt, say "N" or spread the word to your closed source
++	  library vendor.
++
+ config DRM_LOAD_EDID_FIRMWARE
+ 	bool "Allow to specify an EDID data set instead of probing for it"
+ 	depends on DRM
+diff --git a/drivers/gpu/drm/drm_fb_helper.c b/drivers/gpu/drm/drm_fb_helper.c
+index 9214c8b02484..11174b876b70 100644
+--- a/drivers/gpu/drm/drm_fb_helper.c
++++ b/drivers/gpu/drm/drm_fb_helper.c
+@@ -56,6 +56,25 @@ MODULE_PARM_DESC(drm_fbdev_overalloc,
+ 		 "Overallocation of the fbdev buffer (%) [default="
+ 		 __MODULE_STRING(CONFIG_DRM_FBDEV_OVERALLOC) "]");
+ 
++/*
++ * In order to keep user-space compatibility, we want in certain use-cases
++ * to keep leaking the fbdev physical address to the user-space program
++ * handling the fbdev buffer.
++ * This is a bad habit essentially kept into closed source opengl driver
++ * that should really be moved into open-source upstream projects instead
++ * of using legacy physical addresses in user space to communicate with
++ * other out-of-tree kernel modules.
++ *
++ * This module_param *should* be removed as soon as possible and be
++ * considered as a broken and legacy behaviour from a modern fbdev device.
++ */
++#if IS_ENABLED(CONFIG_DRM_FBDEV_LEAK_PHYS_SMEM)
++static bool drm_leak_fbdev_smem = false;
++module_param_unsafe(drm_leak_fbdev_smem, bool, 0600);
++MODULE_PARM_DESC(fbdev_emulation,
++		 "Allow unsafe leaking fbdev physical smem address [default=false]");
++#endif
++
+ static LIST_HEAD(kernel_fb_helper_list);
+ static DEFINE_MUTEX(kernel_fb_helper_lock);
+ 
+@@ -3041,6 +3060,12 @@ int drm_fb_helper_generic_probe(struct drm_fb_helper *fb_helper,
+ 	fbi->screen_size = fb->height * fb->pitches[0];
+ 	fbi->fix.smem_len = fbi->screen_size;
+ 	fbi->screen_buffer = buffer->vaddr;
++	/* Shamelessly leak the physical address to user-space */
++#if IS_ENABLED(CONFIG_DRM_FBDEV_LEAK_PHYS_SMEM)
++	if (drm_leak_fbdev_smem && fbi->fix.smem_start == 0)
++		fbi->fix.smem_start =
++			page_to_phys(virt_to_page(fbi->screen_buffer));
++#endif
+ 	strcpy(fbi->fix.id, "DRM emulated");
+ 
+ 	drm_fb_helper_fill_fix(fbi, fb->pitches[0], fb->format->depth);
+-- 
+2.17.1
+

@@ -1,0 +1,55 @@
+From 4d1edda006a542a29e1d5a68f4cd2b6a9386f613 Mon Sep 17 00:00:00 2001
+From: Kunihiko Hayashi <hayashi.kunihiko@socionext.com>
+Date: Tue, 18 Dec 2018 16:57:04 +0900
+Subject: [PATCH 016/580] net: phy: Fix the issue that netif always links up
+ after resuming
+
+[ Upstream commit 8742beb50f2db903d3b6d69ddd81d67ce9914453 ]
+
+Even though the link is down before entering hibernation,
+there is an issue that the network interface always links up after resuming
+from hibernation.
+
+If the link is still down before enabling the network interface,
+and after resuming from hibernation, the phydev->state is forcibly set
+to PHY_UP in mdio_bus_phy_restore(), and the link becomes up.
+
+In suspend sequence, only if the PHY is attached, mdio_bus_phy_suspend()
+calls phy_stop_machine(), and mdio_bus_phy_resume() calls
+phy_start_machine().
+In resume sequence, it's enough to do the same as mdio_bus_phy_resume()
+because the state has been preserved.
+
+This patch fixes the issue by calling phy_start_machine() in
+mdio_bus_phy_restore() in the same way as mdio_bus_phy_resume().
+
+Fixes: bc87922ff59d ("phy: Move PHY PM operations into phy_device")
+Suggested-by: Heiner Kallweit <hkallweit1@gmail.com>
+Signed-off-by: Kunihiko Hayashi <hayashi.kunihiko@socionext.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/phy/phy_device.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/phy/phy_device.c b/drivers/net/phy/phy_device.c
+index 20d1be2b070b..2c32c795f5dd 100644
+--- a/drivers/net/phy/phy_device.c
++++ b/drivers/net/phy/phy_device.c
+@@ -164,11 +164,8 @@ static int mdio_bus_phy_restore(struct device *dev)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	/* The PHY needs to renegotiate. */
+-	phydev->link = 0;
+-	phydev->state = PHY_UP;
+-
+-	phy_start_machine(phydev);
++	if (phydev->attached_dev && phydev->adjust_link)
++		phy_start_machine(phydev);
+ 
+ 	return 0;
+ }
+-- 
+2.17.1
+

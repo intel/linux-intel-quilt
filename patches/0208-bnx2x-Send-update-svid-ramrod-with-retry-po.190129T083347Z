@@ -1,0 +1,73 @@
+From a01345407c43b4c743db2bfc1956ee282205f252 Mon Sep 17 00:00:00 2001
+From: Sudarsana Reddy Kalluru <sudarsana.kalluru@cavium.com>
+Date: Wed, 12 Dec 2018 08:57:03 -0800
+Subject: [PATCH 208/580] bnx2x: Send update-svid ramrod with retry/poll flags
+ enabled
+
+[ Upstream commit 9061193c4ee065d3240fde06767c2e06ec61decc ]
+
+Driver sends update-SVID ramrod in the MFW notification path.
+If there is a pending ramrod, driver doesn't retry the command
+and storm firmware will never be updated with the SVID value.
+The patch adds changes to send update-svid ramrod in process context with
+retry/poll flags set.
+
+Signed-off-by: Sudarsana Reddy Kalluru <Sudarsana.Kalluru@cavium.com>
+Signed-off-by: Ariel Elior <ariel.elior@cavium.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x.h      |  1 +
+ drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c | 10 +++++++++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+index 0de487a8f0eb..3db54b664aed 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x.h
+@@ -1282,6 +1282,7 @@ enum sp_rtnl_flag {
+ 	BNX2X_SP_RTNL_TX_STOP,
+ 	BNX2X_SP_RTNL_GET_DRV_VERSION,
+ 	BNX2X_SP_RTNL_CHANGE_UDP_PORT,
++	BNX2X_SP_RTNL_UPDATE_SVID,
+ };
+ 
+ enum bnx2x_iov_flag {
+diff --git a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+index 20e5cda6555e..7742bf5f8a18 100644
+--- a/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
++++ b/drivers/net/ethernet/broadcom/bnx2x/bnx2x_main.c
+@@ -2925,6 +2925,10 @@ static void bnx2x_handle_update_svid_cmd(struct bnx2x *bp)
+ 	func_params.f_obj = &bp->func_obj;
+ 	func_params.cmd = BNX2X_F_CMD_SWITCH_UPDATE;
+ 
++	/* Prepare parameters for function state transitions */
++	__set_bit(RAMROD_COMP_WAIT, &func_params.ramrod_flags);
++	__set_bit(RAMROD_RETRY, &func_params.ramrod_flags);
++
+ 	if (IS_MF_UFP(bp) || IS_MF_BD(bp)) {
+ 		int func = BP_ABS_FUNC(bp);
+ 		u32 val;
+@@ -4301,7 +4305,8 @@ static void bnx2x_attn_int_deasserted3(struct bnx2x *bp, u32 attn)
+ 				bnx2x_handle_eee_event(bp);
+ 
+ 			if (val & DRV_STATUS_OEM_UPDATE_SVID)
+-				bnx2x_handle_update_svid_cmd(bp);
++				bnx2x_schedule_sp_rtnl(bp,
++					BNX2X_SP_RTNL_UPDATE_SVID, 0);
+ 
+ 			if (bp->link_vars.periodic_flags &
+ 			    PERIODIC_FLAGS_LINK_EVENT) {
+@@ -10376,6 +10381,9 @@ static void bnx2x_sp_rtnl_task(struct work_struct *work)
+ 			       &bp->sp_rtnl_state))
+ 		bnx2x_update_mng_version(bp);
+ 
++	if (test_and_clear_bit(BNX2X_SP_RTNL_UPDATE_SVID, &bp->sp_rtnl_state))
++		bnx2x_handle_update_svid_cmd(bp);
++
+ 	if (test_and_clear_bit(BNX2X_SP_RTNL_CHANGE_UDP_PORT,
+ 			       &bp->sp_rtnl_state)) {
+ 		if (bnx2x_udp_port_update(bp)) {
+-- 
+2.17.1
+

@@ -1,0 +1,53 @@
+From 873f9a559bcb73690d6f9ee6e5a7d1c360c254e2 Mon Sep 17 00:00:00 2001
+From: Anssi Hannula <anssi.hannula@bitwise.fi>
+Date: Mon, 17 Dec 2018 15:05:39 +0200
+Subject: [PATCH 229/580] net: macb: fix random memory corruption on RX with
+ 64-bit DMA
+
+[ Upstream commit e100a897bf9b19089e57f236f2398c9e0538900e ]
+
+64-bit DMA addresses are split in upper and lower halves that are
+written in separate fields on GEM. For RX, bit 0 of the address is used
+as the ownership bit (RX_USED). When the RX_USED bit is unset the
+controller is allowed to write data to the buffer.
+
+The driver does not guarantee that the controller already sees the upper
+half when the RX_USED bit is cleared, possibly resulting in the
+controller writing an incoming frame to an address with an incorrect
+upper half and therefore possibly corrupting unrelated system memory.
+
+Fix that by adding the necessary DMA memory barrier between the writes.
+
+This corruption was observed on a ZynqMP based system.
+
+Fixes: fff8019a08b6 ("net: macb: Add 64 bit addressing support for GEM")
+Signed-off-by: Anssi Hannula <anssi.hannula@bitwise.fi>
+Acked-by: Harini Katakam <harini.katakam@xilinx.com>
+Tested-by: Claudiu Beznea <claudiu.beznea@microchip.com>
+Cc: Nicolas Ferre <nicolas.ferre@microchip.com>
+Cc: Michal Simek <michal.simek@xilinx.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+ drivers/net/ethernet/cadence/macb_main.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 240fd36b5074..2de9197df074 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -682,6 +682,11 @@ static void macb_set_addr(struct macb *bp, struct macb_dma_desc *desc, dma_addr_
+ 	if (bp->hw_dma_cap & HW_DMA_CAP_64B) {
+ 		desc_64 = macb_64b_desc(bp, desc);
+ 		desc_64->addrh = upper_32_bits(addr);
++		/* The low bits of RX address contain the RX_USED bit, clearing
++		 * of which allows packet RX. Make sure the high bits are also
++		 * visible to HW at that point.
++		 */
++		dma_wmb();
+ 	}
+ #endif
+ 	desc->addr = lower_32_bits(addr);
+-- 
+2.17.1
+

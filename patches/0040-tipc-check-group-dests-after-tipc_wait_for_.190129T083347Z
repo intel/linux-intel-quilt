@@ -1,0 +1,61 @@
+From 7942d5be49224bbd7cc8b5c589e1e670651021d1 Mon Sep 17 00:00:00 2001
+From: Cong Wang <xiyou.wangcong@gmail.com>
+Date: Sun, 16 Dec 2018 23:25:12 -0800
+Subject: [PATCH 040/580] tipc: check group dests after tipc_wait_for_cond()
+
+[ Upstream commit 3c6306d44082ef007a258ae1b86ea58e6974ee3f ]
+
+Similar to commit 143ece654f9f ("tipc: check tsk->group in tipc_wait_for_cond()")
+we have to reload grp->dests too after we re-take the sock lock.
+This means we need to move the dsts check after tipc_wait_for_cond()
+too.
+
+Fixes: 75da2163dbb6 ("tipc: introduce communication groups")
+Reported-and-tested-by: syzbot+99f20222fc5018d2b97a@syzkaller.appspotmail.com
+Cc: Ying Xue <ying.xue@windriver.com>
+Cc: Jon Maloy <jon.maloy@ericsson.com>
+Signed-off-by: Cong Wang <xiyou.wangcong@gmail.com>
+Acked-by: Jon Maloy <jon.maloy@ericsson.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/tipc/socket.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/net/tipc/socket.c b/net/tipc/socket.c
+index ece09dfeac52..e1bdaf056c8f 100644
+--- a/net/tipc/socket.c
++++ b/net/tipc/socket.c
+@@ -1007,7 +1007,7 @@ static int tipc_send_group_bcast(struct socket *sock, struct msghdr *m,
+ 	struct sock *sk = sock->sk;
+ 	struct net *net = sock_net(sk);
+ 	struct tipc_sock *tsk = tipc_sk(sk);
+-	struct tipc_nlist *dsts = tipc_group_dests(tsk->group);
++	struct tipc_nlist *dsts;
+ 	struct tipc_mc_method *method = &tsk->mc_method;
+ 	bool ack = method->mandatory && method->rcast;
+ 	int blks = tsk_blocks(MCAST_H_SIZE + dlen);
+@@ -1016,9 +1016,6 @@ static int tipc_send_group_bcast(struct socket *sock, struct msghdr *m,
+ 	struct sk_buff_head pkts;
+ 	int rc = -EHOSTUNREACH;
+ 
+-	if (!dsts->local && !dsts->remote)
+-		return -EHOSTUNREACH;
+-
+ 	/* Block or return if any destination link or member is congested */
+ 	rc = tipc_wait_for_cond(sock, &timeout,
+ 				!tsk->cong_link_cnt && tsk->group &&
+@@ -1026,6 +1023,10 @@ static int tipc_send_group_bcast(struct socket *sock, struct msghdr *m,
+ 	if (unlikely(rc))
+ 		return rc;
+ 
++	dsts = tipc_group_dests(tsk->group);
++	if (!dsts->local && !dsts->remote)
++		return -EHOSTUNREACH;
++
+ 	/* Complete message header */
+ 	if (dest) {
+ 		msg_set_type(hdr, TIPC_GRP_MCAST_MSG);
+-- 
+2.17.1
+

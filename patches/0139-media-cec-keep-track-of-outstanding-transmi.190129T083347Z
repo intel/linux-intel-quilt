@@ -1,0 +1,167 @@
+From 465153038583876e436cd371e4d36e6c8601e671 Mon Sep 17 00:00:00 2001
+From: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+Date: Fri, 19 Oct 2018 03:55:34 -0400
+Subject: [PATCH 139/580] media: cec: keep track of outstanding transmits
+
+commit 32804fcb612bf867034a093f459415e485cf044b upstream.
+
+I noticed that repeatedly running 'cec-ctl --playback' would occasionally
+select 'Playback Device 2' instead of 'Playback Device 1', even though there
+were no other Playback devices in the HDMI topology. This happened both with
+'real' hardware and with the vivid CEC emulation, suggesting that this was an
+issue in the core code that claims a logical address.
+
+What 'cec-ctl --playback' does is to first clear all existing logical addresses,
+and immediately after that configure the new desired device type.
+
+The core code will poll the logical addresses trying to find a free address.
+When found it will issue a few standard messages as per the CEC spec and return.
+Those messages are queued up and will be transmitted asynchronously.
+
+What happens is that if you run two 'cec-ctl --playback' commands in quick
+succession, there is still a message of the first cec-ctl command being transmitted
+when you reconfigure the adapter again in the second cec-ctl command.
+
+When the logical addresses are cleared, then all information about outstanding
+transmits inside the CEC core is also cleared, and the core is no longer aware
+that there is still a transmit in flight.
+
+When the hardware finishes the transmit it calls transmit_done and the CEC core
+thinks it is actually in response of a POLL messages that is trying to find a
+free logical address. The result of all this is that the core thinks that the
+logical address for Playback Device 1 is in use, when it is really an earlier
+transmit that ended.
+
+The main transmit thread looks at adap->transmitting to check if a transmit
+is in progress, but that is set to NULL when the adapter is unconfigured.
+adap->transmitting represents the view of userspace, not that of the hardware.
+So when unconfiguring the adapter the message is marked aborted from the point
+of view of userspace, but seen from the PoV of the hardware it is still ongoing.
+
+So introduce a new bool transmit_in_progress that represents the hardware state
+and use that instead of adap->transmitting. Now the CEC core waits until the
+hardware finishes the transmit before starting a new transmit.
+
+Signed-off-by: Hans Verkuil <hverkuil-cisco@xs4all.nl>
+Cc: <stable@vger.kernel.org>      # for v4.18 and up
+Signed-off-by: Mauro Carvalho Chehab <mchehab+samsung@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/media/cec/cec-adap.c | 27 ++++++++++++++++++---------
+ include/media/cec.h          |  1 +
+ 2 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/media/cec/cec-adap.c b/drivers/media/cec/cec-adap.c
+index a537e518384b..a7ea27d2aa8e 100644
+--- a/drivers/media/cec/cec-adap.c
++++ b/drivers/media/cec/cec-adap.c
+@@ -442,7 +442,7 @@ int cec_thread_func(void *_adap)
+ 				(adap->needs_hpd &&
+ 				 (!adap->is_configured && !adap->is_configuring)) ||
+ 				kthread_should_stop() ||
+-				(!adap->transmitting &&
++				(!adap->transmit_in_progress &&
+ 				 !list_empty(&adap->transmit_queue)),
+ 				msecs_to_jiffies(CEC_XFER_TIMEOUT_MS));
+ 			timeout = err == 0;
+@@ -450,7 +450,7 @@ int cec_thread_func(void *_adap)
+ 			/* Otherwise we just wait for something to happen. */
+ 			wait_event_interruptible(adap->kthread_waitq,
+ 				kthread_should_stop() ||
+-				(!adap->transmitting &&
++				(!adap->transmit_in_progress &&
+ 				 !list_empty(&adap->transmit_queue)));
+ 		}
+ 
+@@ -475,6 +475,7 @@ int cec_thread_func(void *_adap)
+ 			pr_warn("cec-%s: message %*ph timed out\n", adap->name,
+ 				adap->transmitting->msg.len,
+ 				adap->transmitting->msg.msg);
++			adap->transmit_in_progress = false;
+ 			adap->tx_timeouts++;
+ 			/* Just give up on this. */
+ 			cec_data_cancel(adap->transmitting,
+@@ -486,7 +487,7 @@ int cec_thread_func(void *_adap)
+ 		 * If we are still transmitting, or there is nothing new to
+ 		 * transmit, then just continue waiting.
+ 		 */
+-		if (adap->transmitting || list_empty(&adap->transmit_queue))
++		if (adap->transmit_in_progress || list_empty(&adap->transmit_queue))
+ 			goto unlock;
+ 
+ 		/* Get a new message to transmit */
+@@ -532,6 +533,8 @@ int cec_thread_func(void *_adap)
+ 		if (adap->ops->adap_transmit(adap, data->attempts,
+ 					     signal_free_time, &data->msg))
+ 			cec_data_cancel(data, CEC_TX_STATUS_ABORTED);
++		else
++			adap->transmit_in_progress = true;
+ 
+ unlock:
+ 		mutex_unlock(&adap->lock);
+@@ -562,14 +565,17 @@ void cec_transmit_done_ts(struct cec_adapter *adap, u8 status,
+ 	data = adap->transmitting;
+ 	if (!data) {
+ 		/*
+-		 * This can happen if a transmit was issued and the cable is
++		 * This might happen if a transmit was issued and the cable is
+ 		 * unplugged while the transmit is ongoing. Ignore this
+ 		 * transmit in that case.
+ 		 */
+-		dprintk(1, "%s was called without an ongoing transmit!\n",
+-			__func__);
+-		goto unlock;
++		if (!adap->transmit_in_progress)
++			dprintk(1, "%s was called without an ongoing transmit!\n",
++				__func__);
++		adap->transmit_in_progress = false;
++		goto wake_thread;
+ 	}
++	adap->transmit_in_progress = false;
+ 
+ 	msg = &data->msg;
+ 
+@@ -635,7 +641,6 @@ void cec_transmit_done_ts(struct cec_adapter *adap, u8 status,
+ 	 * for transmitting or to retry the current message.
+ 	 */
+ 	wake_up_interruptible(&adap->kthread_waitq);
+-unlock:
+ 	mutex_unlock(&adap->lock);
+ }
+ EXPORT_SYMBOL_GPL(cec_transmit_done_ts);
+@@ -1483,8 +1488,11 @@ void __cec_s_phys_addr(struct cec_adapter *adap, u16 phys_addr, bool block)
+ 		if (adap->monitor_all_cnt)
+ 			WARN_ON(call_op(adap, adap_monitor_all_enable, false));
+ 		mutex_lock(&adap->devnode.lock);
+-		if (adap->needs_hpd || list_empty(&adap->devnode.fhs))
++		if (adap->needs_hpd || list_empty(&adap->devnode.fhs)) {
+ 			WARN_ON(adap->ops->adap_enable(adap, false));
++			adap->transmit_in_progress = false;
++			wake_up_interruptible(&adap->kthread_waitq);
++		}
+ 		mutex_unlock(&adap->devnode.lock);
+ 		if (phys_addr == CEC_PHYS_ADDR_INVALID)
+ 			return;
+@@ -1492,6 +1500,7 @@ void __cec_s_phys_addr(struct cec_adapter *adap, u16 phys_addr, bool block)
+ 
+ 	mutex_lock(&adap->devnode.lock);
+ 	adap->last_initiator = 0xff;
++	adap->transmit_in_progress = false;
+ 
+ 	if ((adap->needs_hpd || list_empty(&adap->devnode.fhs)) &&
+ 	    adap->ops->adap_enable(adap, true)) {
+diff --git a/include/media/cec.h b/include/media/cec.h
+index 9b7394a74dca..dc4b412e8fa1 100644
+--- a/include/media/cec.h
++++ b/include/media/cec.h
+@@ -155,6 +155,7 @@ struct cec_adapter {
+ 	unsigned int transmit_queue_sz;
+ 	struct list_head wait_queue;
+ 	struct cec_data *transmitting;
++	bool transmit_in_progress;
+ 
+ 	struct task_struct *kthread_config;
+ 	struct completion config_completion;
+-- 
+2.17.1
+

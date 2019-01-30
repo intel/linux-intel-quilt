@@ -1,0 +1,64 @@
+From e15413d61d4e05f6d819fa165116b3d1781d2157 Mon Sep 17 00:00:00 2001
+From: Marcin Wojtas <mw@semihalf.com>
+Date: Tue, 11 Dec 2018 13:56:49 +0100
+Subject: [PATCH 054/580] net: mvneta: fix operation for 64K PAGE_SIZE
+
+[ Upstream commit e735fd55b94bb48363737db3b1d57627c1a16b47 ]
+
+Recent changes in the mvneta driver reworked allocation
+and handling of the ingress buffers to use entire pages.
+Apart from that in SW BM scenario the HW must be informed
+via PRXDQS about the biggest possible incoming buffer
+that can be propagated by RX descriptors.
+
+The BufferSize field was filled according to the MTU-dependent
+pkt_size value. Later change to PAGE_SIZE broke RX operation
+when usin 64K pages, as the field is simply too small.
+
+This patch conditionally limits the value passed to the BufferSize
+of the PRXDQS register, depending on the PAGE_SIZE used.
+On the occasion remove now unused frag_size field of the mvneta_port
+structure.
+
+Fixes: 562e2f467e71 ("net: mvneta: Improve the buffer allocation method for SWBM")
+Signed-off-by: Marcin Wojtas <mw@semihalf.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/net/ethernet/marvell/mvneta.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/marvell/mvneta.c b/drivers/net/ethernet/marvell/mvneta.c
+index b4ed7d394d07..a78a39244b79 100644
+--- a/drivers/net/ethernet/marvell/mvneta.c
++++ b/drivers/net/ethernet/marvell/mvneta.c
+@@ -406,7 +406,6 @@ struct mvneta_port {
+ 	struct mvneta_pcpu_stats __percpu	*stats;
+ 
+ 	int pkt_size;
+-	unsigned int frag_size;
+ 	void __iomem *base;
+ 	struct mvneta_rx_queue *rxqs;
+ 	struct mvneta_tx_queue *txqs;
+@@ -2905,7 +2904,9 @@ static void mvneta_rxq_hw_init(struct mvneta_port *pp,
+ 	if (!pp->bm_priv) {
+ 		/* Set Offset */
+ 		mvneta_rxq_offset_set(pp, rxq, 0);
+-		mvneta_rxq_buf_size_set(pp, rxq, pp->frag_size);
++		mvneta_rxq_buf_size_set(pp, rxq, PAGE_SIZE < SZ_64K ?
++					PAGE_SIZE :
++					MVNETA_RX_BUF_SIZE(pp->pkt_size));
+ 		mvneta_rxq_bm_disable(pp, rxq);
+ 		mvneta_rxq_fill(pp, rxq, rxq->size);
+ 	} else {
+@@ -3749,7 +3750,6 @@ static int mvneta_open(struct net_device *dev)
+ 	int ret;
+ 
+ 	pp->pkt_size = MVNETA_RX_PKT_SIZE(pp->dev->mtu);
+-	pp->frag_size = PAGE_SIZE;
+ 
+ 	ret = mvneta_setup_rxqs(pp);
+ 	if (ret)
+-- 
+2.17.1
+
