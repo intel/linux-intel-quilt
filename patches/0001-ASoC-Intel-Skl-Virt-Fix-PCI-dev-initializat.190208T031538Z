@@ -1,0 +1,149 @@
+From 734f302e62f4c81a8c393f4202e7e00044491b59 Mon Sep 17 00:00:00 2001
+From: Pawel Furtak <pawel.furtak@intel.com>
+Date: Thu, 17 Jan 2019 12:42:23 +0100
+Subject: [PATCH 1/7] ASoC: Intel: Skl: Virt: Fix PCI dev initialization
+
+Copying virtio device may lead to data corruption
+and problems with memory management. Instead
+PCI dev should be initialized properly as child of
+virtio dev.
+
+Change-Id: Ie7a700374590cbaa038ee627ff10d7da065cf40f
+Tracked-On: OAM-75177
+Signed-off-by: Pawel Furtak <pawel.furtak@intel.com>
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+Tested-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ .../soc/intel/skylake/virtio/skl-virtio-fe.c  | 52 +++++++++++++++----
+ 1 file changed, 41 insertions(+), 11 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 2985c87fd387..8b27ebb8c812 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -881,6 +881,11 @@ static struct nhlt_acpi_table *vfe_skl_nhlt_init(struct device *dev)
+ 	return nhlt;
+ }
+ 
++
++void vfe_skl_pci_dev_release(struct device *dev)
++{
++}
++
+ static int vfe_skl_init(struct virtio_device *vdev)
+ {
+ 	int err;
+@@ -892,7 +897,19 @@ static int vfe_skl_init(struct virtio_device *vdev)
+ 		return -ENOMEM;
+ 
+ 	skl->pci->device = vfe_pci_device_id.device;
+-	skl->pci->dev = vdev->dev;
++	device_initialize(&skl->pci->dev);
++	skl->pci->dev.parent = &vfe->vdev->dev;
++	skl->pci->dev.release = vfe_skl_pci_dev_release;
++	skl->pci->dev.bus = vfe->vdev->dev.bus;
++	skl->pci->dev.coherent_dma_mask = vfe->vdev->dev.coherent_dma_mask;
++	skl->pci->dev.dma_mask = &skl->pci->dev.coherent_dma_mask;
++
++	dev_set_name(&skl->pci->dev, "%s", "audio-virtio");
++	err = device_add(&skl->pci->dev);
++	if (err < 0)
++		goto error;
++
++	dev_set_drvdata(&skl->pci->dev, vfe);
+ 
+ 	skl->mach = &vfe_acpi_mach;
+ 	skl->mach->pdata = &vfe;
+@@ -902,23 +919,27 @@ static int vfe_skl_init(struct virtio_device *vdev)
+ 
+ 	err = vfe_skl_init_hbus(vfe, skl);
+ 	if (err < 0)
+-		return err;
++		goto error;
+ 
+ 	strcpy(skl->tplg_name, "5a98-INTEL-NHLT-GPA-11-tplg.bin");
+ 
+ 	err = vfe_skl_init_dsp(skl);
+ 	if (err < 0)
+-		return err;
++		goto error;
+ 
+ 	err = vfe_platform_register(vfe, &vdev->dev);
+ 	if (err < 0)
+-		return err;
++		goto error;
+ 
+ 	err = vfe_machine_device_register(vfe, skl);
+ 	if (err < 0)
+-		return err;
++		goto error;
+ 
+ 	return 0;
++
++error:
++	device_unregister(&skl->pci->dev);
++	return err;
+ }
+ 
+ static int vfe_init(struct virtio_device *vdev)
+@@ -935,7 +956,7 @@ static int vfe_init(struct virtio_device *vdev)
+ 
+ 	vfe = devm_kzalloc(&vdev->dev, sizeof(*vfe), GFP_KERNEL);
+ 	if (!vfe)
+-		return -ENOMEM;
++		goto no_mem;
+ 
+ 	skl_vfe = vfe;
+ 	vfe->vdev = vdev;
+@@ -951,7 +972,7 @@ static int vfe_init(struct virtio_device *vdev)
+ 			      vqs, cbs, vfe_skl_vq_names, NULL);
+ 	if (ret) {
+ 		dev_err(&vdev->dev, "error: find vqs fail with %d\n", ret);
+-		return ret;
++		goto err;
+ 	}
+ 
+ 	spin_lock_init(&vfe->ipc_vq_lock);
+@@ -967,18 +988,25 @@ static int vfe_init(struct virtio_device *vdev)
+ 
+ 	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
+ 	vfe->notify_machine_probe = vfe_wrap_native_driver;
+-	ret = vfe_skl_init(vdev);
+-	if (ret < 0)
+-		return ret;
+ 
+ 	vfe->pos_not = devm_kmalloc(&vdev->dev,
+ 			sizeof(*vfe->pos_not), GFP_KERNEL);
+ 	if (!vfe->pos_not)
+-		return -ENOMEM;
++		goto no_mem;
+ 
+ 	vfe_send_pos_request(vfe, vfe->pos_not);
+ 
++	ret = vfe_skl_init(vdev);
++	if (ret < 0)
++		goto err;
++
+ 	return 0;
++
++no_mem:
++	ret = -ENOMEM;
++err:
++	vdev->priv = NULL;
++	return ret;
+ }
+ 
+ /*
+@@ -1006,6 +1034,8 @@ static int vfe_probe(struct virtio_device *vdev)
+ static void vfe_remove(struct virtio_device *vdev)
+ {
+ 	struct snd_skl_vfe *vfe = vdev->priv;
++	if (!vfe)
++		return;
+ 
+ 	cancel_work_sync(&vfe->posn_update_work);
+ 	vfe_machine_device_unregister(&vfe->sdev);
+-- 
+2.17.1
+
