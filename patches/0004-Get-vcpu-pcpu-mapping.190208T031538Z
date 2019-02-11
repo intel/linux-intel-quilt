@@ -1,0 +1,320 @@
+From 8fe25931ebf7bc22dc6287bd3105d8d26fef8db2 Mon Sep 17 00:00:00 2001
+From: Manisha Chinthapally <manisha.chinthapally@intel.com>
+Date: Fri, 25 Jan 2019 15:24:05 -0800
+Subject: [PATCH 4/7] Get vcpu pcpu mapping
+
+In virtualization platforms, SEP collects samples from multiple guest OSes,
+But to associate a sample to the guest we need VCPU-PCPU-OSID mapping info.
+
+So, added an IOCTL that allows to get VCPU PCPU mapping information on all the guest OSes
+
+Tracked-On: PKT-1717
+Signed-off-by: Manisha Chinthapally <manisha.chinthapally@intel.com>
+---
+ drivers/platform/x86/sepdk/inc/lwpmudrv.h     |   6 +-
+ .../x86/sepdk/include/lwpmudrv_ioctl.h        |   3 +
+ .../x86/sepdk/include/lwpmudrv_struct.h       |  36 +++-
+ drivers/platform/x86/sepdk/sep/lwpmudrv.c     | 162 +++++++++++++++++-
+ 4 files changed, 195 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/platform/x86/sepdk/inc/lwpmudrv.h b/drivers/platform/x86/sepdk/inc/lwpmudrv.h
+index 994121d28ef2..ae8a3aee26a1 100644
+--- a/drivers/platform/x86/sepdk/inc/lwpmudrv.h
++++ b/drivers/platform/x86/sepdk/inc/lwpmudrv.h
+@@ -454,8 +454,8 @@ int sbuf_share_setup(uint32_t pcpu_id, uint32_t sbuf_id, shared_buf_t *sbuf);
+ 
+ extern shared_buf_t **samp_buf_per_cpu;
+ 
+-#define MAX_NR_VCPUS 8
+-#define MAX_NR_VMS 4
++#define MAX_NR_VCPUS 4
++#define MAX_NR_VMS  4
+ #define MAX_MSR_LIST_NUM 15
+ #define MAX_GROUP_NUM 1
+ 
+@@ -504,7 +504,7 @@ struct profiling_vm_info {
+ 
+ struct profiling_vm_info_list {
+ 	uint16_t num_vms;
+-	struct profiling_vm_info vm_list[MAX_NR_VMS];
++	struct profiling_vm_info vm_list[MAX_NR_VMS+1];
+ };
+ 
+ struct profiling_version_info {
+diff --git a/drivers/platform/x86/sepdk/include/lwpmudrv_ioctl.h b/drivers/platform/x86/sepdk/include/lwpmudrv_ioctl.h
+index 3b60274826c6..9713b19c0e5c 100644
+--- a/drivers/platform/x86/sepdk/include/lwpmudrv_ioctl.h
++++ b/drivers/platform/x86/sepdk/include/lwpmudrv_ioctl.h
+@@ -112,6 +112,9 @@ extern "C" {
+ #define DRV_OPERATION_GET_AGENT_MODE 93
+ #define DRV_OPERATION_INIT_DRIVER 94
+ #define DRV_OPERATION_SET_EMON_BUFFER_DRIVER_HELPER 95
++#define DRV_OPERATION_GET_NUM_VM 96
++#define DRV_OPERATION_GET_VCPU_MAP 97
++
+ // Only used by MAC OS
+ #define DRV_OPERATION_GET_ASLR_OFFSET 997 // this may not need
+ #define DRV_OPERATION_SET_OSX_VERSION 998
+diff --git a/drivers/platform/x86/sepdk/include/lwpmudrv_struct.h b/drivers/platform/x86/sepdk/include/lwpmudrv_struct.h
+index 3af04d4ed829..629750152fdb 100644
+--- a/drivers/platform/x86/sepdk/include/lwpmudrv_struct.h
++++ b/drivers/platform/x86/sepdk/include/lwpmudrv_struct.h
+@@ -1646,14 +1646,14 @@ typedef CPU_MAP_TRACE_NODE * CPU_MAP_TRACE;
+ struct CPU_MAP_TRACE_NODE_S {
+ 	U64 tsc;
+ 	U32 os_id;
+-	U16 vcpu_id;
+-	U16 pcpu_id;
++	U32 vcpu_id;
++	U32 pcpu_id;
+ 	U8 is_static : 1;
+ 	U8 initial : 1;
+ 	U8 reserved1 : 6;
+ 	U8 reserved2;
+ 	U16 reserved3;
+-	U32 reserved4;
++	U64 tsc_offset;
+ };
+ 
+ #define CPU_MAP_TRACE_tsc(x) ((x)->tsc)
+@@ -1663,6 +1663,28 @@ struct CPU_MAP_TRACE_NODE_S {
+ #define CPU_MAP_TRACE_is_static(x) ((x)->is_static)
+ #define CPU_MAP_TRACE_initial(x) ((x)->initial)
+ 
++#define MAX_NUM_VCPU 64
++#define MAX_NUM_VM 16
++
++typedef struct CPU_MAP_TRACE_LIST_NODE_S   CPU_MAP_TRACE_LIST_NODE;
++typedef        CPU_MAP_TRACE_LIST_NODE   * CPU_MAP_TRACE_LIST;
++
++struct CPU_MAP_TRACE_LIST_NODE_S {
++	U32 osid;
++	U8  num_entries;
++	U8  reserved1;
++	U16 reserved2;
++	CPU_MAP_TRACE_NODE  entries[MAX_NUM_VCPU];
++};
++
++typedef struct VM_OSID_MAP_NODE_S   VM_OSID_MAP_NODE;
++typedef        VM_OSID_MAP_NODE   * VM_OSID_MAP;
++struct VM_OSID_MAP_NODE_S {
++	U32 num_vms;
++	U32 reserved1;
++	U32 osid[MAX_NUM_VM];
++};
++
+ typedef struct VM_SWITCH_TRACE_NODE_S VM_SWITCH_TRACE_NODE;
+ typedef VM_SWITCH_TRACE_NODE * VM_SWITCH_TRACE;
+ 
+@@ -1675,10 +1697,10 @@ struct VM_SWITCH_TRACE_NODE_S {
+ 	U64 reserved2;
+ };
+ 
+-#define VM_SWITCH_TRACE_tsc(x) 			((x)->tsc)
+-#define VM_SWITCH_TRACE_from_os_id(x) 	((x)->from_os_id)
+-#define VM_SWITCH_TRACE_to_os_id(x) 	((x)->to_os_id)
+-#define VM_SWITCH_TRACE_reason(x) 		((x)->reason)
++#define VM_SWITCH_TRACE_tsc(x)          ((x)->tsc)
++#define VM_SWITCH_TRACE_from_os_id(x)   ((x)->from_os_id)
++#define VM_SWITCH_TRACE_to_os_id(x)     ((x)->to_os_id)
++#define VM_SWITCH_TRACE_reason(x)       ((x)->reason)
+ 
+ typedef struct EMON_BUFFER_DRIVER_HELPER_NODE_S EMON_BUFFER_DRIVER_HELPER_NODE;
+ typedef EMON_BUFFER_DRIVER_HELPER_NODE * EMON_BUFFER_DRIVER_HELPER;
+diff --git a/drivers/platform/x86/sepdk/sep/lwpmudrv.c b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+index bb53962d2695..ccc78629b028 100755
+--- a/drivers/platform/x86/sepdk/sep/lwpmudrv.c
++++ b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+@@ -1675,7 +1675,7 @@ static OS_STATUS lwpmudrv_Pause(void)
+ #if !defined(DRV_SEP_ACRN_ON)
+ 		CONTROL_Invoke_Parallel(lwpmudrv_Pause_Op, NULL);
+ #endif
+-		/*
++	/*
+ 	 * This means that the PAUSE state has been reached.
+ 	 */
+ 		CHANGE_DRIVER_STATE(STATE_BIT_PAUSING, DRV_STATE_PAUSED);
+@@ -6237,6 +6237,154 @@ static OS_STATUS lwpmudrv_Get_Agent_Mode(IOCTL_ARGS args)
+ 	return status;
+ }
+ 
++/* ------------------------------------------------------------------------- */
++/*!
++ * @fn  static OS_STATUS lwpmudrv_Get_Num_Of_Vms(IOCTL_ARGS arg)
++ *
++ * @param arg - pointer to the IOCTL_ARGS structure
++ *
++ * @return OS_STATUS
++ *
++ * @brief  Local function to get number of VMS available
++ * @brief  Returns status.
++ *
++ * <I>Special Notes</I>
++ */
++static OS_STATUS lwpmudrv_Get_Num_Of_Vms(IOCTL_ARGS args)
++
++{
++	VM_OSID_MAP_NODE vm_map;
++#if defined(DRV_SEP_ACRN_ON)
++	U32 i;
++#endif
++	if (args->buf_drv_to_usr == NULL) {
++		SEP_PRINT_ERROR("Invalid arguments (buf_drv_to_usr is NULL)!");
++		return OS_INVALID;
++	}
++
++	if (args->len_drv_to_usr != sizeof(VM_OSID_MAP_NODE)) {
++		SEP_PRINT_ERROR(
++			"Invalid arguments (unexpected len_drv_to_usr value)!");
++		return OS_INVALID;
++	}
++
++	memset(&vm_map, 0, sizeof(VM_OSID_MAP_NODE));
++
++#if defined(DRV_SEP_ACRN_ON)
++	if (vm_info_list == NULL) {
++		vm_info_list =
++		CONTROL_Allocate_Memory(sizeof(struct profiling_vm_info_list));
++	}
++	memset(vm_info_list, 0, sizeof(struct profiling_vm_info_list));
++
++	BUG_ON(!virt_addr_valid(vm_info_list));
++
++	acrn_hypercall2(HC_PROFILING_OPS, PROFILING_GET_VMINFO,
++			virt_to_phys(vm_info_list));
++
++	vm_map.num_vms = 0;
++	for (i = 0; i < vm_info_list->num_vms; i++) {
++		if (vm_info_list->vm_list[i].num_vcpus != 0) {
++			vm_map.osid[i] = (U32)vm_info_list->vm_list[i].vm_id;
++			vm_map.num_vms++;
++		}
++	}
++
++#endif
++	if (copy_to_user((void __user *)args->buf_drv_to_usr,
++		&vm_map, args->len_drv_to_usr)) {
++		SEP_DRV_LOG_ERROR_FLOW_OUT("Memory copy failure!");
++		return OS_FAULT;
++	}
++
++	return OS_SUCCESS;
++
++}
++/* ------------------------------------------------------------------------- */
++/*!
++ * @fn  static OS_STATUS lwpmudrv_Get_Cpu_Map_Info(IOCTL_ARGS arg)
++ *
++ * @param arg - pointer to the IOCTL_ARGS structure
++ *
++ * @return OS_STATUS
++ *
++ * @brief  Local function to get pcpu-vcpu mapping info
++ * @brief  Returns status.
++ *
++ * <I>Special Notes</I>
++ */
++static OS_STATUS lwpmudrv_Get_Cpu_Map_Info(IOCTL_ARGS args)
++{
++	CPU_MAP_TRACE_LIST cpumap;
++	DRV_STATUS status = OS_SUCCESS;
++#if defined(DRV_SEP_ACRN_ON)
++	U32 i, j;
++#endif
++
++	if ((args->buf_drv_to_usr == NULL) ||
++		(args->len_drv_to_usr != sizeof(CPU_MAP_TRACE_LIST_NODE))) {
++		SEP_PRINT_ERROR("Invalid drv_to_usr arguments!");
++		return OS_INVALID;
++	}
++
++	if ((args->buf_usr_to_drv == NULL) ||
++		(args->len_usr_to_drv != sizeof(CPU_MAP_TRACE_LIST_NODE))) {
++		SEP_PRINT_ERROR("Invalid usr_to_drv arguments!");
++		return OS_INVALID;
++	}
++
++	cpumap = (CPU_MAP_TRACE_LIST)
++		CONTROL_Allocate_Memory(sizeof(CPU_MAP_TRACE_LIST_NODE));
++	if (cpumap == NULL) {
++		SEP_DRV_LOG_ERROR_FLOW_OUT("Memory allocation failure");
++		return OS_NO_MEM;
++	}
++
++	if (copy_from_user(cpumap, (void __user *)args->buf_usr_to_drv,
++			sizeof(CPU_MAP_TRACE_LIST_NODE))) {
++		SEP_DRV_LOG_ERROR_FLOW_OUT("Memory copy failure");
++		status = OS_FAULT;
++		goto cleanup;
++	}
++
++#if defined(DRV_SEP_ACRN_ON)
++	if (vm_info_list == NULL) {
++		SEP_DRV_LOG_ERROR_FLOW_OUT("vm_info_list is NULL!");
++		status = OS_INVALID;
++		goto cleanup;
++	}
++
++	SEP_DRV_LOG_TRACE("CPU mapping for osid %d ", cpumap->osid);
++	for (i = 0; i < vm_info_list->num_vms; i++) {
++		if (vm_info_list->vm_list[i].vm_id == cpumap->osid) {
++			for (j = 0;
++			     j < vm_info_list->vm_list[i].num_vcpus; j++) {
++				UTILITY_Read_TSC(&(cpumap->entries[j].tsc));
++				cpumap->entries[j].is_static = 1;
++				cpumap->entries[j].vcpu_id =
++				vm_info_list->vm_list[i].cpu_map[j].vcpu_id;
++				cpumap->entries[j].pcpu_id =
++				vm_info_list->vm_list[i].cpu_map[j].pcpu_id;
++				cpumap->entries[j].os_id =
++				vm_info_list->vm_list[i].vm_id;
++				cpumap->num_entries++;
++			}
++		}
++	}
++#endif
++	if (copy_to_user((void __user *)args->buf_drv_to_usr,
++		cpumap, args->len_drv_to_usr)) {
++		SEP_DRV_LOG_ERROR_FLOW_OUT("Memory copy failure!");
++		status = OS_FAULT;
++		goto cleanup;
++	}
++
++cleanup:
++	cpumap = CONTROL_Free_Memory(cpumap);
++	return status;
++}
++
++
+ /*******************************************************************************
+  *  External Driver functions - Open
+  *      This function is common to all drivers
+@@ -6358,7 +6506,7 @@ static IOCTL_OP_TYPE lwpmu_Service_IOCTL(IOCTL_USE_INODE struct file *filp,
+ 	UTILITY_Driver_Set_Active_Ioctl(cmd);
+ 
+ 	switch (cmd) {
+-		/*
++	/*
+ 	* Common IOCTL commands
+ 	*/
+ 
+@@ -6529,6 +6677,16 @@ static IOCTL_OP_TYPE lwpmu_Service_IOCTL(IOCTL_USE_INODE struct file *filp,
+ 		status = lwpmudrv_Get_Agent_Mode(&local_args);
+ 		break;
+ 
++	case DRV_OPERATION_GET_VCPU_MAP:
++		SEP_DRV_LOG_TRACE("DRV_OPERATION_GET_CPU_MAP\n");
++		status = lwpmudrv_Get_Cpu_Map_Info(&local_args);
++		break;
++
++	case DRV_OPERATION_GET_NUM_VM:
++		SEP_DRV_LOG_TRACE("DRV_OPERATION_GET_NUM_VM\n");
++		status = lwpmudrv_Get_Num_Of_Vms(&local_args);
++		break;
++
+ 		/*
+ 		 * EMON-specific IOCTL commands
+ 		 */
+-- 
+2.17.1
+

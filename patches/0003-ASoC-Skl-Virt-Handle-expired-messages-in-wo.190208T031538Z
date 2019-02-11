@@ -1,0 +1,111 @@
+From 106f1eae091804a76b0955bfd71c71ef154716e7 Mon Sep 17 00:00:00 2001
+From: Pawel Furtak <pawel.furtak@intel.com>
+Date: Wed, 30 Jan 2019 09:32:09 +0100
+Subject: [PATCH 3/7] ASoC: Skl: Virt: Handle expired messages in worker thread
+
+Handling expired messages may be blocking e.g. sending
+another message and waiting for reply. To prevent sleeping
+in IRQ context (virtio queue callback), message handling
+should be deferred to non-atomic context.
+
+Change-Id: I9312ed0525a6c32bc2b4f05b2555e221a3275bf9
+Tracked-On: OAM-75599
+Signed-off-by: Pawel Furtak <pawel.furtak@intel.com>
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+Tested-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ .../intel/skylake/virtio/skl-virtio-common.h  |  2 ++
+ .../soc/intel/skylake/virtio/skl-virtio-fe.c  | 27 +++++++++++++++++--
+ .../soc/intel/skylake/virtio/skl-virtio-fe.h  |  3 +++
+ 3 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-common.h b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+index 98941bfd28fb..cb3d04edb0ce 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-common.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+@@ -72,6 +72,8 @@ struct vfe_ipc_msg {
+ 
+ 	void *tx_buf;
+ 	void *rx_buf;
++
++	struct list_head list;
+ };
+ 
+ struct vbe_ipc_msg {
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 0ae0bba2b376..0ec32be1cd06 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -316,6 +316,26 @@ static void vfe_cmd_handle_rx(struct virtqueue *vq)
+ {
+ }
+ 
++static void vfe_not_tx_timeout_handler(struct work_struct *work)
++{
++	struct vfe_ipc_msg *msg;
++	struct snd_skl_vfe *vfe =
++		container_of(work, struct snd_skl_vfe,
++		msg_timeout_work);
++
++	while (!list_empty(&vfe->expired_msg_list)) {
++		msg = list_first_entry(&vfe->expired_msg_list,
++			struct vfe_ipc_msg, list);
++
++		vfe_handle_timedout_not_tx_msg(vfe, msg);
++
++		list_del(&msg->list);
++		kfree(msg->tx_buf);
++		kfree(msg->rx_buf);
++		kfree(msg);
++	}
++}
++
+ static void vfe_not_tx_done(struct virtqueue *vq)
+ {
+ 	struct snd_skl_vfe *vfe = vq->vdev->priv;
+@@ -335,8 +355,9 @@ static void vfe_not_tx_done(struct virtqueue *vq)
+ 
+ 		msg_status = atomic_read(&msg->status);
+ 		if (msg_status == VFE_MSG_TIMED_OUT) {
+-			vfe_handle_timedout_not_tx_msg(vfe, msg);
+-			goto free_msg;
++			list_add_tail(&msg->list, &vfe->expired_msg_list);
++			schedule_work(&vfe->msg_timeout_work);
++			continue;
+ 		}
+ 
+ 		if (msg->rx_buf) {
+@@ -990,6 +1011,8 @@ static int vfe_init(struct virtio_device *vdev)
+ 	INIT_LIST_HEAD(&vfe->substr_info_list);
+ 	spin_lock_init(&vfe->ipc_vq_lock);
+ 	INIT_WORK(&vfe->posn_update_work, vfe_posn_update);
++	INIT_LIST_HEAD(&vfe->expired_msg_list);
++	INIT_WORK(&vfe->msg_timeout_work, vfe_not_tx_timeout_handler);
+ 
+ 	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
+ 	vfe->notify_machine_probe = vfe_wrap_native_driver;
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index 1fec99031659..77ddd7cfde95 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -39,6 +39,7 @@ struct snd_skl_vfe {
+ 
+ 	/* position update work */
+ 	struct work_struct posn_update_work;
++	struct work_struct msg_timeout_work;
+ 
+ 	spinlock_t ipc_vq_lock;
+ 	/* IPC cmd from frontend to backend */
+@@ -55,6 +56,8 @@ struct snd_skl_vfe {
+ 	spinlock_t substream_info_lock;
+ 	struct list_head substr_info_list;
+ 
++	struct list_head expired_msg_list;
++
+ 	int (*send_dsp_ipc_msg)(struct snd_skl_vfe *vfe,
+ 		struct ipc_message *msg);
+ 	int (*notify_machine_probe)(struct snd_skl_vfe *vfe,
+-- 
+2.17.1
+

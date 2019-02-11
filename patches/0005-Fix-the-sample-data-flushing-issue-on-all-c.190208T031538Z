@@ -1,0 +1,102 @@
+From 025ebd62c81c5780768a090db7a3f9a4c7c14108 Mon Sep 17 00:00:00 2001
+From: Manisha Chinthapally <manisha.chinthapally@intel.com>
+Date: Wed, 30 Jan 2019 16:36:50 -0800
+Subject: [PATCH 5/7] Fix the sample data flushing issue on all cpu buffers
+
+Currently, per-cpu buffers are flushed by each cpu on SOS. However,
+when ACRN SOS launches UOS, it offlines 3 of 4 vcpus, which prevents
+flushing sample data from all cpu buffers.
+
+This patch makes the remaining online cpu to flush data samples from
+all cpu buffers.
+
+Tracked-On: PKT-1717
+Signed-off-by: Min Lim <min.yeol.lim@intel.com>
+---
+ drivers/platform/x86/sepdk/sep/lwpmudrv.c | 11 +++++++++--
+ drivers/platform/x86/sepdk/sep/pmi.c      | 17 ++++++++++++++---
+ 2 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/platform/x86/sepdk/sep/lwpmudrv.c b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+index ccc78629b028..be5310ef43b8 100755
+--- a/drivers/platform/x86/sepdk/sep/lwpmudrv.c
++++ b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+@@ -2241,6 +2241,8 @@ static VOID lwpmudrv_ACRN_Buffer_Read(
+ #endif
+ )
+ {
++	S32 i;
++
+ 	SEP_DRV_LOG_TRACE_IN("");
+ 
+ 	if (GET_DRIVER_STATE() != DRV_STATE_RUNNING) {
+@@ -2248,7 +2250,9 @@ static VOID lwpmudrv_ACRN_Buffer_Read(
+ 		return;
+ 	}
+ 
+-	CONTROL_Invoke_Parallel(PMI_Buffer_Handler, NULL);
++	for (i = 0; i < GLOBAL_STATE_num_cpus(driver_state); i++) {
++		PMI_Buffer_Handler(&i);
++	}
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+ 	mod_timer(buffer_read_timer, jiffies + buffer_timer_interval);
+@@ -4261,7 +4265,10 @@ static OS_STATUS lwpmudrv_Prepare_Stop(void)
+ 
+ 	lwpmudrv_ACRN_Flush_Stop_Timer();
+         SEP_DRV_LOG_TRACE("Calling final PMI_Buffer_Handler\n");
+-	CONTROL_Invoke_Parallel(PMI_Buffer_Handler, NULL);
++
++	for (i = 0; i < GLOBAL_STATE_num_cpus(driver_state); i++) {
++		PMI_Buffer_Handler(&i);
++	}
+ #endif
+ 
+ 	SEP_DRV_LOG_TRACE("Outside of all interrupts.");
+diff --git a/drivers/platform/x86/sepdk/sep/pmi.c b/drivers/platform/x86/sepdk/sep/pmi.c
+index 934473f57efa..516a7f002764 100755
+--- a/drivers/platform/x86/sepdk/sep/pmi.c
++++ b/drivers/platform/x86/sepdk/sep/pmi.c
+@@ -442,10 +442,21 @@ VOID PMI_Buffer_Handler(PVOID data)
+ 	U64 overflow_status = 0;
+ 
+ 	if (!pcb || !cpu_buf || !devices) {
++		SEP_DRV_LOG_ERROR(
++			"Invalid data pointers in PMI_Buffer_Handler!\n");
+ 		return;
+ 	}
+ 
+-	cpu_id = (S32)CONTROL_THIS_CPU();
++	if (data) {
++		cpu_id = *(S32 *)data;
++		if (cpu_id >= GLOBAL_STATE_num_cpus(driver_state)) {
++			SEP_DRV_LOG_ERROR(
++				"Invalid cpu_id: %d\n", cpu_id);
++			return;
++		}
++	} else {
++		cpu_id = (S32)CONTROL_THIS_CPU();
++	}
+ 	pcpu = &pcb[cpu_id];
+ 	bd = &cpu_buf[cpu_id];
+ 	dev_idx = core_to_dev_map[cpu_id];
+@@ -493,14 +504,14 @@ VOID PMI_Buffer_Handler(PVOID data)
+ 			SEP_DRV_LOG_TRACE("payload_size = %x\n", payload_size);
+ 			if (header.payload_size > payload_size) {
+ 				// Mismatch in payload size in header info
+-				SEP_PRINT_ERROR(
++				SEP_DRV_LOG_ERROR(
+ 					"Mismatch in data size: header=%llu, payload_size=%d\n",
+ 					header.payload_size, payload_size);
+ 				goto handler_cleanup;
+ 			}
+ 			if (header.cpu_id != cpu_id) {
+ 				// Mismatch in cpu index in header info
+-				SEP_PRINT_ERROR(
++				SEP_DRV_LOG_ERROR(
+ 					"Mismatch in cpu idx: header=%u, buffer=%d\n",
+ 					header.cpu_id, cpu_id);
+ 				goto handler_cleanup;
+-- 
+2.17.1
+
