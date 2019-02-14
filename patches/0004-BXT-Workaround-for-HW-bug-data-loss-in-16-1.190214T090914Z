@@ -1,0 +1,155 @@
+From de89fd98c923632bdf7920ec95e23f8073dd5d87 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pawe=C5=82=20Har=C5=82ozi=C5=84ski?=
+ <pawel.harlozinski@intel.com>
+Date: Wed, 6 Feb 2019 15:51:22 +0100
+Subject: [PATCH 4/4] BXT Workaround for HW bug:  data loss in 16/16 -> 32/32
+ copier
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: Ib6dd97f94c7dfbe609a5712c5a47248646ac10ff
+Tracked-On: ACI-5615
+Tracked-On: OAM-75492
+Signed-off-by: Paweł Harłoziński <pawel.harlozinski@intel.com>
+---
+ include/sound/hdaudio.h         | 12 +++++++++++-
+ include/sound/hdaudio_ext.h     | 10 ----------
+ sound/hda/ext/hdac_ext_stream.c | 13 +------------
+ sound/hda/hdac_stream.c         | 33 +++++++++++++++++++++++++++++++++
+ 4 files changed, 45 insertions(+), 23 deletions(-)
+
+diff --git a/include/sound/hdaudio.h b/include/sound/hdaudio.h
+index 5eee13a0c045..0d422ab82701 100644
+--- a/include/sound/hdaudio.h
++++ b/include/sound/hdaudio.h
+@@ -523,7 +523,8 @@ struct hdac_stream *snd_hdac_stream_assign(struct hdac_bus *bus,
+ void snd_hdac_stream_release(struct hdac_stream *azx_dev);
+ struct hdac_stream *snd_hdac_get_stream(struct hdac_bus *bus,
+ 					int dir, int stream_tag);
+-
++void snd_hdac_stream_decouple(struct hdac_bus *bus,
++				struct hdac_stream *hstream, bool decouple);
+ int snd_hdac_stream_setup(struct hdac_stream *azx_dev);
+ void snd_hdac_stream_cleanup(struct hdac_stream *azx_dev);
+ int snd_hdac_stream_setup_periods(struct hdac_stream *azx_dev);
+@@ -575,6 +576,15 @@ void snd_hdac_stream_timecounter_init(struct hdac_stream *azx_dev,
+ 			       (snd_hdac_stream_readb(dev, reg) & \
+ 				~(mask)) | (val))
+ 
++/* update register macro */
++#define snd_hdac_updatel(addr, reg, mask, val)		\
++	writel(((readl(addr + reg) & ~(mask)) | (val)), \
++		addr + reg)
++
++#define snd_hdac_updatew(addr, reg, mask, val)		\
++	writew(((readw(addr + reg) & ~(mask)) | (val)), \
++		addr + reg)
++
+ #ifdef CONFIG_SND_HDA_DSP_LOADER
+ /* DSP lock helpers */
+ #define snd_hdac_dsp_lock_init(dev)	mutex_init(&(dev)->dsp_mutex)
+diff --git a/include/sound/hdaudio_ext.h b/include/sound/hdaudio_ext.h
+index 5ebf57fa778d..0cbf44b819e8 100644
+--- a/include/sound/hdaudio_ext.h
++++ b/include/sound/hdaudio_ext.h
+@@ -137,16 +137,6 @@ void snd_hdac_ext_link_clear_stream_id(struct hdac_ext_link *link,
+ int snd_hdac_ext_bus_link_get(struct hdac_bus *bus, struct hdac_ext_link *link);
+ int snd_hdac_ext_bus_link_put(struct hdac_bus *bus, struct hdac_ext_link *link);
+ 
+-/* update register macro */
+-#define snd_hdac_updatel(addr, reg, mask, val)		\
+-	writel(((readl(addr + reg) & ~(mask)) | (val)), \
+-		addr + reg)
+-
+-#define snd_hdac_updatew(addr, reg, mask, val)		\
+-	writew(((readw(addr + reg) & ~(mask)) | (val)), \
+-		addr + reg)
+-
+-
+ struct hdac_ext_device;
+ 
+ /* ops common to all codec drivers */
+diff --git a/sound/hda/ext/hdac_ext_stream.c b/sound/hda/ext/hdac_ext_stream.c
+index fa7b80fcba9d..85ff1536ba44 100644
+--- a/sound/hda/ext/hdac_ext_stream.c
++++ b/sound/hda/ext/hdac_ext_stream.c
+@@ -126,19 +126,8 @@ void snd_hdac_ext_stream_decouple(struct hdac_bus *bus,
+ 				struct hdac_ext_stream *stream, bool decouple)
+ {
+ 	struct hdac_stream *hstream = &stream->hstream;
+-	u32 val;
+-	int mask = AZX_PPCTL_PROCEN(hstream->index);
+-
+-	spin_lock_irq(&bus->reg_lock);
+-	val = readw(bus->ppcap + AZX_REG_PP_PPCTL) & mask;
+-
+-	if (decouple && !val)
+-		snd_hdac_updatel(bus->ppcap, AZX_REG_PP_PPCTL, mask, mask);
+-	else if (!decouple && val)
+-		snd_hdac_updatel(bus->ppcap, AZX_REG_PP_PPCTL, mask, 0);
+-
++	snd_hdac_stream_decouple(bus, hstream, decouple);
+ 	stream->decoupled = decouple;
+-	spin_unlock_irq(&bus->reg_lock);
+ }
+ EXPORT_SYMBOL_GPL(snd_hdac_ext_stream_decouple);
+ 
+diff --git a/sound/hda/hdac_stream.c b/sound/hda/hdac_stream.c
+index 67d672192606..1b83a88ae4e5 100644
+--- a/sound/hda/hdac_stream.c
++++ b/sound/hda/hdac_stream.c
+@@ -178,6 +178,33 @@ void snd_hdac_stream_reset(struct hdac_stream *azx_dev)
+ }
+ EXPORT_SYMBOL_GPL(snd_hdac_stream_reset);
+ 
++/**
++ * snd_hdac_stream_decouple - decouple the hdac stream
++ * @bus: HD-audio core bus
++ * @stream: HD-audio core stream object to initialize
++ * @decouple: flag to decouple
++ */
++void snd_hdac_stream_decouple(struct hdac_bus *bus,
++				struct hdac_stream *hstream, bool decouple)
++{
++	u32 val;
++	int mask = AZX_PPCTL_PROCEN(hstream->index);
++
++	if (bus->ppcap) {
++		spin_lock_irq(&bus->reg_lock);
++		val = readw(bus->ppcap + AZX_REG_PP_PPCTL) & mask;
++
++		if (decouple && !val)
++			snd_hdac_updatel(bus->ppcap, AZX_REG_PP_PPCTL,
++					mask, mask);
++		else if (!decouple && val)
++			snd_hdac_updatel(bus->ppcap, AZX_REG_PP_PPCTL, mask, 0);
++
++		spin_unlock_irq(&bus->reg_lock);
++	}
++}
++EXPORT_SYMBOL_GPL(snd_hdac_stream_decouple);
++
+ /**
+  * snd_hdac_stream_setup -  set up the SD for streaming
+  * @azx_dev: HD-audio core stream to set up
+@@ -205,10 +232,16 @@ int snd_hdac_stream_setup(struct hdac_stream *azx_dev)
+ 	/* program the length of samples in cyclic buffer */
+ 	snd_hdac_stream_writel(azx_dev, SD_CBL, azx_dev->bufsize);
+ 
++	/* workaround for BXT HW bug */
++	snd_hdac_stream_decouple(bus, azx_dev, false);
++
+ 	/* program the stream format */
+ 	/* this value needs to be the same as the one programmed */
+ 	snd_hdac_stream_writew(azx_dev, SD_FORMAT, azx_dev->format_val);
+ 
++	/* workaround for BXT HW bug */
++	snd_hdac_stream_decouple(bus, azx_dev, true);
++
+ 	/* program the stream LVI (last valid index) of the BDL */
+ 	snd_hdac_stream_writew(azx_dev, SD_LVI, azx_dev->frags - 1);
+ 
+-- 
+2.17.1
+
