@@ -1,0 +1,85 @@
+From f1424c4a6b7ae11670b87cd5516e70131908fc3b Mon Sep 17 00:00:00 2001
+From: Mateusz Polrola <mateuszx.potrola@intel.com>
+Date: Tue, 19 Sep 2017 08:37:38 +0200
+Subject: [PATCH 1/4] iommu/vt-d: Added option to disable BXT IPU.
+
+VT-d cannot be used with BXT IPU due to HW issues.
+This change introduces ipu_off option that allows to disable mapping of
+IPU device.
+
+This fixes: 205999
+
+Tracked-On: ACI-5604
+Change-Id: I9319e9c64b4cf195ffd49a81dbf93773a5f1457e
+Signed-off-by: Mateusz Polrola <mateuszx.potrola@intel.com>
+---
+ drivers/iommu/intel-iommu.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/drivers/iommu/intel-iommu.c b/drivers/iommu/intel-iommu.c
+index 4339177629e3..214421a65b91 100644
+--- a/drivers/iommu/intel-iommu.c
++++ b/drivers/iommu/intel-iommu.c
+@@ -61,6 +61,7 @@
+ #define IS_USB_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_SERIAL_USB)
+ #define IS_ISA_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA)
+ #define IS_AZALIA(pdev) ((pdev)->vendor == 0x8086 && (pdev)->device == 0x3a3e)
++#define IS_IPU4(pdev) ((pdev)->vendor == PCI_VENDOR_ID_INTEL && (pdev)->device == 0x5a88)
+ 
+ #define IOAPIC_RANGE_START	(0xfee00000)
+ #define IOAPIC_RANGE_END	(0xfeefffff)
+@@ -427,6 +428,7 @@ int intel_iommu_enabled = 0;
+ EXPORT_SYMBOL_GPL(intel_iommu_enabled);
+ 
+ static int dmar_map_gfx = 1;
++static int dmar_map_ipu = 1;
+ static int dmar_forcedac;
+ static int intel_iommu_strict;
+ static int intel_iommu_superpage = 1;
+@@ -437,6 +439,7 @@ static int iommu_identity_mapping;
+ #define IDENTMAP_ALL		1
+ #define IDENTMAP_GFX		2
+ #define IDENTMAP_AZALIA		4
++#define IDENTMAP_IPU		8
+ 
+ /* Broadwell and Skylake have broken ECS support — normal so-called "second
+  * level" translation of DMA requests-without-PASID doesn't actually happen
+@@ -532,6 +535,10 @@ static int __init intel_iommu_setup(char *str)
+ 		} else if (!strncmp(str, "igfx_off", 8)) {
+ 			dmar_map_gfx = 0;
+ 			pr_info("Disable GFX device mapping\n");
++		} else if (!strncmp(str, "ipu_off", 7)) {
++			dmar_map_ipu = 0;
++			printk(KERN_INFO
++				"Intel-IOMMU: disable IPU device mapping\n");
+ 		} else if (!strncmp(str, "forcedac", 8)) {
+ 			pr_info("Forcing DAC for PCI devices\n");
+ 			dmar_forcedac = 1;
+@@ -2926,6 +2933,9 @@ static int iommu_should_identity_map(struct device *dev, int startup)
+ 		if ((iommu_identity_mapping & IDENTMAP_GFX) && IS_GFX_DEVICE(pdev))
+ 			return 1;
+ 
++		if ((iommu_identity_mapping & IDENTMAP_IPU) && IS_IPU4(pdev))
++			return 1;
++
+ 		if (!(iommu_identity_mapping & IDENTMAP_ALL))
+ 			return 0;
+ 
+@@ -5435,6 +5445,14 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0044, quirk_calpella_no_shadow_g
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0062, quirk_calpella_no_shadow_gtt);
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x006a, quirk_calpella_no_shadow_gtt);
+ 
++static void quirk_broxton_ipu(struct pci_dev *dev)
++{
++	if (!dmar_map_ipu) {
++		iommu_identity_mapping |= IDENTMAP_IPU;
++	}
++}
++DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5a88, quirk_broxton_ipu);
++
+ /* On Tylersburg chipsets, some BIOSes have been known to enable the
+    ISOCH DMAR unit for the Azalia sound device, but not give it any
+    TLB entries, which causes it to deadlock. Check for that.  We do
+-- 
+2.17.1
+
