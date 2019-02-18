@@ -1,0 +1,47 @@
+From f2b09d0e5c7bce9caddb46718724b95a24424546 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Fri, 15 Feb 2019 03:52:45 +0000
+Subject: [PATCH 3/5] drm/i915/gvt: limit the active perf on BXT platform
+
+In commit "drm/i915/gvt: force to active the high-performance mode
+during vGPU busy", it set the max GPU freq when there's GVT workload,
+but on BXT platform, the max GPU freq will impact the CPU performance,
+To make a balance between GPU and CPU, we hardcode it to 600Mhz on BXT
+platform.
+Also, this patch will not disable rps interrupt anymore, so that if
+workload is heavier, GPU freq can be adjusted to higher.
+
+Tracked-On: projectacrn/acrn-hypervisor#2537
+Tracked-On: PKT-1737
+Signed-off-by: Min He <min.he@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/scheduler.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 51060ff067e8..87944a44cb51 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -270,13 +270,14 @@ static void active_hp_work(struct work_struct *work)
+ 	struct intel_gvt *gvt =
+ 		container_of(work, struct intel_gvt, active_hp_work);
+ 	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	u8 freq = dev_priv->gt_pm.rps.rp0_freq;
+ 
+-	gen6_disable_rps_interrupts(dev_priv);
++	if (IS_BROXTON(dev_priv))
++		freq = intel_freq_opcode(dev_priv, 600);
+ 
+-	if (READ_ONCE(dev_priv->gt_pm.rps.cur_freq) <
+-	    READ_ONCE(dev_priv->gt_pm.rps.rp0_freq)) {
++	if (READ_ONCE(dev_priv->gt_pm.rps.cur_freq) < freq) {
+ 		mutex_lock(&dev_priv->pcu_lock);
+-		intel_set_rps(dev_priv, dev_priv->gt_pm.rps.rp0_freq);
++		intel_set_rps(dev_priv, freq);
+ 		mutex_unlock(&dev_priv->pcu_lock);
+ 	}
+ }
+-- 
+2.17.1
+
