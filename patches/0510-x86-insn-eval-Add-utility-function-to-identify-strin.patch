@@ -1,0 +1,85 @@
+From 46410699e1f04287f0c61d547ccb4a5bbbbe07d9 Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Tue, 2 May 2017 18:41:58 -0700
+Subject: [PATCH 0510/2278] x86/insn-eval: Add utility function to identify
+ string instructions
+
+String instructions are special because, in protected mode, the linear
+address is always obtained via the ES segment register in operands that
+use the (E)DI register; the DS segment register in operands that use
+the (E)SI register. Furthermore, segment override prefixes are ignored
+when calculating a linear address involving the (E)DI register; segment
+override prefixes can be used when calculating linear addresses involving
+the (E)SI register.
+
+It follows that linear addresses are calculated differently for the case of
+string instructions. The purpose of this utility function is to identify
+such instructions for callers to determine a linear address correctly.
+
+Note that this function only identifies string instructions; it does not
+determine what segment register to use in the address computation. That is
+left to callers. A subsequent commmit introduces a function to determine
+the segment register to use given the instruction, operands and
+segment override prefixes.
+
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Adam Buchbinder <adam.buchbinder@gmail.com>
+Cc: Colin Ian King <colin.king@canonical.com>
+Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+Cc: Qiaowei Ren <qiaowei.ren@intel.com>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Masami Hiramatsu <mhiramat@kernel.org>
+Cc: Adrian Hunter <adrian.hunter@intel.com>
+Cc: Kees Cook <keescook@chromium.org>
+Cc: Thomas Garnier <thgarnie@google.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Dmitry Vyukov <dvyukov@google.com>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: x86@kernel.org
+Reviewed-by: Borislav Petkov <bp@suse.de>
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/lib/insn-eval.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/arch/x86/lib/insn-eval.c b/arch/x86/lib/insn-eval.c
+index c9d3cde..36bd847 100644
+--- a/arch/x86/lib/insn-eval.c
++++ b/arch/x86/lib/insn-eval.c
+@@ -19,6 +19,32 @@ enum reg_type {
+ 	REG_TYPE_BASE,
+ };
+ 
++/**
++ * is_string_insn() - Determine if instruction is a string instruction
++ * @insn:	Instruction structure containing the opcode
++ *
++ * Return: true if the instruction, determined by the opcode, is any of the
++ * string instructions as defined in the Intel Software Development manual.
++ * False otherwise.
++ */
++static bool is_string_insn(struct insn *insn)
++{
++	insn_get_opcode(insn);
++
++	/* All string instructions have a 1-byte opcode. */
++	if (insn->opcode.nbytes != 1)
++		return false;
++
++	switch (insn->opcode.bytes[0]) {
++	case 0x6c ... 0x6f:	/* INS, OUTS */
++	case 0xa4 ... 0xa7:	/* MOVS, CMPS */
++	case 0xaa ... 0xaf:	/* STOS, LODS, SCAS */
++		return true;
++	default:
++		return false;
++	}
++}
++
+ static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
+ 			  enum reg_type type)
+ {
+-- 
+2.7.4
+

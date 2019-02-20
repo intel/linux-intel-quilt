@@ -1,0 +1,173 @@
+From cecce863fee58bccc653b134ccae37d1398507c5 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Thu, 24 Aug 2017 06:59:52 +0800
+Subject: [PATCH 0932/2278] drm/i915/gvt: Added error interrupt handler for
+ GVT-g guest
+
+An draft version of adding error interrupt handler in GVT-g guest, to
+trigger a GPU reset when receiving the CS error interrupt.
+
+v2: Updated by JH - made the worker object local to the engine rather
+than a global. Also, don't re-initialise it in the interrupt handler
+otherwise null pointer dereferences ensue when the interrupts occur
+too quickly.
+
+In the Xen virtualised environment, the TDR is a co-operative effort
+between the host and guest domains. The actual detection is done
+entirely by the host as only it really knows what the hardware is
+doing. The guest still needs to do all the recovery processing when
+informed about a TDR event occuring by the host. However, the guest
+should not attempt to do the detection itself.
+
+Change-Id: I3edac5211f9878725b14abaab7cacf9048ccd620
+Signed-off-by: Min He <min.he@intel.com>
+Signed-off-by: John Harrison <John.C.Harrison@Intel.com>
+Signed-off-by: Satyeshwar Singh <satyeshwar.singh@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c     |  3 +++
+ drivers/gpu/drm/i915/i915_gem.c         | 16 +++++++++-------
+ drivers/gpu/drm/i915/i915_irq.c         | 19 +++++++++++++++++++
+ drivers/gpu/drm/i915/intel_hangcheck.c  |  3 +++
+ drivers/gpu/drm/i915/intel_lrc.c        | 11 +++++++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.h |  1 +
+ 6 files changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 9cf7772..ae75b5e 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -4160,6 +4160,9 @@ i915_wedged_set(void *data, u64 val)
+ 	struct intel_engine_cs *engine;
+ 	unsigned int tmp;
+ 
++	if (intel_vgpu_active(i915))
++		return -EINVAL;
++
+ 	/*
+ 	 * There is no safeguard against this debugfs entry colliding
+ 	 * with the hangcheck calling same i915_handle_error() in
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 83fa119..1008006 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2764,13 +2764,15 @@ i915_gem_find_active_request(struct intel_engine_cs *engine)
+ 
+ static bool engine_stalled(struct intel_engine_cs *engine)
+ {
+-	if (!engine->hangcheck.stalled)
+-		return false;
+-
+-	/* Check for possible seqno movement after hang declaration */
+-	if (engine->hangcheck.seqno != intel_engine_get_seqno(engine)) {
+-		DRM_DEBUG_DRIVER("%s pardoned\n", engine->name);
+-		return false;
++	if (!intel_vgpu_active(engine->i915)) {
++		if (!engine->hangcheck.stalled)
++			return false;
++
++		/* Check for possible seqno movement after hang declaration */
++		if (engine->hangcheck.seqno != intel_engine_get_seqno(engine)) {
++			DRM_DEBUG_DRIVER("%s pardoned\n", engine->name);
++			return false;
++		}
+ 	}
+ 
+ 	return true;
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 9606d2e..c0b484bc 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1325,6 +1325,12 @@ gen8_cs_irq_handler(struct intel_engine_cs *engine, u32 iir, int test_shift)
+ 		tasklet |= i915.enable_guc_submission;
+ 	}
+ 
++	if ((iir & (GT_RENDER_CS_MASTER_ERROR_INTERRUPT << test_shift)) &&
++			intel_vgpu_active(engine->i915)) {
++		queue_work(system_highpri_wq, &engine->reset_work);
++		return;
++	}
++
+ 	if (tasklet)
+ 		tasklet_hi_schedule(&engine->irq_tasklet);
+ }
+@@ -3458,6 +3464,19 @@ static void gen8_gt_irq_postinstall(struct drm_i915_private *dev_priv)
+ 	if (HAS_L3_DPF(dev_priv))
+ 		gt_interrupts[0] |= GT_RENDER_L3_PARITY_ERROR_INTERRUPT;
+ 
++	if (intel_vgpu_active(dev_priv)) {
++		gt_interrupts[0] |= GT_RENDER_CS_MASTER_ERROR_INTERRUPT <<
++				GEN8_RCS_IRQ_SHIFT |
++			GT_RENDER_CS_MASTER_ERROR_INTERRUPT <<
++				GEN8_BCS_IRQ_SHIFT;
++		gt_interrupts[1] |= GT_RENDER_CS_MASTER_ERROR_INTERRUPT <<
++				GEN8_VCS1_IRQ_SHIFT |
++			GT_RENDER_CS_MASTER_ERROR_INTERRUPT <<
++				GEN8_VCS2_IRQ_SHIFT;
++		gt_interrupts[3] |= GT_RENDER_CS_MASTER_ERROR_INTERRUPT <<
++				GEN8_VECS_IRQ_SHIFT;
++	}
++
+ 	dev_priv->pm_ier = 0x0;
+ 	dev_priv->pm_imr = ~dev_priv->pm_ier;
+ 	GEN8_IRQ_INIT_NDX(GT, 0, ~gt_interrupts[0], gt_interrupts[0]);
+diff --git a/drivers/gpu/drm/i915/intel_hangcheck.c b/drivers/gpu/drm/i915/intel_hangcheck.c
+index d9d87d9..ee23db2 100644
+--- a/drivers/gpu/drm/i915/intel_hangcheck.c
++++ b/drivers/gpu/drm/i915/intel_hangcheck.c
+@@ -431,6 +431,9 @@ static void i915_hangcheck_elapsed(struct work_struct *work)
+ 	if (!i915.enable_hangcheck)
+ 		return;
+ 
++	if (intel_vgpu_active(dev_priv))
++		return;
++
+ 	if (!READ_ONCE(dev_priv->gt.awake))
+ 		return;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index c3589a9..8120404 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -1792,6 +1792,15 @@ lrc_setup_hws(struct intel_engine_cs *engine, struct i915_vma *vma)
+ 	return 0;
+ }
+ 
++static void i915_error_reset(struct work_struct *work) {
++	struct intel_engine_cs *engine =
++		container_of(work, struct intel_engine_cs,
++			     reset_work);
++	i915_handle_error(engine->i915, 1 << engine->id,
++			"Received error interrupt from engine %d",
++			engine->id);
++}
++
+ static void
+ logical_ring_setup(struct intel_engine_cs *engine)
+ {
+@@ -1822,6 +1831,8 @@ logical_ring_setup(struct intel_engine_cs *engine)
+ 
+ 	logical_ring_default_vfuncs(engine);
+ 	logical_ring_default_irqs(engine);
++
++	INIT_WORK(&engine->reset_work, i915_error_reset);
+ }
+ 
+ static int
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 6b2067f..0fb5e1d 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -392,6 +392,7 @@ struct intel_engine_cs {
+ 	struct rb_root execlist_queue;
+ 	struct rb_node *execlist_first;
+ 	unsigned int fw_domains;
++	struct work_struct reset_work;
+ 
+ 	/* Contexts are pinned whilst they are active on the GPU. The last
+ 	 * context executed remains active whilst the GPU is idle - the
+-- 
+2.7.4
+

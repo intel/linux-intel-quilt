@@ -1,0 +1,92 @@
+From fae7867c8807b227b01f3de01432a8f909931e3e Mon Sep 17 00:00:00 2001
+From: Jesus Sanchez-Palencia <jesus.sanchez-palencia@intel.com>
+Date: Wed, 14 Nov 2018 17:26:35 -0800
+Subject: [PATCH 2275/2278] etf: Drop all expired packets
+
+Currently on dequeue() ETF only drops the first expired packet, which
+causes a problem if the next packet is already expired. When this
+happens, the watchdog will be configured with a time in the past, fire
+straight way and the packet will finally be dropped once the dequeue()
+function of the qdisc is called again.
+
+We can save quite a few cycles and improve the overall behavior of the
+qdisc if we drop all expired packets if the next packet is expired.
+This should allow ETF to recover faster from bad situations. But
+packet drops are still a very serious warning that the requirements
+imposed on the system aren't reasonable.
+
+This was inspired by how the implementation of hrtimers use the
+rb_tree inside the kernel.
+
+Signed-off-by: Jesus Sanchez-Palencia <jesus.s.palencia@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ net/sched/sch_etf.c | 36 +++++++++++++++++++++---------------
+ 1 file changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/net/sched/sch_etf.c b/net/sched/sch_etf.c
+index 890c5f6..28a0a51 100644
+--- a/net/sched/sch_etf.c
++++ b/net/sched/sch_etf.c
+@@ -190,29 +190,35 @@ static int etf_enqueue_timesortedlist(struct sk_buff *nskb, struct Qdisc *sch,
+ 	return NET_XMIT_SUCCESS;
+ }
+ 
+-static void timesortedlist_drop(struct Qdisc *sch, struct sk_buff *skb)
++static void timesortedlist_drop(struct Qdisc *sch, struct sk_buff *skb,
++				ktime_t now)
+ {
+ 	struct etf_sched_data *q = qdisc_priv(sch);
+ 	struct sk_buff *to_free = NULL;
++	struct sk_buff *tmp = NULL;
+ 
+-	rb_erase_cached(&skb->rbnode, &q->head);
++	skb_rbtree_walk_from_safe(skb, tmp) {
++		if (ktime_after(skb->tstamp, now))
++			break;
+ 
+-	/* The rbnode field in the skb re-uses these fields, now that
+-	 * we are done with the rbnode, reset them.
+-	 */
+-	skb->next = NULL;
+-	skb->prev = NULL;
+-	skb->dev = qdisc_dev(sch);
++		rb_erase_cached(&skb->rbnode, &q->head);
+ 
+-	qdisc_qstats_backlog_dec(sch, skb);
++		/* The rbnode field in the skb re-uses these fields, now that
++		 * we are done with the rbnode, reset them.
++		 */
++		skb->next = NULL;
++		skb->prev = NULL;
++		skb->dev = qdisc_dev(sch);
+ 
+-	report_sock_error(skb, ECANCELED, SO_EE_CODE_TXTIME_MISSED);
++		report_sock_error(skb, ECANCELED, SO_EE_CODE_TXTIME_MISSED);
+ 
+-	qdisc_drop(skb, sch, &to_free);
+-	kfree_skb_list(to_free);
+-	qdisc_qstats_overlimit(sch);
++		qdisc_qstats_backlog_dec(sch, skb);
++		qdisc_drop(skb, sch, &to_free);
++		qdisc_qstats_overlimit(sch);
++		sch->q.qlen--;
++	}
+ 
+-	sch->q.qlen--;
++	kfree_skb_list(to_free);
+ }
+ 
+ static void timesortedlist_remove(struct Qdisc *sch, struct sk_buff *skb)
+@@ -251,7 +257,7 @@ static struct sk_buff *etf_dequeue_timesortedlist(struct Qdisc *sch)
+ 
+ 	/* Drop if packet has expired while in queue. */
+ 	if (ktime_before(skb->tstamp, now)) {
+-		timesortedlist_drop(sch, skb);
++		timesortedlist_drop(sch, skb, now);
+ 		skb = NULL;
+ 		goto out;
+ 	}
+-- 
+2.7.4
+

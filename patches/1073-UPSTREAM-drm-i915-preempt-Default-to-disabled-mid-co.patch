@@ -1,0 +1,92 @@
+From 7cda4c46c0b23532bae752eecef2fe7fce7136b3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C5=82=20Winiarski?= <michal.winiarski@intel.com>
+Date: Tue, 3 Oct 2017 21:34:46 +0100
+Subject: [PATCH 1073/2278] UPSTREAM: drm/i915/preempt: Default to disabled
+ mid-command preemption levels
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Supporting fine-granularity preemption levels may require changes in
+userspace batch buffer programming. Therefore, we need to fallback to
+safe default values, rather that use hardware defaults. Userspace is
+still able to enable fine-granularity, since we're whitelisting the
+register controlling it in WaEnablePreemptionGranularityControlByUMD.
+
+v2: Extend w/a to cover Cannonlake
+v3: Fix commentary to include both fake w/a names.
+
+Signed-off-by: Michał Winiarski <michal.winiarski@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171003203453.15692-2-chris@chris-wilson.co.uk
+(cherry picked from commit 00a1946a96ad7291a10fdd7f4f4d241a5f72ab9c)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_reg.h        |  6 ++++++
+ drivers/gpu/drm/i915/intel_engine_cs.c | 25 +++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index bdb3caf..20f9e8a 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -6995,6 +6995,12 @@ enum {
+ #define GEN9_CS_DEBUG_MODE1		_MMIO(0x20ec)
+ #define GEN9_CTX_PREEMPT_REG		_MMIO(0x2248)
+ #define GEN8_CS_CHICKEN1		_MMIO(0x2580)
++#define GEN9_PREEMPT_3D_OBJECT_LEVEL		(1<<0)
++#define GEN9_PREEMPT_GPGPU_LEVEL(hi, lo)	(((hi) << 2) | ((lo) << 1))
++#define GEN9_PREEMPT_GPGPU_MID_THREAD_LEVEL	GEN9_PREEMPT_GPGPU_LEVEL(0, 0)
++#define GEN9_PREEMPT_GPGPU_THREAD_GROUP_LEVEL	GEN9_PREEMPT_GPGPU_LEVEL(0, 1)
++#define GEN9_PREEMPT_GPGPU_COMMAND_LEVEL	GEN9_PREEMPT_GPGPU_LEVEL(1, 0)
++#define GEN9_PREEMPT_GPGPU_LEVEL_MASK		GEN9_PREEMPT_GPGPU_LEVEL(1, 1)
+ 
+ /* GEN7 chicken */
+ #define GEN7_COMMON_SLICE_CHICKEN1		_MMIO(0x7010)
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index 3d0b11d..441d62b 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -1072,6 +1072,24 @@ static int gen9_init_workarounds(struct intel_engine_cs *engine)
+ 	if (IS_GEN9_LP(dev_priv))
+ 		WA_SET_BIT_MASKED(GEN9_WM_CHICKEN3, GEN9_FACTOR_IN_CLR_VAL_HIZ);
+ 
++	/*
++	 * Supporting preemption with fine-granularity requires changes in the
++	 * batch buffer programming. Since we can't break old userspace, we
++	 * need to set our default preemption level to safe value. Userspace is
++	 * still able to use more fine-grained preemption levels, since in
++	 * WaEnablePreemptionGranularityControlByUMD we're whitelisting the
++	 * per-ctx register. As such, WaDisable{3D,GPGPU}MidCmdPreemption are
++	 * not real HW workarounds, but merely a way to start using preemption
++	 * while maintaining old contract with userspace.
++	 */
++
++	/* WaDisable3DMidCmdPreemption:skl,bxt,glk,cfl,[cnl] */
++	WA_CLR_BIT_MASKED(GEN8_CS_CHICKEN1, GEN9_PREEMPT_3D_OBJECT_LEVEL);
++
++	/* WaDisableGPGPUMidCmdPreemption:skl,bxt,blk,cfl,[cnl] */
++	WA_SET_FIELD_MASKED(GEN8_CS_CHICKEN1, GEN9_PREEMPT_GPGPU_LEVEL_MASK,
++			    GEN9_PREEMPT_GPGPU_COMMAND_LEVEL);
++
+ 	/* WaVFEStateAfterPipeControlwithMediaStateClear:skl,bxt,glk,cfl */
+ 	ret = wa_ring_whitelist_reg(engine, GEN9_CTX_PREEMPT_REG);
+ 	if (ret)
+@@ -1272,6 +1290,13 @@ static int cnl_init_workarounds(struct intel_engine_cs *engine)
+ 	/* FtrEnableFastAnisoL1BankingFix: cnl */
+ 	WA_SET_BIT_MASKED(HALF_SLICE_CHICKEN3, CNL_FAST_ANISO_L1_BANKING_FIX);
+ 
++	/* WaDisable3DMidCmdPreemption:cnl */
++	WA_CLR_BIT_MASKED(GEN8_CS_CHICKEN1, GEN9_PREEMPT_3D_OBJECT_LEVEL);
++
++	/* WaDisableGPGPUMidCmdPreemption:cnl */
++	WA_SET_FIELD_MASKED(GEN8_CS_CHICKEN1, GEN9_PREEMPT_GPGPU_LEVEL_MASK,
++			    GEN9_PREEMPT_GPGPU_COMMAND_LEVEL);
++
+ 	/* WaEnablePreemptionGranularityControlByUMD:cnl */
+ 	I915_WRITE(GEN7_FF_SLICE_CS_CHICKEN1,
+ 		   _MASKED_BIT_ENABLE(GEN9_FFSC_PERCTX_PREEMPT_CTRL));
+-- 
+2.7.4
+

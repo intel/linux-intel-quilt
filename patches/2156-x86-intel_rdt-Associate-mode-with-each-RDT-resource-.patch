@@ -1,0 +1,105 @@
+From 044c4a0e1025860d6a3583174543368de584f822 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:41:55 -0700
+Subject: [PATCH 2156/2278] x86/intel_rdt: Associate mode with each RDT
+ resource group
+
+Each RDT resource group is associated with a mode that will reflect
+the level of sharing of its allocations. The default, shareable, will be
+associated with each resource group on creation since it is zero and
+resource groups are created with kzalloc. The managing of the mode of a
+resource group will follow. The default resource group always remain
+though so ensure that it is reset to the default mode when the resctrl
+filesystem is unmounted.
+
+Also introduce a utility that can be used to determine the mode of a
+resource group when it is searched for based on its class of service.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/797e4e1de4e4fcdf5b5e0039354d6a28079e2015.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit 472ef09b40c5802a2e014ae2503ad8619486f9e6)
+---
+ arch/x86/kernel/cpu/intel_rdt.h          |  3 +++
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 22 ++++++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index fef254e..482dd6d3b 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -122,6 +122,7 @@ struct mongroup {
+  * @type:			indicates type of this rdtgroup - either
+  *				monitor only or ctrl_mon group
+  * @mon:			mongroup related data
++ * @mode:			mode of resource group
+  */
+ struct rdtgroup {
+ 	struct kernfs_node	*kn;
+@@ -132,6 +133,7 @@ struct rdtgroup {
+ 	atomic_t		waitcount;
+ 	enum rdt_group_type	type;
+ 	struct mongroup		mon;
++	enum rdtgrp_mode	mode;
+ };
+ 
+ /* rdtgroup.flags */
+@@ -461,6 +463,7 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+ 				char *buf, size_t nbytes, loff_t off);
+ int rdtgroup_schemata_show(struct kernfs_open_file *of,
+ 			   struct seq_file *s, void *v);
++enum rdtgrp_mode rdtgroup_mode_by_closid(int closid);
+ struct rdt_domain *get_domain_from_cpu(int cpu, struct rdt_resource *r);
+ int alloc_rmid(void);
+ void free_rmid(u32 rmid);
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index fa668f9..4a72061 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -126,6 +126,27 @@ static void closid_free(int closid)
+ 	closid_free_map |= 1 << closid;
+ }
+ 
++/**
++ * rdtgroup_mode_by_closid - Return mode of resource group with closid
++ * @closid: closid if the resource group
++ *
++ * Each resource group is associated with a @closid. Here the mode
++ * of a resource group can be queried by searching for it using its closid.
++ *
++ * Return: mode as &enum rdtgrp_mode of resource group with closid @closid
++ */
++enum rdtgrp_mode rdtgroup_mode_by_closid(int closid)
++{
++	struct rdtgroup *rdtgrp;
++
++	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
++		if (rdtgrp->closid == closid)
++			return rdtgrp->mode;
++	}
++
++	return RDT_NUM_MODES;
++}
++
+ /* set uid and gid of rdtgroup dirs and files to that of the creator */
+ static int rdtgroup_kn_set_ugid(struct kernfs_node *kn)
+ {
+@@ -1491,6 +1512,7 @@ static void rdt_kill_sb(struct super_block *sb)
+ 		reset_all_ctrls(r);
+ 	cdp_disable_all();
+ 	rmdir_all_sub();
++	rdtgroup_default.mode = RDT_MODE_SHAREABLE;
+ 	static_branch_disable_cpuslocked(&rdt_alloc_enable_key);
+ 	static_branch_disable_cpuslocked(&rdt_mon_enable_key);
+ 	static_branch_disable_cpuslocked(&rdt_enable_key);
+-- 
+2.7.4
+

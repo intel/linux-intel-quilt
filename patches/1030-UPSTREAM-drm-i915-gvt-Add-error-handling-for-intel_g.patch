@@ -1,0 +1,151 @@
+From 130c8977938e0b2f592030f3d6036cd5f7325971 Mon Sep 17 00:00:00 2001
+From: fred gao <fred.gao@intel.com>
+Date: Fri, 18 Aug 2017 15:41:07 +0800
+Subject: [PATCH 1030/2278] UPSTREAM: drm/i915/gvt: Add error handling for
+ intel_gvt_scan_and_shadow_workload
+
+When an error occurs after shadow_indirect_ctx, this patch is to do the
+proper cleanup and rollback to the original states for shadowed indirect
+context before the workload is abandoned.
+
+v2:
+- split the mixed several error paths for better review. (Zhenyu)
+
+v3:
+- no return check for clean up functions. (Changbin)
+
+v4:
+- expose and reuse the existing release_shadow_wa_ctx. (Zhenyu)
+
+v5:
+- move the release function to scheduler.c file. (Zhenyu)
+
+v6:
+- move error handling code of intel_gvt_scan_and_shadow_workload
+  to here. (Zhenyu)
+
+Hand-edit additions.
+
+Signed-off-by: fred gao <fred.gao@intel.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+(cherry picked from commit 32bb494781af8dd6dbad17f2f0be38d7767a2734)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/execlist.c  |  9 ---------
+ drivers/gpu/drm/i915/gvt/scheduler.c | 28 +++++++++++++++++++++-------
+ drivers/gpu/drm/i915/gvt/scheduler.h |  2 ++
+ 3 files changed, 23 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/execlist.c b/drivers/gpu/drm/i915/gvt/execlist.c
+index 14f0f53..5a9fa37 100644
+--- a/drivers/gpu/drm/i915/gvt/execlist.c
++++ b/drivers/gpu/drm/i915/gvt/execlist.c
+@@ -491,15 +491,6 @@ static void release_shadow_batch_buffer(struct intel_vgpu_workload *workload)
+ 	}
+ }
+ 
+-static void release_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
+-{
+-	if (!wa_ctx->indirect_ctx.obj)
+-		return;
+-
+-	i915_gem_object_unpin_map(wa_ctx->indirect_ctx.obj);
+-	i915_gem_object_put(wa_ctx->indirect_ctx.obj);
+-}
+-
+ static int complete_execlist_workload(struct intel_vgpu_workload *workload)
+ {
+ 	struct intel_vgpu *vgpu = workload->vgpu;
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 17cfbfb..00fcc7d 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -214,6 +214,15 @@ static int copy_workload_to_ring_buffer(struct intel_vgpu_workload *workload)
+ 	return 0;
+ }
+ 
++void release_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx)
++{
++	if (!wa_ctx->indirect_ctx.obj)
++		return;
++
++	i915_gem_object_unpin_map(wa_ctx->indirect_ctx.obj);
++	i915_gem_object_put(wa_ctx->indirect_ctx.obj);
++}
++
+ /**
+  * intel_gvt_scan_and_shadow_workload - audit the workload by scanning and
+  * shadow it as well, include ringbuffer,wa_ctx and ctx.
+@@ -248,14 +257,14 @@ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload)
+ 
+ 	ret = intel_gvt_scan_and_shadow_ringbuffer(workload);
+ 	if (ret)
+-		goto out;
++		goto err_scan;
+ 
+ 	if ((workload->ring_id == RCS) &&
+ 	    (workload->wa_ctx.indirect_ctx.size != 0)
+ 	    && gvt_shadow_wa_ctx) {
+ 		ret = intel_gvt_scan_and_shadow_wa_ctx(&workload->wa_ctx);
+ 		if (ret)
+-			goto out;
++			goto err_scan;
+ 	}
+ 
+ 	/* pin shadow context by gvt even the shadow context will be pinned
+@@ -269,18 +278,18 @@ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload)
+ 	if (IS_ERR(ring)) {
+ 		ret = PTR_ERR(ring);
+ 		gvt_vgpu_err("fail to pin shadow context\n");
+-		goto out;
++		goto err_shadow;
+ 	}
+ 
+ 	ret = populate_shadow_context(workload);
+ 	if (ret)
+-		goto out;
++		goto err_unpin;
+ 
+ 	rq = i915_gem_request_alloc(dev_priv->engine[ring_id], shadow_ctx);
+ 	if (IS_ERR(rq)) {
+ 		gvt_vgpu_err("fail to allocate gem request\n");
+ 		ret = PTR_ERR(rq);
+-		goto out;
++		goto err_unpin;
+ 	}
+ 
+ 	gvt_dbg_sched("ring id %d get i915 gem request %p\n", ring_id, rq);
+@@ -288,10 +297,15 @@ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload)
+ 	workload->req = i915_gem_request_get(rq);
+ 	ret = copy_workload_to_ring_buffer(workload);
+ 	if (ret)
+-		goto out;
++		goto err_unpin;
+ 	workload->shadowed = true;
++	return 0;
+ 
+-out:
++err_unpin:
++	engine->context_unpin(engine, shadow_ctx);
++err_shadow:
++	release_shadow_wa_ctx(&workload->wa_ctx);
++err_scan:
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.h b/drivers/gpu/drm/i915/gvt/scheduler.h
+index 924e0e6..e1a7df9 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.h
++++ b/drivers/gpu/drm/i915/gvt/scheduler.h
+@@ -142,6 +142,8 @@ int intel_vgpu_init_gvt_context(struct intel_vgpu *vgpu);
+ 
+ void intel_vgpu_clean_gvt_context(struct intel_vgpu *vgpu);
+ 
++void release_shadow_wa_ctx(struct intel_shadow_wa_ctx *wa_ctx);
++
+ extern bool gvt_shadow_wa_ctx;
+ 
+ #endif
+-- 
+2.7.4
+

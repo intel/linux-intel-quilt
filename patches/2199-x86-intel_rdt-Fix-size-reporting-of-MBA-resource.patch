@@ -1,0 +1,82 @@
+From 51eb7c98444e08437099597304d6499085798c76 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Sat, 15 Sep 2018 14:58:20 -0700
+Subject: [PATCH 2199/2278] x86/intel_rdt: Fix size reporting of MBA resource
+
+Chen Yu reported a divide-by-zero error when accessing the 'size'
+resctrl file when a MBA resource is enabled.
+
+divide error: 0000 [#1] SMP PTI
+CPU: 93 PID: 1929 Comm: cat Not tainted 4.19.0-rc2-debug-rdt+ #25
+RIP: 0010:rdtgroup_cbm_to_size+0x7e/0xa0
+Call Trace:
+rdtgroup_size_show+0x11a/0x1d0
+seq_read+0xd8/0x3b0
+
+Quoting Chen Yu's report: This is because for MB resource, the
+r->cache.cbm_len is zero, thus calculating size in rdtgroup_cbm_to_size()
+will trigger the exception.
+
+Fix this issue in the 'size' file by getting correct memory bandwidth value
+which is in MBps when MBA software controller is enabled or in percentage
+when MBA software controller is disabled.
+
+Fixes: d9b48c86eb38 ("x86/intel_rdt: Display resource groups' allocations in bytes")
+Reported-by: Chen Yu <yu.c.chen@intel.com>
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Tested-by: Chen Yu <yu.c.chen@intel.com>
+Cc: "H Peter Anvin" <hpa@zytor.com>
+Cc: "Tony Luck" <tony.luck@intel.com>
+Cc: "Xiaochen Shen" <xiaochen.shen@intel.com>
+Link: https://lkml.kernel.org/r/20180904174614.26682-1-yu.c.chen@intel.com
+Link: https://lkml.kernel.org/r/1537048707-76280-3-git-send-email-fenghua.yu@intel.com
+
+(cherry picked from commit f968dc119a159a95628a20de2a2dcc913d0a82d7)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index d6d7ea7..ae6d0ce 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -1154,8 +1154,8 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
+ 	struct rdt_resource *r;
+ 	struct rdt_domain *d;
+ 	unsigned int size;
+-	bool sep = false;
+-	u32 cbm;
++	bool sep;
++	u32 ctrl;
+ 
+ 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
+ 	if (!rdtgrp) {
+@@ -1173,6 +1173,7 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
+ 	}
+ 
+ 	for_each_alloc_enabled_rdt_resource(r) {
++		sep = false;
+ 		seq_printf(s, "%*s:", max_name_width, r->name);
+ 		list_for_each_entry(d, &r->domains, list) {
+ 			if (sep)
+@@ -1180,8 +1181,13 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
+ 			if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
+ 				size = 0;
+ 			} else {
+-				cbm = d->ctrl_val[rdtgrp->closid];
+-				size = rdtgroup_cbm_to_size(r, d, cbm);
++				ctrl = (!is_mba_sc(r) ?
++						d->ctrl_val[rdtgrp->closid] :
++						d->mbps_val[rdtgrp->closid]);
++				if (r->rid == RDT_RESOURCE_MBA)
++					size = ctrl;
++				else
++					size = rdtgroup_cbm_to_size(r, d, ctrl);
+ 			}
+ 			seq_printf(s, "%d=%u", d->id, size);
+ 			sep = true;
+-- 
+2.7.4
+

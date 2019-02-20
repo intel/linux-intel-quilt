@@ -1,0 +1,103 @@
+From 03ee63b41adf7e4162527a298eb11de15af1006b Mon Sep 17 00:00:00 2001
+From: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+Date: Tue, 5 Sep 2017 15:23:38 -0700
+Subject: [PATCH 0505/2278] x86/mpx: Do not use SIB.index if its value is 100b
+ and ModRM.mod is not 11b
+
+Section 2.2.1.2 of the Intel 64 and IA-32 Architectures Software
+Developer's Manual volume 2A states that when ModRM.mod !=11b and
+ModRM.rm = 100b indexed register-indirect addressing is used. In other
+words, a SIB byte follows the ModRM byte. In the specific case of
+SIB.index = 100b, the scale*index portion of the computation of the
+effective address is null. To signal callers of this particular situation,
+get_reg_offset() can return -EDOM (-EINVAL continues to indicate that an
+error when decoding the SIB byte).
+
+An example of this situation can be the following instruction:
+
+   8b 4c 23 80       mov -0x80(%rbx,%riz,1),%rcx
+   ModRM:            0x4c [mod:1b][reg:1b][rm:100b]
+   SIB:              0x23 [scale:0b][index:100b][base:11b]
+   Displacement:     0x80  (1-byte, as per ModRM.mod = 1b)
+
+The %riz 'register' indicates a null index.
+
+In long mode, a REX prefix may be used. When a REX prefix is present,
+REX.X adds a fourth bit to the register selection of SIB.index. This gives
+the ability to refer to all the 16 general purpose registers. When REX.X is
+1b and SIB.index is 100b, the index is indicated in %r12. In our example,
+this would look like:
+
+   42 8b 4c 23 80    mov -0x80(%rbx,%r12,1),%rcx
+   REX:              0x42 [W:0b][R:0b][X:1b][B:0b]
+   ModRM:            0x4c [mod:1b][reg:1b][rm:100b]
+   SIB:              0x23 [scale:0b][.X: 1b, index:100b][.B:0b, base:11b]
+   Displacement:     0x80  (1-byte, as per ModRM.mod = 1b)
+
+%r12 is a valid register to use in the scale*index part of the effective
+address computation.
+
+Cc: Borislav Petkov <bp@suse.de>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Adam Buchbinder <adam.buchbinder@gmail.com>
+Cc: Colin Ian King <colin.king@canonical.com>
+Cc: Lorenzo Stoakes <lstoakes@gmail.com>
+Cc: Qiaowei Ren <qiaowei.ren@intel.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Nathan Howard <liverlint@gmail.com>
+Cc: Adan Hawthorn <adanhawthorn@gmail.com>
+Cc: Joe Perches <joe@perches.com>
+Cc: Ravi V. Shankar <ravi.v.shankar@intel.com>
+Cc: x86@kernel.org
+Reviewed-by: Borislav Petkov <bp@suse.de>
+Signed-off-by: Ricardo Neri <ricardo.neri-calderon@linux.intel.com>
+---
+ arch/x86/mm/mpx.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/mm/mpx.c b/arch/x86/mm/mpx.c
+index 9ee37f4..ad8506a 100644
+--- a/arch/x86/mm/mpx.c
++++ b/arch/x86/mm/mpx.c
+@@ -111,6 +111,15 @@ static int get_reg_offset(struct insn *insn, struct pt_regs *regs,
+ 		regno = X86_SIB_INDEX(insn->sib.value);
+ 		if (X86_REX_X(insn->rex_prefix.value))
+ 			regno += 8;
++
++		/*
++		 * If ModRM.mod != 3 and SIB.index = 4 the scale*index
++		 * portion of the address computation is null. This is
++		 * true only if REX.X is 0. In such a case, the SIB index
++		 * is used in the address computation.
++		 */
++		if (X86_MODRM_MOD(insn->modrm.value) != 3 && regno == 4)
++			return -EDOM;
+ 		break;
+ 
+ 	case REG_TYPE_BASE:
+@@ -161,11 +170,19 @@ static void __user *mpx_get_addr_ref(struct insn *insn, struct pt_regs *regs)
+ 				goto out;
+ 
+ 			indx_offset = get_reg_offset(insn, regs, REG_TYPE_INDEX);
+-			if (indx_offset < 0)
++			/*
++			 * A negative offset generally means a error, except
++			 * -EDOM, which means that the contents of the register
++			 * should not be used as index.
++			 */
++			if (indx_offset == -EDOM)
++				indx = 0;
++			else if (indx_offset < 0)
+ 				goto out;
++			else
++				indx = regs_get_register(regs, indx_offset);
+ 
+ 			base = regs_get_register(regs, base_offset);
+-			indx = regs_get_register(regs, indx_offset);
+ 
+ 			eff_addr = base + indx * (1 << X86_SIB_SCALE(sib));
+ 		} else {
+-- 
+2.7.4
+

@@ -1,0 +1,82 @@
+From 50edfa23120864d6b78da8ab1e7dd22b8b1d6366 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:18 -0700
+Subject: [PATCH 2179/2278] x86/intel_rdt: Split resource group removal in two
+
+Resource groups used for pseudo-locking do not require the same work on
+removal as the other resource groups.
+
+The resource group removal is split in two in preparation for support of
+pseudo-locking resource groups. A single re-ordering occurs - the
+setting of the rdtgrp flag is moved to later. This flag is not used by
+any of the code between its original and new location.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/c8cbf7a7c72480b39bb946a929dbae96c0f9aca1.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit 17eafd076291ed23eeb17b28132fa33b0688bc57)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 25 ++++++++++++++++---------
+ 1 file changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index bd4e2de..526cd4a 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -2620,6 +2620,21 @@ static int rdtgroup_rmdir_mon(struct kernfs_node *kn, struct rdtgroup *rdtgrp,
+ 	return 0;
+ }
+ 
++static int rdtgroup_ctrl_remove(struct kernfs_node *kn,
++				struct rdtgroup *rdtgrp)
++{
++	rdtgrp->flags = RDT_DELETED;
++	list_del(&rdtgrp->rdtgroup_list);
++
++	/*
++	 * one extra hold on this, will drop when we kfree(rdtgrp)
++	 * in rdtgroup_kn_unlock()
++	 */
++	kernfs_get(kn);
++	kernfs_remove(rdtgrp->kn);
++	return 0;
++}
++
+ static int rdtgroup_rmdir_ctrl(struct kernfs_node *kn, struct rdtgroup *rdtgrp,
+ 			       cpumask_var_t tmpmask)
+ {
+@@ -2645,7 +2660,6 @@ static int rdtgroup_rmdir_ctrl(struct kernfs_node *kn, struct rdtgroup *rdtgrp,
+ 	cpumask_or(tmpmask, tmpmask, &rdtgrp->cpu_mask);
+ 	update_closid_rmid(tmpmask, NULL);
+ 
+-	rdtgrp->flags = RDT_DELETED;
+ 	closid_free(rdtgrp->closid);
+ 	free_rmid(rdtgrp->mon.rmid);
+ 
+@@ -2654,14 +2668,7 @@ static int rdtgroup_rmdir_ctrl(struct kernfs_node *kn, struct rdtgroup *rdtgrp,
+ 	 */
+ 	free_all_child_rdtgrp(rdtgrp);
+ 
+-	list_del(&rdtgrp->rdtgroup_list);
+-
+-	/*
+-	 * one extra hold on this, will drop when we kfree(rdtgrp)
+-	 * in rdtgroup_kn_unlock()
+-	 */
+-	kernfs_get(kn);
+-	kernfs_remove(rdtgrp->kn);
++	rdtgroup_ctrl_remove(kn, rdtgrp);
+ 
+ 	return 0;
+ }
+-- 
+2.7.4
+

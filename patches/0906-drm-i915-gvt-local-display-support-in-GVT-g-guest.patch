@@ -1,0 +1,76 @@
+From 07eb3dabf87dd3ce1b31cfe55c0cf363a55a3a58 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Thu, 28 Dec 2017 12:21:16 +0800
+Subject: [PATCH 0906/2278] drm/i915/gvt: local display support in GVT-g guest
+
+This patch includes below features in GVT-g guest
+1. DP on port A will be treated as external DP
+2. Avoid some unnecessary checks in GVT-g guest
+
+Change-Id: I6f6dfa4e5c801e7a63105310d5991adb0a0acad1
+Signed-off-by: Min He <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/intel_ddi.c     |  2 +-
+ drivers/gpu/drm/i915/intel_display.c | 11 ++++++++++-
+ drivers/gpu/drm/i915/intel_dp.c      |  7 ++++++-
+ 3 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_ddi.c b/drivers/gpu/drm/i915/intel_ddi.c
+index 77085b9..9a4f8c1 100644
+--- a/drivers/gpu/drm/i915/intel_ddi.c
++++ b/drivers/gpu/drm/i915/intel_ddi.c
+@@ -2554,7 +2554,7 @@ static bool intel_ddi_compute_config(struct intel_encoder *encoder,
+ 
+ 	WARN(type == INTEL_OUTPUT_UNKNOWN, "compute_config() on unknown output!\n");
+ 
+-	if (port == PORT_A)
++	if (port == PORT_A && !intel_vgpu_active(dev_priv))
+ 		pipe_config->cpu_transcoder = TRANSCODER_EDP;
+ 
+ 	if (type == INTEL_OUTPUT_HDMI)
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 01d21f2..6a3a568 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11692,7 +11692,16 @@ verify_crtc_state(struct drm_crtc *crtc,
+ 	intel_pipe_config_sanity_check(dev_priv, pipe_config);
+ 
+ 	sw_config = to_intel_crtc_state(new_crtc_state);
+-	if (!intel_pipe_config_compare(dev_priv, sw_config,
++
++	/*
++	 * Only check for pipe config if we are not in a GVT guest environment,
++	 * because such a check in a GVT guest environment doesn't make any sense
++	 * as we don't allow the guest to do a mode set, so there can very well
++	 * be a difference between what it has programmed vs. what the host
++	 * truly configured the HW pipe to be in.
++	 */
++	if (!intel_vgpu_active(dev_priv) &&
++		!intel_pipe_config_compare(dev_priv, sw_config,
+ 				       pipe_config, false)) {
+ 		I915_STATE_WARN(1, "pipe state doesn't match!\n");
+ 		intel_dump_pipe_config(intel_crtc, pipe_config,
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 65726b8..4e4929a 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -1973,7 +1973,12 @@ static void wait_panel_status(struct intel_dp *intel_dp,
+ 			I915_READ(pp_stat_reg),
+ 			I915_READ(pp_ctrl_reg));
+ 
+-	if (intel_wait_for_register(dev_priv,
++	/*
++	 * Only wait for panel status if we are not in a GVT guest environment,
++	 * because such a wait in a GVT guest environment doesn't make any sense
++	 * as we are exposing virtual DP monitors to the guest.
++	 */
++	if (!intel_vgpu_active(dev_priv) && intel_wait_for_register(dev_priv,
+ 				    pp_stat_reg, mask, value,
+ 				    5000))
+ 		DRM_ERROR("Panel status timeout: status %08x control %08x\n",
+-- 
+2.7.4
+

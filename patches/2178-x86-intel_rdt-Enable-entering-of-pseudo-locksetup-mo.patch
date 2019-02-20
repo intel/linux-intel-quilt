@@ -1,0 +1,159 @@
+From d1b84c40edc1cbbeb0c0217772de447ee903f05d Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:17 -0700
+Subject: [PATCH 2178/2278] x86/intel_rdt: Enable entering of pseudo-locksetup
+ mode
+
+The user can request entering pseudo-locksetup mode by writing
+"pseudo-locksetup" to the mode file. Act on this request as well as
+support switching from a pseudo-locksetup mode (before pseudo-locked
+mode was entered). It is not supported to modify the mode once
+pseudo-locked mode has been entered.
+
+The schemata reflects the new mode by adding "uninitialized" to all
+resources. The size resctrl file reports zero for all cache domains in
+support of the uninitialized nature. Since there are no users of this
+class of service its allocations can be ignored when searching for
+appropriate default allocations for new resource groups. For the same
+reason resource groups in pseudo-locksetup mode are not considered when
+testing if new resource groups may overlap.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/56f553334708022903c296284e62db3bbc1ff150.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit dfe9674b04ff6b819f9105650a008d164d81725e)
+---
+ arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c | 16 +++++++----
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c    | 41 +++++++++++++++++++++++++----
+ 2 files changed, 47 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+index bc79396..1ed2732 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
++++ b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+@@ -156,7 +156,8 @@ int parse_cbm(void *_data, struct rdt_resource *r, struct rdt_domain *d)
+ 	}
+ 
+ 	if (rdtgroup_cbm_overlaps(r, d, cbm_val, rdtgrp->closid, false)) {
+-		if (rdtgrp->mode == RDT_MODE_EXCLUSIVE) {
++		if (rdtgrp->mode == RDT_MODE_EXCLUSIVE ||
++		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
+ 			rdt_last_cmd_printf("overlaps with other group\n");
+ 			return -EINVAL;
+ 		}
+@@ -356,10 +357,15 @@ int rdtgroup_schemata_show(struct kernfs_open_file *of,
+ 
+ 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
+ 	if (rdtgrp) {
+-		closid = rdtgrp->closid;
+-		for_each_alloc_enabled_rdt_resource(r) {
+-			if (closid < r->num_closid)
+-				show_doms(s, r, closid);
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++			for_each_alloc_enabled_rdt_resource(r)
++				seq_printf(s, "%s:uninitialized\n", r->name);
++		} else {
++			closid = rdtgrp->closid;
++			for_each_alloc_enabled_rdt_resource(r) {
++				if (closid < r->num_closid)
++					show_doms(s, r, closid);
++			}
+ 		}
+ 	} else {
+ 		ret = -ENOENT;
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 013cbfe..bd4e2de 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -974,9 +974,10 @@ bool rdtgroup_cbm_overlaps(struct rdt_resource *r, struct rdt_domain *d,
+ 	ctrl = d->ctrl_val;
+ 	for (i = 0; i < r->num_closid; i++, ctrl++) {
+ 		ctrl_b = (unsigned long *)ctrl;
+-		if (closid_allocated(i) && i != closid) {
++		mode = rdtgroup_mode_by_closid(i);
++		if (closid_allocated(i) && i != closid &&
++		    mode != RDT_MODE_PSEUDO_LOCKSETUP) {
+ 			if (bitmap_intersects(cbm, ctrl_b, r->cache.cbm_len)) {
+-				mode = rdtgroup_mode_by_closid(i);
+ 				if (exclusive) {
+ 					if (mode == RDT_MODE_EXCLUSIVE)
+ 						return true;
+@@ -1046,10 +1047,24 @@ static ssize_t rdtgroup_mode_write(struct kernfs_open_file *of,
+ 	mode = rdtgrp->mode;
+ 
+ 	if ((!strcmp(buf, "shareable") && mode == RDT_MODE_SHAREABLE) ||
+-	    (!strcmp(buf, "exclusive") && mode == RDT_MODE_EXCLUSIVE))
++	    (!strcmp(buf, "exclusive") && mode == RDT_MODE_EXCLUSIVE) ||
++	    (!strcmp(buf, "pseudo-locksetup") &&
++	     mode == RDT_MODE_PSEUDO_LOCKSETUP) ||
++	    (!strcmp(buf, "pseudo-locked") && mode == RDT_MODE_PSEUDO_LOCKED))
+ 		goto out;
+ 
++	if (mode == RDT_MODE_PSEUDO_LOCKED) {
++		rdt_last_cmd_printf("cannot change pseudo-locked group\n");
++		ret = -EINVAL;
++		goto out;
++	}
++
+ 	if (!strcmp(buf, "shareable")) {
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++			ret = rdtgroup_locksetup_exit(rdtgrp);
++			if (ret)
++				goto out;
++		}
+ 		rdtgrp->mode = RDT_MODE_SHAREABLE;
+ 	} else if (!strcmp(buf, "exclusive")) {
+ 		if (!rdtgroup_mode_test_exclusive(rdtgrp)) {
+@@ -1057,7 +1072,17 @@ static ssize_t rdtgroup_mode_write(struct kernfs_open_file *of,
+ 			ret = -EINVAL;
+ 			goto out;
+ 		}
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++			ret = rdtgroup_locksetup_exit(rdtgrp);
++			if (ret)
++				goto out;
++		}
+ 		rdtgrp->mode = RDT_MODE_EXCLUSIVE;
++	} else if (!strcmp(buf, "pseudo-locksetup")) {
++		ret = rdtgroup_locksetup_enter(rdtgrp);
++		if (ret)
++			goto out;
++		rdtgrp->mode = RDT_MODE_PSEUDO_LOCKSETUP;
+ 	} else {
+ 		rdt_last_cmd_printf("unknown/unsupported mode\n");
+ 		ret = -EINVAL;
+@@ -1127,8 +1152,12 @@ static int rdtgroup_size_show(struct kernfs_open_file *of,
+ 		list_for_each_entry(d, &r->domains, list) {
+ 			if (sep)
+ 				seq_putc(s, ';');
+-			cbm = d->ctrl_val[rdtgrp->closid];
+-			size = rdtgroup_cbm_to_size(r, d, cbm);
++			if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++				size = 0;
++			} else {
++				cbm = d->ctrl_val[rdtgrp->closid];
++				size = rdtgroup_cbm_to_size(r, d, cbm);
++			}
+ 			seq_printf(s, "%d=%u", d->id, size);
+ 			sep = true;
+ 		}
+@@ -2277,6 +2306,8 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 			for (i = 0; i < r->num_closid; i++, ctrl++) {
+ 				if (closid_allocated(i) && i != closid) {
+ 					mode = rdtgroup_mode_by_closid(i);
++					if (mode == RDT_MODE_PSEUDO_LOCKSETUP)
++						break;
+ 					used_b |= *ctrl;
+ 					if (mode == RDT_MODE_SHAREABLE)
+ 						d->new_ctrl |= *ctrl;
+-- 
+2.7.4
+

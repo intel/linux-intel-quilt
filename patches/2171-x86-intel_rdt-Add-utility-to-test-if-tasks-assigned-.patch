@@ -1,0 +1,81 @@
+From 52994cdb43682e6f08b0a10a3cd9c663af6acdc7 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:10 -0700
+Subject: [PATCH 2171/2278] x86/intel_rdt: Add utility to test if tasks
+ assigned to resource group
+
+In considering changes to a resource group it becomes necessary to know
+whether tasks have been assigned to the resource group in question.
+
+Introduce a new utility that can be used to check if any tasks have been
+assigned to a particular resource group.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/be9ea3969ffd731dfd90c0ebcd5a0e0a2d135bb2.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit f7a6e3f6f5ffa4926818ea2b3e8994ecef00b84f)
+---
+ arch/x86/kernel/cpu/intel_rdt.h          |  1 +
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 26 ++++++++++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index 7b872f2..11c76c4 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -480,6 +480,7 @@ bool rdtgroup_cbm_overlaps(struct rdt_resource *r, struct rdt_domain *d,
+ unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r, struct rdt_domain *d,
+ 				  u32 cbm);
+ enum rdtgrp_mode rdtgroup_mode_by_closid(int closid);
++int rdtgroup_tasks_assigned(struct rdtgroup *r);
+ struct rdt_domain *get_domain_from_cpu(int cpu, struct rdt_resource *r);
+ int update_domains(struct rdt_resource *r, int closid);
+ void closid_free(int closid);
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 6eb7167..59e1de9 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -564,6 +564,32 @@ static int __rdtgroup_move_task(struct task_struct *tsk,
+ 	return ret;
+ }
+ 
++/**
++ * rdtgroup_tasks_assigned - Test if tasks have been assigned to resource group
++ * @r: Resource group
++ *
++ * Return: 1 if tasks have been assigned to @r, 0 otherwise
++ */
++int rdtgroup_tasks_assigned(struct rdtgroup *r)
++{
++	struct task_struct *p, *t;
++	int ret = 0;
++
++	lockdep_assert_held(&rdtgroup_mutex);
++
++	rcu_read_lock();
++	for_each_process_thread(p, t) {
++		if ((r->type == RDTCTRL_GROUP && t->closid == r->closid) ||
++		    (r->type == RDTMON_GROUP && t->rmid == r->mon.rmid)) {
++			ret = 1;
++			break;
++		}
++	}
++	rcu_read_unlock();
++
++	return ret;
++}
++
+ static int rdtgroup_task_write_permission(struct task_struct *task,
+ 					  struct kernfs_open_file *of)
+ {
+-- 
+2.7.4
+

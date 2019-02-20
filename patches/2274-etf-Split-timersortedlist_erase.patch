@@ -1,0 +1,106 @@
+From 50bb50d6bd4a04b3b907c24293460b9e089b9d68 Mon Sep 17 00:00:00 2001
+From: Jesus Sanchez-Palencia <jesus.sanchez-palencia@intel.com>
+Date: Wed, 14 Nov 2018 17:26:34 -0800
+Subject: [PATCH 2274/2278] etf: Split timersortedlist_erase()
+
+This is just a refactor that will simplify the implementation of the
+next patch in this series which will drop all expired packets on the
+dequeue flow.
+
+Signed-off-by: Jesus Sanchez-Palencia <jesus.s.palencia@gmail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ net/sched/sch_etf.c | 44 +++++++++++++++++++++++++++++---------------
+ 1 file changed, 29 insertions(+), 15 deletions(-)
+
+diff --git a/net/sched/sch_etf.c b/net/sched/sch_etf.c
+index 725fe2a..890c5f6 100644
+--- a/net/sched/sch_etf.c
++++ b/net/sched/sch_etf.c
+@@ -190,10 +190,10 @@ static int etf_enqueue_timesortedlist(struct sk_buff *nskb, struct Qdisc *sch,
+ 	return NET_XMIT_SUCCESS;
+ }
+ 
+-static void timesortedlist_erase(struct Qdisc *sch, struct sk_buff *skb,
+-				 bool drop)
++static void timesortedlist_drop(struct Qdisc *sch, struct sk_buff *skb)
+ {
+ 	struct etf_sched_data *q = qdisc_priv(sch);
++	struct sk_buff *to_free = NULL;
+ 
+ 	rb_erase_cached(&skb->rbnode, &q->head);
+ 
+@@ -206,19 +206,33 @@ static void timesortedlist_erase(struct Qdisc *sch, struct sk_buff *skb,
+ 
+ 	qdisc_qstats_backlog_dec(sch, skb);
+ 
+-	if (drop) {
+-		struct sk_buff *to_free = NULL;
++	report_sock_error(skb, ECANCELED, SO_EE_CODE_TXTIME_MISSED);
+ 
+-		report_sock_error(skb, ECANCELED, SO_EE_CODE_TXTIME_MISSED);
++	qdisc_drop(skb, sch, &to_free);
++	kfree_skb_list(to_free);
++	qdisc_qstats_overlimit(sch);
+ 
+-		qdisc_drop(skb, sch, &to_free);
+-		kfree_skb_list(to_free);
+-		qdisc_qstats_overlimit(sch);
+-	} else {
+-		qdisc_bstats_update(sch, skb);
++	sch->q.qlen--;
++}
+ 
+-		q->last = skb->tstamp;
+-	}
++static void timesortedlist_remove(struct Qdisc *sch, struct sk_buff *skb)
++{
++	struct etf_sched_data *q = qdisc_priv(sch);
++
++	rb_erase_cached(&skb->rbnode, &q->head);
++
++	/* The rbnode field in the skb re-uses these fields, now that
++	 * we are done with the rbnode, reset them.
++	 */
++	skb->next = NULL;
++	skb->prev = NULL;
++	skb->dev = qdisc_dev(sch);
++
++	qdisc_qstats_backlog_dec(sch, skb);
++
++	qdisc_bstats_update(sch, skb);
++
++	q->last = skb->tstamp;
+ 
+ 	sch->q.qlen--;
+ }
+@@ -237,7 +251,7 @@ static struct sk_buff *etf_dequeue_timesortedlist(struct Qdisc *sch)
+ 
+ 	/* Drop if packet has expired while in queue. */
+ 	if (ktime_before(skb->tstamp, now)) {
+-		timesortedlist_erase(sch, skb, true);
++		timesortedlist_drop(sch, skb);
+ 		skb = NULL;
+ 		goto out;
+ 	}
+@@ -246,7 +260,7 @@ static struct sk_buff *etf_dequeue_timesortedlist(struct Qdisc *sch)
+ 	 * txtime from deadline to (now + delta).
+ 	 */
+ 	if (q->deadline_mode) {
+-		timesortedlist_erase(sch, skb, false);
++		timesortedlist_remove(sch, skb);
+ 		skb->tstamp = now;
+ 		goto out;
+ 	}
+@@ -255,7 +269,7 @@ static struct sk_buff *etf_dequeue_timesortedlist(struct Qdisc *sch)
+ 
+ 	/* Dequeue only if now is within the [txtime - delta, txtime] range. */
+ 	if (ktime_after(now, next))
+-		timesortedlist_erase(sch, skb, false);
++		timesortedlist_remove(sch, skb);
+ 	else
+ 		skb = NULL;
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,75 @@
+From 619cee91010aca25eb9e995aa03de6c8ae5cece2 Mon Sep 17 00:00:00 2001
+From: Xiaochen Shen <xiaochen.shen@intel.com>
+Date: Fri, 10 Nov 2017 11:16:24 -0800
+Subject: [PATCH 2139/2278] x86/intel_rdt: Fix a silent failure when writing
+ zero value schemata
+
+Writing an invalid schemata with no domain values (e.g., "(L3|MB):"),
+results in a silent failure, i.e. the last_cmd_status returns OK,
+
+Check for an empty value and set the result string with a proper error
+message and return -EINVAL.
+
+Before the fix:
+ # mkdir /sys/fs/resctrl/p1
+
+ # echo "L3:" > /sys/fs/resctrl/p1/schemata
+ (silent failure)
+ # cat /sys/fs/resctrl/info/last_cmd_status
+ ok
+
+ # echo "MB:" > /sys/fs/resctrl/p1/schemata
+ (silent failure)
+ # cat /sys/fs/resctrl/info/last_cmd_status
+ ok
+
+After the fix:
+ # mkdir /sys/fs/resctrl/p1
+
+ # echo "L3:" > /sys/fs/resctrl/p1/schemata
+ -bash: echo: write error: Invalid argument
+ # cat /sys/fs/resctrl/info/last_cmd_status
+ Missing 'L3' value
+
+ # echo "MB:" > /sys/fs/resctrl/p1/schemata
+ -bash: echo: write error: Invalid argument
+ # cat /sys/fs/resctrl/info/last_cmd_status
+ Missing 'MB' value
+
+[ Tony: This is an unintended side effect of the patch earlier to allow the
+    	user to just write the value they want to change.  While allowing
+    	user to specify less than all of the values, it also allows an
+    	empty value. ]
+
+Fixes: c4026b7b95a4 ("x86/intel_rdt: Implement "update" mode when writing schemata file")
+Signed-off-by: Xiaochen Shen <xiaochen.shen@intel.com>
+Signed-off-by: Tony Luck <tony.luck@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Vikas Shivappa <vikas.shivappa@linux.intel.com>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Link: https://lkml.kernel.org/r/20171110191624.20280-1-tony.luck@intel.com
+
+(cherry picked from commit 2244645ab194fe45ffcbaa08f235c8f0c7fb54fc)
+---
+ arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+index 30aeb267..23e1d5c 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
++++ b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+@@ -257,6 +257,11 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+ 			ret = -EINVAL;
+ 			goto out;
+ 		}
++		if (tok[0] == '\0') {
++			rdt_last_cmd_printf("Missing '%s' value\n", resname);
++			ret = -EINVAL;
++			goto out;
++		}
+ 		ret = rdtgroup_parse_resource(resname, tok, closid);
+ 		if (ret)
+ 			goto out;
+-- 
+2.7.4
+

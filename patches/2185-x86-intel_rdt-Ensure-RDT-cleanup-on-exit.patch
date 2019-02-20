@@ -1,0 +1,101 @@
+From 82e5c8adb183b599009793438bf3076ee441c24e Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:24 -0700
+Subject: [PATCH 2185/2278] x86/intel_rdt: Ensure RDT cleanup on exit
+
+The RDT system's initialization does not have the corresponding exit
+handling to ensure everything initialized on load is cleaned up also.
+
+Introduce the cleanup routines that complement all initialization. This
+includes the removal of a duplicate rdtgroup_init() declaration.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/a9e3a2bbd731d13915d2d7bf05d4f675b4fa109b.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit 0af6a48da481109affc4ea8295034f69993a91ef)
+---
+ arch/x86/kernel/cpu/intel_rdt.c          | 11 +++++++++++
+ arch/x86/kernel/cpu/intel_rdt.h          |  3 +--
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c |  7 +++++++
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.c b/arch/x86/kernel/cpu/intel_rdt.c
+index ec4754f..abb71ac 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.c
++++ b/arch/x86/kernel/cpu/intel_rdt.c
+@@ -859,6 +859,8 @@ static __init bool get_rdt_resources(void)
+ 	return (rdt_mon_capable || rdt_alloc_capable);
+ }
+ 
++static enum cpuhp_state rdt_online;
++
+ static int __init intel_rdt_late_init(void)
+ {
+ 	struct rdt_resource *r;
+@@ -880,6 +882,7 @@ static int __init intel_rdt_late_init(void)
+ 		cpuhp_remove_state(state);
+ 		return ret;
+ 	}
++	rdt_online = state;
+ 
+ 	for_each_alloc_capable_rdt_resource(r)
+ 		pr_info("Intel RDT %s allocation detected\n", r->name);
+@@ -891,3 +894,11 @@ static int __init intel_rdt_late_init(void)
+ }
+ 
+ late_initcall(intel_rdt_late_init);
++
++static void __exit intel_rdt_exit(void)
++{
++	cpuhp_remove_state(rdt_online);
++	rdtgroup_exit();
++}
++
++__exitcall(intel_rdt_exit);
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index f245aaa..2b3f761 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -209,6 +209,7 @@ extern struct list_head rdt_all_groups;
+ extern int max_name_width, max_data_width;
+ 
+ int __init rdtgroup_init(void);
++void __exit rdtgroup_exit(void);
+ 
+ /**
+  * struct rftype - describe each file in the resctrl file system
+@@ -431,8 +432,6 @@ extern struct rdt_resource rdt_resources_all[];
+ extern struct rdtgroup rdtgroup_default;
+ DECLARE_STATIC_KEY_FALSE(rdt_alloc_enable_key);
+ 
+-int __init rdtgroup_init(void);
+-
+ enum {
+ 	RDT_RESOURCE_L3,
+ 	RDT_RESOURCE_L3DATA,
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index f301919..9600662 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -2828,3 +2828,10 @@ int __init rdtgroup_init(void)
+ 
+ 	return ret;
+ }
++
++void __exit rdtgroup_exit(void)
++{
++	unregister_filesystem(&rdt_fs_type);
++	sysfs_remove_mount_point(fs_kobj, "resctrl");
++	kernfs_destroy_root(rdt_root);
++}
+-- 
+2.7.4
+

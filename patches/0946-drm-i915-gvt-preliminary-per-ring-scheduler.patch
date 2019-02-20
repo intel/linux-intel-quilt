@@ -1,0 +1,485 @@
+From 5f0fecdbcee25122d4496c9823b9c787b1523818 Mon Sep 17 00:00:00 2001
+From: Fei Jiang <fei.jiang@intel.com>
+Date: Tue, 9 Jan 2018 21:11:06 +0800
+Subject: [PATCH 0946/2278] drm/i915/gvt: preliminary per ring scheduler
+
+The basic idea is to make the scheduler of fine granularity at per-ring
+level, and to let vGPUs run simultaneously on different rings when they
+have different type of workload.
+
+Signed-off-by: Ping Gao <ping.a.gao@intel.com>
+Signed-off-by: Fei Jiang <fei.jiang@intel.com>
+Acknowledged-by: Singh, Satyeshwar <satyeshwar.singh@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gvt.h          |   2 +-
+ drivers/gpu/drm/i915/gvt/sched_policy.c | 194 +++++++++++++++++++-------------
+ drivers/gpu/drm/i915/gvt/scheduler.c    |  11 +-
+ drivers/gpu/drm/i915/gvt/scheduler.h    |   6 +-
+ drivers/gpu/drm/i915/gvt/vgpu.c         |   2 +-
+ 5 files changed, 129 insertions(+), 86 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index be8bdb6..3683b14 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -153,7 +153,7 @@ struct intel_vgpu {
+ 	bool pv_notified;
+ 	bool failsafe;
+ 	unsigned int resetting_eng;
+-	void *sched_data;
++	void *sched_data[I915_NUM_ENGINES];
+ 	struct vgpu_sched_ctl sched_ctl;
+ 
+ 	struct intel_vgpu_fence fence;
+diff --git a/drivers/gpu/drm/i915/gvt/sched_policy.c b/drivers/gpu/drm/i915/gvt/sched_policy.c
+index 6d6d480..02e0915 100644
+--- a/drivers/gpu/drm/i915/gvt/sched_policy.c
++++ b/drivers/gpu/drm/i915/gvt/sched_policy.c
+@@ -34,15 +34,11 @@
+ #include "i915_drv.h"
+ #include "gvt.h"
+ 
+-static bool vgpu_has_pending_workload(struct intel_vgpu *vgpu)
++static bool vgpu_has_pending_workload(struct intel_vgpu *vgpu,
++                                       enum intel_engine_id ring_id)
+ {
+-	enum intel_engine_id i;
+-	struct intel_engine_cs *engine;
+-
+-	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
+-		if (!list_empty(workload_q_head(vgpu, i)))
+-			return true;
+-	}
++	if (!list_empty(workload_q_head(vgpu, ring_id)))
++		return true;
+ 
+ 	return false;
+ }
+@@ -64,13 +60,14 @@ struct gvt_sched_data {
+ 	struct intel_gvt *gvt;
+ 	struct hrtimer timer;
+ 	unsigned long period;
+-	struct list_head lru_runq_head;
++	struct list_head lru_runq_head[I915_NUM_ENGINES];
+ };
+ 
+-static void vgpu_update_timeslice(struct intel_vgpu *pre_vgpu)
++static void vgpu_update_timeslice(struct intel_vgpu *pre_vgpu,
++					enum intel_engine_id ring_id)
+ {
+ 	ktime_t delta_ts;
+-	struct vgpu_sched_data *vgpu_data = pre_vgpu->sched_data;
++	struct vgpu_sched_data *vgpu_data = pre_vgpu->sched_data[ring_id];
+ 
+ 	delta_ts = vgpu_data->sched_out_time - vgpu_data->sched_in_time;
+ 
+@@ -81,7 +78,8 @@ static void vgpu_update_timeslice(struct intel_vgpu *pre_vgpu)
+ #define GVT_TS_BALANCE_PERIOD_MS 100
+ #define GVT_TS_BALANCE_STAGE_NUM 10
+ 
+-static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
++static void gvt_balance_timeslice(struct gvt_sched_data *sched_data,
++					enum intel_engine_id ring_id)
+ {
+ 	struct vgpu_sched_data *vgpu_data;
+ 	struct list_head *pos;
+@@ -95,12 +93,12 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
+ 		int total_weight = 0;
+ 		ktime_t fair_timeslice;
+ 
+-		list_for_each(pos, &sched_data->lru_runq_head) {
++		list_for_each(pos, &sched_data->lru_runq_head[ring_id]) {
+ 			vgpu_data = container_of(pos, struct vgpu_sched_data, lru_list);
+ 			total_weight += vgpu_data->sched_ctl.weight;
+ 		}
+ 
+-		list_for_each(pos, &sched_data->lru_runq_head) {
++		list_for_each(pos, &sched_data->lru_runq_head[ring_id]) {
+ 			vgpu_data = container_of(pos, struct vgpu_sched_data, lru_list);
+ 			fair_timeslice = ms_to_ktime(GVT_TS_BALANCE_PERIOD_MS) *
+ 						vgpu_data->sched_ctl.weight /
+@@ -110,7 +108,7 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
+ 			vgpu_data->left_ts = vgpu_data->allocated_ts;
+ 		}
+ 	} else {
+-		list_for_each(pos, &sched_data->lru_runq_head) {
++		list_for_each(pos, &sched_data->lru_runq_head[ring_id]) {
+ 			vgpu_data = container_of(pos, struct vgpu_sched_data, lru_list);
+ 
+ 			/* timeslice for next 100ms should add the left/debt
+@@ -121,70 +119,72 @@ static void gvt_balance_timeslice(struct gvt_sched_data *sched_data)
+ 	}
+ }
+ 
+-static void try_to_schedule_next_vgpu(struct intel_gvt *gvt)
++static void try_to_schedule_next_vgpu(struct intel_gvt *gvt,
++                                       enum intel_engine_id ring_id)
+ {
+ 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
+-	enum intel_engine_id i;
+-	struct intel_engine_cs *engine;
+ 	struct vgpu_sched_data *vgpu_data;
+ 	ktime_t cur_time;
+ 
+ 	/* no need to schedule if next_vgpu is the same with current_vgpu,
+ 	 * let scheduler chose next_vgpu again by setting it to NULL.
+ 	 */
+-	if (scheduler->next_vgpu == scheduler->current_vgpu) {
+-		scheduler->next_vgpu = NULL;
++	if (scheduler->next_vgpu[ring_id] == scheduler->current_vgpu[ring_id]) {
++		scheduler->next_vgpu[ring_id] = NULL;
+ 		return;
+ 	}
+ 
++	/* no target to schedule */
++	if (!scheduler->next_vgpu[ring_id])
++		return;
++
+ 	/*
+ 	 * after the flag is set, workload dispatch thread will
+ 	 * stop dispatching workload for current vgpu
+ 	 */
+-	scheduler->need_reschedule = true;
++	scheduler->need_reschedule[ring_id] = true;
+ 
+ 	/* still have uncompleted workload? */
+-	for_each_engine(engine, gvt->dev_priv, i) {
+-		if (scheduler->current_workload[i])
+-			return;
+-	}
++	if (scheduler->current_workload[ring_id])
++		return;
+ 
+ 	cur_time = ktime_get();
+-	if (scheduler->current_vgpu) {
+-		vgpu_data = scheduler->current_vgpu->sched_data;
++	if (scheduler->current_vgpu[ring_id]) {
++		vgpu_data = scheduler->current_vgpu[ring_id]->sched_data[ring_id];
+ 		vgpu_data->sched_out_time = cur_time;
+-		vgpu_update_timeslice(scheduler->current_vgpu);
++		vgpu_update_timeslice(scheduler->current_vgpu[ring_id], ring_id);
+ 	}
+-	vgpu_data = scheduler->next_vgpu->sched_data;
++	vgpu_data = scheduler->next_vgpu[ring_id]->sched_data[ring_id];
+ 	vgpu_data->sched_in_time = cur_time;
+ 
+ 	/* switch current vgpu */
+-	scheduler->current_vgpu = scheduler->next_vgpu;
+-	scheduler->next_vgpu = NULL;
++	scheduler->current_vgpu[ring_id] = scheduler->next_vgpu[ring_id];
++	scheduler->next_vgpu[ring_id] = NULL;
+ 
+-	scheduler->need_reschedule = false;
++	scheduler->need_reschedule[ring_id] = false;
+ 
+ 	/* wake up workload dispatch thread */
+-	for_each_engine(engine, gvt->dev_priv, i)
+-		wake_up(&scheduler->waitq[i]);
++	wake_up(&scheduler->waitq[ring_id]);
+ }
+ 
+-static struct intel_vgpu *find_busy_vgpu(struct gvt_sched_data *sched_data)
++static struct intel_vgpu *find_busy_vgpu(struct gvt_sched_data *sched_data,
++                                               enum intel_engine_id ring_id)
+ {
+ 	struct vgpu_sched_data *vgpu_data;
+ 	struct intel_vgpu *vgpu = NULL;
+-	struct list_head *head = &sched_data->lru_runq_head;
++	struct list_head *head = &sched_data->lru_runq_head[ring_id];
+ 	struct list_head *pos;
+ 
+ 	/* search a vgpu with pending workload */
+ 	list_for_each(pos, head) {
+-
+ 		vgpu_data = container_of(pos, struct vgpu_sched_data, lru_list);
+-		if (!vgpu_has_pending_workload(vgpu_data->vgpu))
++		if (!vgpu_has_pending_workload(vgpu_data->vgpu, ring_id))
+ 			continue;
+-
+-		vgpu = vgpu_data->vgpu;
+-		break;
++               /* Return the vGPU only if it has time slice left */
++               if (vgpu_data->left_ts > 0) {
++                       vgpu = vgpu_data->vgpu;
++                       break;
++               }
+ 	}
+ 
+ 	return vgpu;
+@@ -193,48 +193,56 @@ static struct intel_vgpu *find_busy_vgpu(struct gvt_sched_data *sched_data)
+ /* in nanosecond */
+ #define GVT_DEFAULT_TIME_SLICE 5000000
+ 
+-static void tbs_sched_func(struct gvt_sched_data *sched_data)
++static void tbs_sched_func(struct gvt_sched_data *sched_data, enum intel_engine_id ring_id)
+ {
+ 	struct intel_gvt *gvt = sched_data->gvt;
+ 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
+ 	struct vgpu_sched_data *vgpu_data;
+ 	struct intel_vgpu *vgpu = NULL;
+ 	/* no active vgpu or has already had a target */
+-	if (list_empty(&sched_data->lru_runq_head) || scheduler->next_vgpu)
++	if (list_empty(&sched_data->lru_runq_head[ring_id]) || scheduler->next_vgpu[ring_id])
+ 		goto out;
+ 
+-	vgpu = find_busy_vgpu(sched_data);
++	vgpu = find_busy_vgpu(sched_data, ring_id);
+ 	if (vgpu) {
+-		scheduler->next_vgpu = vgpu;
++		scheduler->next_vgpu[ring_id] = vgpu;
+ 
+ 		/* Move the last used vGPU to the tail of lru_list */
+-		vgpu_data = vgpu->sched_data;
++		vgpu_data = vgpu->sched_data[ring_id];
+ 		list_del_init(&vgpu_data->lru_list);
+ 		list_add_tail(&vgpu_data->lru_list,
+-				&sched_data->lru_runq_head);
++				&sched_data->lru_runq_head[ring_id]);
+ 
+ 		gvt_dbg_sched("pick next vgpu %d\n", vgpu->id);
+ 	}
+ out:
+-	if (scheduler->next_vgpu)
+-		try_to_schedule_next_vgpu(gvt);
++	if (scheduler->next_vgpu[ring_id]) {
++		gvt_dbg_sched("try to schedule next vgpu %d\n",
++				scheduler->next_vgpu[ring_id]->id);
++		try_to_schedule_next_vgpu(gvt, ring_id);
++	}
+ }
+ 
+ void intel_gvt_schedule(struct intel_gvt *gvt)
+ {
+ 	struct gvt_sched_data *sched_data = gvt->scheduler.sched_data;
+ 	static uint64_t timer_check;
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
+ 
+ 	mutex_lock(&gvt->sched_lock);
+ 
+ 	if (test_and_clear_bit(INTEL_GVT_REQUEST_SCHED,
+ 				(void *)&gvt->service_request)) {
+-		if (!(timer_check++ % GVT_TS_BALANCE_PERIOD_MS))
+-			gvt_balance_timeslice(sched_data);
++		if (!(timer_check++ % GVT_TS_BALANCE_PERIOD_MS)) {
++			for_each_engine(engine, gvt->dev_priv, i)
++				gvt_balance_timeslice(sched_data, i);
++		}
+ 	}
+ 	clear_bit(INTEL_GVT_REQUEST_EVENT_SCHED, (void *)&gvt->service_request);
+ 
+-	tbs_sched_func(sched_data);
++	for_each_engine(engine, gvt->dev_priv, i)
++		tbs_sched_func(sched_data, i);
+ 
+ 	mutex_unlock(&gvt->sched_lock);
+ }
+@@ -254,6 +262,9 @@ static enum hrtimer_restart tbs_timer_fn(struct hrtimer *timer_data)
+ 
+ static int tbs_sched_init(struct intel_gvt *gvt)
+ {
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
++
+ 	struct intel_gvt_workload_scheduler *scheduler =
+ 		&gvt->scheduler;
+ 
+@@ -263,7 +274,9 @@ static int tbs_sched_init(struct intel_gvt *gvt)
+ 	if (!data)
+ 		return -ENOMEM;
+ 
+-	INIT_LIST_HEAD(&data->lru_runq_head);
++	for_each_engine(engine, gvt->dev_priv, i)
++		INIT_LIST_HEAD(&data->lru_runq_head[i]);
++
+ 	hrtimer_init(&data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+ 	data->timer.function = tbs_timer_fn;
+ 	data->period = GVT_DEFAULT_TIME_SLICE;
+@@ -289,35 +302,54 @@ static void tbs_sched_clean(struct intel_gvt *gvt)
+ static int tbs_sched_init_vgpu(struct intel_vgpu *vgpu)
+ {
+ 	struct vgpu_sched_data *data;
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
+ 
+-	data = kzalloc(sizeof(*data), GFP_KERNEL);
+-	if (!data)
+-		return -ENOMEM;
+-
+-	data->sched_ctl.weight = vgpu->sched_ctl.weight;
+-	data->vgpu = vgpu;
+-	INIT_LIST_HEAD(&data->lru_list);
++	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
++		data = kzalloc(sizeof(*data), GFP_KERNEL);
++		if (!data)
++			goto err;
+ 
+-	vgpu->sched_data = data;
++		data->sched_ctl.weight = vgpu->sched_ctl.weight;
++		data->vgpu = vgpu;
++		INIT_LIST_HEAD(&data->lru_list);
+ 
++		vgpu->sched_data[i] = data;
++	}
+ 	return 0;
++
++err:
++	for (; i >= 0; i--) {
++		kfree(vgpu->sched_data[i]);
++		vgpu->sched_data[i] = NULL;
++	}
++	return -ENOMEM;
+ }
+ 
+ static void tbs_sched_clean_vgpu(struct intel_vgpu *vgpu)
+ {
+-	kfree(vgpu->sched_data);
+-	vgpu->sched_data = NULL;
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
++
++	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
++		kfree(vgpu->sched_data[i]);
++		vgpu->sched_data[i] = NULL;
++	}
+ }
+ 
+ static void tbs_sched_start_schedule(struct intel_vgpu *vgpu)
+ {
+ 	struct gvt_sched_data *sched_data = vgpu->gvt->scheduler.sched_data;
+-	struct vgpu_sched_data *vgpu_data = vgpu->sched_data;
+-
+-	if (!list_empty(&vgpu_data->lru_list))
+-		return;
++	struct vgpu_sched_data *vgpu_data[I915_NUM_ENGINES];
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
+ 
+-	list_add_tail(&vgpu_data->lru_list, &sched_data->lru_runq_head);
++	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
++		vgpu_data[i] = vgpu->sched_data[i];
++		if (!list_empty(&vgpu_data[i]->lru_list))
++			 continue;
++		list_add_tail(&vgpu_data[i]->lru_list, &sched_data->lru_runq_head[i]);
++	}
+ 
+ 	if (!hrtimer_active(&sched_data->timer))
+ 		hrtimer_start(&sched_data->timer, ktime_add_ns(ktime_get(),
+@@ -326,9 +358,14 @@ static void tbs_sched_start_schedule(struct intel_vgpu *vgpu)
+ 
+ static void tbs_sched_stop_schedule(struct intel_vgpu *vgpu)
+ {
+-	struct vgpu_sched_data *vgpu_data = vgpu->sched_data;
++	struct vgpu_sched_data *vgpu_data[I915_NUM_ENGINES];
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
+ 
+-	list_del_init(&vgpu_data->lru_list);
++	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
++		vgpu_data[i] = vgpu->sched_data[i];
++		list_del_init(&vgpu_data[i]->lru_list);
++	}
+ }
+ 
+ static struct intel_gvt_sched_policy_ops tbs_schedule_ops = {
+@@ -374,18 +411,21 @@ void intel_vgpu_stop_schedule(struct intel_vgpu *vgpu)
+ 	struct intel_gvt_workload_scheduler *scheduler =
+ 		&vgpu->gvt->scheduler;
+ 	int ring_id;
++	enum intel_engine_id i;
++	struct intel_engine_cs *engine;
+ 
+ 	gvt_dbg_core("vgpu%d: stop schedule\n", vgpu->id);
+ 
+ 	scheduler->sched_ops->stop_schedule(vgpu);
+ 
+-	if (scheduler->next_vgpu == vgpu)
+-		scheduler->next_vgpu = NULL;
+-
+-	if (scheduler->current_vgpu == vgpu) {
+-		/* stop workload dispatching */
+-		scheduler->need_reschedule = true;
+-		scheduler->current_vgpu = NULL;
++	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
++		if (scheduler->next_vgpu[i] == vgpu)
++			scheduler->next_vgpu[i] = NULL;
++		if (scheduler->current_vgpu[i] == vgpu) {
++			/* stop workload dispatching */
++			scheduler->need_reschedule[i] = true;
++			scheduler->current_vgpu[i] = NULL;
++		}
+ 	}
+ 
+ 	spin_lock_bh(&scheduler->mmio_context_lock);
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 9d8d45b..85f1b76 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -357,18 +357,21 @@ static struct intel_vgpu_workload *pick_next_workload(
+ 	 * no current vgpu / will be scheduled out / no workload
+ 	 * bail out
+ 	 */
+-	if (!scheduler->current_vgpu) {
++	if (!scheduler->current_vgpu[ring_id]) {
+ 		gvt_dbg_sched("ring id %d stop - no current vgpu\n", ring_id);
+ 		goto out;
+ 	}
+ 
+-	if (scheduler->need_reschedule) {
++	if (scheduler->need_reschedule[ring_id]) {
+ 		gvt_dbg_sched("ring id %d stop - will reschedule\n", ring_id);
+ 		goto out;
+ 	}
+ 
+-	if (list_empty(workload_q_head(scheduler->current_vgpu, ring_id)))
++	if (list_empty(workload_q_head(scheduler->current_vgpu[ring_id], ring_id))) {
++		gvt_dbg_sched("ring id %d stop - no available workload\n",
++				ring_id);
+ 		goto out;
++	}
+ 
+ 	/*
+ 	 * still have current workload, maybe the workload disptacher
+@@ -388,7 +391,7 @@ static struct intel_vgpu_workload *pick_next_workload(
+ 	 * schedule out a vgpu.
+ 	 */
+ 	scheduler->current_workload[ring_id] = container_of(
+-			workload_q_head(scheduler->current_vgpu, ring_id)->next,
++			workload_q_head(scheduler->current_vgpu[ring_id], ring_id)->next,
+ 			struct intel_vgpu_workload, list);
+ 
+ 	workload = scheduler->current_workload[ring_id];
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.h b/drivers/gpu/drm/i915/gvt/scheduler.h
+index 3920c54..924e0e6 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.h
++++ b/drivers/gpu/drm/i915/gvt/scheduler.h
+@@ -37,10 +37,10 @@
+ #define _GVT_SCHEDULER_H_
+ 
+ struct intel_gvt_workload_scheduler {
+-	struct intel_vgpu *current_vgpu;
+-	struct intel_vgpu *next_vgpu;
++	struct intel_vgpu *current_vgpu[I915_NUM_ENGINES];
++	struct intel_vgpu *next_vgpu[I915_NUM_ENGINES];
+ 	struct intel_vgpu_workload *current_workload[I915_NUM_ENGINES];
+-	bool need_reschedule;
++	bool need_reschedule[I915_NUM_ENGINES];
+ 
+ 	spinlock_t mmio_context_lock;
+ 	/* can be null when owner is host */
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 6e74c94..b6c9bbf 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -507,7 +507,7 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 	 * The current_vgpu will set to NULL after stopping the
+ 	 * scheduler when the reset is triggered by current vgpu.
+ 	 */
+-	if (scheduler->current_vgpu == NULL) {
++	if (scheduler->current_vgpu[0] == NULL) {
+ 		mutex_unlock(&gvt->lock);
+ 		mutex_unlock(&vgpu->gvt->sched_lock);
+ 		intel_gvt_wait_vgpu_idle(vgpu);
+-- 
+2.7.4
+

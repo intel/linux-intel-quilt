@@ -1,0 +1,296 @@
+From 644cf92aef721e511b02da18857b827327e8defd Mon Sep 17 00:00:00 2001
+From: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Date: Thu, 27 Apr 2017 15:20:42 -0700
+Subject: [PATCH 0910/2278] drm/i915/gvt: Serialize GGTT updates accross all
+ DomUs
+
+When updating the GGTT, make sure we pause all other domains
+before we start touching the GGTT and un-pause them after
+we are done.
+
+Change-Id: Ic6bbec7e9d5a4f1b81a3880f1dcf2a96dc89c4a3
+Signed-off-by: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Signed-off-by: Walter Mack <walter.mack@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gtt.c       | 84 +++++++++++++++++++++++++++++++++++-
+ drivers/gpu/drm/i915/gvt/gvt.c       | 30 +++++++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h       |  2 +
+ drivers/gpu/drm/i915/gvt/hypercall.h |  2 +
+ drivers/gpu/drm/i915/gvt/mpt.h       | 15 +++++++
+ drivers/gpu/drm/i915/i915_gem_gtt.c  | 28 ++++++++++++
+ 6 files changed, 159 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index 39f0185..0cb47169 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -33,6 +33,7 @@
+  *
+  */
+ 
++#include <linux/stop_machine.h>
+ #include "i915_drv.h"
+ #include "gvt.h"
+ #include "i915_pvinfo.h"
+@@ -284,6 +285,50 @@ static inline int gtt_get_entry64(void *pt,
+ 	return 0;
+ }
+ 
++struct ggtt_entry64 {
++	void *pt;
++	struct intel_gvt_gtt_entry *e;
++	unsigned long index;
++	bool hypervisor_access;
++	unsigned long gpa;
++	struct intel_vgpu *vgpu;
++};
++
++#ifdef CONFIG_INTEL_IOMMU
++static int gtt_get_entry64__cb(void *_arg)
++{
++	struct ggtt_entry64 *arg = _arg;
++	int ret = 0;
++
++	gvt_pause_user_domains(arg->vgpu->gvt->dev_priv);
++	ret = gtt_get_entry64(arg->pt, arg->e, arg->index,
++			arg->hypervisor_access, arg->gpa, arg->vgpu);
++	gvt_unpause_user_domains(arg->vgpu->gvt->dev_priv);
++
++	return ret;
++}
++#endif
++
++static inline int gtt_get_entry64__BKL(void *pt,
++		struct intel_gvt_gtt_entry *e,
++		unsigned long index, bool hypervisor_access, unsigned long gpa,
++		struct intel_vgpu *vgpu)
++{
++#ifdef CONFIG_INTEL_IOMMU
++	struct ggtt_entry64 arg = { pt, e, index, hypervisor_access, gpa, vgpu };
++
++	if (!intel_iommu_gfx_mapped || !IS_BROXTON(vgpu->gvt->dev_priv) ||
++				hypervisor_access || pt) {
++		return gtt_get_entry64(pt, e, index, hypervisor_access, gpa, vgpu);
++	} else {
++		stop_machine(gtt_get_entry64__cb, &arg, NULL);
++		return 0;
++	}
++#else
++	return gtt_get_entry64(pt, e, index, hypervisor_access, gpa, vgpu);
++#endif
++}
++
+ static inline int gtt_set_entry64(void *pt,
+ 		struct intel_gvt_gtt_entry *e,
+ 		unsigned long index, bool hypervisor_access, unsigned long gpa,
+@@ -309,6 +354,41 @@ static inline int gtt_set_entry64(void *pt,
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_INTEL_IOMMU
++static int gtt_set_entry64__cb(void *_arg)
++{
++	struct ggtt_entry64 *arg = _arg;
++	int ret;
++
++	gvt_pause_user_domains(arg->vgpu->gvt->dev_priv);
++	ret = gtt_set_entry64(arg->pt, arg->e, arg->index, arg->hypervisor_access,
++				arg->gpa, arg->vgpu);
++	gvt_unpause_user_domains(arg->vgpu->gvt->dev_priv);
++
++	return ret;
++}
++#endif
++
++static inline int gtt_set_entry64__BKL(void *pt,
++		struct intel_gvt_gtt_entry *e,
++		unsigned long index, bool hypervisor_access, unsigned long gpa,
++		struct intel_vgpu *vgpu)
++{
++#ifdef CONFIG_INTEL_IOMMU
++	struct ggtt_entry64 arg = { pt, e, index, hypervisor_access, gpa, vgpu };
++
++	if (!intel_iommu_gfx_mapped || !IS_BROXTON(vgpu->gvt->dev_priv) ||
++				hypervisor_access || pt) {
++		return gtt_set_entry64(pt, e, index, hypervisor_access, gpa, vgpu);
++	} else {
++		stop_machine(gtt_set_entry64__cb, &arg, NULL);
++		return 0;
++	}
++#else
++	return gtt_set_entry64(pt, e, index, hypervisor_access, gpa, vgpu);
++#endif
++}
++
+ #define GTT_HAW 46
+ 
+ #define ADDR_1G_MASK (((1UL << (GTT_HAW - 30)) - 1) << 30)
+@@ -403,8 +483,8 @@ DEFINE_PPGTT_GMA_TO_INDEX(gen8, l4_pdp, (gma >> 30 & 0x1ff));
+ DEFINE_PPGTT_GMA_TO_INDEX(gen8, pml4, (gma >> 39 & 0x1ff));
+ 
+ static struct intel_gvt_gtt_pte_ops gen8_gtt_pte_ops = {
+-	.get_entry = gtt_get_entry64,
+-	.set_entry = gtt_set_entry64,
++	.get_entry = gtt_get_entry64__BKL,
++	.set_entry = gtt_set_entry64__BKL,
+ 	.clear_present = gtt_entry_clear_present,
+ 	.test_present = gen8_gtt_test_present,
+ 	.test_pse = gen8_gtt_test_pse,
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index 3468a92..3923b42 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -380,3 +380,33 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
+ 	kfree(gvt);
+ 	return ret;
+ }
++
++int gvt_pause_user_domains(struct drm_i915_private *dev_priv)
++{
++	struct intel_vgpu *vgpu;
++	int id, ret = 0;
++
++	if (!intel_gvt_active(dev_priv))
++		return 0;
++
++	for_each_active_vgpu(dev_priv->gvt, vgpu, id) {
++		ret = intel_gvt_hypervisor_pause_domain(vgpu);
++	}
++
++	return ret;
++}
++
++int gvt_unpause_user_domains(struct drm_i915_private *dev_priv)
++{
++	struct intel_vgpu *vgpu;
++	int id, ret = 0;
++
++	if (!intel_gvt_active(dev_priv))
++		return 0;
++
++	for_each_active_vgpu(dev_priv->gvt, vgpu, id) {
++		ret = intel_gvt_hypervisor_unpause_domain(vgpu);
++	}
++
++	return ret;
++}
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index af2a19c..836ba0f 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -511,6 +511,8 @@ int intel_vgpu_init_opregion(struct intel_vgpu *vgpu, u32 gpa);
+ 
+ int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci);
+ void populate_pvinfo_page(struct intel_vgpu *vgpu);
++int gvt_pause_user_domains(struct drm_i915_private *dev_priv);
++int gvt_unpause_user_domains(struct drm_i915_private *dev_priv);
+ 
+ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/hypercall.h b/drivers/gpu/drm/i915/gvt/hypercall.h
+index df7f33a..8f300be 100644
+--- a/drivers/gpu/drm/i915/gvt/hypercall.h
++++ b/drivers/gpu/drm/i915/gvt/hypercall.h
+@@ -55,6 +55,8 @@ struct intel_gvt_mpt {
+ 			      unsigned long mfn, unsigned int nr, bool map);
+ 	int (*set_trap_area)(unsigned long handle, u64 start, u64 end,
+ 			     bool map);
++	int (*pause_domain)(unsigned long handle);
++	int (*unpause_domain)(unsigned long handle);
+ };
+ 
+ extern struct intel_gvt_mpt xengt_mpt;
+diff --git a/drivers/gpu/drm/i915/gvt/mpt.h b/drivers/gpu/drm/i915/gvt/mpt.h
+index f0e5487..b775d90 100644
+--- a/drivers/gpu/drm/i915/gvt/mpt.h
++++ b/drivers/gpu/drm/i915/gvt/mpt.h
+@@ -292,4 +292,19 @@ static inline int intel_gvt_hypervisor_set_trap_area(
+ 	return intel_gvt_host.mpt->set_trap_area(vgpu->handle, start, end, map);
+ }
+ 
++static inline int intel_gvt_hypervisor_pause_domain(struct intel_vgpu *vgpu)
++{
++	if (!intel_gvt_host.mpt || !intel_gvt_host.mpt->pause_domain)
++		return 0;
++
++	return intel_gvt_host.mpt->pause_domain(vgpu->handle);
++}
++
++static inline int intel_gvt_hypervisor_unpause_domain(struct intel_vgpu *vgpu)
++{
++	if (!intel_gvt_host.mpt || !intel_gvt_host.mpt->unpause_domain)
++		return 0;
++
++	return intel_gvt_host.mpt->unpause_domain(vgpu->handle);
++}
+ #endif /* _GVT_MPT_H_ */
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index ad524cb..90628604 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -42,6 +42,10 @@
+ #include "intel_drv.h"
+ #include "intel_frontbuffer.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ #define I915_GFP_DMA (GFP_KERNEL | __GFP_HIGHMEM)
+ 
+ /**
+@@ -2202,7 +2206,15 @@ static int bxt_vtd_ggtt_insert_page__cb(void *_arg)
+ {
+ 	struct insert_page *arg = _arg;
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_pause_user_domains(arg->vm->i915);
++#endif
+ 	gen8_ggtt_insert_page(arg->vm, arg->addr, arg->offset, arg->level, 0);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_unpause_user_domains(arg->vm->i915);
++#endif
+ 	bxt_vtd_ggtt_wa(arg->vm);
+ 
+ 	return 0;
+@@ -2229,7 +2241,15 @@ static int bxt_vtd_ggtt_insert_entries__cb(void *_arg)
+ {
+ 	struct insert_entries *arg = _arg;
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_pause_user_domains(arg->vm->i915);
++#endif
+ 	gen8_ggtt_insert_entries(arg->vm, arg->vma, arg->level, 0);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_unpause_user_domains(arg->vm->i915);
++#endif
+ 	bxt_vtd_ggtt_wa(arg->vm);
+ 
+ 	return 0;
+@@ -2255,7 +2275,15 @@ static int bxt_vtd_ggtt_clear_range__cb(void *_arg)
+ {
+ 	struct clear_range *arg = _arg;
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_pause_user_domains(arg->vm->i915);
++#endif
+ 	gen8_ggtt_clear_range(arg->vm, arg->start, arg->length);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (intel_gvt_active(arg->vm->i915))
++		gvt_unpause_user_domains(arg->vm->i915);
++#endif
+ 	bxt_vtd_ggtt_wa(arg->vm);
+ 
+ 	return 0;
+-- 
+2.7.4
+

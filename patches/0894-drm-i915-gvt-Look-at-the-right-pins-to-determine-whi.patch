@@ -1,0 +1,106 @@
+From e02bb8bd95a018446553aedf6d1b473f341ea8bf Mon Sep 17 00:00:00 2001
+From: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Date: Thu, 23 Mar 2017 04:24:04 +0800
+Subject: [PATCH 0894/2278] drm/i915/gvt: Look at the right pins to determine
+ which port is connected
+
+Also, make sure DomU sees the updates to GEN8_DE_PORT_ISR (instead of
+SDEISR) to verify port connectivity.
+
+Signed-off-by: Vivek Kasireddy <vivek.kasireddy@intel.com>
+(cherry picked from commit 9e26c9d08da2a5ccd65ab27f5795da5ecfbe5dd1)
+
+Change-Id: Ie207295f1efac15f695990eed01c4e3b43a9ab6c
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c | 17 +++++++++++++++++
+ drivers/gpu/drm/i915/gvt/edid.c    | 31 +++++++++++++++++++++----------
+ 2 files changed, 38 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 3c31843..5fdb5cd 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -169,6 +169,23 @@ static u8 dpcd_fix_data[DPCD_HEADER_SIZE] = {
+ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
+ {
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++
++	if (IS_BROXTON(dev_priv)) {
++		vgpu_vreg(vgpu, GEN8_DE_PORT_ISR) &= ~(BXT_DE_PORT_HP_DDIA |
++				BXT_DE_PORT_HP_DDIB |
++				BXT_DE_PORT_HP_DDIC);
++
++		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_A))
++			vgpu_vreg(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIA;
++
++		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_B))
++			vgpu_vreg(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIB;
++
++		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_C))
++			vgpu_vreg(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIC;
++		return;
++	}
++
+ 	vgpu_vreg(vgpu, SDEISR) &= ~(SDE_PORTB_HOTPLUG_CPT |
+ 			SDE_PORTC_HOTPLUG_CPT |
+ 			SDE_PORTD_HOTPLUG_CPT);
+diff --git a/drivers/gpu/drm/i915/gvt/edid.c b/drivers/gpu/drm/i915/gvt/edid.c
+index 42cd09ec..1636f6b 100644
+--- a/drivers/gpu/drm/i915/gvt/edid.c
++++ b/drivers/gpu/drm/i915/gvt/edid.c
+@@ -77,19 +77,30 @@ static unsigned char edid_get_byte(struct intel_vgpu *vgpu)
+ 	return chr;
+ }
+ 
+-static inline int get_port_from_gmbus0(u32 gmbus0)
++static inline int get_port_from_gmbus0(struct intel_vgpu *vgpu, u32 gmbus0)
+ {
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 	int port_select = gmbus0 & _GMBUS_PIN_SEL_MASK;
+ 	int port = -EINVAL;
+ 
+-	if (port_select == 2)
+-		port = PORT_E;
+-	else if (port_select == 4)
+-		port = PORT_C;
+-	else if (port_select == 5)
+-		port = PORT_B;
+-	else if (port_select == 6)
+-		port = PORT_D;
++        if (IS_BROXTON(dev_priv)) {
++                if (port_select == 1)
++                        port = PORT_B;
++                else if (port_select == 2)
++                        port = PORT_C;
++                else if (port_select == 3)
++                        port = PORT_D;
++	} else {
++		if (port_select == 2)
++			port = PORT_E;
++		else if (port_select == 4)
++			port = PORT_C;
++		else if (port_select == 5)
++			port = PORT_B;
++		else if (port_select == 6)
++			port = PORT_D;
++	}
++
+ 	return port;
+ }
+ 
+@@ -116,7 +127,7 @@ static int gmbus0_mmio_write(struct intel_vgpu *vgpu,
+ 	if (pin_select == 0)
+ 		return 0;
+ 
+-	port = get_port_from_gmbus0(pin_select);
++	port = get_port_from_gmbus0(vgpu, pin_select);
+ 	if (WARN_ON(port < 0))
+ 		return 0;
+ 
+-- 
+2.7.4
+

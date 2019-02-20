@@ -1,0 +1,477 @@
+From a362150da736a40558fbc7497cdd50dbd73a084d Mon Sep 17 00:00:00 2001
+From: Chang Ying <ying.chang@intel.com>
+Date: Thu, 23 Mar 2017 04:24:03 +0800
+Subject: [PATCH 0893/2278] drm/i915/gvt: add initial support for bxt
+
+1. add device definition
+2. make bxt and skl go through almost same code path
+3. add mmio info
+
+Change-Id: I60b59f18d06dc31391a610a559f40e4061926718
+Signed-off-by: Chang Ying <ying.chang@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cmd_parser.c |  12 +-
+ drivers/gpu/drm/i915/gvt/gtt.c        |   2 +-
+ drivers/gpu/drm/i915/gvt/gvt.c        |   1 +
+ drivers/gpu/drm/i915/gvt/handlers.c   | 236 ++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/gvt/interrupt.c  |   4 +-
+ drivers/gpu/drm/i915/gvt/mmio.h       |  11 +-
+ drivers/gpu/drm/i915/gvt/render.c     |   7 +-
+ drivers/gpu/drm/i915/gvt/scheduler.c  |   2 +
+ 8 files changed, 263 insertions(+), 12 deletions(-)
+ mode change 100644 => 100755 drivers/gpu/drm/i915/gvt/handlers.c
+
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.c b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+index d6993c2..7a42c5a 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.c
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+@@ -1209,7 +1209,8 @@ static int gen8_check_mi_display_flip(struct parser_exec_state *s,
+ 	if (!info->async_flip)
+ 		return 0;
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)) {
++	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv) ||
++			IS_BROXTON(dev_priv)) {
+ 		stride = vgpu_vreg(s->vgpu, info->stride_reg) & GENMASK(9, 0);
+ 		tile = (vgpu_vreg(s->vgpu, info->ctrl_reg) &
+ 				GENMASK(12, 10)) >> 10;
+@@ -1237,7 +1238,8 @@ static int gen8_update_plane_mmio_from_mi_display_flip(
+ 
+ 	set_mask_bits(&vgpu_vreg(vgpu, info->surf_reg), GENMASK(31, 12),
+ 		      info->surf_val << 12);
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)) {
++	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv) ||
++			IS_BROXTON(dev_priv)) {
+ 		set_mask_bits(&vgpu_vreg(vgpu, info->stride_reg), GENMASK(9, 0),
+ 			      info->stride_val);
+ 		set_mask_bits(&vgpu_vreg(vgpu, info->ctrl_reg), GENMASK(12, 10),
+@@ -1261,7 +1263,8 @@ static int decode_mi_display_flip(struct parser_exec_state *s,
+ 
+ 	if (IS_BROADWELL(dev_priv))
+ 		return gen8_decode_mi_display_flip(s, info);
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv))
++	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv) ||
++			IS_BROXTON(dev_priv))
+ 		return skl_decode_mi_display_flip(s, info);
+ 
+ 	return -ENODEV;
+@@ -1274,6 +1277,7 @@ static int check_mi_display_flip(struct parser_exec_state *s,
+ 
+ 	if (IS_BROADWELL(dev_priv)
+ 		|| IS_SKYLAKE(dev_priv)
++		|| IS_BROXTON(dev_priv)
+ 		|| IS_KABYLAKE(dev_priv))
+ 		return gen8_check_mi_display_flip(s, info);
+ 	return -ENODEV;
+@@ -1287,6 +1291,7 @@ static int update_plane_mmio_from_mi_display_flip(
+ 
+ 	if (IS_BROADWELL(dev_priv)
+ 		|| IS_SKYLAKE(dev_priv)
++		|| IS_BROXTON(dev_priv)
+ 		|| IS_KABYLAKE(dev_priv))
+ 		return gen8_update_plane_mmio_from_mi_display_flip(s, info);
+ 	return -ENODEV;
+@@ -1568,6 +1573,7 @@ static int batch_buffer_needs_scan(struct parser_exec_state *s)
+ 	struct intel_gvt *gvt = s->vgpu->gvt;
+ 
+ 	if (IS_BROADWELL(gvt->dev_priv) || IS_SKYLAKE(gvt->dev_priv)
++		|| IS_BROXTON(gvt->dev_priv)
+ 		|| IS_KABYLAKE(gvt->dev_priv)) {
+ 		/* BDW decides privilege based on address space */
+ 		if (cmd_val(s, 0) & (1 << 8))
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index 7c0ff04..39f0185 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -2269,7 +2269,7 @@ int intel_gvt_init_gtt(struct intel_gvt *gvt)
+ 	gvt_dbg_core("init gtt\n");
+ 
+ 	if (IS_BROADWELL(gvt->dev_priv) || IS_SKYLAKE(gvt->dev_priv)
+-		|| IS_KABYLAKE(gvt->dev_priv)) {
++		|| IS_KABYLAKE(gvt->dev_priv) || IS_BROXTON(gvt->dev_priv)) {
+ 		gvt->gtt.pte_ops = &gen8_gtt_pte_ops;
+ 		gvt->gtt.gma_ops = &gen8_gtt_gma_ops;
+ 		gvt->gtt.mm_alloc_page_table = gen8_mm_alloc_page_table;
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index c27c683..242ece1 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -109,6 +109,7 @@ static void init_device_info(struct intel_gvt *gvt)
+ 	struct pci_dev *pdev = gvt->dev_priv->drm.pdev;
+ 
+ 	if (IS_BROADWELL(gvt->dev_priv) || IS_SKYLAKE(gvt->dev_priv)
++		|| IS_BROXTON(gvt->dev_priv)
+ 		|| IS_KABYLAKE(gvt->dev_priv)) {
+ 		info->max_support_vgpus = 8;
+ 		info->cfg_space_size = 256;
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+old mode 100644
+new mode 100755
+index a5bed2e..d862d20
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -55,6 +55,8 @@ unsigned long intel_gvt_get_device_type(struct intel_gvt *gvt)
+ 		return D_SKL;
+ 	else if (IS_KABYLAKE(gvt->dev_priv))
+ 		return D_KBL;
++	else if (IS_BROXTON(gvt->dev_priv))
++		return D_BXT;
+ 
+ 	return 0;
+ }
+@@ -243,6 +245,7 @@ static int mul_force_wake_write(struct intel_vgpu *vgpu,
+ 	new = CALC_MODE_MASK_REG(old, *(u32 *)p_data);
+ 
+ 	if (IS_SKYLAKE(vgpu->gvt->dev_priv)
++		|| IS_BROXTON(vgpu->gvt->dev_priv)
+ 		|| IS_KABYLAKE(vgpu->gvt->dev_priv)) {
+ 		switch (offset) {
+ 		case FORCEWAKE_RENDER_GEN9_REG:
+@@ -2822,6 +2825,232 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	return 0;
+ }
+ 
++static int init_bxt_mmio_info(struct intel_gvt *gvt)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	int ret;
++
++	MMIO_DH(FORCEWAKE_RENDER_GEN9, D_SKL_PLUS, NULL, mul_force_wake_write);
++	MMIO_DH(FORCEWAKE_ACK_RENDER_GEN9, D_SKL_PLUS, NULL, NULL);
++	MMIO_DH(FORCEWAKE_BLITTER_GEN9, D_SKL_PLUS, NULL, mul_force_wake_write);
++	MMIO_DH(FORCEWAKE_ACK_BLITTER_GEN9, D_SKL_PLUS, NULL, NULL);
++	MMIO_DH(FORCEWAKE_MEDIA_GEN9, D_SKL_PLUS, NULL, mul_force_wake_write);
++	MMIO_DH(FORCEWAKE_ACK_MEDIA_GEN9, D_SKL_PLUS, NULL, NULL);
++
++	MMIO_F(_DPB_AUX_CH_CTL, 6 * 4, 0, 0, 0, D_SKL_PLUS, NULL, dp_aux_ch_ctl_mmio_write);
++	MMIO_F(_DPC_AUX_CH_CTL, 6 * 4, 0, 0, 0, D_SKL_PLUS, NULL, dp_aux_ch_ctl_mmio_write);
++	MMIO_F(_DPD_AUX_CH_CTL, 6 * 4, 0, 0, 0, D_SKL_PLUS, NULL, dp_aux_ch_ctl_mmio_write);
++
++	MMIO_D(HSW_PWR_WELL_CTL_BIOS(SKL_DISP_PW_MISC_IO), D_SKL_PLUS);
++	MMIO_DH(HSW_PWR_WELL_CTL_DRIVER(SKL_DISP_PW_MISC_IO), D_SKL_PLUS, NULL,
++		skl_power_well_ctl_write);
++
++	MMIO_DH(GEN6_PCODE_MAILBOX, D_BXT, NULL, mailbox_write);
++	MMIO_D(0xa210, D_SKL_PLUS);
++	MMIO_D(GEN9_MEDIA_PG_IDLE_HYSTERESIS, D_SKL_PLUS);
++	MMIO_D(GEN9_RENDER_PG_IDLE_HYSTERESIS, D_SKL_PLUS);
++	MMIO_DFH(GEN9_GAMT_ECO_REG_RW_IA, D_SKL_PLUS, F_CMD_ACCESS, NULL, NULL);
++	MMIO_DH(0x4ddc, D_BXT, NULL, skl_misc_ctl_write);
++	MMIO_DH(0x42080, D_BXT, NULL, skl_misc_ctl_write);
++	MMIO_D(0x45504, D_BXT);
++	MMIO_D(0x45520, D_BXT);
++	MMIO_D(0x46000, D_BXT);
++	MMIO_DH(0x46010, D_BXT, NULL, skl_lcpll_write);
++	MMIO_DH(0x46014, D_BXT, NULL, skl_lcpll_write);
++	MMIO_D(0x6C040, D_BXT);
++	MMIO_D(0x6C048, D_BXT);
++	MMIO_D(0x6C050, D_BXT);
++	MMIO_D(0x6C044, D_BXT);
++	MMIO_D(0x6C04C, D_BXT);
++	MMIO_D(0x6C054, D_BXT);
++	MMIO_D(0x6c058, D_BXT);
++	MMIO_D(0x6c05c, D_BXT);
++	MMIO_DH(0X6c060, D_BXT, dpll_status_read, NULL);
++
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_A, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_B, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_POS(PIPE_C, 1), D_BXT, NULL, pf_write);
++
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_A, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_B, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_WIN_SZ(PIPE_C, 1), D_BXT, NULL, pf_write);
++
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_A, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_B, 1), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 0), D_BXT, NULL, pf_write);
++	MMIO_DH(SKL_PS_CTRL(PIPE_C, 1), D_BXT, NULL, pf_write);
++
++	MMIO_DH(PLANE_BUF_CFG(PIPE_A, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_A, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_A, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_A, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_BUF_CFG(PIPE_B, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_B, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_B, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_B, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_BUF_CFG(PIPE_C, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_C, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_C, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_BUF_CFG(PIPE_C, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(CUR_BUF_CFG(PIPE_A), D_BXT, NULL, NULL);
++	MMIO_DH(CUR_BUF_CFG(PIPE_B), D_BXT, NULL, NULL);
++	MMIO_DH(CUR_BUF_CFG(PIPE_C), D_BXT, NULL, NULL);
++
++	MMIO_F(PLANE_WM(PIPE_A, 0, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_A, 1, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_A, 2, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++
++	MMIO_F(PLANE_WM(PIPE_B, 0, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_B, 1, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_B, 2, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++
++	MMIO_F(PLANE_WM(PIPE_C, 0, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_C, 1, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(PLANE_WM(PIPE_C, 2, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++
++	MMIO_F(CUR_WM(PIPE_A, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(CUR_WM(PIPE_B, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(CUR_WM(PIPE_C, 0), 4 * 8, 0, 0, 0, D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_WM_TRANS(PIPE_A, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_A, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_A, 2), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_WM_TRANS(PIPE_B, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_B, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_B, 2), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_WM_TRANS(PIPE_C, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_C, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_WM_TRANS(PIPE_C, 2), D_BXT, NULL, NULL);
++
++	MMIO_DH(CUR_WM_TRANS(PIPE_A), D_BXT, NULL, NULL);
++	MMIO_DH(CUR_WM_TRANS(PIPE_B), D_BXT, NULL, NULL);
++	MMIO_DH(CUR_WM_TRANS(PIPE_C), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_A, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_A, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_A, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_A, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_B, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_B, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_B, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_B, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_C, 0), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_C, 1), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_C, 2), D_BXT, NULL, NULL);
++	MMIO_DH(PLANE_NV12_BUF_CFG(PIPE_C, 3), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C0(PIPE_A, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_A, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_A, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_A, 4), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C0(PIPE_B, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_B, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_B, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_B, 4), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C0(PIPE_C, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_C, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_C, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C0(PIPE_C, 4), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C4(PIPE_A, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_A, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_A, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_A, 4), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C4(PIPE_B, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_B, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_B, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_B, 4), D_BXT, NULL, NULL);
++
++	MMIO_DH(_REG_701C4(PIPE_C, 1), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_C, 2), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_C, 3), D_BXT, NULL, NULL);
++	MMIO_DH(_REG_701C4(PIPE_C, 4), D_BXT, NULL, NULL);
++
++	MMIO_D(0x70380, D_BXT);
++	MMIO_D(0x71380, D_BXT);
++	MMIO_D(0x72380, D_BXT);
++	MMIO_D(0x7039c, D_BXT);
++
++	MMIO_F(0x80000, 0x3000, 0, 0, 0, D_BXT, NULL, NULL);
++	MMIO_D(0x8f074, D_BXT);
++	MMIO_D(0x8f004, D_BXT);
++	MMIO_D(0x8f034, D_BXT);
++
++	MMIO_D(0xb11c, D_BXT);
++
++	MMIO_D(0x51000, D_BXT);
++	MMIO_D(0x6c00c, D_BXT);
++
++	MMIO_F(0xc800, 0x7f8, F_CMD_ACCESS, 0, 0, D_BXT, NULL, NULL);
++	MMIO_F(0xb020, 0x80, F_CMD_ACCESS, 0, 0, D_BXT, NULL, NULL);
++
++	MMIO_D(0xd08, D_BXT);
++	MMIO_D(0x20e0, D_BXT);
++	MMIO_D(0x20ec, D_BXT);
++
++	/* TRTT */
++	MMIO_D(0x4de0, D_BXT);
++	MMIO_D(0x4de4, D_BXT);
++	MMIO_D(0x4de8, D_BXT);
++	MMIO_D(0x4dec, D_BXT);
++	MMIO_D(0x4df0, D_BXT);
++	MMIO_DH(0x4df4, D_BXT, NULL, gen9_trtte_write);
++	MMIO_DH(0x4dfc, D_BXT, NULL, gen9_trtt_chicken_write);
++
++	MMIO_D(0x45008, D_BXT);
++
++	MMIO_D(0x46430, D_BXT);
++
++	MMIO_D(0x46520, D_BXT);
++
++	MMIO_D(0xc403c, D_BXT);
++	MMIO_D(0xb004, D_BXT);
++	MMIO_DH(DMA_CTRL, D_SKL_PLUS, NULL, dma_ctrl_write);
++
++	MMIO_D(0x65900, D_BXT);
++	MMIO_D(0x1082c0, D_BXT);
++	MMIO_D(0x4068, D_BXT);
++	MMIO_D(0x67054, D_BXT);
++	MMIO_D(0x6e560, D_BXT);
++	MMIO_D(0x6e554, D_BXT);
++	MMIO_D(0x2b20, D_BXT);
++	MMIO_D(0x65f00, D_BXT);
++	MMIO_D(0x65f08, D_BXT);
++	MMIO_D(0x320f0, D_BXT);
++
++	MMIO_D(0x70034, D_BXT);
++	MMIO_D(0x71034, D_BXT);
++	MMIO_D(0x72034, D_BXT);
++
++	MMIO_D(_PLANE_KEYVAL_1(PIPE_A), D_BXT);
++	MMIO_D(_PLANE_KEYVAL_1(PIPE_B), D_BXT);
++	MMIO_D(_PLANE_KEYVAL_1(PIPE_C), D_BXT);
++	MMIO_D(_PLANE_KEYMSK_1(PIPE_A), D_BXT);
++	MMIO_D(_PLANE_KEYMSK_1(PIPE_B), D_BXT);
++	MMIO_D(_PLANE_KEYMSK_1(PIPE_C), D_BXT);
++
++	MMIO_D(0x44500, D_BXT);
++	return 0;
++}
++
+ static struct gvt_mmio_block *find_mmio_block(struct intel_gvt *gvt,
+ 					      unsigned int offset)
+ {
+@@ -2909,6 +3138,13 @@ int intel_gvt_setup_mmio_info(struct intel_gvt *gvt)
+ 		ret = init_skl_mmio_info(gvt);
+ 		if (ret)
+ 			goto err;
++	} else if (IS_BROXTON(dev_priv)) {
++		ret = init_broadwell_mmio_info(gvt);
++		if (ret)
++			goto err;
++		ret = init_bxt_mmio_info(gvt);
++		if (ret)
++			goto err;
+ 	}
+ 
+ 	gvt->mmio.mmio_block = mmio_blocks;
+diff --git a/drivers/gpu/drm/i915/gvt/interrupt.c b/drivers/gpu/drm/i915/gvt/interrupt.c
+index 7a041b3..cf78cd9 100644
+--- a/drivers/gpu/drm/i915/gvt/interrupt.c
++++ b/drivers/gpu/drm/i915/gvt/interrupt.c
+@@ -580,7 +580,8 @@ static void gen8_init_irq(
+ 
+ 		SET_BIT_INFO(irq, 4, PRIMARY_C_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_C);
+ 		SET_BIT_INFO(irq, 5, SPRITE_C_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_C);
+-	} else if (IS_SKYLAKE(gvt->dev_priv) || IS_KABYLAKE(gvt->dev_priv)) {
++	} else if (IS_SKYLAKE(gvt->dev_priv) || IS_BROXTON(gvt->dev_priv)
++			|| IS_KABYLAKE(gvt->dev_priv)) {
+ 		SET_BIT_INFO(irq, 25, AUX_CHANNEL_B, INTEL_GVT_IRQ_INFO_DE_PORT);
+ 		SET_BIT_INFO(irq, 26, AUX_CHANNEL_C, INTEL_GVT_IRQ_INFO_DE_PORT);
+ 		SET_BIT_INFO(irq, 27, AUX_CHANNEL_D, INTEL_GVT_IRQ_INFO_DE_PORT);
+@@ -691,6 +692,7 @@ int intel_gvt_init_irq(struct intel_gvt *gvt)
+ 	gvt_dbg_core("init irq framework\n");
+ 
+ 	if (IS_BROADWELL(gvt->dev_priv) || IS_SKYLAKE(gvt->dev_priv)
++		|| IS_BROXTON(gvt->dev_priv)
+ 		|| IS_KABYLAKE(gvt->dev_priv)) {
+ 		irq->ops = &gen8_irq_ops;
+ 		irq->irq_map = gen8_irq_map;
+diff --git a/drivers/gpu/drm/i915/gvt/mmio.h b/drivers/gpu/drm/i915/gvt/mmio.h
+index 32cd64d..0301d789 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio.h
++++ b/drivers/gpu/drm/i915/gvt/mmio.h
+@@ -42,15 +42,16 @@ struct intel_vgpu;
+ #define D_BDW   (1 << 0)
+ #define D_SKL	(1 << 1)
+ #define D_KBL	(1 << 2)
++#define D_BXT	(1 << 3)
+ 
+-#define D_GEN9PLUS	(D_SKL | D_KBL)
+-#define D_GEN8PLUS	(D_BDW | D_SKL | D_KBL)
++#define D_GEN9PLUS	(D_SKL | D_KBL | D_BXT)
++#define D_GEN8PLUS	(D_BDW | D_SKL | D_KBL | D_BXT)
+ 
+-#define D_SKL_PLUS	(D_SKL | D_KBL)
+-#define D_BDW_PLUS	(D_BDW | D_SKL | D_KBL)
++#define D_SKL_PLUS	(D_SKL | D_KBL | D_BXT)
++#define D_BDW_PLUS	(D_BDW | D_SKL | D_KBL | D_BXT)
+ 
+ #define D_PRE_SKL	(D_BDW)
+-#define D_ALL		(D_BDW | D_SKL | D_KBL)
++#define D_ALL		(D_BDW | D_SKL | D_KBL | D_BXT)
+ 
+ typedef int (*gvt_mmio_func)(struct intel_vgpu *, unsigned int, void *,
+ 			     unsigned int);
+diff --git a/drivers/gpu/drm/i915/gvt/render.c b/drivers/gpu/drm/i915/gvt/render.c
+index 2ea5422..9a39a44 100644
+--- a/drivers/gpu/drm/i915/gvt/render.c
++++ b/drivers/gpu/drm/i915/gvt/render.c
+@@ -172,7 +172,8 @@ static void handle_tlb_pending_event(struct intel_vgpu *vgpu, int ring_id)
+ 	 */
+ 	fw = intel_uncore_forcewake_for_reg(dev_priv, reg,
+ 					    FW_REG_READ | FW_REG_WRITE);
+-	if (ring_id == RCS && (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)))
++	if (ring_id == RCS && (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)
++				|| IS_BROXTON(dev_priv)))
+ 		fw |= FORCEWAKE_RENDER;
+ 
+ 	intel_uncore_forcewake_get(dev_priv, fw);
+@@ -271,6 +272,7 @@ static void switch_mmio_to_vgpu(struct intel_vgpu *vgpu, int ring_id)
+ 	i915_reg_t last_reg = _MMIO(0);
+ 
+ 	if (IS_SKYLAKE(vgpu->gvt->dev_priv)
++		|| IS_BROXTON(dev_priv)
+ 		|| IS_KABYLAKE(vgpu->gvt->dev_priv)) {
+ 		mmio = gen9_render_mmio_list;
+ 		array_size = ARRAY_SIZE(gen9_render_mmio_list);
+@@ -325,7 +327,8 @@ static void switch_mmio_to_host(struct intel_vgpu *vgpu, int ring_id)
+ 	u32 v;
+ 	int i, array_size;
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)) {
++	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv)
++			|| IS_BROXTON(dev_priv)) {
+ 		mmio = gen9_render_mmio_list;
+ 		array_size = ARRAY_SIZE(gen9_render_mmio_list);
+ 		restore_mocs(vgpu, ring_id);
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 391800d..400aaaa 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -525,7 +525,9 @@ static int workload_thread(void *priv)
+ 	struct intel_vgpu *vgpu = NULL;
+ 	int ret;
+ 	bool need_force_wake = IS_SKYLAKE(gvt->dev_priv)
++			|| IS_BROXTON(gvt->dev_priv)
+ 			|| IS_KABYLAKE(gvt->dev_priv);
++
+ 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+ 
+ 	kfree(p);
+-- 
+2.7.4
+

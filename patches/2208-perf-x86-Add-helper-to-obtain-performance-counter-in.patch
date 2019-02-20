@@ -1,0 +1,92 @@
+From 1de3f19ce0685b39eb9eb15b2bac7dbf73f6eaae Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Wed, 19 Sep 2018 10:29:07 -0700
+Subject: [PATCH 2208/2278] perf/x86: Add helper to obtain performance counter
+ index
+
+perf_event_read_local() is the safest way to obtain measurements
+associated with performance events. In some cases the overhead
+introduced by perf_event_read_local() affects the measurements and the
+use of rdpmcl() is needed. rdpmcl() requires the index
+of the performance counter used so a helper is introduced to determine
+the index used by a provided performance event.
+
+The index used by a performance event may change when interrupts are
+enabled. A check is added to ensure that the index is only accessed
+with interrupts disabled. Even with this check the use of this counter
+needs to be done with care to ensure it is queried and used within the
+same disabled interrupts section.
+
+This change introduces a new checkpatch warning:
+CHECK: extern prototypes should be avoided in .h files
++extern int x86_perf_rdpmc_index(struct perf_event *event);
+
+This warning was discussed and designated as a false positive in
+http://lkml.kernel.org/r/20180919091759.GZ24124@hirez.programming.kicks-ass.net
+
+Suggested-by: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: acme@kernel.org
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/b277ffa78a51254f5414f7b1bc1923826874566e.1537377064.git.reinette.chatre@intel.com
+
+(cherry picked from commit 1182a49529edde899be4b4f0e1ab76e626976eb6)
+---
+ arch/x86/events/core.c            | 21 +++++++++++++++++++++
+ arch/x86/include/asm/perf_event.h |  1 +
+ 2 files changed, 22 insertions(+)
+
+diff --git a/arch/x86/events/core.c b/arch/x86/events/core.c
+index 7d12b0d..23dc5c6 100644
+--- a/arch/x86/events/core.c
++++ b/arch/x86/events/core.c
+@@ -1013,6 +1013,27 @@ static inline void x86_assign_hw_event(struct perf_event *event,
+ 	}
+ }
+ 
++/**
++ * x86_perf_rdpmc_index - Return PMC counter used for event
++ * @event: the perf_event to which the PMC counter was assigned
++ *
++ * The counter assigned to this performance event may change if interrupts
++ * are enabled. This counter should thus never be used while interrupts are
++ * enabled. Before this function is used to obtain the assigned counter the
++ * event should be checked for validity using, for example,
++ * perf_event_read_local(), within the same interrupt disabled section in
++ * which this counter is planned to be used.
++ *
++ * Return: The index of the performance monitoring counter assigned to
++ * @perf_event.
++ */
++int x86_perf_rdpmc_index(struct perf_event *event)
++{
++	lockdep_assert_irqs_disabled();
++
++	return event->hw.event_base_rdpmc;
++}
++
+ static inline int match_prev_assignment(struct hw_perf_event *hwc,
+ 					struct cpu_hw_events *cpuc,
+ 					int i)
+diff --git a/arch/x86/include/asm/perf_event.h b/arch/x86/include/asm/perf_event.h
+index 78241b7..8bdf749 100644
+--- a/arch/x86/include/asm/perf_event.h
++++ b/arch/x86/include/asm/perf_event.h
+@@ -278,6 +278,7 @@ struct perf_guest_switch_msr {
+ extern struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr);
+ extern void perf_get_x86_pmu_capability(struct x86_pmu_capability *cap);
+ extern void perf_check_microcode(void);
++extern int x86_perf_rdpmc_index(struct perf_event *event);
+ #else
+ static inline struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr)
+ {
+-- 
+2.7.4
+

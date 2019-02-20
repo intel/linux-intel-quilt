@@ -1,0 +1,234 @@
+From 496bec6823d57439109ad7f33feaae9c1d43b3dc Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 15 Sep 2017 18:31:00 +0100
+Subject: [PATCH 1047/2278] UPSTREAM: drm/i915: Cancel all ready but queued
+ requests when wedging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When wedging the hw, we want to mark all in-flight requests as -EIO.
+This is made slightly more complex by execlists who store the ready but
+not yet submitted-to-hw requests on a private queue (an rbtree
+priolist). Call into execlists to cancel not only the ELSP tracking for
+the submitted requests, but also the queue of unsubmitted requests.
+
+v2: Move the majority of engine_set_wedged to the backends (both legacy
+ringbuffer and execlists handling their own lists).
+
+Reported-by: Michał Winiarski <michal.winiarski@intel.com>
+Testcase: igt/gem_eio/in-flight-contexts
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170915173100.26470-1-chris@chris-wilson.co.uk
+Reviewed-by: Michał Winiarski <michal.winiarski@intel.com>
+(cherry picked from commit 7c72134cdf22081d3a21e2b93820288383e3496f)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem.c         | 38 +--------------------
+ drivers/gpu/drm/i915/intel_lrc.c        | 60 +++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.c | 20 +++++++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.h |  8 +++++
+ 4 files changed, 89 insertions(+), 37 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 921cc45..3278b85 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -3018,9 +3018,6 @@ static void nop_submit_request(struct drm_i915_gem_request *request)
+ 
+ static void engine_set_wedged(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_gem_request *request;
+-	unsigned long flags;
+-
+ 	/* We need to be sure that no thread is running the old callback as
+ 	 * we install the nop handler (otherwise we would submit a request
+ 	 * to hardware that will never complete). In order to prevent this
+@@ -3030,40 +3027,7 @@ static void engine_set_wedged(struct intel_engine_cs *engine)
+ 	engine->submit_request = nop_submit_request;
+ 
+ 	/* Mark all executing requests as skipped */
+-	spin_lock_irqsave(&engine->timeline->lock, flags);
+-	list_for_each_entry(request, &engine->timeline->requests, link)
+-		if (!i915_gem_request_completed(request))
+-			dma_fence_set_error(&request->fence, -EIO);
+-	spin_unlock_irqrestore(&engine->timeline->lock, flags);
+-
+-	/*
+-	 * Clear the execlists queue up before freeing the requests, as those
+-	 * are the ones that keep the context and ringbuffer backing objects
+-	 * pinned in place.
+-	 */
+-
+-	if (i915.enable_execlists) {
+-		struct execlist_port *port = engine->execlist_port;
+-		unsigned long flags;
+-		unsigned int n;
+-
+-		spin_lock_irqsave(&engine->timeline->lock, flags);
+-
+-		for (n = 0; n < ARRAY_SIZE(engine->execlist_port); n++)
+-			i915_gem_request_put(port_request(&port[n]));
+-		memset(engine->execlist_port, 0, sizeof(engine->execlist_port));
+-		engine->execlist_queue = RB_ROOT;
+-		engine->execlist_first = NULL;
+-
+-		spin_unlock_irqrestore(&engine->timeline->lock, flags);
+-
+-		/* The port is checked prior to scheduling a tasklet, but
+-		 * just in case we have suspended the tasklet to do the
+-		 * wedging make sure that when it wakes, it decides there
+-		 * is no work to do by clearing the irq_posted bit.
+-		 */
+-		clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
+-	}
++	engine->cancel_requests(engine);
+ 
+ 	/* Mark all pending requests as complete so that any concurrent
+ 	 * (lockless) lookup doesn't try and wait upon the request as we
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 037a95b..4e6575b 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -541,6 +541,65 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 		execlists_submit_ports(engine);
+ }
+ 
++static void execlists_cancel_requests(struct intel_engine_cs *engine)
++{
++	struct execlist_port *port = engine->execlist_port;
++	struct drm_i915_gem_request *rq, *rn;
++	struct rb_node *rb;
++	unsigned long flags;
++	unsigned long n;
++
++	spin_lock_irqsave(&engine->timeline->lock, flags);
++
++	/* Cancel the requests on the HW and clear the ELSP tracker. */
++	for (n = 0; n < ARRAY_SIZE(engine->execlist_port); n++)
++		i915_gem_request_put(port_request(&port[n]));
++	memset(engine->execlist_port, 0, sizeof(engine->execlist_port));
++
++	/* Mark all executing requests as skipped. */
++	list_for_each_entry(rq, &engine->timeline->requests, link) {
++		GEM_BUG_ON(!rq->global_seqno);
++		if (!i915_gem_request_completed(rq))
++			dma_fence_set_error(&rq->fence, -EIO);
++	}
++
++	/* Flush the queued requests to the timeline list (for retiring). */
++	rb = engine->execlist_first;
++	while (rb) {
++		struct i915_priolist *p = rb_entry(rb, typeof(*p), node);
++
++		list_for_each_entry_safe(rq, rn, &p->requests, priotree.link) {
++			INIT_LIST_HEAD(&rq->priotree.link);
++			rq->priotree.priority = INT_MAX;
++
++			dma_fence_set_error(&rq->fence, -EIO);
++			__i915_gem_request_submit(rq);
++		}
++
++		rb = rb_next(rb);
++		rb_erase(&p->node, &engine->execlist_queue);
++		INIT_LIST_HEAD(&p->requests);
++		if (p->priority != I915_PRIORITY_NORMAL)
++			kmem_cache_free(engine->i915->priorities, p);
++	}
++
++	/* Remaining _unready_ requests will be nop'ed when submitted */
++
++	engine->execlist_queue = RB_ROOT;
++	engine->execlist_first = NULL;
++	GEM_BUG_ON(port_isset(&port[0]));
++
++	/*
++	 * The port is checked prior to scheduling a tasklet, but
++	 * just in case we have suspended the tasklet to do the
++	 * wedging make sure that when it wakes, it decides there
++	 * is no work to do by clearing the irq_posted bit.
++	 */
++	clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
++
++	spin_unlock_irqrestore(&engine->timeline->lock, flags);
++}
++
+ static bool execlists_elsp_ready(const struct intel_engine_cs *engine)
+ {
+ 	const struct execlist_port *port = engine->execlist_port;
+@@ -1749,6 +1808,7 @@ void intel_logical_ring_cleanup(struct intel_engine_cs *engine)
+ static void execlists_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = execlists_submit_request;
++	engine->cancel_requests = execlists_cancel_requests;
+ 	engine->schedule = execlists_schedule;
+ 	engine->irq_tasklet.func = intel_lrc_irq_handler;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.c b/drivers/gpu/drm/i915/intel_ringbuffer.c
+index c277a26..d0f01a8 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.c
+@@ -778,6 +778,24 @@ static u32 *gen6_signal(struct drm_i915_gem_request *req, u32 *cs)
+ 	return cs;
+ }
+ 
++static void cancel_requests(struct intel_engine_cs *engine)
++{
++	struct drm_i915_gem_request *request;
++	unsigned long flags;
++
++	spin_lock_irqsave(&engine->timeline->lock, flags);
++
++	/* Mark all submitted requests as skipped. */
++	list_for_each_entry(request, &engine->timeline->requests, link) {
++		GEM_BUG_ON(!request->global_seqno);
++		if (!i915_gem_request_completed(request))
++			dma_fence_set_error(&request->fence, -EIO);
++	}
++	/* Remaining _unready_ requests will be nop'ed when submitted */
++
++	spin_unlock_irqrestore(&engine->timeline->lock, flags);
++}
++
+ static void i9xx_submit_request(struct drm_i915_gem_request *request)
+ {
+ 	struct drm_i915_private *dev_priv = request->i915;
+@@ -1992,11 +2010,13 @@ static void intel_ring_init_irq(struct drm_i915_private *dev_priv,
+ static void i9xx_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = i9xx_submit_request;
++	engine->cancel_requests = cancel_requests;
+ }
+ 
+ static void gen6_bsd_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = gen6_bsd_submit_request;
++	engine->cancel_requests = cancel_requests;
+ }
+ 
+ static void intel_ring_default_vfuncs(struct drm_i915_private *dev_priv,
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 7c97426..49bbfb3 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -307,6 +307,14 @@ struct intel_engine_cs {
+ 	void		(*schedule)(struct drm_i915_gem_request *request,
+ 				    int priority);
+ 
++	/*
++	 * Cancel all requests on the hardware, or queued for execution.
++	 * This should only cancel the ready requests that have been
++	 * submitted to the engine (via the engine->submit_request callback).
++	 * This is called when marking the device as wedged.
++	 */
++	void		(*cancel_requests)(struct intel_engine_cs *engine);
++
+ 	/* Some chipsets are not quite as coherent as advertised and need
+ 	 * an expensive kick to force a true read of the up-to-date seqno.
+ 	 * However, the up-to-date seqno is not always required and the last
+-- 
+2.7.4
+

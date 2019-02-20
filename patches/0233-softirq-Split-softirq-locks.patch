@@ -1,7 +1,7 @@
-From e17cd222f10a05b893f5fd4e83a06caed16199fc Mon Sep 17 00:00:00 2001
+From e992a29862e40ebb966c2e4ad92a5afc8eed58cd Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 4 Oct 2012 14:20:47 +0100
-Subject: [PATCH 0233/2104] softirq: Split softirq locks
+Subject: [PATCH 0233/2278] softirq: Split softirq locks
 
 The 3.x RT series removed the split softirq implementation in favour
 of pushing softirq processing into the context of the thread which
@@ -178,7 +178,7 @@ index a3b19af..2983043 100644
  #define in_task()		(!(preempt_count() & \
  				   (NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET)))
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 209e71d..b82a53c 100644
+index ea110a4..ee6f6d3 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -1136,6 +1136,8 @@ struct task_struct {
@@ -211,7 +211,7 @@ index c4a4514..c86f3d3 100644
  	boot_cpu_hotplug_init();
  
 diff --git a/kernel/softirq.c b/kernel/softirq.c
-index 7f8629d..fe0b460 100644
+index 7f8629d..92fbc06 100644
 --- a/kernel/softirq.c
 +++ b/kernel/softirq.c
 @@ -26,6 +26,7 @@
@@ -304,7 +304,7 @@ index 7f8629d..fe0b460 100644
 +{
 +	static int rate_limit;
 +
-+	if (rate_limit < 10 &&
++	if (rate_limit < 10 && !in_softirq() &&
 +			(local_softirq_pending() & SOFTIRQ_STOP_IDLE_MASK)) {
 +		printk(KERN_ERR "NOHZ: local_softirq_pending %02x\n",
 +		       local_softirq_pending());
@@ -810,7 +810,7 @@ index 7f8629d..fe0b460 100644
  	.thread_fn		= run_ksoftirqd,
  	.thread_comm		= "ksoftirqd/%u",
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index 3af3d93..9222268 100644
+index c21fd6a..9222268 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
 @@ -911,14 +911,7 @@ static bool can_stop_idle_tick(int cpu, struct tick_sched *ts)
@@ -819,7 +819,7 @@ index 3af3d93..9222268 100644
  	if (unlikely(local_softirq_pending() && cpu_online(cpu))) {
 -		static int ratelimit;
 -
--		if (ratelimit < 10 &&
+-		if (ratelimit < 10 && !in_softirq() &&
 -		    (local_softirq_pending() & SOFTIRQ_STOP_IDLE_MASK)) {
 -			pr_warn("NOHZ: local_softirq_pending %02x\n",
 -				(unsigned int) local_softirq_pending());
@@ -830,10 +830,10 @@ index 3af3d93..9222268 100644
  	}
  
 diff --git a/net/core/dev.c b/net/core/dev.c
-index 3c07425..d279344 100644
+index 49812d1..8972786 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
-@@ -4088,11 +4088,9 @@ int netif_rx_ni(struct sk_buff *skb)
+@@ -4110,11 +4110,9 @@ int netif_rx_ni(struct sk_buff *skb)
  
  	trace_netif_rx_ni_entry(skb);
  

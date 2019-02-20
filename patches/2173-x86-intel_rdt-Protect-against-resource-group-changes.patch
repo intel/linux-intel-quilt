@@ -1,0 +1,118 @@
+From a4efb675dc8eb4492a54104bc175e75e5f24c6ce Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:12 -0700
+Subject: [PATCH 2173/2278] x86/intel_rdt: Protect against resource group
+ changes during locking
+
+We intend to modify file permissions to make the "tasks", "cpus", and
+"cpus_list" not accessible to the user when cache pseudo-locking in
+progress. Even so, it is still possible for the user to force the file
+permissions (using chmod) to make them writeable. Similarly, directory
+permissions will be modified to prevent future monitor group creation but
+the user can override these restrictions also.
+
+Add additional checks to the files we intend to restrict to ensure that no
+modifications from user space are attempted while setting up a
+pseudo-locking or after a pseudo-locked region is set up.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/0c5cb006e81ead0b8bfff2df530c5d3017fd31d1.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit c966dac8a5ede5d5f9b730512d8bdbcec307fe38)
+---
+ arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c | 10 +++++++++
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c    | 32 +++++++++++++++++++++++++----
+ 2 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+index 0e6210a..bc79396 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
++++ b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+@@ -283,6 +283,16 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+ 	}
+ 	rdt_last_cmd_clear();
+ 
++	/*
++	 * No changes to pseudo-locked region allowed. It has to be removed
++	 * and re-created instead.
++	 */
++	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED) {
++		ret = -EINVAL;
++		rdt_last_cmd_puts("resource group is pseudo-locked\n");
++		goto out;
++	}
++
+ 	for_each_alloc_enabled_rdt_resource(r) {
+ 		list_for_each_entry(dom, &r->domains, list)
+ 			dom->have_new_ctrl = false;
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 08a412e..013cbfe 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -449,6 +449,13 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
+ 		goto unlock;
+ 	}
+ 
++	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED ||
++	    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++		ret = -EINVAL;
++		rdt_last_cmd_puts("pseudo-locking in progress\n");
++		goto unlock;
++	}
++
+ 	if (is_cpu_list(of))
+ 		ret = cpulist_parse(buf, newmask);
+ 	else
+@@ -651,13 +658,22 @@ static ssize_t rdtgroup_tasks_write(struct kernfs_open_file *of,
+ 	if (kstrtoint(strstrip(buf), 0, &pid) || pid < 0)
+ 		return -EINVAL;
+ 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
++	if (!rdtgrp) {
++		rdtgroup_kn_unlock(of->kn);
++		return -ENOENT;
++	}
+ 	rdt_last_cmd_clear();
+ 
+-	if (rdtgrp)
+-		ret = rdtgroup_move_task(pid, rdtgrp, of);
+-	else
+-		ret = -ENOENT;
++	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED ||
++	    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++		ret = -EINVAL;
++		rdt_last_cmd_puts("pseudo-locking in progress\n");
++		goto unlock;
++	}
++
++	ret = rdtgroup_move_task(pid, rdtgrp, of);
+ 
++unlock:
+ 	rdtgroup_kn_unlock(of->kn);
+ 
+ 	return ret ?: nbytes;
+@@ -2315,6 +2331,14 @@ static int mkdir_rdt_prepare(struct kernfs_node *parent_kn,
+ 		goto out_unlock;
+ 	}
+ 
++	if (rtype == RDTMON_GROUP &&
++	    (prdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
++	     prdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)) {
++		ret = -EINVAL;
++		rdt_last_cmd_puts("pseudo-locking in progress\n");
++		goto out_unlock;
++	}
++
+ 	/* allocate the rdtgroup. */
+ 	rdtgrp = kzalloc(sizeof(*rdtgrp), GFP_KERNEL);
+ 	if (!rdtgrp) {
+-- 
+2.7.4
+

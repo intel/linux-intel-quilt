@@ -1,0 +1,166 @@
+From 51369f5f1efe7f8b4e6a75706adb1d86a9d57b34 Mon Sep 17 00:00:00 2001
+From: Michel Thierry <michel.thierry@intel.com>
+Date: Wed, 13 Sep 2017 09:56:00 +0100
+Subject: [PATCH 1036/2278] UPSTREAM: drm/i915/lrc: Clarify the format of the
+ context image
+
+Not only the context image consist of two parts (the PPHWSP, and the
+logical context state), but we also allocate a header at the start of
+for sharing data with GuC. Thus every lrc looks like this:
+
+  | [guc]          | [hwsp] [logical state] |
+  |<- our header ->|<- context image      ->|
+
+So far, we have oversimplified whenever we use each of these parts of the
+context, just because the GuC header happens to be in page 0, and the
+(PP)HWSP is in page 1. But this had led to using the same define for more
+than one meaning (as a page index in the lrc and as 1 page).
+
+This patch adds defines for the GuC shared page, the PPHWSP page and the
+start of the logical state. It also updated the places where the old
+define was being used. Since we are not changing the size (or format) of
+the context, there are no functional changes.
+
+v2: Use PPHWSP index for hws again.
+
+Hand-edit additions.
+Hand-edit deletions.
+Hand-edit additions to use LRC_HEADER_PAGES instead of LRC_PPHWSP_PN
+in call
+to i915_gem_object_get_page().
+Hand-edit deleteions to remove gvt code that copies data from host buffer
+to GPA.
+Files edited:
+drivers/gpu/drm/i915/gvt/scheduler.c
+
+Suggested-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Michel Thierry <michel.thierry@intel.com>
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Cc: Michal Wajdeczko <michal.wajdeczko@intel.com>
+Cc: Oscar Mateo <oscar.mateo@intel.com>
+Cc: intel-gvt-dev@lists.freedesktop.org
+Link: http://patchwork.freedesktop.org/patch/msgid/20170712193032.27080-1-michel.thierry@intel.com
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170913085605.18299-1-chris@chris-wilson.co.uk
+(cherry picked from commit 695e8375ce6cc66b9a380857510fac431823cdae)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/scheduler.c       |  4 ++--
+ drivers/gpu/drm/i915/i915_guc_submission.c |  4 ++--
+ drivers/gpu/drm/i915/intel_lrc.c           |  9 ++++++---
+ drivers/gpu/drm/i915/intel_lrc.h           | 25 ++++++++++++++++++++++---
+ 4 files changed, 32 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index dad38a9..6b9dafc 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -106,7 +106,7 @@ static int populate_shadow_context(struct intel_vgpu_workload *workload)
+ 
+ 		if (!enable_lazy_shadow_ctx) {
+ 			page = i915_gem_object_get_page(ctx_obj,
+-					LRC_PPHWSP_PN + i);
++					LRC_HEADER_PAGES + i);
+ 			dst = kmap(page);
+ 			intel_gvt_hypervisor_read_gpa(vgpu, context_gpa, dst,
+ 				GTT_PAGE_SIZE);
+@@ -514,7 +514,7 @@ static void update_guest_context(struct intel_vgpu_workload *workload)
+ 			}
+ 
+ 			page = i915_gem_object_get_page(ctx_obj,
+-					LRC_PPHWSP_PN + i);
++					LRC_HEADER_PAGES + i);
+ 			src = kmap(page);
+ 			intel_gvt_hypervisor_write_gpa(vgpu, context_gpa, src,
+ 					GTT_PAGE_SIZE);
+diff --git a/drivers/gpu/drm/i915/i915_guc_submission.c b/drivers/gpu/drm/i915/i915_guc_submission.c
+index 5c81d5f..226e539 100644
+--- a/drivers/gpu/drm/i915/i915_guc_submission.c
++++ b/drivers/gpu/drm/i915/i915_guc_submission.c
+@@ -1314,7 +1314,7 @@ int intel_guc_suspend(struct drm_i915_private *dev_priv)
+ 	/* any value greater than GUC_POWER_D0 */
+ 	data[1] = GUC_POWER_D1;
+ 	/* first page is shared data with GuC */
+-	data[2] = guc_ggtt_offset(ctx->engine[RCS].state);
++	data[2] = guc_ggtt_offset(ctx->engine[RCS].state) + LRC_GUCSHR_PN * PAGE_SIZE;
+ 
+ 	return intel_guc_send(guc, data, ARRAY_SIZE(data));
+ }
+@@ -1340,7 +1340,7 @@ int intel_guc_resume(struct drm_i915_private *dev_priv)
+ 	data[0] = INTEL_GUC_ACTION_EXIT_S_STATE;
+ 	data[1] = GUC_POWER_D0;
+ 	/* first page is shared data with GuC */
+-	data[2] = guc_ggtt_offset(ctx->engine[RCS].state);
++	data[2] = guc_ggtt_offset(ctx->engine[RCS].state) + LRC_GUCSHR_PN * PAGE_SIZE;
+ 
+ 	return intel_guc_send(guc, data, ARRAY_SIZE(data));
+ }
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index a8f9c03..8fa44dc 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -279,7 +279,7 @@ intel_lr_context_descriptor_update(struct i915_gem_context *ctx,
+ 	BUILD_BUG_ON(MAX_CONTEXT_HW_ID > (1<<GEN8_CTX_ID_WIDTH));
+ 
+ 	desc = ctx->desc_template;				/* bits  0-11 */
+-	desc |= i915_ggtt_offset(ce->state) + LRC_PPHWSP_PN * PAGE_SIZE;
++	desc |= i915_ggtt_offset(ce->state) + LRC_HEADER_PAGES * PAGE_SIZE;
+ 								/* bits 12-31 */
+ 	desc |= (u64)ctx->hw_id << GEN8_CTX_ID_SHIFT;		/* bits 32-52 */
+ 
+@@ -2112,8 +2112,11 @@ static int execlists_context_deferred_alloc(struct i915_gem_context *ctx,
+ 
+ 	context_size = round_up(engine->context_size, I915_GTT_PAGE_SIZE);
+ 
+-	/* One extra page as the sharing data between driver and GuC */
+-	context_size += PAGE_SIZE * LRC_PPHWSP_PN;
++	/*
++	 * Before the actual start of the context image, we insert a few pages
++	 * for our own use and for sharing with the GuC.
++	 */
++	context_size += LRC_HEADER_PAGES * PAGE_SIZE;
+ 
+ 	ctx_obj = i915_gem_object_create(ctx->i915, context_size);
+ 	if (IS_ERR(ctx_obj)) {
+diff --git a/drivers/gpu/drm/i915/intel_lrc.h b/drivers/gpu/drm/i915/intel_lrc.h
+index 3b1de32..314adee 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.h
++++ b/drivers/gpu/drm/i915/intel_lrc.h
+@@ -70,10 +70,29 @@ int logical_xcs_ring_init(struct intel_engine_cs *engine);
+ 
+ /* Logical Ring Contexts */
+ 
+-/* One extra page is added before LRC for GuC as shared data */
++/*
++ * We allocate a header at the start of the context image for our own
++ * use, therefore the actual location of the logical state is offset
++ * from the start of the VMA. The layout is
++ *
++ * | [guc]          | [hwsp] [logical state] |
++ * |<- our header ->|<- context image      ->|
++ *
++ */
++/* The first page is used for sharing data with the GuC */
+ #define LRC_GUCSHR_PN	(0)
+-#define LRC_PPHWSP_PN	(LRC_GUCSHR_PN + 1)
+-#define LRC_STATE_PN	(LRC_PPHWSP_PN + 1)
++#define LRC_GUCSHR_SZ	(1)
++/* At the start of the context image is its per-process HWS page */
++#define LRC_PPHWSP_PN	(LRC_GUCSHR_PN + LRC_GUCSHR_SZ)
++#define LRC_PPHWSP_SZ	(1)
++/* Finally we have the logical state for the context */
++#define LRC_STATE_PN	(LRC_PPHWSP_PN + LRC_PPHWSP_SZ)
++
++/*
++ * Currently we include the PPHWSP in __intel_engine_context_size() so
++ * the size of the header is synonymous with the start of the PPHWSP.
++ */
++#define LRC_HEADER_PAGES LRC_PPHWSP_PN
+ 
+ struct drm_i915_private;
+ struct i915_gem_context;
+-- 
+2.7.4
+

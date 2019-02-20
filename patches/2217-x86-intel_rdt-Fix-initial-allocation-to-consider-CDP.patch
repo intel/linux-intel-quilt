@@ -1,0 +1,93 @@
+From 053c13514813d51ca038a658b5869b7eb55c7fdb Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Wed, 3 Oct 2018 15:17:03 -0700
+Subject: [PATCH 2217/2278] x86/intel_rdt: Fix initial allocation to consider
+ CDP
+
+When a new resource group is created it is initialized with a default
+allocation that considers which portions of cache are currently
+available for sharing across all resource groups or which portions of
+cache are currently unused.
+
+If a CDP allocation forms part of a resource group that is in exclusive
+mode then it should be ensured that no new allocation overlaps with any
+resource that shares the underlying hardware. The current initial
+allocation does not take this sharing of hardware into account and
+a new allocation in a resource that shares the same
+hardware would affect the exclusive resource group.
+
+Fix this by considering the allocation of a peer RDT domain - a RDT
+domain sharing the same hardware - as part of the test to determine
+which portion of cache is in use and available for use.
+
+Fixes: 95f0b77efa57 ("x86/intel_rdt: Initialize new resource group with sane defaults")
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Fenghua Yu <fenghua.yu@intel.com>
+Cc: tony.luck@intel.com
+Cc: jithu.joseph@intel.com
+Cc: gavin.hindman@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/b1f7ec08b1695be067de416a4128466d49684317.1538603665.git.reinette.chatre@intel.com
+
+(cherry picked from commit 42688c0c327ec0d647db6e0fc18fd644e7c50e3d)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 6116c09..f87eaf3 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -2458,14 +2458,16 @@ static void cbm_ensure_valid(u32 *_val, struct rdt_resource *r)
+  */
+ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ {
++	struct rdt_resource *r_cdp = NULL;
++	struct rdt_domain *d_cdp = NULL;
+ 	u32 used_b = 0, unused_b = 0;
+ 	u32 closid = rdtgrp->closid;
+ 	struct rdt_resource *r;
+ 	unsigned long tmp_cbm;
+ 	enum rdtgrp_mode mode;
+ 	struct rdt_domain *d;
++	u32 peer_ctl, *ctrl;
+ 	int i, ret;
+-	u32 *ctrl;
+ 
+ 	for_each_alloc_enabled_rdt_resource(r) {
+ 		/*
+@@ -2475,6 +2477,7 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 		if (r->rid == RDT_RESOURCE_MBA)
+ 			continue;
+ 		list_for_each_entry(d, &r->domains, list) {
++			rdt_cdp_peer_get(r, d, &r_cdp, &d_cdp);
+ 			d->have_new_ctrl = false;
+ 			d->new_ctrl = r->cache.shareable_bits;
+ 			used_b = r->cache.shareable_bits;
+@@ -2484,9 +2487,19 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 					mode = rdtgroup_mode_by_closid(i);
+ 					if (mode == RDT_MODE_PSEUDO_LOCKSETUP)
+ 						break;
+-					used_b |= *ctrl;
++					/*
++					 * If CDP is active include peer
++					 * domain's usage to ensure there
++					 * is no overlap with an exclusive
++					 * group.
++					 */
++					if (d_cdp)
++						peer_ctl = d_cdp->ctrl_val[i];
++					else
++						peer_ctl = 0;
++					used_b |= *ctrl | peer_ctl;
+ 					if (mode == RDT_MODE_SHAREABLE)
+-						d->new_ctrl |= *ctrl;
++						d->new_ctrl |= *ctrl | peer_ctl;
+ 				}
+ 			}
+ 			if (d->plr && d->plr->cbm > 0)
+-- 
+2.7.4
+

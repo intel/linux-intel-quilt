@@ -1,0 +1,62 @@
+From 35f469dca5c7f2191b32d054b0ed8bd9ff98a30b Mon Sep 17 00:00:00 2001
+From: Frederic Weisbecker <frederic@kernel.org>
+Date: Mon, 6 Nov 2017 16:01:17 +0100
+Subject: [PATCH 2207/2278] locking/lockdep: Add IRQs disabled/enabled
+ assertion APIs: lockdep_assert_irqs_enabled()/disabled()
+
+Checking whether IRQs are enabled or disabled is a very common sanity
+check, however not free of overhead especially on fastpath where such
+assertion is very common.
+
+Lockdep is a good host for such concurrency correctness check and it
+even already tracks down IRQs disablement state. Just reuse its
+machinery. This will allow us to get rid of the flags pop and check
+overhead from fast path when kernel is built for production.
+
+Suggested-by: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Frederic Weisbecker <frederic@kernel.org>
+Acked-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: David S . Miller <davem@davemloft.net>
+Cc: Lai Jiangshan <jiangshanlai@gmail.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+Cc: Tejun Heo <tj@kernel.org>
+Link: http://lkml.kernel.org/r/1509980490-4285-2-git-send-email-frederic@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+(cherry picked from commit f54bb2ec02c839f6bfe3e8d438cd93d30b4809dd)
+---
+ include/linux/lockdep.h | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/include/linux/lockdep.h b/include/linux/lockdep.h
+index f301d31..0a91556 100644
+--- a/include/linux/lockdep.h
++++ b/include/linux/lockdep.h
+@@ -720,9 +720,24 @@ do {									\
+ 	lock_acquire(&(lock)->dep_map, 0, 0, 1, 1, NULL, _THIS_IP_);	\
+ 	lock_release(&(lock)->dep_map, 0, _THIS_IP_);			\
+ } while (0)
++
++#define lockdep_assert_irqs_enabled()	do {				\
++		WARN_ONCE(debug_locks && !current->lockdep_recursion &&	\
++			  !current->hardirqs_enabled,			\
++			  "IRQs not enabled as expected\n");		\
++	} while (0)
++
++#define lockdep_assert_irqs_disabled()	do {				\
++		WARN_ONCE(debug_locks && !current->lockdep_recursion &&	\
++			  current->hardirqs_enabled,			\
++			  "IRQs not disabled as expected\n");		\
++	} while (0)
++
+ #else
+ # define might_lock(lock) do { } while (0)
+ # define might_lock_read(lock) do { } while (0)
++# define lockdep_assert_irqs_enabled() do { } while (0)
++# define lockdep_assert_irqs_disabled() do { } while (0)
+ #endif
+ 
+ #ifdef CONFIG_LOCKDEP
+-- 
+2.7.4
+

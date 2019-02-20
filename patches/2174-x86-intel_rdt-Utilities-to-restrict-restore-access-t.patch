@@ -1,0 +1,174 @@
+From ba406d7d00909bb7e9abbe8de9f7f7acaae6d692 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:13 -0700
+Subject: [PATCH 2174/2278] x86/intel_rdt: Utilities to restrict/restore access
+ to specific files
+
+In support of Cache Pseudo-Locking we need to restrict access to specific
+resctrl files to protect the state of a resource group used for
+pseudo-locking from being changed in unsupported ways.
+
+Introduce two utilities that can be used to either restrict or restore the
+access to all files irrelevant to cache pseudo-locking when pseudo-locking
+in progress for the resource group.
+
+At this time introduce a new source file, intel_rdt_pseudo_lock.c, that
+will contain most of the code related to cache pseudo-locking.
+
+Temporarily mark these new functions as unused to silence compile warnings
+until they are used.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/ab6319d1244366be3f9b7f9fba1c3da4810a274b.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit 2a5d76a4fc6469ea9dd6f02fcd4dad3a129bc1c0)
+---
+ arch/x86/kernel/cpu/Makefile                |   3 +-
+ arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c | 113 ++++++++++++++++++++++++++++
+ 2 files changed, 115 insertions(+), 1 deletion(-)
+ create mode 100644 arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+
+diff --git a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
+index 570e8bb..53022c2 100644
+--- a/arch/x86/kernel/cpu/Makefile
++++ b/arch/x86/kernel/cpu/Makefile
+@@ -35,7 +35,8 @@ obj-$(CONFIG_CPU_SUP_CENTAUR)		+= centaur.o
+ obj-$(CONFIG_CPU_SUP_TRANSMETA_32)	+= transmeta.o
+ obj-$(CONFIG_CPU_SUP_UMC_32)		+= umc.o
+ 
+-obj-$(CONFIG_INTEL_RDT)	+= intel_rdt.o intel_rdt_rdtgroup.o intel_rdt_monitor.o intel_rdt_ctrlmondata.o
++obj-$(CONFIG_INTEL_RDT)	+= intel_rdt.o intel_rdt_rdtgroup.o intel_rdt_monitor.o
++obj-$(CONFIG_INTEL_RDT)	+= intel_rdt_ctrlmondata.o intel_rdt_pseudo_lock.o
+ 
+ obj-$(CONFIG_X86_MCE)			+= mcheck/
+ obj-$(CONFIG_MTRR)			+= mtrr/
+diff --git a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+new file mode 100644
+index 0000000..dc79b30
+--- /dev/null
++++ b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+@@ -0,0 +1,113 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Resource Director Technology (RDT)
++ *
++ * Pseudo-locking support built on top of Cache Allocation Technology (CAT)
++ *
++ * Copyright (C) 2018 Intel Corporation
++ *
++ * Author: Reinette Chatre <reinette.chatre@intel.com>
++ */
++
++#define pr_fmt(fmt)	KBUILD_MODNAME ": " fmt
++
++#include "intel_rdt.h"
++
++/**
++ * rdtgroup_locksetup_user_restrict - Restrict user access to group
++ * @rdtgrp: resource group needing access restricted
++ *
++ * A resource group used for cache pseudo-locking cannot have cpus or tasks
++ * assigned to it. This is communicated to the user by restricting access
++ * to all the files that can be used to make such changes.
++ *
++ * Permissions restored with rdtgroup_locksetup_user_restore()
++ *
++ * Return: 0 on success, <0 on failure. If a failure occurs during the
++ * restriction of access an attempt will be made to restore permissions but
++ * the state of the mode of these files will be uncertain when a failure
++ * occurs.
++ */
++static int __attribute__ ((unused))
++rdtgroup_locksetup_user_restrict(struct rdtgroup *rdtgrp)
++{
++	int ret;
++
++	ret = rdtgroup_kn_mode_restrict(rdtgrp, "tasks");
++	if (ret)
++		return ret;
++
++	ret = rdtgroup_kn_mode_restrict(rdtgrp, "cpus");
++	if (ret)
++		goto err_tasks;
++
++	ret = rdtgroup_kn_mode_restrict(rdtgrp, "cpus_list");
++	if (ret)
++		goto err_cpus;
++
++	if (rdt_mon_capable) {
++		ret = rdtgroup_kn_mode_restrict(rdtgrp, "mon_groups");
++		if (ret)
++			goto err_cpus_list;
++	}
++
++	ret = 0;
++	goto out;
++
++err_cpus_list:
++	rdtgroup_kn_mode_restore(rdtgrp, "cpus_list");
++err_cpus:
++	rdtgroup_kn_mode_restore(rdtgrp, "cpus");
++err_tasks:
++	rdtgroup_kn_mode_restore(rdtgrp, "tasks");
++out:
++	return ret;
++}
++
++/**
++ * rdtgroup_locksetup_user_restore - Restore user access to group
++ * @rdtgrp: resource group needing access restored
++ *
++ * Restore all file access previously removed using
++ * rdtgroup_locksetup_user_restrict()
++ *
++ * Return: 0 on success, <0 on failure.  If a failure occurs during the
++ * restoration of access an attempt will be made to restrict permissions
++ * again but the state of the mode of these files will be uncertain when
++ * a failure occurs.
++ */
++static int __attribute__ ((unused))
++rdtgroup_locksetup_user_restore(struct rdtgroup *rdtgrp)
++{
++	int ret;
++
++	ret = rdtgroup_kn_mode_restore(rdtgrp, "tasks");
++	if (ret)
++		return ret;
++
++	ret = rdtgroup_kn_mode_restore(rdtgrp, "cpus");
++	if (ret)
++		goto err_tasks;
++
++	ret = rdtgroup_kn_mode_restore(rdtgrp, "cpus_list");
++	if (ret)
++		goto err_cpus;
++
++	if (rdt_mon_capable) {
++		ret = rdtgroup_kn_mode_restore(rdtgrp, "mon_groups");
++		if (ret)
++			goto err_cpus_list;
++	}
++
++	ret = 0;
++	goto out;
++
++err_cpus_list:
++	rdtgroup_kn_mode_restrict(rdtgrp, "cpus_list");
++err_cpus:
++	rdtgroup_kn_mode_restrict(rdtgrp, "cpus");
++err_tasks:
++	rdtgroup_kn_mode_restrict(rdtgrp, "tasks");
++out:
++	return ret;
++}
+-- 
+2.7.4
+

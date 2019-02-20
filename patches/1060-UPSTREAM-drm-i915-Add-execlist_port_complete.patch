@@ -1,0 +1,175 @@
+From abe2e0e9bd70db4134801033f421c36200e01b0e Mon Sep 17 00:00:00 2001
+From: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Date: Fri, 22 Sep 2017 15:43:06 +0300
+Subject: [PATCH 1060/2278] UPSTREAM: drm/i915: Add execlist_port_complete
+
+When first execlist entry is processed, we move the port (contents).
+Introduce function for this as execlist and guc use this common
+operation.
+
+v2: rebase. s/GEM_DEBUG_BUG/GEM_BUG (Chris)
+v3: rebase
+
+Signed-off-by: Mika Kuoppala <mika.kuoppala@intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170922124307.10914-4-mika.kuoppala@intel.com
+(cherry picked from commit ed939e6adc07c382e7ea4b73859b03b56ee2a068)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_guc_submission.c |  8 ++++----
+ drivers/gpu/drm/i915/intel_lrc.c           | 22 +++++++++++-----------
+ drivers/gpu/drm/i915/intel_ringbuffer.h    | 14 +++++++++++++-
+ 3 files changed, 28 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_guc_submission.c b/drivers/gpu/drm/i915/i915_guc_submission.c
+index bce3f1b..55e15a5 100644
+--- a/drivers/gpu/drm/i915/i915_guc_submission.c
++++ b/drivers/gpu/drm/i915/i915_guc_submission.c
+@@ -592,7 +592,7 @@ static void i915_guc_dequeue(struct intel_engine_cs *engine)
+ 			rq->priotree.priority = INT_MAX;
+ 
+ 			__i915_gem_request_submit(rq);
+-			trace_i915_gem_request_in(rq, port_index(port, engine));
++			trace_i915_gem_request_in(rq, port_index(port, execlists));
+ 			last = rq;
+ 			submit = true;
+ 		}
+@@ -615,7 +615,8 @@ static void i915_guc_dequeue(struct intel_engine_cs *engine)
+ static void i915_guc_irq_handler(unsigned long data)
+ {
+ 	struct intel_engine_cs * const engine = (struct intel_engine_cs *)data;
+-	struct execlist_port *port = engine->execlists.port;
++	struct intel_engine_execlists * const execlists = &engine->execlists;
++	struct execlist_port *port = execlists->port;
+ 	struct drm_i915_gem_request *rq;
+ 
+ 	rq = port_request(&port[0]);
+@@ -623,8 +624,7 @@ static void i915_guc_irq_handler(unsigned long data)
+ 		trace_i915_gem_request_out(rq);
+ 		i915_gem_request_put(rq);
+ 
+-		port[0] = port[1];
+-		memset(&port[1], 0, sizeof(port[1]));
++		execlists_port_complete(execlists, port);
+ 
+ 		rq = port_request(&port[0]);
+ 	}
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index a180ace..56a92c4 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -489,7 +489,8 @@ static void port_assign(struct execlist_port *port,
+ static void execlists_dequeue(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_gem_request *last;
+-	struct execlist_port *port = engine->execlists.port;
++	struct intel_engine_execlists * const execlists = &engine->execlists;
++	struct execlist_port *port = execlists->port;
+ 	struct rb_node *rb;
+ 	bool submit = false;
+ 
+@@ -503,8 +504,6 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 		 */
+ 		last->tail = last->wa_tail;
+ 
+-	GEM_BUG_ON(port_isset(&port[1]));
+-
+ 	/* Hardware submission is through 2 ports. Conceptually each port
+ 	 * has a (RING_START, RING_HEAD, RING_TAIL) tuple. RING_START is
+ 	 * static for a context, and unique to each, so we only execute
+@@ -527,8 +526,8 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 	 */
+ 
+ 	spin_lock_irq(&engine->timeline->lock);
+-	rb = engine->execlists.first;
+-	GEM_BUG_ON(rb_first(&engine->execlists.queue) != rb);
++	rb = execlists->first;
++	GEM_BUG_ON(rb_first(&execlists->queue) != rb);
+ 	while (rb) {
+ 		struct i915_priolist *p = rb_entry(rb, typeof(*p), node);
+ 		struct drm_i915_gem_request *rq, *rn;
+@@ -551,7 +550,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 				 * combine this request with the last, then we
+ 				 * are done.
+ 				 */
+-				if (port != engine->execlists.port) {
++				if (port != execlists->port) {
+ 					__list_del_many(&p->requests,
+ 							&rq->priotree.link);
+ 					goto done;
+@@ -576,25 +575,27 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 				if (submit)
+ 					port_assign(port, last);
+ 				port++;
++
++				GEM_BUG_ON(port_isset(port));
+ 			}
+ 
+ 			INIT_LIST_HEAD(&rq->priotree.link);
+ 			rq->priotree.priority = INT_MAX;
+ 
+ 			__i915_gem_request_submit(rq);
+-			trace_i915_gem_request_in(rq, port_index(port, engine));
++			trace_i915_gem_request_in(rq, port_index(port, execlists));
+ 			last = rq;
+ 			submit = true;
+ 		}
+ 
+ 		rb = rb_next(rb);
+-		rb_erase(&p->node, &engine->execlists.queue);
++		rb_erase(&p->node, &execlists->queue);
+ 		INIT_LIST_HEAD(&p->requests);
+ 		if (p->priority != I915_PRIORITY_NORMAL)
+ 			kmem_cache_free(engine->i915->priorities, p);
+ 	}
+ done:
+-	engine->execlists.first = rb;
++	execlists->first = rb;
+ 	if (submit)
+ 		port_assign(port, last);
+ 	spin_unlock_irq(&engine->timeline->lock);
+@@ -783,8 +784,7 @@ static void intel_lrc_irq_handler(unsigned long data)
+ 				trace_i915_gem_request_out(rq);
+ 				i915_gem_request_put(rq);
+ 
+-				port[0] = port[1];
+-				memset(&port[1], 0, sizeof(port[1]));
++				execlists_port_complete(execlists, port);
+ 			} else {
+ 				port_set(port, port_pack(rq, count));
+ 			}
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 112ab5d..42999c7 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -229,7 +229,7 @@ struct intel_engine_execlists {
+ #define port_unpack(p, count) ptr_unpack_bits((p)->request_count, count, EXECLIST_COUNT_BITS)
+ #define port_set(p, packed) ((p)->request_count = (packed))
+ #define port_isset(p) ((p)->request_count)
+-#define port_index(p, e) ((p) - (e)->execlists.port)
++#define port_index(p, execlists) ((p) - (execlists)->port)
+ 
+ 		/**
+ 		 * @context_id: context ID for port
+@@ -513,6 +513,18 @@ struct intel_engine_cs {
+ 	u32 (*get_cmd_length_mask)(u32 cmd_header);
+ };
+ 
++static inline void
++execlists_port_complete(struct intel_engine_execlists * const execlists,
++			struct execlist_port * const port)
++{
++	struct execlist_port * const port1 = &execlists->port[1];
++
++	GEM_BUG_ON(port_index(port, execlists) != 0);
++
++	*port = *port1;
++	memset(port1, 0, sizeof(struct execlist_port));
++}
++
+ static inline unsigned int
+ intel_engine_flag(const struct intel_engine_cs *engine)
+ {
+-- 
+2.7.4
+

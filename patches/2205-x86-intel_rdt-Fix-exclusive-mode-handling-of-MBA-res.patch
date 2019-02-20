@@ -1,0 +1,77 @@
+From d41c63c65e9b34f7af0f757d84d0b2b6ac12ca16 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Sat, 15 Sep 2018 14:58:26 -0700
+Subject: [PATCH 2205/2278] x86/intel_rdt: Fix exclusive mode handling of MBA
+ resource
+
+It is possible for a resource group to consist out of MBA as well as
+CAT/CDP resources. The "exclusive" resource mode only applies to the
+CAT/CDP resources since MBA allocations cannot be specified to overlap
+or not. When a user requests a resource group to become "exclusive" then it
+can only be successful if there are CAT/CDP resources in the group
+and none of their CBMs associated with the group's CLOSID overlaps with
+any other resource group.
+
+Fix the "exclusive" mode setting by failing if there isn't any CAT/CDP
+resource in the group and ensuring that the CBM checking is only done on
+CAT/CDP resources.
+
+Fixes: 49f7b4efa ("x86/intel_rdt: Enable setting of exclusive mode")
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: "H Peter Anvin" <hpa@zytor.com>
+Cc: "Tony Luck" <tony.luck@intel.com>
+Cc: "Xiaochen Shen" <xiaochen.shen@intel.com>
+Cc: "Chen Yu" <yu.c.chen@intel.com>
+Link: https://lkml.kernel.org/r/1537048707-76280-9-git-send-email-fenghua.yu@intel.com
+
+(cherry picked from commit 939b90b20bc87e199b6b53942764b987289b87ce)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index dfcd731..76e07f1 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -1030,16 +1030,27 @@ static bool rdtgroup_mode_test_exclusive(struct rdtgroup *rdtgrp)
+ {
+ 	int closid = rdtgrp->closid;
+ 	struct rdt_resource *r;
++	bool has_cache = false;
+ 	struct rdt_domain *d;
+ 
+ 	for_each_alloc_enabled_rdt_resource(r) {
++		if (r->rid == RDT_RESOURCE_MBA)
++			continue;
++		has_cache = true;
+ 		list_for_each_entry(d, &r->domains, list) {
+ 			if (rdtgroup_cbm_overlaps(r, d, d->ctrl_val[closid],
+-						  rdtgrp->closid, false))
++						  rdtgrp->closid, false)) {
++				rdt_last_cmd_puts("schemata overlaps\n");
+ 				return false;
++			}
+ 		}
+ 	}
+ 
++	if (!has_cache) {
++		rdt_last_cmd_puts("cannot be exclusive without CAT/CDP\n");
++		return false;
++	}
++
+ 	return true;
+ }
+ 
+@@ -1091,7 +1102,6 @@ static ssize_t rdtgroup_mode_write(struct kernfs_open_file *of,
+ 		rdtgrp->mode = RDT_MODE_SHAREABLE;
+ 	} else if (!strcmp(buf, "exclusive")) {
+ 		if (!rdtgroup_mode_test_exclusive(rdtgrp)) {
+-			rdt_last_cmd_printf("schemata overlaps\n");
+ 			ret = -EINVAL;
+ 			goto out;
+ 		}
+-- 
+2.7.4
+

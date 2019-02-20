@@ -1,0 +1,464 @@
+From 75f69402459b6218a4a27fde2334f5b51ec38e10 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 3 Oct 2017 21:34:52 +0100
+Subject: [PATCH 1080/2278] UPSTREAM: drm/i915/execlists: Preemption!
+
+When we write to ELSP, it triggers a context preemption at the earliest
+arbitration point (3DPRIMITIVE, some PIPECONTROLs, a few other
+operations and the explicit MI_ARB_CHECK). If this is to the same
+context, it triggers a LITE_RESTORE where the RING_TAIL is merely
+updated (used currently to chain requests from the same context
+together, avoiding bubbles). However, if it is to a different context, a
+full context-switch is performed and it will start to execute the new
+context saving the image of the old for later execution.
+
+Previously we avoided preemption by only submitting a new context when
+the old was idle. But now we wish embrace it, and if the new request has
+a higher priority than the currently executing request, we write to the
+ELSP regardless, thus triggering preemption, but we tell the GPU to
+switch to our special preemption context (not the target). In the
+context-switch interrupt handler, we know that the previous contexts
+have finished execution and so can unwind all the incomplete requests
+and compute the new highest priority request to execute.
+
+It would be feasible to avoid the switch-to-idle intermediate by
+programming the ELSP with the target context. The difficulty is in
+tracking which request that should be whilst maintaining the dependency
+change, the error comes in with coalesced requests. As we only track the
+most recent request and its priority, we may run into the issue of being
+tricked in preempting a high priority request that was followed by a
+low priority request from the same context (e.g. for PI); worse still
+that earlier request may be our own dependency and the order then broken
+by preemption. By injecting the switch-to-idle and then recomputing the
+priority queue, we avoid the issue with tracking in-flight coalesced
+requests. Having tried the preempt-to-busy approach, and failed to find
+a way around the coalesced priority issue, Michal's original proposal to
+inject an idle context (based on handling GuC preemption) succeeds.
+
+The current heuristic for deciding when to preempt are only if the new
+request is of higher priority, and has the privileged priority of
+greater than 0. Note that the scheduler remains unfair!
+
+v2: Disable for gen8 (bdw/bsw) as we need additional w/a for GPGPU.
+Since, the feature is now conditional and not always available when we
+have a scheduler, make it known via the HAS_SCHEDULER GETPARAM (now a
+capability mask).
+v3: Stylistic tweaks.
+v4: Appease Joonas with a snippet of kerneldoc, only to fuel to fire of
+the preempt vs preempting debate.
+
+Hand-edit additions.
+Hand-edit ammends to delete calls to writel(upper_32_bits(desc), elsp)
+and writel(lower_32_bits(desc), elsp), because these are done in
+elsp_write(desc, elsp).
+Files edited:
+drivers/gpu/drm/i915/intel_lrc.c
+
+Suggested-by: Michal Winiarski <michal.winiarski@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michal Winiarski <michal.winiarski@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Arkadiusz Hiler <arkadiusz.hiler@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+Cc: Ben Widawsky <benjamin.widawsky@intel.com>
+Cc: Zhenyu Wang <zhenyuw@linux.intel.com>
+Cc: Zhi Wang <zhi.a.wang@intel.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171003203453.15692-8-chris@chris-wilson.co.uk
+(cherry picked from commit 27012343a0b4044d24104f84b85ecda5d67db5c2)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.c         |   9 +-
+ drivers/gpu/drm/i915/i915_irq.c         |   6 +-
+ drivers/gpu/drm/i915/i915_pci.c         |   2 +
+ drivers/gpu/drm/i915/intel_lrc.c        | 157 +++++++++++++++++++++++++-------
+ drivers/gpu/drm/i915/intel_ringbuffer.h |   5 +
+ 5 files changed, 143 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 191725f..322e996 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -371,9 +371,16 @@ static int i915_getparam(struct drm_device *dev, void *data,
+ 		break;
+ 	case I915_PARAM_HAS_SCHEDULER:
+ 		value = 0;
+-		if (dev_priv->engine[RCS] && dev_priv->engine[RCS]->schedule)
++		if (dev_priv->engine[RCS] && dev_priv->engine[RCS]->schedule) {
+ 			value |= I915_SCHEDULER_CAP_ENABLED;
++
++			if (INTEL_INFO(dev_priv)->has_logical_ring_preemption &&
++			    i915_modparams.enable_execlists &&
++			    !i915_modparams.enable_guc_submission)
++				value |= I915_SCHEDULER_CAP_PREEMPTION;
++		}
+ 		break;
++
+ 	case I915_PARAM_MMAP_VERSION:
+ 		/* Remember to bump this if the version changes! */
+ 	case I915_PARAM_HAS_GEM:
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 50d4f22..9311bcc 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1315,10 +1315,8 @@ gen8_cs_irq_handler(struct intel_engine_cs *engine, u32 iir, int test_shift)
+ 	bool tasklet = false;
+ 
+ 	if (iir & (GT_CONTEXT_SWITCH_INTERRUPT << test_shift)) {
+-		if (port_count(&execlists->port[0])) {
+-			__set_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
+-			tasklet = true;
+-		}
++		__set_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
++		tasklet = true;
+ 	}
+ 
+ 	if (iir & (GT_RENDER_USER_INTERRUPT << test_shift)) {
+diff --git a/drivers/gpu/drm/i915/i915_pci.c b/drivers/gpu/drm/i915/i915_pci.c
+index 064873e..310ba47 100644
+--- a/drivers/gpu/drm/i915/i915_pci.c
++++ b/drivers/gpu/drm/i915/i915_pci.c
+@@ -421,6 +421,7 @@ static const struct intel_device_info intel_cherryview_info __initconst = {
+ 
+ #define GEN9_FEATURES \
+ 	GEN8_FEATURES, \
++	.has_logical_ring_preemption = 1, \
+ 	.has_csr = 1, \
+ 	.has_guc = 1, \
+ 	.has_ipc = 1, \
+@@ -474,6 +475,7 @@ static const struct intel_device_info intel_skylake_gt4_info __initconst = {
+ 	.has_dp_mst = 1, \
+ 	.has_gmbus_irq = 1, \
+ 	.has_logical_ring_contexts = 1, \
++	.has_logical_ring_preemption = 1, \
+ 	.has_guc = 1, \
+ 	.has_aliasing_ppgtt = 1, \
+ 	.has_full_ppgtt = 1, \
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index f55cff1..4f88a7a 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -208,9 +208,9 @@
+ 
+ /* Typical size of the average request (2 pipecontrols and a MI_BB) */
+ #define EXECLISTS_REQUEST_SIZE 64 /* bytes */
+-
+ #define WA_TAIL_DWORDS 2
+ #define WA_TAIL_BYTES (sizeof(u32) * WA_TAIL_DWORDS)
++#define PREEMPT_ID 0x1
+ 
+ static int execlists_context_deferred_alloc(struct i915_gem_context *ctx,
+ 					    struct intel_engine_cs *engine);
+@@ -447,6 +447,12 @@ static u64 execlists_update_context(struct drm_i915_gem_request *rq)
+ 	return ce->lrc_desc;
+ }
+ 
++static inline void elsp_write(u64 desc, u32 __iomem *elsp)
++{
++	writel(upper_32_bits(desc), elsp);
++	writel(lower_32_bits(desc), elsp);
++}
++
+ static void execlists_submit_ports(struct intel_engine_cs *engine)
+ {
+ 	struct execlist_port *port = engine->execlists.port;
+@@ -479,8 +485,7 @@ static void execlists_submit_ports(struct intel_engine_cs *engine)
+ 			descs[i + 1] = lower_32_bits(desc);
+ 			i += 2;
+ 		} else {
+-			writel(upper_32_bits(desc), elsp);
+-			writel(lower_32_bits(desc), elsp);
++			elsp_write(desc, elsp);
+ 		}
+ 	}
+ 
+@@ -524,26 +529,43 @@ static void port_assign(struct execlist_port *port,
+ 	port_set(port, port_pack(i915_gem_request_get(rq), port_count(port)));
+ }
+ 
++static void inject_preempt_context(struct intel_engine_cs *engine)
++{
++	struct intel_context *ce =
++		&engine->i915->preempt_context->engine[engine->id];
++	u32 __iomem *elsp =
++		engine->i915->regs + i915_mmio_reg_offset(RING_ELSP(engine));
++	unsigned int n;
++
++	GEM_BUG_ON(engine->i915->preempt_context->hw_id != PREEMPT_ID);
++	GEM_BUG_ON(!IS_ALIGNED(ce->ring->size, WA_TAIL_BYTES));
++
++	memset(ce->ring->vaddr + ce->ring->tail, 0, WA_TAIL_BYTES);
++	ce->ring->tail += WA_TAIL_BYTES;
++	ce->ring->tail &= (ce->ring->size - 1);
++	ce->lrc_reg_state[CTX_RING_TAIL+1] = ce->ring->tail;
++
++	for (n = execlists_num_ports(&engine->execlists); --n; )
++		elsp_write(0, elsp);
++
++	elsp_write(ce->lrc_desc, elsp);
++}
++
++static bool can_preempt(struct intel_engine_cs *engine)
++{
++	return INTEL_INFO(engine->i915)->has_logical_ring_preemption;
++}
++
+ static void execlists_dequeue(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_gem_request *last;
+ 	struct intel_engine_execlists * const execlists = &engine->execlists;
+ 	struct execlist_port *port = execlists->port;
+ 	const struct execlist_port * const last_port =
+ 		&execlists->port[execlists->port_mask];
++	struct drm_i915_gem_request *last = port_request(port);
+ 	struct rb_node *rb;
+ 	bool submit = false;
+ 
+-	last = port_request(port);
+-	if (last)
+-		/* WaIdleLiteRestore:bdw,skl
+-		 * Apply the wa NOOPs to prevent ring:HEAD == req:TAIL
+-		 * as we resubmit the request. See gen8_emit_breadcrumb()
+-		 * for where we prepare the padding after the end of the
+-		 * request.
+-		 */
+-		last->tail = last->wa_tail;
+-
+ 	/* Hardware submission is through 2 ports. Conceptually each port
+ 	 * has a (RING_START, RING_HEAD, RING_TAIL) tuple. RING_START is
+ 	 * static for a context, and unique to each, so we only execute
+@@ -568,7 +590,65 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 	spin_lock_irq(&engine->timeline->lock);
+ 	rb = execlists->first;
+ 	GEM_BUG_ON(rb_first(&execlists->queue) != rb);
+-	while (rb) {
++	if (!rb)
++		goto unlock;
++
++	if (last) {
++		/*
++		 * Don't resubmit or switch until all outstanding
++		 * preemptions (lite-restore) are seen. Then we
++		 * know the next preemption status we see corresponds
++		 * to this ELSP update.
++		 */
++		if (port_count(&port[0]) > 1)
++			goto unlock;
++
++		if (can_preempt(engine) &&
++		    rb_entry(rb, struct i915_priolist, node)->priority >
++		    max(last->priotree.priority, 0)) {
++			/*
++			 * Switch to our empty preempt context so
++			 * the state of the GPU is known (idle).
++			 */
++			inject_preempt_context(engine);
++			execlists->preempt = true;
++			goto unlock;
++		} else {
++			/*
++			 * In theory, we could coalesce more requests onto
++			 * the second port (the first port is active, with
++			 * no preemptions pending). However, that means we
++			 * then have to deal with the possible lite-restore
++			 * of the second port (as we submit the ELSP, there
++			 * may be a context-switch) but also we may complete
++			 * the resubmission before the context-switch. Ergo,
++			 * coalescing onto the second port will cause a
++			 * preemption event, but we cannot predict whether
++			 * that will affect port[0] or port[1].
++			 *
++			 * If the second port is already active, we can wait
++			 * until the next context-switch before contemplating
++			 * new requests. The GPU will be busy and we should be
++			 * able to resubmit the new ELSP before it idles,
++			 * avoiding pipeline bubbles (momentary pauses where
++			 * the driver is unable to keep up the supply of new
++			 * work).
++			 */
++			if (port_count(&port[1]))
++				goto unlock;
++
++			/* WaIdleLiteRestore:bdw,skl
++			 * Apply the wa NOOPs to prevent
++			 * ring:HEAD == req:TAIL as we resubmit the
++			 * request. See gen8_emit_breadcrumb() for
++			 * where we prepare the padding after the
++			 * end of the request.
++			 */
++			last->tail = last->wa_tail;
++		}
++	}
++
++	do {
+ 		struct i915_priolist *p = rb_entry(rb, typeof(*p), node);
+ 		struct drm_i915_gem_request *rq, *rn;
+ 
+@@ -631,11 +711,12 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 		INIT_LIST_HEAD(&p->requests);
+ 		if (p->priority != I915_PRIORITY_NORMAL)
+ 			kmem_cache_free(engine->i915->priorities, p);
+-	}
++	} while (rb);
+ done:
+ 	execlists->first = rb;
+ 	if (submit)
+ 		port_assign(port, last);
++unlock:
+ 	spin_unlock_irq(&engine->timeline->lock);
+ 
+ 	if (submit)
+@@ -716,13 +797,6 @@ static void execlists_cancel_requests(struct intel_engine_cs *engine)
+ 	spin_unlock_irqrestore(&engine->timeline->lock, flags);
+ }
+ 
+-static bool execlists_elsp_ready(const struct intel_engine_cs *engine)
+-{
+-	const struct execlist_port *port = engine->execlists.port;
+-
+-	return port_count(&port[0]) + port_count(&port[1]) < 2;
+-}
+-
+ /*
+  * Check the unread Context Status Buffers and manage the submission of new
+  * contexts to the ELSP accordingly.
+@@ -731,7 +805,7 @@ static void intel_lrc_irq_handler(unsigned long data)
+ {
+ 	struct intel_engine_cs * const engine = (struct intel_engine_cs *)data;
+ 	struct intel_engine_execlists * const execlists = &engine->execlists;
+-	struct execlist_port *port = execlists->port;
++	struct execlist_port * const port = execlists->port;
+ 	struct drm_i915_private *dev_priv = engine->i915;
+ 
+ 	/* We can skip acquiring intel_runtime_pm_get() here as it was taken
+@@ -816,6 +890,23 @@ static void intel_lrc_irq_handler(unsigned long data)
+ 			if (!(status & GEN8_CTX_STATUS_COMPLETED_MASK))
+ 				continue;
+ 
++			if (status & GEN8_CTX_STATUS_ACTIVE_IDLE &&
++			    buf[2*head + 1] == PREEMPT_ID) {
++				execlist_cancel_port_requests(execlists);
++
++				spin_lock_irq(&engine->timeline->lock);
++				unwind_incomplete_requests(engine);
++				spin_unlock_irq(&engine->timeline->lock);
++
++				GEM_BUG_ON(!execlists->preempt);
++				execlists->preempt = false;
++				continue;
++			}
++
++			if (status & GEN8_CTX_STATUS_PREEMPTED &&
++			    execlists->preempt)
++				continue;
++
+ 			/* Check the context/desc id for this event matches */
+ 			GEM_DEBUG_BUG_ON(buf[2 * head + 1] != port->context_id);
+ 
+@@ -847,7 +938,7 @@ static void intel_lrc_irq_handler(unsigned long data)
+ 		}
+ 	}
+ 
+-	if (execlists_elsp_ready(engine))
++	if (!execlists->preempt)
+ 		execlists_dequeue(engine);
+ 
+ 	intel_uncore_forcewake_put(dev_priv, execlists->fw_domains);
+@@ -860,7 +951,7 @@ static void insert_request(struct intel_engine_cs *engine,
+ 	struct i915_priolist *p = lookup_priolist(engine, pt, prio);
+ 
+ 	list_add_tail(&pt->link, &ptr_mask_bits(p, 1)->requests);
+-	if (ptr_unmask_bits(p, 1) && execlists_elsp_ready(engine))
++	if (ptr_unmask_bits(p, 1))
+ 		tasklet_hi_schedule(&engine->execlists.irq_tasklet);
+ }
+ 
+@@ -990,8 +1081,6 @@ static void execlists_schedule(struct drm_i915_gem_request *request, int prio)
+ 	}
+ 
+ 	spin_unlock_irq(&engine->timeline->lock);
+-
+-	/* XXX Do we need to preempt to make room for us and our deps? */
+ }
+ 
+ static struct intel_ring *
+@@ -1187,6 +1276,8 @@ static u32 *gen8_init_indirectctx_bb(struct intel_engine_cs *engine, u32 *batch)
+ 				       i915_ggtt_offset(engine->scratch) +
+ 				       2 * CACHELINE_BYTES);
+ 
++	*batch++ = MI_ARB_ON_OFF | MI_ARB_ENABLE;
++
+ 	/* Pad to end of cacheline */
+ 	while ((unsigned long)batch % CACHELINE_BYTES)
+ 		*batch++ = MI_NOOP;
+@@ -1202,6 +1293,8 @@ static u32 *gen8_init_indirectctx_bb(struct intel_engine_cs *engine, u32 *batch)
+ 
+ static u32 *gen9_init_indirectctx_bb(struct intel_engine_cs *engine, u32 *batch)
+ {
++	*batch++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
++
+ 	/* WaFlushCoherentL3CacheLinesAtContextSwitch:skl,bxt,glk */
+ 	batch = gen8_emit_flush_coherentl3_wa(engine, batch);
+ 
+@@ -1257,6 +1350,8 @@ static u32 *gen9_init_indirectctx_bb(struct intel_engine_cs *engine, u32 *batch)
+ 		*batch++ = 0;
+ 	}
+ 
++	*batch++ = MI_ARB_ON_OFF | MI_ARB_ENABLE;
++
+ 	/* Pad to end of cacheline */
+ 	while ((unsigned long)batch % CACHELINE_BYTES)
+ 		*batch++ = MI_NOOP;
+@@ -1416,6 +1511,7 @@ static int gen8_init_common_ring(struct intel_engine_cs *engine)
+ 		   GT_CONTEXT_SWITCH_INTERRUPT << engine->irq_shift);
+ 	clear_bit(ENGINE_IRQ_EXECLIST, &engine->irq_posted);
+ 	execlists->csb_head = -1;
++	execlists->preempt = false;
+ 
+ 	/* After a GPU reset, we may have requests to replay */
+ 	if (!i915_modparams.enable_guc_submission && execlists->first)
+@@ -1711,7 +1807,8 @@ static int gen8_emit_flush_render(struct drm_i915_gem_request *request,
+  */
+ static void gen8_emit_wa_tail(struct drm_i915_gem_request *request, u32 *cs)
+ {
+-	*cs++ = MI_NOOP;
++	/* Ensure there's always at least one preemption point per-request. */
++	*cs++ = MI_ARB_CHECK;
+ 	*cs++ = MI_NOOP;
+ 	request->wa_tail = intel_ring_offset(request, cs);
+ }
+@@ -1732,7 +1829,6 @@ static void gen8_emit_breadcrumb(struct drm_i915_gem_request *request, u32 *cs)
+ 
+ 	gen8_emit_wa_tail(request, cs);
+ }
+-
+ static const int gen8_emit_breadcrumb_sz = 6 + WA_TAIL_DWORDS;
+ 
+ static void gen8_emit_breadcrumb_render(struct drm_i915_gem_request *request,
+@@ -1760,7 +1856,6 @@ static void gen8_emit_breadcrumb_render(struct drm_i915_gem_request *request,
+ 
+ 	gen8_emit_wa_tail(request, cs);
+ }
+-
+ static const int gen8_emit_breadcrumb_render_sz = 8 + WA_TAIL_DWORDS;
+ 
+ static int gen8_init_rcs_context(struct drm_i915_gem_request *req)
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 84f8df1..7a76e37 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -240,6 +240,11 @@ struct intel_engine_execlists {
+ 	} port[EXECLIST_MAX_PORTS];
+ 
+ 	/**
++	 * @preempt: are we currently handling a preempting context switch?
++	 */
++	bool preempt;
++
++	/**
+ 	 * @port_mask: number of execlist ports - 1
+ 	 */
+ 	unsigned int port_mask;
+-- 
+2.7.4
+

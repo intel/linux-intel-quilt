@@ -1,0 +1,144 @@
+From 7b501a447594f93d9a408b40f9bcd4175082a3b8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Thu, 24 Aug 2017 22:10:51 +0300
+Subject: [PATCH 1043/2278] UPSTREAM: drm/i915: Switch over to the LLC/eLLC
+ hotspot avoidance hash mode for CCS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Use the LLC/eLLC hotspot avoidance mode for CCS on LLC machines. This is
+reported to give better performance.
+
+Testing has indicated that we don't need to enforce any massive 2 or 4
+MiB alignment for all compressed resources even though there are still
+plenty of stale comments in the spec suggesting that we do.
+
+We do need to make sure every hardware unit that deals with the
+compressed data uses the same hash mode.
+
+Hand-edit additions.
+
+Cc: Ben Widawsky <ben@bwidawsk.net>
+Cc: Jason Ekstrand <jason@jlekstrand.net>
+Cc: Daniel Stone <daniels@collabora.com>
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170824191100.10949-4-ville.syrjala@linux.intel.com
+Reviewed-by: Ben Widawsky <ben@bwidawsk.net>
+(cherry picked from commit 441dc4683047d5889014107778c662ecff91ff58)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_reg.h        |  8 +++++++-
+ drivers/gpu/drm/i915/intel_engine_cs.c | 13 +++++++++++++
+ drivers/gpu/drm/i915/intel_pm.c        | 27 +++++++++++++--------------
+ 3 files changed, 33 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 8b11427..bdb3caf 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -6926,7 +6926,7 @@ enum {
+ # define CHICKEN3_DGMG_DONE_FIX_DISABLE		(1 << 2)
+ 
+ #define CHICKEN_PAR1_1		_MMIO(0x42080)
+-#define  SKL_RC_HASH_OUTSIDE	(1 << 15)
++#define  SKL_DE_COMPRESSED_HASH_MODE	(1 << 15)
+ #define  DPA_MASK_VBLANK_SRD	(1 << 15)
+ #define  FORCE_ARB_IDLE_PLANES	(1 << 14)
+ #define  SKL_EDP_PSR_FIX_RDWRAP	(1 << 3)
+@@ -7001,6 +7001,7 @@ enum {
+ # define GEN7_CSC1_RHWO_OPT_DISABLE_IN_RCC	((1<<10) | (1<<26))
+ # define GEN9_RHWO_OPTIMIZATION_DISABLE		(1<<14)
+ #define COMMON_SLICE_CHICKEN2			_MMIO(0x7014)
++# define GEN9_PBE_COMPRESSED_HASH_SELECTION	(1<<13)
+ # define GEN9_DISABLE_GATHER_AT_SET_SHADER_COMMON_SLICE (1<<12)
+ # define GEN8_SBE_DISABLE_REPLAY_BUF_OPTIMIZATION (1<<8)
+ # define GEN8_CSC2_SBE_VUE_CACHE_CONSERVATIVE	(1<<0)
+@@ -8098,6 +8099,7 @@ enum {
+ #define   GEN8_SAMPLER_POWER_BYPASS_DIS	(1<<1)
+ 
+ #define GEN9_HALF_SLICE_CHICKEN7	_MMIO(0xe194)
++#define   GEN9_SAMPLER_HASH_COMPRESSED_READ_ADDR	(1<<8)
+ #define   GEN9_ENABLE_YV12_BUGFIX	(1<<4)
+ #define   GEN9_ENABLE_GPGPU_PREEMPTION	(1<<2)
+ 
+@@ -9484,6 +9486,10 @@ enum skl_power_gate {
+ #define   GEN9_L3_LRA_1_GPGPU_DEFAULT_VALUE_SKL  0x67F1427F /*    "        " */
+ #define   GEN9_L3_LRA_1_GPGPU_DEFAULT_VALUE_BXT  0x5FF101FF /*    "        " */
+ 
++#define MMCD_MISC_CTRL		_MMIO(0x4ddc) /* skl+ */
++#define  MMCD_PCLA		(1 << 31)
++#define  MMCD_HOTSPOT_EN	(1 << 27)
++
+ /* GVT has special read process from some MMIO register,
+  * which so that should be trapped to GVT to make a
+  * complete emulation. Such MMIO is not too much, now using
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index 0023860..91d8e9d 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -938,6 +938,19 @@ static int gen9_init_workarounds(struct intel_engine_cs *engine)
+ 		I915_WRITE(GAM_ECOCHK, I915_READ(GAM_ECOCHK) |
+ 			   ECOCHK_DIS_TLB);
+ 
++	if (HAS_LLC(dev_priv)) {
++		/* WaCompressedResourceSamplerPbeMediaNewHashMode:skl,kbl
++		 *
++		 * Must match Display Engine. See
++		 * WaCompressedResourceDisplayNewHashMode.
++		 */
++		WA_SET_BIT_MASKED(COMMON_SLICE_CHICKEN2,
++				  GEN9_PBE_COMPRESSED_HASH_SELECTION);
++		WA_SET_BIT_MASKED(GEN9_HALF_SLICE_CHICKEN7,
++				  GEN9_SAMPLER_HASH_COMPRESSED_READ_ADDR);
++		WA_SET_BIT(MMCD_MISC_CTRL, MMCD_PCLA | MMCD_HOTSPOT_EN);
++	}
++
+ 	/* WaClearFlowControlGpgpuContextSave:skl,bxt,kbl,glk,cfl */
+ 	/* WaDisablePartialInstShootdown:skl,bxt,kbl,glk,cfl */
+ 	WA_SET_BIT_MASKED(GEN8_ROW_CHICKEN,
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 25a661b..1a9000e 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -62,24 +62,23 @@
+ 
+ static void gen9_init_clock_gating(struct drm_i915_private *dev_priv)
+ {
++	if (HAS_LLC(dev_priv)) {
++		/*
++		 * WaCompressedResourceDisplayNewHashMode:skl,kbl
++		 * Display WA#0390: skl,kbl
++		 *
++		 * Must match Sampler, Pixel Back End, and Media. See
++		 * WaCompressedResourceSamplerPbeMediaNewHashMode.
++		 */
++		I915_WRITE(CHICKEN_PAR1_1,
++			   I915_READ(CHICKEN_PAR1_1) |
++			   SKL_DE_COMPRESSED_HASH_MODE);
++	}
++
+ 	/* See Bspec note for PSR2_CTL bit 31, Wa#828:skl,bxt,kbl,cfl */
+ 	I915_WRITE(CHICKEN_PAR1_1,
+ 		   I915_READ(CHICKEN_PAR1_1) | SKL_EDP_PSR_FIX_RDWRAP);
+ 
+-	/*
+-	 * Display WA#0390: skl,bxt,kbl,glk
+-	 *
+-	 * Must match Sampler, Pixel Back End, and Media
+-	 * (0xE194 bit 8, 0x7014 bit 13, 0x4DDC bits 27 and 31).
+-	 *
+-	 * Including bits outside the page in the hash would
+-	 * require 2 (or 4?) MiB alignment of resources. Just
+-	 * assume the defaul hashing mode which only uses bits
+-	 * within the page.
+-	 */
+-	I915_WRITE(CHICKEN_PAR1_1,
+-		   I915_READ(CHICKEN_PAR1_1) & ~SKL_RC_HASH_OUTSIDE);
+-
+ 	I915_WRITE(GEN8_CONFIG0,
+ 		   I915_READ(GEN8_CONFIG0) | GEN9_DEFAULT_FIXES);
+ 
+-- 
+2.7.4
+

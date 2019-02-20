@@ -1,0 +1,249 @@
+From 6c2918eae492c49e2960e0b12b6f7568b90a8319 Mon Sep 17 00:00:00 2001
+From: Fenghua Yu <fenghua.yu@intel.com>
+Date: Wed, 20 Dec 2017 14:57:23 -0800
+Subject: [PATCH 2144/2278] x86/intel_rdt: Enable L2 CDP in MSR IA32_L2_QOS_CFG
+
+Bit 0 in MSR IA32_L2_QOS_CFG (0xc82) is L2 CDP enable bit. By default,
+the bit is zero, i.e. L2 CAT is enabled, and L2 CDP is disabled. When
+the resctrl mount parameter "cdpl2" is given, the bit is set to 1 and L2
+CDP is enabled.
+
+In L2 CDP mode, the L2 CAT mask MSRs are re-mapped into interleaved pairs
+of mask MSRs for code (referenced by an odd CLOSID) and data (referenced by
+an even CLOSID).
+
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: "Ravi V Shankar" <ravi.v.shankar@intel.com>
+Cc: "Tony Luck" <tony.luck@intel.com>
+Cc: Vikas" <vikas.shivappa@intel.com>
+Cc: Sai Praneeth" <sai.praneeth.prakhya@intel.com>
+Cc: Reinette" <reinette.chatre@intel.com>
+Link: https://lkml.kernel.org/r/1513810644-78015-6-git-send-email-fenghua.yu@intel.com
+
+(cherry picked from commit 99adde9b370de8e07ef76630c6f60dbf586cdf0e)
+---
+ arch/x86/kernel/cpu/intel_rdt.h          |   3 +
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 117 ++++++++++++++++++++++++-------
+ 2 files changed, 94 insertions(+), 26 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index 19ffc5a..3fd7a70 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -7,12 +7,15 @@
+ #include <linux/jump_label.h>
+ 
+ #define IA32_L3_QOS_CFG		0xc81
++#define IA32_L2_QOS_CFG		0xc82
+ #define IA32_L3_CBM_BASE	0xc90
+ #define IA32_L2_CBM_BASE	0xd10
+ #define IA32_MBA_THRTL_BASE	0xd50
+ 
+ #define L3_QOS_CDP_ENABLE	0x01ULL
+ 
++#define L2_QOS_CDP_ENABLE	0x01ULL
++
+ /*
+  * Event IDs are used to program IA32_QM_EVTSEL before reading event
+  * counter from IA32_QM_CTR
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 0265d5a..fca759d 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -990,6 +990,7 @@ mongroup_create_dir(struct kernfs_node *parent_kn, struct rdtgroup *prgrp,
+ 	kernfs_remove(kn);
+ 	return ret;
+ }
++
+ static void l3_qos_cfg_update(void *arg)
+ {
+ 	bool *enable = arg;
+@@ -997,8 +998,17 @@ static void l3_qos_cfg_update(void *arg)
+ 	wrmsrl(IA32_L3_QOS_CFG, *enable ? L3_QOS_CDP_ENABLE : 0ULL);
+ }
+ 
+-static int set_l3_qos_cfg(struct rdt_resource *r, bool enable)
++static void l2_qos_cfg_update(void *arg)
+ {
++	bool *enable = arg;
++
++	wrmsrl(IA32_L2_QOS_CFG, *enable ? L2_QOS_CDP_ENABLE : 0ULL);
++}
++
++static int set_cache_qos_cfg(int level, bool enable)
++{
++	void (*update)(void *arg);
++	struct rdt_resource *r_l;
+ 	cpumask_var_t cpu_mask;
+ 	struct rdt_domain *d;
+ 	int cpu;
+@@ -1006,16 +1016,24 @@ static int set_l3_qos_cfg(struct rdt_resource *r, bool enable)
+ 	if (!zalloc_cpumask_var(&cpu_mask, GFP_KERNEL))
+ 		return -ENOMEM;
+ 
+-	list_for_each_entry(d, &r->domains, list) {
++	if (level == RDT_RESOURCE_L3)
++		update = l3_qos_cfg_update;
++	else if (level == RDT_RESOURCE_L2)
++		update = l2_qos_cfg_update;
++	else
++		return -EINVAL;
++
++	r_l = &rdt_resources_all[level];
++	list_for_each_entry(d, &r_l->domains, list) {
+ 		/* Pick one CPU from each domain instance to update MSR */
+ 		cpumask_set_cpu(cpumask_any(&d->cpu_mask), cpu_mask);
+ 	}
+ 	cpu = get_cpu();
+ 	/* Update QOS_CFG MSR on this cpu if it's in cpu_mask. */
+ 	if (cpumask_test_cpu(cpu, cpu_mask))
+-		l3_qos_cfg_update(&enable);
++		update(&enable);
+ 	/* Update QOS_CFG MSR on all other cpus in cpu_mask. */
+-	smp_call_function_many(cpu_mask, l3_qos_cfg_update, &enable, 1);
++	smp_call_function_many(cpu_mask, update, &enable, 1);
+ 	put_cpu();
+ 
+ 	free_cpumask_var(cpu_mask);
+@@ -1023,52 +1041,99 @@ static int set_l3_qos_cfg(struct rdt_resource *r, bool enable)
+ 	return 0;
+ }
+ 
+-static int cdp_enable(void)
++static int cdp_enable(int level, int data_type, int code_type)
+ {
+-	struct rdt_resource *r_l3data = &rdt_resources_all[RDT_RESOURCE_L3DATA];
+-	struct rdt_resource *r_l3code = &rdt_resources_all[RDT_RESOURCE_L3CODE];
+-	struct rdt_resource *r_l3 = &rdt_resources_all[RDT_RESOURCE_L3];
++	struct rdt_resource *r_ldata = &rdt_resources_all[data_type];
++	struct rdt_resource *r_lcode = &rdt_resources_all[code_type];
++	struct rdt_resource *r_l = &rdt_resources_all[level];
+ 	int ret;
+ 
+-	if (!r_l3->alloc_capable || !r_l3data->alloc_capable ||
+-	    !r_l3code->alloc_capable)
++	if (!r_l->alloc_capable || !r_ldata->alloc_capable ||
++	    !r_lcode->alloc_capable)
+ 		return -EINVAL;
+ 
+-	ret = set_l3_qos_cfg(r_l3, true);
++	ret = set_cache_qos_cfg(level, true);
+ 	if (!ret) {
+-		r_l3->alloc_enabled = false;
+-		r_l3data->alloc_enabled = true;
+-		r_l3code->alloc_enabled = true;
++		r_l->alloc_enabled = false;
++		r_ldata->alloc_enabled = true;
++		r_lcode->alloc_enabled = true;
+ 	}
+ 	return ret;
+ }
+ 
+-static void cdp_disable(void)
++static int cdpl3_enable(void)
+ {
+-	struct rdt_resource *r = &rdt_resources_all[RDT_RESOURCE_L3];
++	return cdp_enable(RDT_RESOURCE_L3, RDT_RESOURCE_L3DATA,
++			  RDT_RESOURCE_L3CODE);
++}
++
++static int cdpl2_enable(void)
++{
++	return cdp_enable(RDT_RESOURCE_L2, RDT_RESOURCE_L2DATA,
++			  RDT_RESOURCE_L2CODE);
++}
++
++static void cdp_disable(int level, int data_type, int code_type)
++{
++	struct rdt_resource *r = &rdt_resources_all[level];
+ 
+ 	r->alloc_enabled = r->alloc_capable;
+ 
+-	if (rdt_resources_all[RDT_RESOURCE_L3DATA].alloc_enabled) {
+-		rdt_resources_all[RDT_RESOURCE_L3DATA].alloc_enabled = false;
+-		rdt_resources_all[RDT_RESOURCE_L3CODE].alloc_enabled = false;
+-		set_l3_qos_cfg(r, false);
++	if (rdt_resources_all[data_type].alloc_enabled) {
++		rdt_resources_all[data_type].alloc_enabled = false;
++		rdt_resources_all[code_type].alloc_enabled = false;
++		set_cache_qos_cfg(level, false);
+ 	}
+ }
+ 
++static void cdpl3_disable(void)
++{
++	cdp_disable(RDT_RESOURCE_L3, RDT_RESOURCE_L3DATA, RDT_RESOURCE_L3CODE);
++}
++
++static void cdpl2_disable(void)
++{
++	cdp_disable(RDT_RESOURCE_L2, RDT_RESOURCE_L2DATA, RDT_RESOURCE_L2CODE);
++}
++
++static void cdp_disable_all(void)
++{
++	if (rdt_resources_all[RDT_RESOURCE_L3DATA].alloc_enabled)
++		cdpl3_disable();
++	if (rdt_resources_all[RDT_RESOURCE_L2DATA].alloc_enabled)
++		cdpl2_disable();
++}
++
+ static int parse_rdtgroupfs_options(char *data)
+ {
+ 	char *token, *o = data;
+ 	int ret = 0;
+ 
+ 	while ((token = strsep(&o, ",")) != NULL) {
+-		if (!*token)
+-			return -EINVAL;
++		if (!*token) {
++			ret = -EINVAL;
++			goto out;
++		}
+ 
+-		if (!strcmp(token, "cdp"))
+-			ret = cdp_enable();
++		if (!strcmp(token, "cdp")) {
++			ret = cdpl3_enable();
++			if (ret)
++				goto out;
++		} else if (!strcmp(token, "cdpl2")) {
++			ret = cdpl2_enable();
++			if (ret)
++				goto out;
++		} else {
++			ret = -EINVAL;
++			goto out;
++		}
+ 	}
+ 
++	return 0;
++
++out:
++	pr_err("Invalid mount option \"%s\"\n", token);
++
+ 	return ret;
+ }
+ 
+@@ -1223,7 +1288,7 @@ static struct dentry *rdt_mount(struct file_system_type *fs_type,
+ out_info:
+ 	kernfs_remove(kn_info);
+ out_cdp:
+-	cdp_disable();
++	cdp_disable_all();
+ out:
+ 	rdt_last_cmd_clear();
+ 	mutex_unlock(&rdtgroup_mutex);
+@@ -1383,7 +1448,7 @@ static void rdt_kill_sb(struct super_block *sb)
+ 	/*Put everything back to default values. */
+ 	for_each_alloc_enabled_rdt_resource(r)
+ 		reset_all_ctrls(r);
+-	cdp_disable();
++	cdp_disable_all();
+ 	rmdir_all_sub();
+ 	static_branch_disable_cpuslocked(&rdt_alloc_enable_key);
+ 	static_branch_disable_cpuslocked(&rdt_mon_enable_key);
+-- 
+2.7.4
+

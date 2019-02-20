@@ -1,0 +1,832 @@
+From 3c05162206efa60ef4cdb75b1799c6bbc8e0d2f3 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Tue, 19 Dec 2017 10:22:34 +0800
+Subject: [PATCH 0905/2278] drm/i915/gvt: local display support
+
+Added local display dispaly support for GVT-g.
+
+Signed-off-by: Min He <min.he@intel.com>
+
+Change-Id: I430fbf98318cd35f7104657c4d1c128e50f56f2d
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c   | 89 ++++++++++++++++++++++++++++++++----
+ drivers/gpu/drm/i915/gvt/edid.c      | 20 ++++----
+ drivers/gpu/drm/i915/gvt/edid.h      |  2 +-
+ drivers/gpu/drm/i915/gvt/gvt.c       | 43 +++++++++++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h       | 29 ++++++++++++
+ drivers/gpu/drm/i915/gvt/handlers.c  | 26 +++++++++--
+ drivers/gpu/drm/i915/gvt/interrupt.c |  6 +--
+ drivers/gpu/drm/i915/gvt/vgpu.c      |  4 ++
+ drivers/gpu/drm/i915/i915_debugfs.c  |  7 +++
+ drivers/gpu/drm/i915/i915_irq.c      | 25 +++++++++-
+ drivers/gpu/drm/i915/intel_display.c | 42 +++++++++++++++++
+ drivers/gpu/drm/i915/intel_dp.c      |  2 +-
+ drivers/gpu/drm/i915/intel_drv.h     |  1 +
+ drivers/gpu/drm/i915/intel_pm.c      | 58 ++++++++++++++++++++---
+ drivers/gpu/drm/i915/intel_sprite.c  | 46 +++++++++++++++++++
+ 15 files changed, 363 insertions(+), 37 deletions(-)
+ mode change 100755 => 100644 drivers/gpu/drm/i915/gvt/handlers.c
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 5fdb5cd..47de283 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -297,14 +297,18 @@ static void clean_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num)
+ }
+ 
+ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
+-				    int type, unsigned int resolution)
++				    int type, unsigned int resolution, void *edid)
+ {
+ 	struct intel_vgpu_port *port = intel_vgpu_port(vgpu, port_num);
++	int valid_extensions = 1;
+ 
+ 	if (WARN_ON(resolution >= GVT_EDID_NUM))
+ 		return -EINVAL;
+ 
+-	port->edid = kzalloc(sizeof(*(port->edid)), GFP_KERNEL);
++	if (edid)
++		valid_extensions += ((struct edid *)edid)->extensions;
++	port->edid = kzalloc(sizeof(*(port->edid))
++			+ valid_extensions * EDID_SIZE, GFP_KERNEL);
+ 	if (!port->edid)
+ 		return -ENOMEM;
+ 
+@@ -314,8 +318,12 @@ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
+ 		return -ENOMEM;
+ 	}
+ 
+-	memcpy(port->edid->edid_block, virtual_dp_monitor_edid[resolution],
+-			EDID_SIZE);
++	if (edid)
++		memcpy(port->edid->edid_block, edid, EDID_SIZE * valid_extensions);
++	else
++		memcpy(port->edid->edid_block, virtual_dp_monitor_edid[resolution],
++				EDID_SIZE);
++
+ 	port->edid->data_valid = true;
+ 
+ 	memcpy(port->dpcd->data, dpcd_fix_data, DPCD_HEADER_SIZE);
+@@ -420,6 +428,65 @@ void intel_gvt_emulate_vblank(struct intel_gvt *gvt)
+ 		emulate_vblank(vgpu);
+ }
+ 
++static void intel_gvt_vblank_work(struct work_struct *w)
++{
++	struct intel_gvt_pipe_info *pipe_info = container_of(w,
++			struct intel_gvt_pipe_info, vblank_work);
++	struct intel_gvt *gvt = pipe_info->gvt;
++	struct intel_vgpu *vgpu;
++	int id;
++
++	mutex_lock(&gvt->lock);
++	for_each_active_vgpu(gvt, vgpu, id)
++		emulate_vblank_on_pipe(vgpu, pipe_info->pipe_num);
++	mutex_unlock(&gvt->lock);
++}
++
++void intel_gvt_init_pipe_info(struct intel_gvt *gvt)
++{
++	int pipe;
++
++	for (pipe = PIPE_A; pipe <= PIPE_C; pipe++) {
++		gvt->pipe_info[pipe].pipe_num = pipe;
++		gvt->pipe_info[pipe].gvt = gvt;
++		INIT_WORK(&gvt->pipe_info[pipe].vblank_work,
++				intel_gvt_vblank_work);
++	}
++}
++
++int bxt_setup_virtual_monitors(struct intel_vgpu *vgpu)
++{
++	struct intel_connector *connector = NULL;
++	struct drm_connector_list_iter conn_iter;
++	int pipe = 0;
++	int ret = 0;
++
++	drm_connector_list_iter_begin(&vgpu->gvt->dev_priv->drm, &conn_iter);
++	for_each_intel_connector_iter(connector, &conn_iter) {
++		if (connector->encoder->get_hw_state(connector->encoder, &pipe)
++				&& connector->detect_edid) {
++			ret = setup_virtual_dp_monitor(vgpu, pipe,
++					GVT_DP_A + pipe, 0,
++					connector->detect_edid);
++			if (ret)
++				return ret;
++		}
++	}
++	return 0;
++}
++
++void bxt_clean_virtual_monitors(struct intel_vgpu *vgpu)
++{
++	int port = 0;
++
++	for (port = PORT_A; port < INTEL_GVT_MAX_PORT; port++) {
++		struct intel_vgpu_port *p = intel_vgpu_port(vgpu, port);
++
++		if (p->edid)
++			clean_virtual_dp_monitor(vgpu, port);
++	}
++}
++
+ /**
+  * intel_vgpu_clean_display - clean vGPU virtual display emulation
+  * @vgpu: a vGPU
+@@ -431,7 +498,9 @@ void intel_vgpu_clean_display(struct intel_vgpu *vgpu)
+ {
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv))
++	if (IS_BROXTON(dev_priv))
++		bxt_clean_virtual_monitors(vgpu);
++	else if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv))
+ 		clean_virtual_dp_monitor(vgpu, PORT_D);
+ 	else
+ 		clean_virtual_dp_monitor(vgpu, PORT_B);
+@@ -453,12 +522,12 @@ int intel_vgpu_init_display(struct intel_vgpu *vgpu, u64 resolution)
+ 
+ 	intel_vgpu_init_i2c_edid(vgpu);
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv))
+-		return setup_virtual_dp_monitor(vgpu, PORT_D, GVT_DP_D,
+-						resolution);
++	if (IS_BROXTON(dev_priv))
++		return bxt_setup_virtual_monitors(vgpu);
++	else if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv))
++		return setup_virtual_dp_monitor(vgpu, PORT_D, GVT_DP_D, resolution, NULL);
+ 	else
+-		return setup_virtual_dp_monitor(vgpu, PORT_B, GVT_DP_B,
+-						resolution);
++		return setup_virtual_dp_monitor(vgpu, PORT_B, GVT_DP_B, resolution, NULL);
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/gvt/edid.c b/drivers/gpu/drm/i915/gvt/edid.c
+index 1636f6b..899fac3 100644
+--- a/drivers/gpu/drm/i915/gvt/edid.c
++++ b/drivers/gpu/drm/i915/gvt/edid.c
+@@ -55,10 +55,6 @@ static unsigned char edid_get_byte(struct intel_vgpu *vgpu)
+ 		gvt_vgpu_err("Driver tries to read EDID without proper sequence!\n");
+ 		return 0;
+ 	}
+-	if (edid->current_edid_read >= EDID_SIZE) {
+-		gvt_vgpu_err("edid_get_byte() exceeds the size of EDID!\n");
+-		return 0;
+-	}
+ 
+ 	if (!edid->edid_available) {
+ 		gvt_vgpu_err("Reading EDID but EDID is not available!\n");
+@@ -445,6 +441,8 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 	u32 value = *(u32 *)p_data;
+ 	int aux_data_for_write = 0;
+ 	int reg = get_aux_ch_reg(offset);
++	uint8_t rxbuf[20];
++	size_t rxsize;
+ 
+ 	if (reg != AUX_CH_CTL) {
+ 		vgpu_vreg(vgpu, offset) = value;
+@@ -452,6 +450,9 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 	}
+ 
+ 	msg_length = AUX_CTL_MSG_LENGTH(value);
++	for (rxsize = 0; rxsize < msg_length; rxsize += 4)
++		intel_dp_unpack_aux(vgpu_vreg(vgpu, offset + 4 + rxsize),
++				rxbuf + rxsize, msg_length - rxsize);
+ 	// check the msg in DATA register.
+ 	msg = vgpu_vreg(vgpu, offset + 4);
+ 	addr = (msg >> 8) & 0xffff;
+@@ -491,12 +492,13 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 			}
+ 		}
+ 	} else if ((op & 0x1) == GVT_AUX_I2C_WRITE) {
+-		/* TODO
+-		 * We only support EDID reading from I2C_over_AUX. And
+-		 * we do not expect the index mode to be used. Right now
+-		 * the WRITE operation is ignored. It is good enough to
+-		 * support the gfx driver to do EDID access.
++		/* We only support EDID reading from I2C_over_AUX.
++		 * But if EDID has extension blocks, we use this write
++		 * operation to set block starting address
+ 		 */
++		if (addr == EDID_ADDR) {
++			i2c_edid->current_edid_read = rxbuf[4];
++		}
+ 	} else {
+ 		if (WARN_ON((op & 0x1) != GVT_AUX_I2C_READ))
+ 			return;
+diff --git a/drivers/gpu/drm/i915/gvt/edid.h b/drivers/gpu/drm/i915/gvt/edid.h
+index f6dfc8b..11a75d6 100644
+--- a/drivers/gpu/drm/i915/gvt/edid.h
++++ b/drivers/gpu/drm/i915/gvt/edid.h
+@@ -48,7 +48,7 @@
+ 
+ struct intel_vgpu_edid_data {
+ 	bool data_valid;
+-	unsigned char edid_block[EDID_SIZE];
++	unsigned char edid_block[0];
+ };
+ 
+ enum gmbus_cycle_type {
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index 242ece1..3468a92 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -177,6 +177,46 @@ static int init_service_thread(struct intel_gvt *gvt)
+ 	return 0;
+ }
+ 
++void intel_gvt_init_pipe_info(struct intel_gvt *gvt);
++
++/*
++ * When enabling multi-plane in DomU, an issue is that the PLANE_BUF_CFG
++ * register cannot be updated dynamically, since Dom0 has no idea of the
++ * plane information of DomU's planes, so here we statically allocate the
++ * ddb entries for all the possible enabled planes.
++ */
++static void intel_gvt_init_ddb(struct intel_gvt *gvt)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct skl_ddb_allocation *ddb = &gvt->ddb;
++	unsigned int pipe_size, ddb_size, plane_size, plane_cnt;
++	u16 start, end;
++	enum pipe pipe;
++	enum plane_id plane;
++
++	ddb_size = INTEL_INFO(dev_priv)->ddb_size;
++	ddb_size -= 4; /* 4 blocks for bypass path allocation */
++	pipe_size = ddb_size / INTEL_INFO(dev_priv)->num_pipes;
++
++	memset(ddb, 0, sizeof(*ddb));
++	for_each_pipe(dev_priv, pipe) {
++		start = pipe * ddb_size / INTEL_INFO(dev_priv)->num_pipes;
++		end = start + pipe_size;
++		ddb->plane[pipe][PLANE_CURSOR].start = end - 8;
++		ddb->plane[pipe][PLANE_CURSOR].end = end;
++
++		plane_cnt = (INTEL_INFO(dev_priv)->num_sprites[pipe] + 1);
++		plane_size = (pipe_size - 8) / plane_cnt;
++
++		for_each_universal_plane(dev_priv, pipe, plane) {
++			ddb->plane[pipe][plane].start = start +
++				(plane * (pipe_size - 8) / plane_cnt);
++			ddb->plane[pipe][plane].end =
++				ddb->plane[pipe][plane].start + plane_size;
++		}
++	}
++}
++
+ /**
+  * intel_gvt_clean_device - clean a GVT device
+  * @gvt: intel gvt device
+@@ -293,6 +333,9 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
+ 	if (ret)
+ 		goto out_clean_thread;
+ 
++	intel_gvt_init_pipe_info(gvt);
++	intel_gvt_init_ddb(gvt);
++
+ 	ret = intel_gvt_hypervisor_host_init(&dev_priv->drm.pdev->dev, gvt,
+ 				&intel_gvt_ops);
+ 	if (ret) {
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 44b719e..af2a19c 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -243,6 +243,7 @@ struct intel_gvt_opregion {
+ };
+ 
+ #define NR_MAX_INTEL_VGPU_TYPES 20
++
+ struct intel_vgpu_type {
+ 	char name[16];
+ 	unsigned int avail_instance;
+@@ -253,6 +254,31 @@ struct intel_vgpu_type {
+ 	enum intel_vgpu_edid resolution;
+ };
+ 
++struct intel_dom0_plane_regs {
++	u32 plane_ctl;
++	u32 plane_stride;
++	u32 plane_pos;
++	u32 plane_size;
++	u32 plane_keyval;
++	u32 plane_keymsk;
++	u32 plane_keymax;
++	u32 plane_offset;
++	u32 plane_aux_dist;
++	u32 plane_aux_offset;
++	u32 plane_surf;
++	u32 plane_wm[8];
++	u32 plane_wm_trans;
++};
++
++struct intel_gvt_pipe_info {
++	enum pipe pipe_num;
++	int owner;
++	struct intel_gvt *gvt;
++	struct work_struct vblank_work;
++	struct intel_dom0_plane_regs dom0_regs[I915_MAX_PLANES - 1];
++	int plane_owner[I915_MAX_PLANES - 1];
++};
++
+ struct intel_gvt {
+ 	struct mutex lock;
+ 	struct drm_i915_private *dev_priv;
+@@ -276,6 +302,9 @@ struct intel_gvt {
+ 	struct task_struct *service_thread;
+ 	wait_queue_head_t service_thread_wq;
+ 	unsigned long service_request;
++	struct intel_gvt_pipe_info pipe_info[I915_MAX_PIPES];
++
++	struct skl_ddb_allocation ddb;
+ };
+ 
+ static inline struct intel_gvt *to_gvt(struct drm_i915_private *i915)
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+old mode 100755
+new mode 100644
+index 708a144..417508c
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -403,14 +403,18 @@ static int pipeconf_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+ 	u32 data;
++	struct drm_device *dev = &vgpu->gvt->dev_priv->drm;
++	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
+ 
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	data = vgpu_vreg(vgpu, offset);
+ 
+-	if (data & PIPECONF_ENABLE)
++	if (data & PIPECONF_ENABLE) {
+ 		vgpu_vreg(vgpu, offset) |= I965_PIPECONF_ACTIVE;
+-	else
++		dev->driver->enable_vblank(dev, pipe);
++	} else {
+ 		vgpu_vreg(vgpu, offset) &= ~I965_PIPECONF_ACTIVE;
++	}
+ 	intel_gvt_check_vblank_emulation(vgpu->gvt);
+ 	return 0;
+ }
+@@ -749,6 +753,7 @@ static int spr_surf_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
+ 	unsigned int plane = SKL_PLANE_REG_TO_PLANE(offset);
+ 	i915_reg_t reg_1ac = _MMIO(_REG_701AC(pipe, plane));
+@@ -757,6 +762,11 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	vgpu_vreg(vgpu, reg_1ac) = vgpu_vreg(vgpu, offset);
+ 
++	if ((vgpu_vreg(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
++			(vgpu->gvt->pipe_info[pipe].plane_owner[plane] == vgpu->id)) {
++		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++	}
++
+ 	set_bit(flip_event, vgpu->irq.flip_done_event[pipe]);
+ 	return 0;
+ }
+@@ -764,7 +774,15 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ static int skl_plane_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
++	unsigned int plane = SKL_PLANE_REG_TO_PLANE(offset);
++
+ 	write_vreg(vgpu, offset, p_data, bytes);
++	if ((vgpu_vreg(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
++			(vgpu->gvt->pipe_info[pipe].plane_owner[plane] == vgpu->id)) {
++		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++	}
+ 	return 0;
+ }
+ 
+@@ -3044,8 +3062,8 @@ static int init_bxt_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_PLANES_DH(_REG_701C0, D_BXT, NULL, skl_plane_mmio_write);
+ 	MMIO_PLANES_DH(_REG_701C4, D_BXT, NULL, skl_plane_mmio_write);
+ 
+-	MMIO_PLANES_SDH(_PLANE_WM_BASE, 4 * 8, D_BXT, NULL, NULL);
+-	MMIO_PLANES_DH(PLANE_WM_TRANS, D_BXT, NULL, NULL);
++	MMIO_PLANES_SDH(_PLANE_WM_BASE, 4 * 8, D_BXT, NULL, skl_plane_mmio_write);
++	MMIO_PLANES_DH(PLANE_WM_TRANS, D_BXT, NULL, skl_plane_mmio_write);
+ 	MMIO_PLANES_DH(PLANE_NV12_BUF_CFG, D_BXT, NULL, NULL);
+ 	MMIO_PLANES_DH(PLANE_BUF_CFG, D_BXT, NULL, NULL);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/interrupt.c b/drivers/gpu/drm/i915/gvt/interrupt.c
+index c40c803..9d0ab9e 100644
+--- a/drivers/gpu/drm/i915/gvt/interrupt.c
++++ b/drivers/gpu/drm/i915/gvt/interrupt.c
+@@ -595,8 +595,8 @@ static void gen8_init_irq(
+ 		SET_BIT_INFO(irq, 4, SPRITE_C_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_C);
+ 
+ 		SET_BIT_INFO(irq, 5, PLANE_3_A_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_A);
+-		SET_BIT_INFO(irq, 5, PLANE_3_A_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_B);
+-		SET_BIT_INFO(irq, 5, PLANE_3_A_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_C);
++		SET_BIT_INFO(irq, 5, PLANE_3_B_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_B);
++		SET_BIT_INFO(irq, 5, PLANE_3_C_FLIP_DONE, INTEL_GVT_IRQ_INFO_DE_PIPE_C);
+ 	}
+ 
+ 	/* GEN8 interrupt PCU events */
+@@ -656,7 +656,7 @@ static enum hrtimer_restart vblank_timer_fn(struct hrtimer *data)
+ 	irq = container_of(vblank_timer, struct intel_gvt_irq, vblank_timer);
+ 	gvt = container_of(irq, struct intel_gvt, irq);
+ 
+-	intel_gvt_request_service(gvt, INTEL_GVT_REQUEST_EMULATE_VBLANK);
++//	intel_gvt_request_service(gvt, INTEL_GVT_REQUEST_EMULATE_VBLANK);
+ 	hrtimer_add_expires_ns(&vblank_timer->timer, vblank_timer->period);
+ 	return HRTIMER_RESTART;
+ }
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 02c61a1..4d669e3 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -226,6 +226,8 @@ void intel_gvt_deactivate_vgpu(struct intel_vgpu *vgpu)
+ 
+ 	vgpu->active = false;
+ 
++	idr_remove(&gvt->vgpu_idr, vgpu->id);
++
+ 	if (atomic_read(&vgpu->running_workload_num)) {
+ 		mutex_unlock(&gvt->lock);
+ 		intel_gvt_wait_vgpu_idle(vgpu);
+@@ -384,6 +386,8 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
+ 	if (ret)
+ 		goto out_clean_shadow_ctx;
+ 
++	vgpu->active = true;
++
+ 	mutex_unlock(&gvt->lock);
+ 
+ 	return vgpu;
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index e4d4b6b..9cf7772 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -3549,11 +3549,18 @@ static int i915_ddb_info(struct seq_file *m, void *unused)
+ 			seq_printf(m, "  Plane%-8d%8u%8u%8u\n", plane + 1,
+ 				   entry->start, entry->end,
+ 				   skl_ddb_entry_size(entry));
++			entry = &ddb->y_plane[pipe][plane];
++			seq_printf(m, " YPlane%-8d%8u%8u%8u\n", plane + 1,
++				   entry->start, entry->end,
++				   skl_ddb_entry_size(entry));
+ 		}
+ 
+ 		entry = &ddb->plane[pipe][PLANE_CURSOR];
+ 		seq_printf(m, "  %-13s%8u%8u%8u\n", "Cursor", entry->start,
+ 			   entry->end, skl_ddb_entry_size(entry));
++		entry = &ddb->y_plane[pipe][PLANE_CURSOR];
++		seq_printf(m, " Y%-13s%8u%8u%8u\n", "Cursor", entry->start,
++			   entry->end, skl_ddb_entry_size(entry));
+ 	}
+ 
+ 	drm_modeset_unlock_all(dev);
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 506b445..9606d2e 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -37,6 +37,10 @@
+ #include "i915_trace.h"
+ #include "intel_drv.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ /**
+  * DOC: interrupt handling
+  *
+@@ -1708,6 +1712,17 @@ static void gen9_guc_irq_handler(struct drm_i915_private *dev_priv, u32 gt_iir)
+ 	}
+ }
+ 
++
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++static inline void gvt_notify_vblank(struct drm_i915_private *dev_priv,
++				     enum pipe pipe)
++{
++	if (dev_priv->gvt)
++		queue_work(system_unbound_wq,
++				&dev_priv->gvt->pipe_info[pipe].vblank_work);
++}
++#endif
++
+ static void valleyview_pipestat_irq_ack(struct drm_i915_private *dev_priv,
+ 					u32 iir, u32 pipe_stats[I915_MAX_PIPES])
+ {
+@@ -2495,8 +2510,12 @@ gen8_de_irq_handler(struct drm_i915_private *dev_priv, u32 master_ctl)
+ 		ret = IRQ_HANDLED;
+ 		I915_WRITE(GEN8_DE_PIPE_IIR(pipe), iir);
+ 
+-		if (iir & GEN8_PIPE_VBLANK)
++		if (iir & GEN8_PIPE_VBLANK) {
+ 			drm_handle_vblank(&dev_priv->drm, pipe);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++			gvt_notify_vblank(dev_priv, pipe);
++#endif
++		}
+ 
+ 		if (iir & GEN8_PIPE_CDCLK_CRC_DONE)
+ 			hsw_pipe_crc_irq_handler(dev_priv, pipe);
+@@ -2881,7 +2900,9 @@ static void gen8_disable_vblank(struct drm_device *dev, unsigned int pipe)
+ 	unsigned long irqflags;
+ 
+ 	spin_lock_irqsave(&dev_priv->irq_lock, irqflags);
+-	bdw_disable_pipe_irq(dev_priv, pipe, GEN8_PIPE_VBLANK);
++	/*since guest will see all the pipes, we don't want it disable vblank*/
++	if (!dev_priv->gvt)
++		bdw_disable_pipe_irq(dev_priv, pipe, GEN8_PIPE_VBLANK);
+ 	spin_unlock_irqrestore(&dev_priv->irq_lock, irqflags);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 944cb3c..01d21f2 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -49,6 +49,10 @@
+ #include <linux/dma_remapping.h>
+ #include <linux/reservation.h>
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ /* Primary plane formats for gen <= 3 */
+ static const uint32_t i8xx_primary_formats[] = {
+ 	DRM_FORMAT_C8,
+@@ -3559,6 +3563,9 @@ static void skylake_update_primary_plane(struct intel_plane *plane,
+ 	int dst_w = drm_rect_width(&plane_state->base.dst);
+ 	int dst_h = drm_rect_height(&plane_state->base.dst);
+ 	unsigned long irqflags;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++#endif
+ 
+ 	/* Sizes are 0 based */
+ 	src_w--;
+@@ -3580,6 +3587,30 @@ static void skylake_update_primary_plane(struct intel_plane *plane,
+ 			      PLANE_COLOR_PLANE_GAMMA_DISABLE);
+ 	}
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++		struct intel_dom0_plane_regs *dom0_regs =
++			&gvt->pipe_info[pipe].dom0_regs[plane_id];
++
++		dom0_regs->plane_ctl = plane_ctl;
++		dom0_regs->plane_offset = (src_y << 16) | src_x;
++		dom0_regs->plane_stride = stride;
++		dom0_regs->plane_size = (src_h << 16) | src_w;
++		dom0_regs->plane_aux_dist =
++			(plane_state->aux.offset - surf_addr) | aux_stride;
++		dom0_regs->plane_aux_offset =
++			 (plane_state->aux.y << 16) | plane_state->aux.x;
++		dom0_regs->plane_pos = (dst_y << 16) | dst_x;
++		dom0_regs->plane_surf = intel_plane_ggtt_offset(plane_state) +
++			surf_addr;
++		/* TODO: to support plane scaling in gvt*/
++		if (scaler_id >= 0)
++			DRM_ERROR("GVT not support plane scaling yet\n");
++		spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags);
++		return;
++	}
++#endif
++
+ 	I915_WRITE_FW(PLANE_CTL(pipe, plane_id), plane_ctl);
+ 	I915_WRITE_FW(PLANE_OFFSET(pipe, plane_id), (src_y << 16) | src_x);
+ 	I915_WRITE_FW(PLANE_STRIDE(pipe, plane_id), stride);
+@@ -3619,6 +3650,17 @@ static void skylake_disable_primary_plane(struct intel_plane *primary,
+ 	enum plane_id plane_id = primary->id;
+ 	enum pipe pipe = primary->pipe;
+ 	unsigned long irqflags;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++
++	if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++		struct intel_dom0_plane_regs *dom0_regs =
++			&gvt->pipe_info[pipe].dom0_regs[plane_id];
++		dom0_regs->plane_ctl = 0;
++		dom0_regs->plane_surf = 0;
++		return;
++	}
++#endif
+ 
+ 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 5eeb774..65726b8 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -428,7 +428,7 @@ uint32_t intel_dp_pack_aux(const uint8_t *src, int src_bytes)
+ 	return v;
+ }
+ 
+-static void intel_dp_unpack_aux(uint32_t src, uint8_t *dst, int dst_bytes)
++void intel_dp_unpack_aux(uint32_t src, uint8_t *dst, int dst_bytes)
+ {
+ 	int i;
+ 	if (dst_bytes > 4)
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 73b1b59..ddeb3dc 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -1515,6 +1515,7 @@ int intel_dp_rate_select(struct intel_dp *intel_dp, int rate);
+ void intel_dp_hot_plug(struct intel_encoder *intel_encoder);
+ void intel_power_sequencer_reset(struct drm_i915_private *dev_priv);
+ uint32_t intel_dp_pack_aux(const uint8_t *src, int src_bytes);
++void intel_dp_unpack_aux(uint32_t src, uint8_t *dst, int dst_bytes);
+ void intel_plane_destroy(struct drm_plane *plane);
+ void intel_edp_drrs_enable(struct intel_dp *intel_dp,
+ 			   struct intel_crtc_state *crtc_state);
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 87cccb5..126e57d 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -33,6 +33,10 @@
+ #include <linux/module.h>
+ #include <drm/drm_atomic_helper.h>
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ /**
+  * DOC: RC6
+  *
+@@ -4657,18 +4661,22 @@ static void skl_ddb_entry_write(struct drm_i915_private *dev_priv,
+ 		I915_WRITE(reg, 0);
+ }
+ 
+-static void skl_write_wm_level(struct drm_i915_private *dev_priv,
+-			       i915_reg_t reg,
+-			       const struct skl_wm_level *level)
++static inline uint32_t skl_calc_wm_level(const struct skl_wm_level *level)
+ {
+ 	uint32_t val = 0;
+-
+ 	if (level->plane_en) {
+ 		val |= PLANE_WM_EN;
+ 		val |= level->plane_res_b;
+ 		val |= level->plane_res_l << PLANE_WM_LINES_SHIFT;
+ 	}
++	return val;
++}
+ 
++static void skl_write_wm_level(struct drm_i915_private *dev_priv,
++			       i915_reg_t reg,
++			       const struct skl_wm_level *level)
++{
++	uint32_t val = skl_calc_wm_level(level);
+ 	I915_WRITE(reg, val);
+ }
+ 
+@@ -4682,13 +4690,41 @@ static void skl_write_plane_wm(struct intel_crtc *intel_crtc,
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
+ 	int level, max_level = ilk_wm_max_level(dev_priv);
+ 	enum pipe pipe = intel_crtc->pipe;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_plane_regs *dom0_regs = NULL;
++#endif
+ 
+ 	for (level = 0; level <= max_level; level++) {
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++		if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++			dom0_regs = &gvt->pipe_info[pipe].dom0_regs[plane_id];
++			dom0_regs->plane_wm[level] = skl_calc_wm_level(
++					&wm->wm[level]);
++		} else {
++			skl_write_wm_level(dev_priv,
++				PLANE_WM(pipe, plane_id, level),
++				&wm->wm[level]);
++		}
++#else
+ 		skl_write_wm_level(dev_priv, PLANE_WM(pipe, plane_id, level),
+-				   &wm->wm[level]);
++				&wm->wm[level]);
++#endif
++	}
++
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++		dom0_regs = &gvt->pipe_info[pipe].dom0_regs[plane_id];
++		dom0_regs->plane_wm_trans = skl_calc_wm_level(
++				&wm->trans_wm);
++	} else {
++		skl_write_wm_level(dev_priv, PLANE_WM_TRANS(pipe, plane_id),
++				&wm->trans_wm);
+ 	}
+-	skl_write_wm_level(dev_priv, PLANE_WM_TRANS(pipe, plane_id),
+-			   &wm->trans_wm);
++#else
++	skl_write_wm_level(dev_priv, PLANE_WM(pipe, plane_id, level),
++			&wm->trans_wm);
++#endif
+ 
+ 	skl_ddb_entry_write(dev_priv, PLANE_BUF_CFG(pipe, plane_id),
+ 			    &ddb->plane[pipe][plane_id]);
+@@ -4877,6 +4913,14 @@ skl_compute_ddb(struct drm_atomic_state *state)
+ 	 */
+ 	memcpy(ddb, &dev_priv->wm.skl_hw.ddb, sizeof(*ddb));
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	/* In GVT environemnt, we only use the statically allocated ddb */
++	if (dev_priv->gvt) {
++		memcpy(ddb, &dev_priv->gvt->ddb, sizeof(*ddb));
++		return 0;
++	}
++#endif
++
+ 	for_each_intel_crtc_mask(dev, intel_crtc, realloc_pipes) {
+ 		struct intel_crtc_state *cstate;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_sprite.c b/drivers/gpu/drm/i915/intel_sprite.c
+index 7e0cadf..2e88569 100644
+--- a/drivers/gpu/drm/i915/intel_sprite.c
++++ b/drivers/gpu/drm/i915/intel_sprite.c
+@@ -42,6 +42,10 @@
+ #include <drm/i915_drm.h>
+ #include "i915_drv.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ static bool
+ format_is_yuv(uint32_t format)
+ {
+@@ -250,6 +254,11 @@ skl_update_plane(struct intel_plane *plane,
+ 	uint32_t src_w = drm_rect_width(&plane_state->base.src) >> 16;
+ 	uint32_t src_h = drm_rect_height(&plane_state->base.src) >> 16;
+ 	unsigned long irqflags;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_plane_regs *dom0_regs =
++		&gvt->pipe_info[pipe].dom0_regs[plane_id];
++#endif
+ 
+ 	/* Sizes are 0 based */
+ 	src_w--;
+@@ -259,6 +268,32 @@ skl_update_plane(struct intel_plane *plane,
+ 
+ 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++		dom0_regs->plane_keyval =  key->min_value;
++		dom0_regs->plane_keymax =  key->max_value;
++		dom0_regs->plane_keymsk =  key->channel_mask;
++		dom0_regs->plane_offset =  (y << 16) | x;
++		dom0_regs->plane_stride = stride;
++		dom0_regs->plane_size = (src_h << 16) | src_w;
++		dom0_regs->plane_aux_dist =
++			(plane_state->aux.offset - surf_addr) | aux_stride;
++		dom0_regs->plane_aux_offset =
++			(plane_state->aux.y << 16) | plane_state->aux.x;
++		dom0_regs->plane_pos = (crtc_y << 16) | crtc_x;
++		dom0_regs->plane_ctl = plane_ctl;
++		dom0_regs->plane_surf =
++			intel_plane_ggtt_offset(plane_state) +
++			surf_addr;
++
++		if (plane_state->scaler_id >= 0)
++			DRM_ERROR("GVT not support plane scaling yet\n");
++
++		spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags);
++		return;
++	}
++#endif
++
+ 	if (IS_GEMINILAKE(dev_priv) || IS_CANNONLAKE(dev_priv)) {
+ 		I915_WRITE_FW(PLANE_COLOR_CTL(pipe, plane_id),
+ 			      PLANE_COLOR_PIPE_GAMMA_ENABLE |
+@@ -314,6 +349,17 @@ skl_disable_plane(struct intel_plane *plane, struct intel_crtc *crtc)
+ 	enum plane_id plane_id = plane->id;
+ 	enum pipe pipe = plane->pipe;
+ 	unsigned long irqflags;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++
++	if (gvt && gvt->pipe_info[pipe].plane_owner[plane_id]) {
++		struct intel_dom0_plane_regs *dom0_regs =
++			&gvt->pipe_info[pipe].dom0_regs[plane_id];
++		dom0_regs->plane_ctl = 0;
++		dom0_regs->plane_surf = 0;
++		return;
++	}
++#endif
+ 
+ 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 
+-- 
+2.7.4
+

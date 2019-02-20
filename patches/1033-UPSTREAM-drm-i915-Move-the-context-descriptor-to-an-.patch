@@ -1,0 +1,78 @@
+From e1e494a61ad908640fc77fab560bb1adbdc8070c Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 12 Sep 2017 22:49:05 +0100
+Subject: [PATCH 1033/2278] UPSTREAM: drm/i915: Move the context descriptor to
+ an inline helper
+
+The context descriptor is stored inside the per-engine context state, as
+we only need to compute it once and access it frequently. However,
+currently only intel_lrc.c has easy access, but i915_guc_submission.c
+would like to frequently read it as well, and more so only ever needs
+the lower 32bits. Make it an inline as the compiler should be able to
+retrieve the value in less instructions than it takes to do the function
+call:
+
+add/remove: 0/1 grow/shrink: 1/0 up/down: 8/-45 (-37)
+function                                     old     new   delta
+i915_guc_submit                              621     629      +8
+intel_lr_context_descriptor                   45       -     -45
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170912214905.21987-1-chris@chris-wilson.co.uk
+Reviewed-by: Oscar Mateo <oscar.mateo@intel.com>
+(cherry picked from commit a11523c54d6bd92b9b2b0bbd46f323dc9f390a44)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c |  6 ------
+ drivers/gpu/drm/i915/intel_lrc.h | 11 +++++++++--
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index bcd1938..a8f9c03 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -286,12 +286,6 @@ intel_lr_context_descriptor_update(struct i915_gem_context *ctx,
+ 	ce->lrc_desc = desc;
+ }
+ 
+-uint64_t intel_lr_context_descriptor(struct i915_gem_context *ctx,
+-				     struct intel_engine_cs *engine)
+-{
+-	return ctx->engine[engine->id].lrc_desc;
+-}
+-
+ static inline void
+ execlists_context_status_change(struct drm_i915_gem_request *rq,
+ 				unsigned long status)
+diff --git a/drivers/gpu/drm/i915/intel_lrc.h b/drivers/gpu/drm/i915/intel_lrc.h
+index 57ef583..3b1de32 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.h
++++ b/drivers/gpu/drm/i915/intel_lrc.h
+@@ -25,6 +25,7 @@
+ #define _INTEL_LRC_H_
+ 
+ #include "intel_ringbuffer.h"
++#include "i915_gem_context.h"
+ 
+ #define GEN8_LR_CONTEXT_ALIGN I915_GTT_MIN_ALIGNMENT
+ 
+@@ -78,8 +79,14 @@ struct drm_i915_private;
+ struct i915_gem_context;
+ 
+ void intel_lr_context_resume(struct drm_i915_private *dev_priv);
+-uint64_t intel_lr_context_descriptor(struct i915_gem_context *ctx,
+-				     struct intel_engine_cs *engine);
++
++static inline uint64_t
++intel_lr_context_descriptor(struct i915_gem_context *ctx,
++			    struct intel_engine_cs *engine)
++{
++	return ctx->engine[engine->id].lrc_desc;
++}
++
+ 
+ /* Execlists */
+ int intel_sanitize_enable_execlists(struct drm_i915_private *dev_priv,
+-- 
+2.7.4
+

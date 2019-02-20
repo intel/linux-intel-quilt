@@ -1,0 +1,83 @@
+From 1bba60ab8c1504c4e41f95ff066a715c9dc1f153 Mon Sep 17 00:00:00 2001
+From: Tony Luck <tony.luck@intel.com>
+Date: Mon, 25 Sep 2017 16:39:36 -0700
+Subject: [PATCH 2134/2278] x86/intel_rdt: Add diagnostics when writing the
+ cpus file
+
+Can't add a cpu to a monitor group unless it belongs to parent
+group. Can't delete cpus from the default group.
+
+Signed-off-by: Tony Luck <tony.luck@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Fenghua Yu <fenghua.yu@intel.com>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Cc: Vikas Shivappa <vikas.shivappa@intel.com>
+Cc: Boris Petkov <bp@suse.de>
+Cc: Reinette Chatre <reinette.chatre@intel.com>
+Link: https://lkml.kernel.org/r/757a869a25e9fc1b7a2e9bc43e1159455c1964a0.1506382469.git.tony.luck@intel.com
+
+(cherry picked from commit 94457b36e8a5026443707b48dcf54b204e098fd7)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index bb9b0c18..5a7844b 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -264,8 +264,10 @@ static int cpus_mon_write(struct rdtgroup *rdtgrp, cpumask_var_t newmask,
+ 
+ 	/* Check whether cpus belong to parent ctrl group */
+ 	cpumask_andnot(tmpmask, newmask, &prgrp->cpu_mask);
+-	if (cpumask_weight(tmpmask))
++	if (cpumask_weight(tmpmask)) {
++		rdt_last_cmd_puts("can only add CPUs to mongroup that belong to parent\n");
+ 		return -EINVAL;
++	}
+ 
+ 	/* Check whether cpus are dropped from this group */
+ 	cpumask_andnot(tmpmask, &rdtgrp->cpu_mask, newmask);
+@@ -317,8 +319,10 @@ static int cpus_ctrl_write(struct rdtgroup *rdtgrp, cpumask_var_t newmask,
+ 	cpumask_andnot(tmpmask, &rdtgrp->cpu_mask, newmask);
+ 	if (cpumask_weight(tmpmask)) {
+ 		/* Can't drop from default group */
+-		if (rdtgrp == &rdtgroup_default)
++		if (rdtgrp == &rdtgroup_default) {
++			rdt_last_cmd_puts("Can't drop CPUs from default group\n");
+ 			return -EINVAL;
++		}
+ 
+ 		/* Give any dropped cpus to rdtgroup_default */
+ 		cpumask_or(&rdtgroup_default.cpu_mask,
+@@ -383,8 +387,10 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
+ 	}
+ 
+ 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
++	rdt_last_cmd_clear();
+ 	if (!rdtgrp) {
+ 		ret = -ENOENT;
++		rdt_last_cmd_puts("directory was removed\n");
+ 		goto unlock;
+ 	}
+ 
+@@ -393,13 +399,16 @@ static ssize_t rdtgroup_cpus_write(struct kernfs_open_file *of,
+ 	else
+ 		ret = cpumask_parse(buf, newmask);
+ 
+-	if (ret)
++	if (ret) {
++		rdt_last_cmd_puts("bad cpu list/mask\n");
+ 		goto unlock;
++	}
+ 
+ 	/* check that user didn't specify any offline cpus */
+ 	cpumask_andnot(tmpmask, newmask, cpu_online_mask);
+ 	if (cpumask_weight(tmpmask)) {
+ 		ret = -EINVAL;
++		rdt_last_cmd_puts("can only assign online cpus\n");
+ 		goto unlock;
+ 	}
+ 
+-- 
+2.7.4
+

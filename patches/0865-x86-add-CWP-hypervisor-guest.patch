@@ -1,0 +1,196 @@
+From cb40721feef65f16759b94ded4060dcd78375f7e Mon Sep 17 00:00:00 2001
+From: Jason Chen CJ <jason.cj.chen@intel.com>
+Date: Tue, 26 Dec 2017 03:05:33 +0800
+Subject: [PATCH 0865/2278] x86: add CWP hypervisor guest
+
+add x86_hyper_cwp into supported hypervisors array, which enabling
+CWP services guest run on CWP hypervisor.
+
+Change-Id: Ib9e7d9a8e971d5f32290953b4916dea064de8638
+Signed-off-by: Jason Chen CJ <jason.cj.chen@intel.com>
+Signed-off-by: Jack Ren <jack.ren@intel.com>
+Reviewed-by: Chi, Mingqiang <mingqiang.chi@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ arch/x86/Kbuild                   |  2 ++
+ arch/x86/Kconfig                  |  2 ++
+ arch/x86/cwp/Kconfig              | 15 +++++++++
+ arch/x86/cwp/Makefile             |  2 ++
+ arch/x86/cwp/cwp.c                | 71 +++++++++++++++++++++++++++++++++++++++
+ arch/x86/include/asm/hypervisor.h |  1 +
+ arch/x86/kernel/cpu/hypervisor.c  |  4 +++
+ 7 files changed, 97 insertions(+)
+ create mode 100644 arch/x86/cwp/Kconfig
+ create mode 100644 arch/x86/cwp/Makefile
+ create mode 100644 arch/x86/cwp/cwp.c
+
+diff --git a/arch/x86/Kbuild b/arch/x86/Kbuild
+index 0038a2d..fd9c227 100644
+--- a/arch/x86/Kbuild
++++ b/arch/x86/Kbuild
+@@ -7,6 +7,8 @@ obj-$(CONFIG_KVM) += kvm/
+ # Xen paravirtualization support
+ obj-$(CONFIG_XEN) += xen/
+ 
++obj-$(CONFIG_CWP) += cwp/
++
+ # Hyper-V paravirtualization support
+ obj-$(subst m,y,$(CONFIG_HYPERV)) += hyperv/
+ 
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 616ed8a2..1f2209b 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -774,6 +774,8 @@ config QUEUED_LOCK_STAT
+ 	  behavior of paravirtualized queued spinlocks and report
+ 	  them on debugfs.
+ 
++source "arch/x86/cwp/Kconfig"
++
+ source "arch/x86/xen/Kconfig"
+ 
+ config KVM_GUEST
+diff --git a/arch/x86/cwp/Kconfig b/arch/x86/cwp/Kconfig
+new file mode 100644
+index 0000000..0aaab97
+--- /dev/null
++++ b/arch/x86/cwp/Kconfig
+@@ -0,0 +1,15 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# This Kconfig describes CWP options
++#
++
++config CWP
++	bool "Enable services run on CWP hypervisor"
++	depends on X86
++	depends on PARAVIRT
++	depends on DMA_CMA
++	depends on !INTEL_IOMMU
++	depends on !VMAP_STACK
++	help
++	  This option is needed if were to run CWP services linux on top of
++	  CWP hypervisor.
+diff --git a/arch/x86/cwp/Makefile b/arch/x86/cwp/Makefile
+new file mode 100644
+index 0000000..cd62b47
+--- /dev/null
++++ b/arch/x86/cwp/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_CWP)	+= cwp.o
+diff --git a/arch/x86/cwp/cwp.c b/arch/x86/cwp/cwp.c
+new file mode 100644
+index 0000000..8083cf6
+--- /dev/null
++++ b/arch/x86/cwp/cwp.c
+@@ -0,0 +1,71 @@
++/*
++ * CWP hypervisor support
++ *
++ * Copyright (C) 2017 Intel Corporation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ *   * Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in
++ *     the documentation and/or other materials provided with the
++ *     distribution.
++ *   * Neither the name of Intel Corporation nor the names of its
++ *     contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * Jason Chen CJ <jason.cj.chen@intel.com>
++ *
++ */
++#include <asm/hypervisor.h>
++
++static uint32_t __init cwp_detect(void)
++{
++	return hypervisor_cpuid_base("CWPCWPCWP\0\0", 0);
++}
++
++static void __init cwp_init_platform(void)
++{
++}
++
++static void cwp_pin_vcpu(int cpu)
++{
++	/* do nothing here now */
++}
++
++static bool cwp_x2apic_available(void)
++{
++	/* do not support x2apic */
++	return false;
++}
++
++static void __init cwp_init_mem_mapping(void)
++{
++	/* do nothing here now */
++}
++
++const struct hypervisor_x86 x86_hyper_cwp = {
++	.name                   = "CWP",
++	.detect                 = cwp_detect,
++	.type                 	= X86_HYPER_CWP,
++	.init.init_platform     = cwp_init_platform,
++	.runtime.pin_vcpu       = cwp_pin_vcpu,
++	.init.x2apic_available  = cwp_x2apic_available,
++	.init.init_mem_mapping	= cwp_init_mem_mapping,
++};
++EXPORT_SYMBOL(x86_hyper_cwp);
+diff --git a/arch/x86/include/asm/hypervisor.h b/arch/x86/include/asm/hypervisor.h
+index 96aa6b9..f1665a3 100644
+--- a/arch/x86/include/asm/hypervisor.h
++++ b/arch/x86/include/asm/hypervisor.h
+@@ -28,6 +28,7 @@ enum x86_hypervisor_type {
+ 	X86_HYPER_XEN_PV,
+ 	X86_HYPER_XEN_HVM,
+ 	X86_HYPER_KVM,
++	X86_HYPER_CWP,
+ };
+ 
+ #ifdef CONFIG_HYPERVISOR_GUEST
+diff --git a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
+index bea8d3e..fc46ce7 100644
+--- a/arch/x86/kernel/cpu/hypervisor.c
++++ b/arch/x86/kernel/cpu/hypervisor.c
+@@ -31,6 +31,7 @@ extern const struct hypervisor_x86 x86_hyper_ms_hyperv;
+ extern const struct hypervisor_x86 x86_hyper_xen_pv;
+ extern const struct hypervisor_x86 x86_hyper_xen_hvm;
+ extern const struct hypervisor_x86 x86_hyper_kvm;
++extern const struct hypervisor_x86 x86_hyper_cwp;
+ 
+ static const __initconst struct hypervisor_x86 * const hypervisors[] =
+ {
+@@ -45,6 +46,9 @@ static const __initconst struct hypervisor_x86 * const hypervisors[] =
+ #ifdef CONFIG_KVM_GUEST
+ 	&x86_hyper_kvm,
+ #endif
++#ifdef CONFIG_CWP
++	&x86_hyper_cwp,
++#endif
+ };
+ 
+ enum x86_hypervisor_type x86_hyper_type;
+-- 
+2.7.4
+

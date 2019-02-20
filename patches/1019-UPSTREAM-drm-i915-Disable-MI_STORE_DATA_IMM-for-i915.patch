@@ -1,0 +1,121 @@
+From 60b6b797824e12179f9ee895abebace6102b79ad Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 6 Sep 2017 16:28:59 +0100
+Subject: [PATCH 1019/2278] UPSTREAM: drm/i915: Disable MI_STORE_DATA_IMM for
+ i915g/i915gm
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The early gen3 machines (i915g/Grantsdale and i915gm/Alviso) share a lot
+of characteristics in their MI/GTT blocks with gen2, and in particular
+can only use physical addresses in MI_STORE_DATA_IMM. This makes it
+incompatible with our usage, so include those two machines in the
+blacklist to prevent usage.
+
+v2: Make it easy for gcc and rewrite it as a switch to save some space.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com> #v1
+Link: https://patchwork.freedesktop.org/patch/msgid/20170906152859.5304-1-chris@chris-wilson.co.uk
+(cherry picked from commit 1135ca4a166eba0d4c6046c21a58b889af5aeb40)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h            |  7 -------
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c |  7 ++++---
+ drivers/gpu/drm/i915/intel_engine_cs.c     | 15 +++++++++++++++
+ drivers/gpu/drm/i915/intel_ringbuffer.h    | 12 +-----------
+ 4 files changed, 20 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 4649ea9..52a02b7 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -4350,11 +4350,4 @@ int remap_io_mapping(struct vm_area_struct *vma,
+ 		     unsigned long addr, unsigned long pfn, unsigned long size,
+ 		     struct io_mapping *iomap);
+ 
+-static inline bool
+-intel_engine_can_store_dword(struct intel_engine_cs *engine)
+-{
+-	return __intel_engine_can_store_dword(INTEL_GEN(engine->i915),
+-					      engine->class);
+-}
+-
+ #endif
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index d3b005b..2c47509 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -1174,6 +1174,9 @@ static u32 *reloc_gpu(struct i915_execbuffer *eb,
+ 		if (eb_use_cmdparser(eb))
+ 			return ERR_PTR(-EWOULDBLOCK);
+ 
++		if (!intel_engine_can_store_dword(eb->engine))
++			return ERR_PTR(-ENODEV);
++
+ 		err = __reloc_gpu_alloc(eb, vma, len);
+ 		if (unlikely(err))
+ 			return ERR_PTR(err);
+@@ -1198,9 +1201,7 @@ relocate_entry(struct i915_vma *vma,
+ 
+ 	if (!eb->reloc_cache.vaddr &&
+ 	    (DBG_FORCE_RELOC == FORCE_GPU_RELOC ||
+-	     !reservation_object_test_signaled_rcu(vma->resv, true)) &&
+-	    __intel_engine_can_store_dword(eb->reloc_cache.gen,
+-					   eb->engine->class)) {
++	     !reservation_object_test_signaled_rcu(vma->resv, true))) {
+ 		const unsigned int gen = eb->reloc_cache.gen;
+ 		unsigned int len;
+ 		u32 *batch;
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index b42ea02..3b7aaba 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -1390,6 +1390,21 @@ void intel_engines_mark_idle(struct drm_i915_private *i915)
+ 	}
+ }
+ 
++bool intel_engine_can_store_dword(struct intel_engine_cs *engine)
++{
++	switch (INTEL_GEN(engine->i915)) {
++	case 2:
++		return false; /* uses physical not virtual addresses */
++	case 3:
++		/* maybe only uses physical not virtual addresses */
++		return !(IS_I915G(engine->i915) || IS_I915GM(engine->i915));
++	case 6:
++		return engine->class != VIDEO_DECODE_CLASS; /* b0rked */
++	default:
++		return true;
++	}
++}
++
+ #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)
+ #include "selftests/mock_engine.c"
+ #endif
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 6de0a57..6119b5b 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -741,16 +741,6 @@ bool intel_engines_are_idle(struct drm_i915_private *dev_priv);
+ void intel_engines_mark_idle(struct drm_i915_private *i915);
+ void intel_engines_reset_default_submission(struct drm_i915_private *i915);
+ 
+-static inline bool
+-__intel_engine_can_store_dword(unsigned int gen, unsigned int class)
+-{
+-	if (gen <= 2)
+-		return false; /* uses physical not virtual addresses */
+-
+-	if (gen == 6 && class == VIDEO_DECODE_CLASS)
+-		return false; /* b0rked */
+-
+-	return true;
+-}
++bool intel_engine_can_store_dword(struct intel_engine_cs *engine);
+ 
+ #endif /* _INTEL_RINGBUFFER_H_ */
+-- 
+2.7.4
+

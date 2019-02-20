@@ -1,0 +1,95 @@
+From 2abb989c74a1691607f116cc03ce1060a4e0181d Mon Sep 17 00:00:00 2001
+From: Pei Zhang <pei.zhang@intel.com>
+Date: Sat, 10 Jun 2017 00:43:42 +0800
+Subject: [PATCH 0918/2278] drm/i915/gvt: get ready of memory for pvmmio
+
+To enable pvmmio feature, we need to prepare to regions memory: the mmio
+memory whose size is 2M for Gen8/9, and the 4K shared page. GVT creates
+them for every vGPU instance, guest i915 driver will map them to virtual
+address.
+
+Change-Id: Ifcbd0e55783e19125e98036622cd5d08624d34fa
+Signed-off-by: Pei Zhang <pei.zhang@intel.com>
+Acknowledged-by: Singh, Satyeshwar <satyeshwar.singh@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gvt.c  |  2 ++
+ drivers/gpu/drm/i915/gvt/gvt.h  |  2 ++
+ drivers/gpu/drm/i915/gvt/mmio.c | 18 ++++++++++++------
+ 3 files changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index b128fe0..616d450 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -114,6 +114,8 @@ static void init_device_info(struct intel_gvt *gvt)
+ 		info->max_support_vgpus = 8;
+ 		info->cfg_space_size = 256;
+ 		info->mmio_size = 2 * 1024 * 1024;
++		/* order of mmio size. assert(2^order == mmio_size) */
++		info->mmio_size_order = 9;
+ 		info->mmio_bar = 0;
+ 		info->gtt_start_offset = 8 * 1024 * 1024;
+ 		info->gtt_entry_size = 8;
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 8691d71..a49dae3 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -67,6 +67,7 @@ struct intel_gvt_device_info {
+ 	u32 max_support_vgpus;
+ 	u32 cfg_space_size;
+ 	u32 mmio_size;
++	u32 mmio_size_order;
+ 	u32 mmio_bar;
+ 	unsigned long msi_cap_offset;
+ 	u32 gtt_start_offset;
+@@ -96,6 +97,7 @@ struct intel_vgpu_fence {
+ struct intel_vgpu_mmio {
+ 	void *vreg;
+ 	void *sreg;
++	struct gvt_shared_page *shared_page;
+ 	bool disable_warn_untrack;
+ };
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/mmio.c b/drivers/gpu/drm/i915/gvt/mmio.c
+index 0374414..3dd0d4e8 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio.c
++++ b/drivers/gpu/drm/i915/gvt/mmio.c
+@@ -337,12 +337,14 @@ int intel_vgpu_init_mmio(struct intel_vgpu *vgpu)
+ {
+ 	const struct intel_gvt_device_info *info = &vgpu->gvt->device_info;
+ 
+-	vgpu->mmio.vreg = vzalloc(info->mmio_size * 2);
+-	if (!vgpu->mmio.vreg)
++	vgpu->mmio.sreg = vzalloc(info->mmio_size);
++	vgpu->mmio.vreg = (void *)__get_free_pages(GFP_KERNEL,
++			info->mmio_size_order);
++	vgpu->mmio.shared_page = (struct gvt_shared_page *) __get_free_pages(
++			GFP_KERNEL, 0);
++	if (!vgpu->mmio.vreg || !vgpu->mmio.sreg || !vgpu->mmio.shared_page)
+ 		return -ENOMEM;
+ 
+-	vgpu->mmio.sreg = vgpu->mmio.vreg + info->mmio_size;
+-
+ 	intel_vgpu_reset_mmio(vgpu, true);
+ 
+ 	return 0;
+@@ -355,6 +357,10 @@ int intel_vgpu_init_mmio(struct intel_vgpu *vgpu)
+  */
+ void intel_vgpu_clean_mmio(struct intel_vgpu *vgpu)
+ {
+-	vfree(vgpu->mmio.vreg);
+-	vgpu->mmio.vreg = vgpu->mmio.sreg = NULL;
++	const struct intel_gvt_device_info *info = &vgpu->gvt->device_info;
++
++	vfree(vgpu->mmio.sreg);
++	free_pages((unsigned long) vgpu->mmio.vreg, info->mmio_size_order);
++	free_pages((unsigned long) vgpu->mmio.shared_page, 0);
++	vgpu->mmio.vreg = vgpu->mmio.sreg = vgpu->mmio.shared_page = NULL;
+ }
+-- 
+2.7.4
+

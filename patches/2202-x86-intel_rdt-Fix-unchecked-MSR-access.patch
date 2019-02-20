@@ -1,0 +1,69 @@
+From 0a84a3925d3e181d222f5aa371e8b2123bf3fa6f Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Sat, 15 Sep 2018 14:58:23 -0700
+Subject: [PATCH 2202/2278] x86/intel_rdt: Fix unchecked MSR access
+
+When a new resource group is created, it is initialized with sane
+defaults that currently assume the resource being initialized is a CAT
+resource. This code path is also followed by a MBA resource that is not
+allocated the same as a CAT resource and as a result we encounter the
+following unchecked MSR access error:
+
+unchecked MSR access error: WRMSR to 0xd51 (tried to write 0x0000
+000000000064) at rIP: 0xffffffffae059994 (native_write_msr+0x4/0x20)
+Call Trace:
+mba_wrmsr+0x41/0x80
+update_domains+0x125/0x130
+rdtgroup_mkdir+0x270/0x500
+
+Fix the above by ensuring the initial allocation is only attempted on a
+CAT resource.
+
+Fixes: 95f0b77ef ("x86/intel_rdt: Initialize new resource group with sane defaults")
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: "H Peter Anvin" <hpa@zytor.com>
+Cc: "Tony Luck" <tony.luck@intel.com>
+Cc: "Xiaochen Shen" <xiaochen.shen@intel.com>
+Cc: "Chen Yu" <yu.c.chen@intel.com>
+Link: https://lkml.kernel.org/r/1537048707-76280-6-git-send-email-fenghua.yu@intel.com
+
+(cherry picked from commit 70479c012b67b89e219c40eddc5dc338b7c447a3)
+---
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index b5dbb55..a28ab61 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -2347,6 +2347,12 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 	u32 *ctrl;
+ 
+ 	for_each_alloc_enabled_rdt_resource(r) {
++		/*
++		 * Only initialize default allocations for CBM cache
++		 * resources
++		 */
++		if (r->rid == RDT_RESOURCE_MBA)
++			continue;
+ 		list_for_each_entry(d, &r->domains, list) {
+ 			d->have_new_ctrl = false;
+ 			d->new_ctrl = r->cache.shareable_bits;
+@@ -2384,6 +2390,12 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 	}
+ 
+ 	for_each_alloc_enabled_rdt_resource(r) {
++		/*
++		 * Only initialize default allocations for CBM cache
++		 * resources
++		 */
++		if (r->rid == RDT_RESOURCE_MBA)
++			continue;
+ 		ret = update_domains(r, rdtgrp->closid);
+ 		if (ret < 0) {
+ 			rdt_last_cmd_puts("failed to initialize allocations\n");
+-- 
+2.7.4
+

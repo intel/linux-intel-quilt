@@ -1,0 +1,195 @@
+From 6fb39b937e927e517f6a395164d8c89c420b6e2b Mon Sep 17 00:00:00 2001
+From: Ping Gao <ping.a.gao@intel.com>
+Date: Thu, 31 Aug 2017 10:45:05 +0800
+Subject: [PATCH 0937/2278] drm/i915/gvt: Introduce non-context MMIO check
+ routines
+
+Guest conformance check can be implemented by verifying whether the
+non-context MMIOs have the same values with host snapshot.
+
+This patch introduced some routines, snapshot the host registers values
+and compare when with corresponding vregs by walking the non-context
+MMIO list.
+
+Change-Id: Ie5d143ee0db45f386af223e64afa8daffa843de1
+Signed-off-by: Ping Gao <ping.a.gao@intel.com>
+Reviewed-by: Kevin Tian <kevin.tian@intel.com>
+Reviewed-by: Singh, Satyeshwar <satyeshwar.singh@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Jiang, Fei <fei.jiang@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gvt.h      |   2 +
+ drivers/gpu/drm/i915/gvt/handlers.c |   9 +++
+ drivers/gpu/drm/i915/gvt/render.c   | 107 ++++++++++++++++++++++++++++++++----
+ 3 files changed, 107 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 49c889f7..da61464 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -233,6 +233,8 @@ struct intel_gvt_mmio {
+ 	struct gvt_mmio_block *mmio_block;
+ 	unsigned int num_mmio_block;
+ 
++	void *mmio_host_cache;
++	bool host_cache_initialized;
+ 	DECLARE_HASHTABLE(mmio_info_table, INTEL_GVT_MMIO_HASH_BITS);
+ 	unsigned int num_tracked_mmio;
+ };
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index f7f08b6..7945a59 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -3284,6 +3284,9 @@ void intel_gvt_clean_mmio_info(struct intel_gvt *gvt)
+ 
+ 	vfree(gvt->mmio.mmio_attribute);
+ 	gvt->mmio.mmio_attribute = NULL;
++
++	vfree(gvt->mmio.mmio_host_cache);
++	gvt->mmio.mmio_host_cache = NULL;
+ }
+ 
+ /* Special MMIO blocks. */
+@@ -3318,6 +3321,12 @@ int intel_gvt_setup_mmio_info(struct intel_gvt *gvt)
+ 	if (!gvt->mmio.mmio_attribute)
+ 		return -ENOMEM;
+ 
++	gvt->mmio.mmio_host_cache = vzalloc(info->mmio_size);
++	if (!gvt->mmio.mmio_host_cache) {
++		vfree(gvt->mmio.mmio_attribute);
++		return -ENOMEM;
++	}
++
+ 	ret = init_generic_mmio_info(gvt);
+ 	if (ret)
+ 		goto err;
+diff --git a/drivers/gpu/drm/i915/gvt/render.c b/drivers/gpu/drm/i915/gvt/render.c
+index 30372af..ab01402 100644
+--- a/drivers/gpu/drm/i915/gvt/render.c
++++ b/drivers/gpu/drm/i915/gvt/render.c
+@@ -143,20 +143,9 @@ static struct render_mmio gen9_render_mmio_list[] __cacheline_aligned = {
+ 
+ void intel_gvt_mark_noncontext_mmios(struct intel_gvt *gvt)
+ {
+-	uint32_t reg;
+ 	struct render_mmio *mmio;
+ 	int i, array_size;
+ 
+-	for (i = 0; i < 64 * 5; i++) {
+-		reg = GEN9_GFX_MOCS(i).reg;
+-		intel_gvt_mmio_set_non_context(gvt, reg);
+-	}
+-
+-	for (i = 0; i < 32; i++) {
+-		reg = GEN9_LNCFCMOCS(i).reg;
+-		intel_gvt_mmio_set_non_context(gvt, reg);
+-	}
+-
+ 	if (IS_SKYLAKE(gvt->dev_priv)
+ 		|| IS_BROXTON(gvt->dev_priv)) {
+ 		mmio = gen9_render_mmio_list;
+@@ -438,3 +427,99 @@ void intel_gvt_switch_mmio(struct intel_vgpu *pre,
+ 
+ 	intel_uncore_forcewake_put(dev_priv, FORCEWAKE_ALL);
+ }
++
++#define gvt_host_reg(gvt, reg) 	\
++	(*(u32 *)(gvt->mmio.mmio_host_cache + reg))	\
++
++#define MMIO_COMPARE(vgpu, reg, mask) ({			\
++	int ret;						\
++	u32 value = vgpu_vreg(vgpu, reg);			\
++	u32 host_value = gvt_host_reg(vgpu->gvt, reg);		\
++								\
++	if (mask) {						\
++		value &= mask;					\
++		host_value &= mask;				\
++	}							\
++	if (host_value == value) {				\
++		ret = 0;					\
++	} else {						\
++		gvt_err("vgpu%d unconformance mmio 0x%x:0x%x,0x%x\n",	\
++			vgpu->id, reg,				\
++			vgpu_vreg(vgpu, reg),			\
++			gvt_host_reg(vgpu->gvt, reg));		\
++		ret = -EINVAL;					\
++	}							\
++	ret;							\
++	})
++
++static int noncontext_mmio_compare(struct intel_vgpu *vgpu, int ring_id)
++{
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	struct render_mmio *mmio, *mmio_list;
++	int i, array_size;
++
++	if (IS_SKYLAKE(dev_priv) || IS_BROXTON(dev_priv)) {
++		mmio_list = gen9_render_mmio_list;
++		array_size = ARRAY_SIZE(gen9_render_mmio_list);
++	} else {
++		mmio_list = gen8_render_mmio_list;
++		array_size = ARRAY_SIZE(gen8_render_mmio_list);
++	}
++
++	for (i = 0, mmio = mmio_list; i < array_size; i++, mmio++) {
++		if (mmio->ring_id != ring_id || mmio->in_context)
++			continue;
++
++		if (MMIO_COMPARE(vgpu, mmio->reg.reg, mmio->mask))
++			return -EINVAL;
++	}
++
++	return 0;
++}
++
++static void get_host_mmio_snapshot(struct intel_gvt *gvt)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct render_mmio *mmio, *mmio_list;
++	int i, array_size;
++
++	if (IS_SKYLAKE(dev_priv) || IS_BROXTON(dev_priv)) {
++		mmio_list = gen9_render_mmio_list;
++		array_size = ARRAY_SIZE(gen9_render_mmio_list);
++	} else {
++		mmio_list = gen8_render_mmio_list;
++		array_size = ARRAY_SIZE(gen8_render_mmio_list);
++	}
++
++	if (!gvt->mmio.host_cache_initialized) {
++		/* Snapshot all the non-context MMIOs */
++		for (i = 0, mmio = mmio_list; i < array_size; i++, mmio++) {
++
++			if (mmio->in_context)
++				continue;
++
++			gvt_host_reg(gvt, mmio->reg.reg) =
++						I915_READ_FW(mmio->reg);
++			if (mmio->mask)
++				gvt_host_reg(gvt, mmio->reg.reg) &= mmio->mask;
++		}
++
++		gvt->mmio.host_cache_initialized = true;
++	}
++}
++
++int intel_gvt_vgpu_conformance_check(struct intel_vgpu *vgpu, int ring_id)
++{
++
++	int ret;
++
++	get_host_mmio_snapshot(vgpu->gvt);
++
++	ret = noncontext_mmio_compare(vgpu, ring_id);
++	if (ret)
++		goto err;
++
++	return 0;
++err:
++	return ret;
++}
+-- 
+2.7.4
+

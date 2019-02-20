@@ -1,0 +1,96 @@
+From 523d4cbb2f6c48e0ebef63736a046aa4c06adc2a Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:08 -0700
+Subject: [PATCH 2169/2278] x86/intel_rdt: Introduce the Cache Pseudo-Locking
+ modes
+
+The two modes used to manage Cache Pseudo-Locked regions are introduced.  A
+resource group is assigned "pseudo-locksetup" mode when the user indicates
+that this resource group will be used for a Cache Pseudo-Locked
+region. When the Cache Pseudo-Locked region has been set up successfully
+after the user wrote the requested schemata to the "schemata" file, then
+the mode will automatically changed to "pseudo-locked".  The user is not
+able to modify the mode to "pseudo-locked" by writing "pseudo-locked" to
+the "mode" file directly.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/98d6ca129bbe7dd0932d1fcfeb3cbb65f29a8d9d.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit bb9fec69cb41380428d6b8dab3a303189a9b480a)
+---
+ arch/x86/kernel/cpu/intel_rdt.h          | 10 ++++++++++
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c | 13 +++++++++++--
+ 2 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index ed20e91..7b872f2 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -84,15 +84,25 @@ enum rdt_group_type {
+  * enum rdtgrp_mode - Mode of a RDT resource group
+  * @RDT_MODE_SHAREABLE: This resource group allows sharing of its allocations
+  * @RDT_MODE_EXCLUSIVE: No sharing of this resource group's allocations allowed
++ * @RDT_MODE_PSEUDO_LOCKSETUP: Resource group will be used for Pseudo-Locking
++ * @RDT_MODE_PSEUDO_LOCKED: No sharing of this resource group's allocations
++ *                          allowed AND the allocations are Cache Pseudo-Locked
+  *
+  * The mode of a resource group enables control over the allowed overlap
+  * between allocations associated with different resource groups (classes
+  * of service). User is able to modify the mode of a resource group by
+  * writing to the "mode" resctrl file associated with the resource group.
++ *
++ * The "shareable", "exclusive", and "pseudo-locksetup" modes are set by
++ * writing the appropriate text to the "mode" file. A resource group enters
++ * "pseudo-locked" mode after the schemata is written while the resource
++ * group is in "pseudo-locksetup" mode.
+  */
+ enum rdtgrp_mode {
+ 	RDT_MODE_SHAREABLE = 0,
+ 	RDT_MODE_EXCLUSIVE,
++	RDT_MODE_PSEUDO_LOCKSETUP,
++	RDT_MODE_PSEUDO_LOCKED,
+ 
+ 	/* Must be last */
+ 	RDT_NUM_MODES,
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index cde0f41..fef92b9 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -161,8 +161,10 @@ enum rdtgrp_mode rdtgroup_mode_by_closid(int closid)
+ }
+ 
+ static const char * const rdt_mode_str[] = {
+-	[RDT_MODE_SHAREABLE]	= "shareable",
+-	[RDT_MODE_EXCLUSIVE]	= "exclusive",
++	[RDT_MODE_SHAREABLE]		= "shareable",
++	[RDT_MODE_EXCLUSIVE]		= "exclusive",
++	[RDT_MODE_PSEUDO_LOCKSETUP]	= "pseudo-locksetup",
++	[RDT_MODE_PSEUDO_LOCKED]	= "pseudo-locked",
+ };
+ 
+ /**
+@@ -759,6 +761,13 @@ static int rdt_bit_usage_show(struct kernfs_open_file *of,
+ 			case RDT_MODE_EXCLUSIVE:
+ 				exclusive |= *ctrl;
+ 				break;
++			/*
++			 * Temporarily handle pseudo-locking enums
++			 * to silence compile warnings until handling
++			 * added in later patches.
++			 */
++			case RDT_MODE_PSEUDO_LOCKSETUP:
++			case RDT_MODE_PSEUDO_LOCKED:
+ 			case RDT_NUM_MODES:
+ 				WARN(1,
+ 				     "invalid mode for closid %d\n", i);
+-- 
+2.7.4
+

@@ -1,0 +1,167 @@
+From 712d6d1f7b1c8f9e661637f3d723ccdba93102d3 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Fri, 22 Jun 2018 15:42:22 -0700
+Subject: [PATCH 2183/2278] x86/intel_rdt: Support creation/removal of
+ pseudo-locked region
+
+The user triggers the creation of a pseudo-locked region when writing a
+valid schemata to the schemata file of a resource group in the
+pseudo-locksetup mode.
+
+A valid schemata is one that: (1) does not overlap with any other resource
+group, (2) does not involve a cache that already contains a pseudo-locked
+region within its hierarchy.
+
+After a valid schemata is parsed the system is programmed to associate the
+to be pseudo-lock bitmask with the closid associated with the resource
+group. With the system set up the pseudo-locked region can be created.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/8929c3a9e2ba600e79649abe584aa28b8d0ff639.1529706536.git.reinette.chatre@intel.com
+
+(cherry picked from commit e0bdfe8e36f3fbbdc91e70bf927f743ca23917b0)
+---
+ arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c | 42 +++++++++++++++++++++++++++++
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c    | 25 +++++++++++++----
+ 2 files changed, 62 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+index 1ed2732..6f4c000 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
++++ b/arch/x86/kernel/cpu/intel_rdt_ctrlmondata.c
+@@ -143,9 +143,26 @@ int parse_cbm(void *_data, struct rdt_resource *r, struct rdt_domain *d)
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * Cannot set up more than one pseudo-locked region in a cache
++	 * hierarchy.
++	 */
++	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP &&
++	    rdtgroup_pseudo_locked_in_hierarchy(d)) {
++		rdt_last_cmd_printf("pseudo-locked region in hierarchy\n");
++		return -EINVAL;
++	}
++
+ 	if (!cbm_validate(data->buf, &cbm_val, r))
+ 		return -EINVAL;
+ 
++	if ((rdtgrp->mode == RDT_MODE_EXCLUSIVE ||
++	     rdtgrp->mode == RDT_MODE_SHAREABLE) &&
++	    rdtgroup_cbm_overlaps_pseudo_locked(d, cbm_val)) {
++		rdt_last_cmd_printf("CBM overlaps with pseudo-locked region\n");
++		return -EINVAL;
++	}
++
+ 	/*
+ 	 * The CBM may not overlap with the CBM of another closid if
+ 	 * either is exclusive.
+@@ -199,6 +216,21 @@ static int parse_line(char *line, struct rdt_resource *r,
+ 			data.rdtgrp = rdtgrp;
+ 			if (r->parse_ctrlval(&data, r, d))
+ 				return -EINVAL;
++			if (rdtgrp->mode ==  RDT_MODE_PSEUDO_LOCKSETUP) {
++				/*
++				 * In pseudo-locking setup mode and just
++				 * parsed a valid CBM that should be
++				 * pseudo-locked. Only one locked region per
++				 * resource group and domain so just do
++				 * the required initialization for single
++				 * region and return.
++				 */
++				rdtgrp->plr->r = r;
++				rdtgrp->plr->d = d;
++				rdtgrp->plr->cbm = d->new_ctrl;
++				d->plr = rdtgrp->plr;
++				return 0;
++			}
+ 			goto next;
+ 		}
+ 	}
+@@ -322,6 +354,16 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+ 			goto out;
+ 	}
+ 
++	if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP) {
++		/*
++		 * If pseudo-locking fails we keep the resource group in
++		 * mode RDT_MODE_PSEUDO_LOCKSETUP with its class of service
++		 * active and updated for just the domain the pseudo-locked
++		 * region was requested for.
++		 */
++		ret = rdtgroup_pseudo_lock_create(rdtgrp);
++	}
++
+ out:
+ 	rdtgroup_kn_unlock(of->kn);
+ 	return ret ?: nbytes;
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index 526cd4a..d3fb7bd8c 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -1771,6 +1771,9 @@ void rdtgroup_kn_unlock(struct kernfs_node *kn)
+ 
+ 	if (atomic_dec_and_test(&rdtgrp->waitcount) &&
+ 	    (rdtgrp->flags & RDT_DELETED)) {
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
++		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
++			rdtgroup_pseudo_lock_remove(rdtgrp);
+ 		kernfs_unbreak_active_protection(kn);
+ 		kernfs_put(rdtgrp->kn);
+ 		kfree(rdtgrp);
+@@ -2002,6 +2005,10 @@ static void rmdir_all_sub(void)
+ 		if (rdtgrp == &rdtgroup_default)
+ 			continue;
+ 
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
++		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
++			rdtgroup_pseudo_lock_remove(rdtgrp);
++
+ 		/*
+ 		 * Give any CPUs back to the default group. We cannot copy
+ 		 * cpu_online_mask because a CPU might have executed the
+@@ -2313,6 +2320,8 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 						d->new_ctrl |= *ctrl;
+ 				}
+ 			}
++			if (d->plr && d->plr->cbm > 0)
++				used_b |= d->plr->cbm;
+ 			unused_b = used_b ^ (BIT_MASK(r->cache.cbm_len) - 1);
+ 			unused_b &= BIT_MASK(r->cache.cbm_len) - 1;
+ 			d->new_ctrl |= unused_b;
+@@ -2696,13 +2705,19 @@ static int rdtgroup_rmdir(struct kernfs_node *kn)
+ 	 * If the rdtgroup is a mon group and parent directory
+ 	 * is a valid "mon_groups" directory, remove the mon group.
+ 	 */
+-	if (rdtgrp->type == RDTCTRL_GROUP && parent_kn == rdtgroup_default.kn)
+-		ret = rdtgroup_rmdir_ctrl(kn, rdtgrp, tmpmask);
+-	else if (rdtgrp->type == RDTMON_GROUP &&
+-		 is_mon_groups(parent_kn, kn->name))
++	if (rdtgrp->type == RDTCTRL_GROUP && parent_kn == rdtgroup_default.kn) {
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKSETUP ||
++		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED) {
++			ret = rdtgroup_ctrl_remove(kn, rdtgrp);
++		} else {
++			ret = rdtgroup_rmdir_ctrl(kn, rdtgrp, tmpmask);
++		}
++	} else if (rdtgrp->type == RDTMON_GROUP &&
++		 is_mon_groups(parent_kn, kn->name)) {
+ 		ret = rdtgroup_rmdir_mon(kn, rdtgrp, tmpmask);
+-	else
++	} else {
+ 		ret = -EPERM;
++	}
+ 
+ out:
+ 	rdtgroup_kn_unlock(kn);
+-- 
+2.7.4
+

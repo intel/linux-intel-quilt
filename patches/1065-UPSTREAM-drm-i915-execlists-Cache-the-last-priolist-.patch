@@ -1,0 +1,70 @@
+From 1451dced596c66fdc5d4834b2ed25405d154f706 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Micha=C5=82=20Winiarski?= <michal.winiarski@intel.com>
+Date: Thu, 28 Sep 2017 20:39:01 +0100
+Subject: [PATCH 1065/2278] UPSTREAM: drm/i915/execlists: Cache the last
+ priolist lookup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Avoid the repeated rbtree lookup for each request as we unwind them by
+tracking the last priolist.
+
+v2: Fix up my unhelpful suggestion of using default_priolist.
+
+Signed-off-by: Michał Winiarski <michal.winiarski@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170928193910.17988-4-chris@chris-wilson.co.uk
+(cherry picked from commit 0d906bc6f569c760291954a582458b4e30c0cc15)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/intel_lrc.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 131e613..eced563 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -358,25 +358,31 @@ static void unwind_wa_tail(struct drm_i915_gem_request *rq)
+ static void unwind_incomplete_requests(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_gem_request *rq, *rn;
++	struct i915_priolist *uninitialized_var(p);
++	int last_prio = I915_PRIORITY_INVALID;
+ 
+ 	lockdep_assert_held(&engine->timeline->lock);
+ 
+ 	list_for_each_entry_safe_reverse(rq, rn,
+ 					 &engine->timeline->requests,
+ 					 link) {
+-		struct i915_priolist *p;
+-
+ 		if (i915_gem_request_completed(rq))
+ 			return;
+ 
+ 		__i915_gem_request_unsubmit(rq);
+ 		unwind_wa_tail(rq);
+ 
+-		p = lookup_priolist(engine,
+-				    &rq->priotree,
+-				    rq->priotree.priority);
+-		list_add(&rq->priotree.link,
+-			 &ptr_mask_bits(p, 1)->requests);
++		GEM_BUG_ON(rq->priotree.priority == I915_PRIORITY_INVALID);
++		if (rq->priotree.priority != last_prio) {
++			p = lookup_priolist(engine,
++					    &rq->priotree,
++					    rq->priotree.priority);
++			p = ptr_mask_bits(p, 1);
++
++			last_prio = rq->priotree.priority;
++		}
++
++		list_add(&rq->priotree.link, &p->requests);
+ 	}
+ }
+ 
+-- 
+2.7.4
+

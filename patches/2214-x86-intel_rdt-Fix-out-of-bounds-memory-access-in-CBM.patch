@@ -1,0 +1,218 @@
+From 513d6928a36fb4e29fd609754d7a09ddaa72972b Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Thu, 4 Oct 2018 14:05:23 -0700
+Subject: [PATCH 2214/2278] x86/intel_rdt: Fix out-of-bounds memory access in
+ CBM tests
+
+While the DOC at the beginning of lib/bitmap.c explicitly states that
+"The number of valid bits in a given bitmap does _not_ need to be an
+exact multiple of BITS_PER_LONG." some of the bitmap operations do
+indeed access BITS_PER_LONG portions of the provided bitmap no matter
+the size of the provided bitmap. For example, if bitmap_intersects()
+is provided with an 8 bit bitmap the operation will access
+BITS_PER_LONG bits from the provided bitmap. While the operation
+ensures that these extra bits do not affect the result the memory
+is still accessed.
+
+The capacity bitmasks (CBMs) are typically stored in u32 since they
+can never exceed 32 bits. A few instances exist where a bitmap_*
+operation is performed on a CBM by simply pointing the bitmap operation
+to the stored u32 value.
+
+The consequency of this pattern is that some bitmap_* operations will
+access out-of-bounds memory when interacting with the provided CBM. This
+is confirmed with a KASAN test that reports:
+
+ BUG: KASAN: stack-out-of-bounds in __bitmap_intersects+0xa2/0x100
+
+and
+
+ BUG: KASAN: stack-out-of-bounds in __bitmap_weight+0x58/0x90
+
+Fix this by moving any CBM provided to a bitmap operation needing
+BITS_PER_LONG to an unsigned long variable.
+
+[ tglx: Changed related function arguments to unsigned long and got rid
+  	of the _cbm extra step ]
+
+Fixes: 72d505056604 ("x86/intel_rdt: Add utilities to test pseudo-locked region possibility")
+Fixes: 49f7b4efa110 ("x86/intel_rdt: Enable setting of exclusive mode")
+Fixes: d9b48c86eb38 ("x86/intel_rdt: Display resource groups' allocations' size in bytes")
+Fixes: 95f0b77efa57 ("x86/intel_rdt: Initialize new resource group with sane defaults")
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/69a428613a53f10e80594679ac726246020ff94f.1538686926.git.reinette.chatre@intel.com
+
+(cherry picked from commit e8bd1803aec89dfce5758d88022963fe3248bc4c)
+---
+ arch/x86/kernel/cpu/intel_rdt.h             |  6 ++---
+ arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c | 20 ++++++++--------
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c    | 36 ++++++++++++++++++-----------
+ 3 files changed, 37 insertions(+), 25 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt.h b/arch/x86/kernel/cpu/intel_rdt.h
+index 285eb3e..3736f6d 100644
+--- a/arch/x86/kernel/cpu/intel_rdt.h
++++ b/arch/x86/kernel/cpu/intel_rdt.h
+@@ -529,14 +529,14 @@ ssize_t rdtgroup_schemata_write(struct kernfs_open_file *of,
+ int rdtgroup_schemata_show(struct kernfs_open_file *of,
+ 			   struct seq_file *s, void *v);
+ bool rdtgroup_cbm_overlaps(struct rdt_resource *r, struct rdt_domain *d,
+-			   u32 _cbm, int closid, bool exclusive);
++			   unsigned long cbm, int closid, bool exclusive);
+ unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r, struct rdt_domain *d,
+-				  u32 cbm);
++				  unsigned long cbm);
+ enum rdtgrp_mode rdtgroup_mode_by_closid(int closid);
+ int rdtgroup_tasks_assigned(struct rdtgroup *r);
+ int rdtgroup_locksetup_enter(struct rdtgroup *rdtgrp);
+ int rdtgroup_locksetup_exit(struct rdtgroup *rdtgrp);
+-bool rdtgroup_cbm_overlaps_pseudo_locked(struct rdt_domain *d, u32 _cbm);
++bool rdtgroup_cbm_overlaps_pseudo_locked(struct rdt_domain *d, unsigned long cbm);
+ bool rdtgroup_pseudo_locked_in_hierarchy(struct rdt_domain *d);
+ int rdt_pseudo_lock_init(void);
+ void rdt_pseudo_lock_release(void);
+diff --git a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+index 3bb0b2c..7b358d9 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
++++ b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+@@ -789,25 +789,27 @@ int rdtgroup_locksetup_exit(struct rdtgroup *rdtgrp)
+ /**
+  * rdtgroup_cbm_overlaps_pseudo_locked - Test if CBM or portion is pseudo-locked
+  * @d: RDT domain
+- * @_cbm: CBM to test
++ * @cbm: CBM to test
+  *
+- * @d represents a cache instance and @_cbm a capacity bitmask that is
+- * considered for it. Determine if @_cbm overlaps with any existing
++ * @d represents a cache instance and @cbm a capacity bitmask that is
++ * considered for it. Determine if @cbm overlaps with any existing
+  * pseudo-locked region on @d.
+  *
+- * Return: true if @_cbm overlaps with pseudo-locked region on @d, false
++ * @cbm is unsigned long, even if only 32 bits are used to make the
++ * bitmap functions work correctly.
++ *
++ * Return: true if @cbm overlaps with pseudo-locked region on @d, false
+  * otherwise.
+  */
+-bool rdtgroup_cbm_overlaps_pseudo_locked(struct rdt_domain *d, u32 _cbm)
++bool rdtgroup_cbm_overlaps_pseudo_locked(struct rdt_domain *d, unsigned long cbm)
+ {
+-	unsigned long *cbm = (unsigned long *)&_cbm;
+-	unsigned long *cbm_b;
+ 	unsigned int cbm_len;
++	unsigned long cbm_b;
+ 
+ 	if (d->plr) {
+ 		cbm_len = d->plr->r->cache.cbm_len;
+-		cbm_b = (unsigned long *)&d->plr->cbm;
+-		if (bitmap_intersects(cbm, cbm_b, cbm_len))
++		cbm_b = d->plr->cbm;
++		if (bitmap_intersects(&cbm, &cbm_b, cbm_len))
+ 			return true;
+ 	}
+ 	return false;
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index f4783af..a425a8f 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -974,33 +974,34 @@ static int rdtgroup_mode_show(struct kernfs_open_file *of,
+  * is false then overlaps with any resource group or hardware entities
+  * will be considered.
+  *
++ * @cbm is unsigned long, even if only 32 bits are used to make the
++ * bitmap functions work correctly.
++ *
+  * Return: false if CBM does not overlap, true if it does.
+  */
+ bool rdtgroup_cbm_overlaps(struct rdt_resource *r, struct rdt_domain *d,
+-			   u32 _cbm, int closid, bool exclusive)
++			   unsigned long cbm, int closid, bool exclusive)
+ {
+-	unsigned long *cbm = (unsigned long *)&_cbm;
+-	unsigned long *ctrl_b;
+ 	enum rdtgrp_mode mode;
++	unsigned long ctrl_b;
+ 	u32 *ctrl;
+ 	int i;
+ 
+ 	/* Check for any overlap with regions used by hardware directly */
+ 	if (!exclusive) {
+-		if (bitmap_intersects(cbm,
+-				      (unsigned long *)&r->cache.shareable_bits,
+-				      r->cache.cbm_len))
++		ctrl_b = r->cache.shareable_bits;
++		if (bitmap_intersects(&cbm, &ctrl_b, r->cache.cbm_len))
+ 			return true;
+ 	}
+ 
+ 	/* Check for overlap with other resource groups */
+ 	ctrl = d->ctrl_val;
+ 	for (i = 0; i < closids_supported(); i++, ctrl++) {
+-		ctrl_b = (unsigned long *)ctrl;
++		ctrl_b = *ctrl;
+ 		mode = rdtgroup_mode_by_closid(i);
+ 		if (closid_allocated(i) && i != closid &&
+ 		    mode != RDT_MODE_PSEUDO_LOCKSETUP) {
+-			if (bitmap_intersects(cbm, ctrl_b, r->cache.cbm_len)) {
++			if (bitmap_intersects(&cbm, &ctrl_b, r->cache.cbm_len)) {
+ 				if (exclusive) {
+ 					if (mode == RDT_MODE_EXCLUSIVE)
+ 						return true;
+@@ -1137,15 +1138,18 @@ static ssize_t rdtgroup_mode_write(struct kernfs_open_file *of,
+  * computed by first dividing the total cache size by the CBM length to
+  * determine how many bytes each bit in the bitmask represents. The result
+  * is multiplied with the number of bits set in the bitmask.
++ *
++ * @cbm is unsigned long, even if only 32 bits are used to make the
++ * bitmap functions work correctly.
+  */
+ unsigned int rdtgroup_cbm_to_size(struct rdt_resource *r,
+-				  struct rdt_domain *d, u32 cbm)
++				  struct rdt_domain *d, unsigned long cbm)
+ {
+ 	struct cpu_cacheinfo *ci;
+ 	unsigned int size = 0;
+ 	int num_b, i;
+ 
+-	num_b = bitmap_weight((unsigned long *)&cbm, r->cache.cbm_len);
++	num_b = bitmap_weight(&cbm, r->cache.cbm_len);
+ 	ci = get_cpu_cacheinfo(cpumask_any(&d->cpu_mask));
+ 	for (i = 0; i < ci->num_leaves; i++) {
+ 		if (ci->info_list[i].level == r->cache_level) {
+@@ -2351,6 +2355,7 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 	u32 used_b = 0, unused_b = 0;
+ 	u32 closid = rdtgrp->closid;
+ 	struct rdt_resource *r;
++	unsigned long tmp_cbm;
+ 	enum rdtgrp_mode mode;
+ 	struct rdt_domain *d;
+ 	int i, ret;
+@@ -2388,9 +2393,14 @@ static int rdtgroup_init_alloc(struct rdtgroup *rdtgrp)
+ 			 * modify the CBM based on system availability.
+ 			 */
+ 			cbm_ensure_valid(&d->new_ctrl, r);
+-			if (bitmap_weight((unsigned long *) &d->new_ctrl,
+-					  r->cache.cbm_len) <
+-					r->cache.min_cbm_bits) {
++			/*
++			 * Assign the u32 CBM to an unsigned long to ensure
++			 * that bitmap_weight() does not access out-of-bound
++			 * memory.
++			 */
++			tmp_cbm = d->new_ctrl;
++			if (bitmap_weight(&tmp_cbm, r->cache.cbm_len) <
++			    r->cache.min_cbm_bits) {
+ 				rdt_last_cmd_printf("no space on %s:%d\n",
+ 						    r->name, d->id);
+ 				return -ENOSPC;
+-- 
+2.7.4
+

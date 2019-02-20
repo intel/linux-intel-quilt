@@ -1,0 +1,100 @@
+From b0baa87210121439f6fa5c6ad0bdd8f4ff4e8f1f Mon Sep 17 00:00:00 2001
+From: Zhou Furong <furong.zhou@intel.com>
+Date: Fri, 13 Oct 2017 12:49:15 +0800
+Subject: [PATCH 0568/2278] Fix kernel_read call param
+
+Linux v4.14-rc1 update kernel_read system call moving 2nd param
+offset to 4th and moving it in/out. All of feature call the function
+need update accordingly. for more information, please refer to:
+bdd1d2d3d251c65b74ac4493e08db18971c09240
+
+Change-Id: I20fa64213c25f9589bb77222ecd99afde019670f
+---
+ drivers/net/wireless/bcmdhd/dhd_linux.c | 8 +++++---
+ drivers/net/wireless/bcmdhd/dhd_pcie.c  | 3 ++-
+ drivers/net/wireless/bcmdhd/linux_osl.c | 2 +-
+ 3 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/wireless/bcmdhd/dhd_linux.c b/drivers/net/wireless/bcmdhd/dhd_linux.c
+index 5b91865..6b36d24 100644
+--- a/drivers/net/wireless/bcmdhd/dhd_linux.c
++++ b/drivers/net/wireless/bcmdhd/dhd_linux.c
+@@ -10121,7 +10121,7 @@ dhd_os_get_image_block(char *buf, int len, void *image)
+ 		return 0;
+ 
+ 	size = i_size_read(file_inode(fp));
+-	rdlen = kernel_read(fp, fp->f_pos, buf, MIN(len, size));
++	rdlen = kernel_read(fp, buf, MIN(len, size), &fp->f_pos);
+ 
+ 	if (len >= size && size != rdlen) {
+ 		return -EIO;
+@@ -12782,6 +12782,7 @@ void dhd_get_memdump_info(dhd_pub_t *dhd)
+ 	uint32 mem_val = DUMP_MEMFILE_MAX;
+ 	int ret = 0;
+ 	char *filepath = MEMDUMPINFO;
++	loff_t pos=0;
+ 
+ 	/* Read memdump info from the file */
+ 	fp = filp_open(filepath, O_RDONLY, 0);
+@@ -12789,7 +12790,7 @@ void dhd_get_memdump_info(dhd_pub_t *dhd)
+ 		DHD_ERROR(("%s: File [%s] doesn't exist\n", __FUNCTION__, filepath));
+ 		goto done;
+ 	} else {
+-		ret = kernel_read(fp, 0, (char *)&mem_val, 4);
++		ret = kernel_read(fp, (char *)&mem_val, 4, &pos);
+ 		if (ret < 0) {
+ 			DHD_ERROR(("%s: File read error, ret=%d\n", __FUNCTION__, ret));
+ 			filp_close(fp, NULL);
+@@ -12984,6 +12985,7 @@ void dhd_get_assert_info(dhd_pub_t *dhd)
+ {
+ 	struct file *fp = NULL;
+ 	char *filepath = ASSERTINFO;
++	loff_t pos=0;
+ 
+ 	/*
+ 	 * Read assert info from the file
+@@ -12997,7 +12999,7 @@ void dhd_get_assert_info(dhd_pub_t *dhd)
+ 		DHD_ERROR(("%s: File [%s] doesn't exist\n", __FUNCTION__, filepath));
+ 	} else {
+ 		int mem_val = 0;
+-		int ret = kernel_read(fp, 0, (char *)&mem_val, 4);
++		int ret = kernel_read(fp, (char *)&mem_val, 4, &pos);
+ 		if (ret < 0) {
+ 			DHD_ERROR(("%s: File read error, ret=%d\n", __FUNCTION__, ret));
+ 		} else {
+diff --git a/drivers/net/wireless/bcmdhd/dhd_pcie.c b/drivers/net/wireless/bcmdhd/dhd_pcie.c
+index 7577b8e..7438d58 100644
+--- a/drivers/net/wireless/bcmdhd/dhd_pcie.c
++++ b/drivers/net/wireless/bcmdhd/dhd_pcie.c
+@@ -1068,13 +1068,14 @@ dhd_get_memcheck_info(void)
+ 	uint32 mem_val = 0;
+ 	int ret = 0;
+ 	char *filepath = MEMCHECKINFO;
++	loff_t pos=0;
+ 
+ 	fp = filp_open(filepath, O_RDONLY, 0);
+ 	if (IS_ERR(fp)) {
+ 		DHD_ERROR(("[WIFI_SEC] %s: File [%s] doesn't exist\n", __FUNCTION__, filepath));
+ 		goto done;
+ 	} else {
+-		ret = kernel_read(fp, 0, (char *)&mem_val, 4);
++		ret = kernel_read(fp, (char *)&mem_val, 4, &pos);
+ 		if (ret < 0) {
+ 			DHD_ERROR(("[WIFI_SEC] %s: File read error, ret=%d\n", __FUNCTION__, ret));
+ 			filp_close(fp, NULL);
+diff --git a/drivers/net/wireless/bcmdhd/linux_osl.c b/drivers/net/wireless/bcmdhd/linux_osl.c
+index 74b65777..f2abdb4 100644
+--- a/drivers/net/wireless/bcmdhd/linux_osl.c
++++ b/drivers/net/wireless/bcmdhd/linux_osl.c
+@@ -2046,7 +2046,7 @@ osl_os_get_image_block(char *buf, int len, void *image)
+ 	if (!image)
+ 		return 0;
+ 
+-	rdlen = kernel_read(fp, fp->f_pos, buf, len);
++	rdlen = kernel_read(fp, buf, len, &fp->f_pos);
+ 	if (rdlen > 0)
+ 		fp->f_pos += rdlen;
+ 
+-- 
+2.7.4
+

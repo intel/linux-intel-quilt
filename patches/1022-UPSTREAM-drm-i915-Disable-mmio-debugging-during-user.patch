@@ -1,0 +1,182 @@
+From ea4d3fbf9860a7698c10baef972b89cd916e5a7a Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 7 Sep 2017 14:44:41 +0100
+Subject: [PATCH 1022/2278] UPSTREAM: drm/i915: Disable mmio debugging during
+ user access
+
+If the user bypasses i915 and accesses mmio directly, that easily
+confuses our automatic mmio debugging (any error we then detect is
+likely to be as a result of the user). Since we expect userspace to open
+debugfs/i915_forcewake_user if i915.ko is loaded and they want mmio
+access, that makes the opportune time to disable our debugging for
+duration of the bypass.
+
+v2: Move the fiddling of uncore internals to uncore.c
+
+Hand-edit additions.
+
+References: https://bugs.freedesktop.org/show_bug.cgi?id=102543
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20170907134441.12881-1-chris@chris-wilson.co.uk
+(cherry picked from commit ad4dba88b71aa9653060fd1b7641844e5e47d4f4)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c | 19 ++++++++------
+ drivers/gpu/drm/i915/intel_uncore.c | 51 +++++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_uncore.h | 13 ++++++++++
+ 3 files changed, 75 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 12565ba..c30650c 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -1422,6 +1422,9 @@ static int i915_forcewake_domains(struct seq_file *m, void *data)
+ 	struct intel_uncore_forcewake_domain *fw_domain;
+ 	unsigned int tmp;
+ 
++	seq_printf(m, "user.bypass_count = %u\n",
++		   i915->uncore.user_forcewake.count);
++
+ 	for_each_fw_domain(fw_domain, i915, tmp)
+ 		seq_printf(m, "%s.wake_count = %u\n",
+ 			   intel_uncore_forcewake_domain_to_str(fw_domain->id),
+@@ -4740,26 +4743,26 @@ static int i915_sseu_status(struct seq_file *m, void *unused)
+ 
+ static int i915_forcewake_open(struct inode *inode, struct file *file)
+ {
+-	struct drm_i915_private *dev_priv = inode->i_private;
++	struct drm_i915_private *i915 = inode->i_private;
+ 
+-	if (INTEL_GEN(dev_priv) < 6)
++	if (INTEL_GEN(i915) < 6)
+ 		return 0;
+ 
+-	intel_runtime_pm_get(dev_priv);
+-	intel_uncore_forcewake_get(dev_priv, FORCEWAKE_ALL);
++	intel_runtime_pm_get(i915);
++	intel_uncore_forcewake_user_get(i915);
+ 
+ 	return 0;
+ }
+ 
+ static int i915_forcewake_release(struct inode *inode, struct file *file)
+ {
+-	struct drm_i915_private *dev_priv = inode->i_private;
++	struct drm_i915_private *i915 = inode->i_private;
+ 
+-	if (INTEL_GEN(dev_priv) < 6)
++	if (INTEL_GEN(i915) < 6)
+ 		return 0;
+ 
+-	intel_uncore_forcewake_put(dev_priv, FORCEWAKE_ALL);
+-	intel_runtime_pm_put(dev_priv);
++	intel_uncore_forcewake_user_put(i915);
++	intel_runtime_pm_put(i915);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_uncore.c b/drivers/gpu/drm/i915/intel_uncore.c
+index d2f3e12..b051e11 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -496,6 +496,57 @@ void intel_uncore_forcewake_get(struct drm_i915_private *dev_priv,
+ }
+ 
+ /**
++ * intel_uncore_forcewake_user_get - claim forcewake on behalf of userspace
++ * @dev_priv: i915 device instance
++ *
++ * This function is a wrapper around intel_uncore_forcewake_get() to acquire
++ * the GT powerwell and in the process disable our debugging for the
++ * duration of userspace's bypass.
++ */
++void intel_uncore_forcewake_user_get(struct drm_i915_private *dev_priv)
++{
++	spin_lock_irq(&dev_priv->uncore.lock);
++	if (!dev_priv->uncore.user_forcewake.count++) {
++		intel_uncore_forcewake_get__locked(dev_priv, FORCEWAKE_ALL);
++
++		/* Save and disable mmio debugging for the user bypass */
++		dev_priv->uncore.user_forcewake.saved_mmio_check =
++			dev_priv->uncore.unclaimed_mmio_check;
++		dev_priv->uncore.user_forcewake.saved_mmio_debug =
++			i915.mmio_debug;
++
++		dev_priv->uncore.unclaimed_mmio_check = 0;
++		i915.mmio_debug = 0;
++	}
++	spin_unlock_irq(&dev_priv->uncore.lock);
++}
++
++/**
++ * intel_uncore_forcewake_user_put - release forcewake on behalf of userspace
++ * @dev_priv: i915 device instance
++ *
++ * This function complements intel_uncore_forcewake_user_get() and releases
++ * the GT powerwell taken on behalf of the userspace bypass.
++ */
++void intel_uncore_forcewake_user_put(struct drm_i915_private *dev_priv)
++{
++	spin_lock_irq(&dev_priv->uncore.lock);
++	if (!--dev_priv->uncore.user_forcewake.count) {
++		if (intel_uncore_unclaimed_mmio(dev_priv))
++			dev_info(dev_priv->drm.dev,
++				 "Invalid mmio detected during user access\n");
++
++		dev_priv->uncore.unclaimed_mmio_check =
++			dev_priv->uncore.user_forcewake.saved_mmio_check;
++		i915.mmio_debug =
++			dev_priv->uncore.user_forcewake.saved_mmio_debug;
++
++		intel_uncore_forcewake_put__locked(dev_priv, FORCEWAKE_ALL);
++	}
++	spin_unlock_irq(&dev_priv->uncore.lock);
++}
++
++/**
+  * intel_uncore_forcewake_get__locked - grab forcewake domain references
+  * @dev_priv: i915 device instance
+  * @fw_domains: forcewake domains to get reference on
+diff --git a/drivers/gpu/drm/i915/intel_uncore.h b/drivers/gpu/drm/i915/intel_uncore.h
+index 8ca98dc..8ed41ed 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.h
++++ b/drivers/gpu/drm/i915/intel_uncore.h
+@@ -102,6 +102,13 @@ struct intel_uncore {
+ 		i915_reg_t reg_ack;
+ 	} fw_domain[FW_DOMAIN_ID_COUNT];
+ 
++	struct {
++		unsigned int count;
++
++		int saved_mmio_check;
++		int saved_mmio_debug;
++	} user_forcewake;
++
+ 	int unclaimed_mmio_check;
+ };
+ 
+@@ -144,6 +151,11 @@ void intel_uncore_forcewake_get__locked(struct drm_i915_private *dev_priv,
+ 					enum forcewake_domains domains);
+ void intel_uncore_forcewake_put__locked(struct drm_i915_private *dev_priv,
+ 					enum forcewake_domains domains);
++
++void intel_uncore_forcewake_user_get(struct drm_i915_private *dev_priv);
++void intel_uncore_forcewake_user_put(struct drm_i915_private *dev_priv);
++
++
+ int __intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 			      i915_reg_t reg,
+ 			      u32 mask,
+@@ -151,6 +163,7 @@ int __intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 			      unsigned int fast_timeout_us,
+ 			      unsigned int slow_timeout_ms,
+ 			      u32 *out_value);
++
+ static inline
+ int intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 			    i915_reg_t reg,
+-- 
+2.7.4
+

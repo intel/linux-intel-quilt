@@ -1,0 +1,182 @@
+From 7c5cd9b08079380d6696b80f2155d4c3b1ebe58d Mon Sep 17 00:00:00 2001
+From: Sean Paul <seanpaul@chromium.org>
+Date: Mon, 8 Jan 2018 14:55:36 -0500
+Subject: [PATCH 0975/2278] UPSTREAM: drm/i915: Add more control to wait_for
+ routines
+
+This patch adds a little more control to a couple wait_for routines such
+that we can avoid open-coding read/wait/timeout patterns which:
+ - need the value of the register after the wait_for
+ - run arbitrary operation for the read portion
+
+This patch also chooses the correct sleep function (based on
+timers-howto.txt) for the polling interval the caller specifies.
+
+Changes in v2:
+- Added to the series
+Changes in v3:
+- Rebased on drm-intel-next-queued and the new Wmin/max _wait_for
+- Removed msleep option
+Changes in v4:
+- Removed ; for OP in _wait_for (Chris)
+- Moved reg_value definition above ret (Chris)
+Changes in v4:
+- checkpatch whitespace fix
+Changes in v5:
+- None
+Changes in v6:
+- None
+
+Suggested-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Sean Paul <seanpaul@chromium.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20180108195545.218615-3-seanpaul@chromium.org
+(cherry picked from commit 5f0ad452056cf9a9fbf309ce4a4ef6a337cf55d3)
+
+Change-Id: I44024180b4eaef7e214ca5c9aee130ea936ac9e4
+---
+ drivers/gpu/drm/i915/intel_drv.h    | 17 ++++++++++-------
+ drivers/gpu/drm/i915/intel_uncore.c | 23 ++++++++++++++++-------
+ drivers/gpu/drm/i915/intel_uncore.h | 15 +++++++++++++--
+ 3 files changed, 39 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 3eb1115..43bcac8 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -41,20 +41,21 @@
+ #include <drm/drm_atomic.h>
+ 
+ /**
+- * _wait_for - magic (register) wait macro
++ * __wait_for - magic wait macro
+  *
+- * Does the right thing for modeset paths when run under kdgb or similar atomic
+- * contexts. Note that it's important that we check the condition again after
+- * having timed out, since the timeout could be due to preemption or similar and
+- * we've never had a chance to check the condition before the timeout.
++ * Macro to help avoid open coding check/wait/timeout patterns. Note that it's
++ * important that we check the condition again after having timed out, since the
++ * timeout could be due to preemption or similar and we've never had a chance to
++ * check the condition before the timeout.
+  */
+-#define _wait_for(COND, US, Wmin, Wmax) ({ \
++#define __wait_for(OP, COND, US, Wmin, Wmax) ({ \
+ 	unsigned long timeout__ = jiffies + usecs_to_jiffies(US) + 1;	\
+ 	long wait__ = (Wmin); /* recommended min for usleep is 10 us */	\
+ 	int ret__;							\
+ 	might_sleep();							\
+ 	for (;;) {							\
+ 		bool expired__ = time_after(jiffies, timeout__);	\
++		OP;							\
+ 		if (COND) {						\
+ 			ret__ = 0;					\
+ 			break;						\
+@@ -70,7 +71,9 @@
+ 	ret__;								\
+ })
+ 
+-#define wait_for(COND, MS)	_wait_for((COND), (MS) * 1000, 10, 1000)
++#define _wait_for(COND, US, Wmin, Wmax)	__wait_for(, (COND), (US), (Wmin), \
++						   (Wmax))
++#define wait_for(COND, MS)		_wait_for((COND), (MS) * 1000, 10, 1000)
+ 
+ /* If CONFIG_PREEMPT_COUNT is disabled, in_atomic() always reports false. */
+ #if defined(CONFIG_DRM_I915_DEBUG) && defined(CONFIG_PREEMPT_COUNT)
+diff --git a/drivers/gpu/drm/i915/intel_uncore.c b/drivers/gpu/drm/i915/intel_uncore.c
+index e9ed025..d2f3e12 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -1580,12 +1580,14 @@ int __intel_wait_for_register_fw(struct drm_i915_private *dev_priv,
+ }
+ 
+ /**
+- * intel_wait_for_register - wait until register matches expected state
++ * __intel_wait_for_register - wait until register matches expected state
+  * @dev_priv: the i915 device
+  * @reg: the register to read
+  * @mask: mask to apply to register value
+  * @value: expected value
+- * @timeout_ms: timeout in millisecond
++ * @fast_timeout_us: fast timeout in microsecond for atomic/tight wait
++ * @slow_timeout_ms: slow timeout in millisecond
++ * @out_value: optional placeholder to hold registry value
+  *
+  * This routine waits until the target register @reg contains the expected
+  * @value after applying the @mask, i.e. it waits until ::
+@@ -1596,14 +1598,17 @@ int __intel_wait_for_register_fw(struct drm_i915_private *dev_priv,
+  *
+  * Returns 0 if the register matches the desired condition, or -ETIMEOUT.
+  */
+-int intel_wait_for_register(struct drm_i915_private *dev_priv,
++int __intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 			    i915_reg_t reg,
+ 			    u32 mask,
+ 			    u32 value,
+-			    unsigned int timeout_ms)
++			    unsigned int fast_timeout_us,
++			    unsigned int slow_timeout_ms,
++			    u32 *out_value)
+ {
+ 	unsigned fw =
+ 		intel_uncore_forcewake_for_reg(dev_priv, reg, FW_REG_READ);
++	u32 reg_value;
+ 	int ret;
+ 
+ 	might_sleep();
+@@ -1613,14 +1618,18 @@ int intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 
+ 	ret = __intel_wait_for_register_fw(dev_priv,
+ 					   reg, mask, value,
+-					   2, 0, NULL);
++					   fast_timeout_us, 0, &reg_value);
+ 
+ 	intel_uncore_forcewake_put__locked(dev_priv, fw);
+ 	spin_unlock_irq(&dev_priv->uncore.lock);
+ 
+ 	if (ret)
+-		ret = wait_for((I915_READ_NOTRACE(reg) & mask) == value,
+-			       timeout_ms);
++		ret = __wait_for(reg_value = I915_READ_NOTRACE(reg),
++				 (reg_value & mask) == value,
++				 slow_timeout_ms * 1000, 10, 1000);
++
++	if (out_value)
++		*out_value = reg_value;
+ 
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_uncore.h b/drivers/gpu/drm/i915/intel_uncore.h
+index 0bdc3fc..8ca98dc 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.h
++++ b/drivers/gpu/drm/i915/intel_uncore.h
+@@ -144,12 +144,23 @@ void intel_uncore_forcewake_get__locked(struct drm_i915_private *dev_priv,
+ 					enum forcewake_domains domains);
+ void intel_uncore_forcewake_put__locked(struct drm_i915_private *dev_priv,
+ 					enum forcewake_domains domains);
+-
++int __intel_wait_for_register(struct drm_i915_private *dev_priv,
++			      i915_reg_t reg,
++			      u32 mask,
++			      u32 value,
++			      unsigned int fast_timeout_us,
++			      unsigned int slow_timeout_ms,
++			      u32 *out_value);
++static inline
+ int intel_wait_for_register(struct drm_i915_private *dev_priv,
+ 			    i915_reg_t reg,
+ 			    u32 mask,
+ 			    u32 value,
+-			    unsigned int timeout_ms);
++			    unsigned int timeout_ms)
++{
++	return __intel_wait_for_register(dev_priv, reg, mask, value, 2,
++					 timeout_ms, NULL);
++}
+ int __intel_wait_for_register_fw(struct drm_i915_private *dev_priv,
+ 				 i915_reg_t reg,
+ 				 u32 mask,
+-- 
+2.7.4
+

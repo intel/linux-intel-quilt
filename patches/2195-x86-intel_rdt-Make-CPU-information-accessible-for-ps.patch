@@ -1,0 +1,92 @@
+From f837d3ba1385b5bfec1787bd5097003b554ac9ca Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Sat, 30 Jun 2018 22:17:33 -0700
+Subject: [PATCH 2195/2278] x86/intel_rdt: Make CPU information accessible for
+ pseudo-locked regions
+
+When a resource group enters pseudo-locksetup mode it reflects that the
+platform supports cache pseudo-locking and the resource group is unused,
+ready to be used for a pseudo-locked region. Until it is set up as a
+pseudo-locked region the resource group is "locked down" such that no new
+tasks or cpus can be assigned to it. This is accomplished in a user visible
+way by making the cpus, cpus_list, and tasks resctrl files inaccassible
+(user cannot read from or write to these files).
+
+When the resource group changes to pseudo-locked mode it represents a cache
+pseudo-locked region. While not appropriate to make any changes to the cpus
+assigned to this region it is useful to make it easy for the user to see
+which cpus are associated with the pseudo-locked region.
+
+Modify the permissions of the cpus/cpus_list file when the resource group
+changes to pseudo-locked mode to support reading (not writing).  The
+information presented to the user when reading the file are the cpus
+associated with the pseudo-locked region.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: vikas.shivappa@linux.intel.com
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/12756b7963b6abc1bffe8fb560b87b75da827bd1.1530421961.git.reinette.chatre@intel.com
+
+(cherry picked from commit 33dc3e410a0d99f394905143b26d34f1fd64c962)
+---
+ Documentation/x86/intel_rdt_ui.txt          | 3 +++
+ arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c | 3 +++
+ arch/x86/kernel/cpu/intel_rdt_rdtgroup.c    | 8 ++++++--
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/x86/intel_rdt_ui.txt b/Documentation/x86/intel_rdt_ui.txt
+index acac30b..f662d3c 100644
+--- a/Documentation/x86/intel_rdt_ui.txt
++++ b/Documentation/x86/intel_rdt_ui.txt
+@@ -178,6 +178,9 @@ All groups contain the following files:
+ 	CPUs to/from this group. As with the tasks file a hierarchy is
+ 	maintained where MON groups may only include CPUs owned by the
+ 	parent CTRL_MON group.
++	When the resouce group is in pseudo-locked mode this file will
++	only be readable, reflecting the CPUs associated with the
++	pseudo-locked region.
+ 
+ 
+ "cpus_list":
+diff --git a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+index ba16702..ec79213 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
++++ b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+@@ -1304,6 +1304,9 @@ int rdtgroup_pseudo_lock_create(struct rdtgroup *rdtgrp)
+ 
+ 	rdtgrp->mode = RDT_MODE_PSEUDO_LOCKED;
+ 	closid_free(rdtgrp->closid);
++	rdtgroup_kn_mode_restore(rdtgrp, "cpus", 0444);
++	rdtgroup_kn_mode_restore(rdtgrp, "cpus_list", 0444);
++
+ 	ret = 0;
+ 	goto out;
+ 
+diff --git a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+index c20b51a..d6d7ea7 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
++++ b/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
+@@ -265,8 +265,12 @@ static int rdtgroup_cpus_show(struct kernfs_open_file *of,
+ 	rdtgrp = rdtgroup_kn_lock_live(of->kn);
+ 
+ 	if (rdtgrp) {
+-		seq_printf(s, is_cpu_list(of) ? "%*pbl\n" : "%*pb\n",
+-			   cpumask_pr_args(&rdtgrp->cpu_mask));
++		if (rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
++			seq_printf(s, is_cpu_list(of) ? "%*pbl\n" : "%*pb\n",
++				   cpumask_pr_args(&rdtgrp->plr->d->cpu_mask));
++		else
++			seq_printf(s, is_cpu_list(of) ? "%*pbl\n" : "%*pb\n",
++				   cpumask_pr_args(&rdtgrp->cpu_mask));
+ 	} else {
+ 		ret = -ENOENT;
+ 	}
+-- 
+2.7.4
+

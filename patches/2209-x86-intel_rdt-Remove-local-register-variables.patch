@@ -1,0 +1,152 @@
+From dc2eeda588a535339c9950b5d1a150fec6aef747 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Wed, 19 Sep 2018 10:29:08 -0700
+Subject: [PATCH 2209/2278] x86/intel_rdt: Remove local register variables
+
+Local register variables were used in an effort to improve the
+accuracy of the measurement of cache residency of a pseudo-locked
+region. This was done to ensure that only the cache residency of
+the memory is measured and not the cache residency of the variables
+used to perform the measurement.
+
+While local register variables do accomplish the goal they do require
+significant care since different architectures have different registers
+available. Local register variables also cannot be used with valuable
+developer tools like KASAN.
+
+Significant testing has shown that similar accuracy in measurement
+results can be obtained by replacing local register variables with
+regular local variables.
+
+Make use of local variables in the critical code but do so with
+READ_ONCE() to prevent the compiler from merging or refetching reads.
+Ensure these variables are initialized before the measurement starts,
+and ensure it is only the local variables that are accessed during
+the measurement.
+
+With the removal of the local register variables and using READ_ONCE()
+there is no longer a motivation for using a direct wrmsr call (that
+avoids the additional tracing code that may clobber the local register
+variables).
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Acked-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: fenghua.yu@intel.com
+Cc: tony.luck@intel.com
+Cc: acme@kernel.org
+Cc: gavin.hindman@intel.com
+Cc: jithu.joseph@intel.com
+Cc: dave.hansen@intel.com
+Cc: hpa@zytor.com
+Link: https://lkml.kernel.org/r/f430f57347414e0691765d92b144758ab93d8407.1537377064.git.reinette.chatre@intel.com
+
+(cherry picked from commit b5e4274ef7f00a03ce8d728701409a6e2c99146b)
+---
+ arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c | 53 +++++------------------------
+ 1 file changed, 9 insertions(+), 44 deletions(-)
+
+diff --git a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+index c885463..9e88120 100644
+--- a/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
++++ b/arch/x86/kernel/cpu/intel_rdt_pseudo_lock.c
+@@ -886,31 +886,14 @@ static int measure_cycles_lat_fn(void *_plr)
+ 	struct pseudo_lock_region *plr = _plr;
+ 	unsigned long i;
+ 	u64 start, end;
+-#ifdef CONFIG_KASAN
+-	/*
+-	 * The registers used for local register variables are also used
+-	 * when KASAN is active. When KASAN is active we use a regular
+-	 * variable to ensure we always use a valid pointer to access memory.
+-	 * The cost is that accessing this pointer, which could be in
+-	 * cache, will be included in the measurement of memory read latency.
+-	 */
+ 	void *mem_r;
+-#else
+-#ifdef CONFIG_X86_64
+-	register void *mem_r asm("rbx");
+-#else
+-	register void *mem_r asm("ebx");
+-#endif /* CONFIG_X86_64 */
+-#endif /* CONFIG_KASAN */
+ 
+ 	local_irq_disable();
+ 	/*
+-	 * The wrmsr call may be reordered with the assignment below it.
+-	 * Call wrmsr as directly as possible to avoid tracing clobbering
+-	 * local register variable used for memory pointer.
++	 * Disable hardware prefetchers.
+ 	 */
+-	__wrmsr(MSR_MISC_FEATURE_CONTROL, prefetch_disable_bits, 0x0);
+-	mem_r = plr->kmem;
++	wrmsr(MSR_MISC_FEATURE_CONTROL, prefetch_disable_bits, 0x0);
++	mem_r = READ_ONCE(plr->kmem);
+ 	/*
+ 	 * Dummy execute of the time measurement to load the needed
+ 	 * instructions into the L1 instruction cache.
+@@ -939,26 +922,10 @@ static int measure_cycles_perf_fn(void *_plr)
+ 	struct pseudo_lock_region *plr = _plr;
+ 	unsigned long long l2_hits, l2_miss;
+ 	u64 l2_hit_bits, l2_miss_bits;
+-	unsigned long i;
+-#ifdef CONFIG_KASAN
+-	/*
+-	 * The registers used for local register variables are also used
+-	 * when KASAN is active. When KASAN is active we use regular variables
+-	 * at the cost of including cache access latency to these variables
+-	 * in the measurements.
+-	 */
+ 	unsigned int line_size;
+ 	unsigned int size;
++	unsigned long i;
+ 	void *mem_r;
+-#else
+-	register unsigned int line_size asm("esi");
+-	register unsigned int size asm("edi");
+-#ifdef CONFIG_X86_64
+-	register void *mem_r asm("rbx");
+-#else
+-	register void *mem_r asm("ebx");
+-#endif /* CONFIG_X86_64 */
+-#endif /* CONFIG_KASAN */
+ 
+ 	/*
+ 	 * Non-architectural event for the Goldmont Microarchitecture
+@@ -1011,11 +978,9 @@ static int measure_cycles_perf_fn(void *_plr)
+ 
+ 	local_irq_disable();
+ 	/*
+-	 * Call wrmsr direcly to avoid the local register variables from
+-	 * being overwritten due to reordering of their assignment with
+-	 * the wrmsr calls.
++	 * Disable hardware prefetchers.
+ 	 */
+-	__wrmsr(MSR_MISC_FEATURE_CONTROL, prefetch_disable_bits, 0x0);
++	wrmsr(MSR_MISC_FEATURE_CONTROL, prefetch_disable_bits, 0x0);
+ 	/* Disable events and reset counters */
+ 	pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_EVENTSEL0, 0x0);
+ 	pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_EVENTSEL0 + 1, 0x0);
+@@ -1028,6 +993,9 @@ static int measure_cycles_perf_fn(void *_plr)
+ 		pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_PERFCTR0 + 3, 0x0);
+ 	}
+ 	/* Set and enable the L2 counters */
++	mem_r = READ_ONCE(plr->kmem);
++	size = READ_ONCE(plr->size);
++	line_size = READ_ONCE(plr->line_size);
+ 	pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_EVENTSEL0, l2_hit_bits);
+ 	pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_EVENTSEL0 + 1, l2_miss_bits);
+ 	if (l3_hit_bits > 0) {
+@@ -1036,9 +1004,6 @@ static int measure_cycles_perf_fn(void *_plr)
+ 		pseudo_wrmsrl_notrace(MSR_ARCH_PERFMON_EVENTSEL0 + 3,
+ 				      l3_miss_bits);
+ 	}
+-	mem_r = plr->kmem;
+-	size = plr->size;
+-	line_size = plr->line_size;
+ 	for (i = 0; i < size; i += line_size) {
+ 		asm volatile("mov (%0,%1,1), %%eax\n\t"
+ 			     :
+-- 
+2.7.4
+
