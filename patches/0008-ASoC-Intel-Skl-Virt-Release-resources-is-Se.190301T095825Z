@@ -1,0 +1,451 @@
+From bd4ac2322625b37d0c5b1109533588b5a8f91f3b Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Fri, 18 Jan 2019 13:19:51 +0100
+Subject: [PATCH 08/23] ASoC: Intel: Skl: Virt: Release resources is Service OS
+
+Original addresses of BLDEs are replaced with addresses allocated by GOS.
+Thus, playback on SOS won't work properly if GOS used the same PCM before.
+The change enables correct playback on SOS by restoring native BLDEs when
+playback on GOS is finished(PCM close).
+Moreover the patch adds removing VHM client and closing all PCMs during
+release operation  on vbs_k_audio file.
+
+Change-Id: I1029c7d3780778bffe31c367c5242579a44d33f6
+Tracked-On: OAM-76301
+Signed-off-by: Jablonski, Wojciech <wojciech.jablonski@intel.com>
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Tested-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+---
+ .../soc/intel/skylake/virtio/skl-virt-audio.c |  29 +++-
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 151 +++++++++++++-----
+ .../soc/intel/skylake/virtio/skl-virtio-be.h  |   8 +
+ 3 files changed, 142 insertions(+), 46 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virt-audio.c b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+index 718658b8dc87..0b712db04fe9 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virt-audio.c
++++ b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+@@ -32,7 +32,7 @@ struct vskl *get_virtio_audio(void)
+ }
+ 
+ /* find client from client ID */
+-static struct snd_skl_vbe_client *vbe_client_find(struct snd_skl_vbe *vbe,
++struct snd_skl_vbe_client *vbe_client_find(struct snd_skl_vbe *vbe,
+ 	int client_id)
+ {
+ 	struct snd_skl_vbe_client *client;
+@@ -115,7 +115,6 @@ int vskl_vbs_init_be(struct vskl *vskl, struct snd_skl_vbe *vbe)
+ 	int i;
+ 
+ 	INIT_LIST_HEAD(&vbe->client_list);
+-	INIT_LIST_HEAD(&vbe->substr_info_list);
+ 	INIT_LIST_HEAD(&vbe->pending_msg_list);
+ 	spin_lock_init(&vbe->posn_lock);
+ 	vbe->dev = dev;
+@@ -194,6 +193,7 @@ int vskl_vbs_register_client(struct snd_skl_vbe *vbe)
+ 	/* just attach once as vhm will kick kthread */
+ 	acrn_ioreq_attach_client(client->vhm_client_id, 0);
+ 
++	INIT_LIST_HEAD(&client->substr_info_list);
+ 	/* complete client init and add to list */
+ 	list_add(&client->list, &vbe->client_list);
+ 
+@@ -203,6 +203,22 @@ int vskl_vbs_register_client(struct snd_skl_vbe *vbe)
+ 	return -EINVAL;
+ }
+ 
++static void vskl_vbs_close_client(struct snd_skl_vbe *vbe)
++{
++	struct snd_skl_vbe_client *client;
++
++	if (!list_empty(&vbe->client_list)) {
++		client = list_first_entry(&vbe->client_list,
++				struct snd_skl_vbe_client, list);
++		vbe_skl_pcm_close_all(vbe, client);
++		acrn_ioreq_destroy_client(client->vhm_client_id);
++		list_del(&client->list);
++
++	} else {
++		pr_err("%s: vbs client not present!\n", __func__);
++	}
++
++}
+ static int vskl_vbs_audio_open(struct inode *inode, struct file *f)
+ {
+ 	struct vskl *vskl = get_virtio_audio();
+@@ -228,7 +244,6 @@ static long vskl_vbs_audio_ioctl(struct file *f, unsigned int ioctl,
+ 		ret = virtio_vqs_ioctl(&vbe->dev_info, ioctl, argp);
+ 		if (ret)
+ 			return ret;
+-
+ 		ret = vskl_vbs_register_client(vbe);
+ 		if (ret)
+ 			return ret;
+@@ -246,7 +261,8 @@ static int vskl_vbs_audio_release(struct inode *inode, struct file *f)
+ {
+ 	struct vskl *vskl = get_virtio_audio();
+ 
+-	return vbe_skl_detach(&vskl->vbe, vskl->skl);
++	vskl_vbs_close_client(&vskl->vbe);
++	return 0;
+ }
+ 
+ static const struct file_operations vskl_vbs_audio_fops = {
+@@ -283,8 +299,9 @@ static int vskl_vbs_init(struct vskl *vskl)
+ static int vskl_vbs_close(struct vskl *vskl)
+ {
+ 	misc_deregister(&vskl_vbs_audio_k);
++	vbe_skl_unbind(&vskl->vbe, vskl->skl);
+ 
+-	return vbe_skl_detach(&vskl->vbe, vskl->skl);
++	return 0;
+ }
+ 
+ static int vskl_init(struct vskl *vskl, struct skl *skl, struct device *dev)
+@@ -300,7 +317,7 @@ static int vskl_init(struct vskl *vskl, struct skl *skl, struct device *dev)
+ 			"Failed to initialize BE service (error: %d)\n", ret);
+ 		return ret;
+ 	}
+-
++	vbe_skl_bind(&vskl->vbe, vskl->skl);
+ 	virtio_audio = vskl;
+ 
+ 	return 0;
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 5f59c373c8d1..062ead5c31c2 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -46,11 +46,11 @@ struct kctl_proxy *get_kctl_proxy(void)
+ }
+ 
+ const struct vbe_substream_info *vbe_find_substream_info_by_pcm(
+-	const struct snd_skl_vbe *vbe, char *pcm_id, int direction)
++	const struct snd_skl_vbe_client *client, char *pcm_id, int direction)
+ {
+ 	const struct vbe_substream_info *info;
+ 
+-	list_for_each_entry(info, &vbe->substr_info_list, list) {
++	list_for_each_entry(info, &client->substr_info_list, list) {
+ 		if (info->direction == direction &&
+ 			strncmp(info->pcm->id, pcm_id,
+ 					ARRAY_SIZE(info->pcm->id)) == 0)
+@@ -59,11 +59,19 @@ const struct vbe_substream_info *vbe_find_substream_info_by_pcm(
+ 	return NULL;
+ }
+ 
+-inline const struct vbe_substream_info *vbe_find_substream_info(
++const struct vbe_substream_info *vbe_find_substream_info(
+ 	const struct snd_skl_vbe *vbe, const struct snd_pcm_substream *substr)
+ {
+-	return vbe_find_substream_info_by_pcm(vbe, substr->pcm->id,
+-			substr->stream);
++	struct snd_skl_vbe_client *client;
++	const struct vbe_substream_info *info;
++
++	list_for_each_entry(client, &vbe->client_list, list) {
++		info = vbe_find_substream_info_by_pcm(client,
++				substr->pcm->id, substr->stream);
++		if (info)
++			return info;
++	}
++	return NULL;
+ }
+ 
+ static const struct vbe_substream_info *vbe_skl_find_substream_info(
+@@ -354,22 +362,24 @@ void vbe_skl_initialize_substream_runtime(struct snd_pcm_runtime *runtime,
+ 	runtime->boundary = runtime->buffer_size << 4;
+ }
+ 
+-static int vbe_skl_prepare_dma(const struct snd_pcm_substream *substream,
+-	int vm_id, const struct vfe_pcm_dma_conf *dma_conf)
++static int vbe_skl_prepare_dma(struct vbe_substream_info *substr_info,
++	int vm_id, struct vfe_pcm_dma_conf *dma_conf)
+ {
+ 	const struct snd_sg_buf *sg_buf;
+ 	int cnt;
+-	u64 pcm_buffer_gpa = dma_conf->addr & ~(u64)0xfff;
++	u64 pcm_buffer_gpa = dma_conf->addr;
+ 	u64 pcm_buffer_hpa = vhm_vm_gpa2hpa(vm_id, pcm_buffer_gpa);
+ 
+ 	if (!pcm_buffer_hpa)
+ 		return -EINVAL;
+ 
+-	sg_buf = snd_pcm_substream_sgbuf(substream);
++	sg_buf = snd_pcm_substream_sgbuf(substr_info->substream);
+ 	if (!sg_buf)
+ 		return -EINVAL;
+ 
+-	sg_buf->table[0].addr = pcm_buffer_hpa | 0x10;
++	substr_info->native_dma_addr = sg_buf->table[0].addr;
++	sg_buf->table[0].addr = pcm_buffer_hpa;
++	pcm_buffer_hpa &= ~(u64)0xfff;
+ 	for (cnt = 1; cnt < sg_buf->pages; cnt++) {
+ 		pcm_buffer_hpa += PAGE_SIZE;
+ 		sg_buf->table[cnt].addr = pcm_buffer_hpa;
+@@ -410,21 +420,30 @@ static int vbe_skl_assemble_params(struct vfe_pcm_hw_params *vfe_params,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_add_substream_info(struct snd_skl_vbe *vbe,
++static int vbe_skl_add_substream_info(struct snd_skl_vbe *vbe, int vm_id,
+ 		const struct snd_pcm_substream *substream)
+ {
+ 	struct vbe_substream_info *substr_info =
+ 		kzalloc(sizeof(*substr_info), GFP_KERNEL);
++	/*TODO: call vbe_client_find with proper client_id*/
++	struct snd_skl_vbe_client *client = list_first_entry_or_null(
++			&vbe->client_list, struct snd_skl_vbe_client, list);
+ 
+ 	if (!substr_info)
+ 		return -ENOMEM;
+ 
++	if (!client) {
++		dev_err(vbe->dev,
++			"Can not find active client [%d].\n", vm_id);
++		return -EINVAL;
++	}
++
+ 	substr_info->pcm = substream->pcm;
+ 	substr_info->substream = substream;
+ 	substr_info->direction = substream->stream;
+ 	substr_info->vbe = vbe;
+ 
+-	list_add(&substr_info->list, &vbe->substr_info_list);
++	list_add(&substr_info->list, &client->substr_info_list);
+ 	return 0;
+ }
+ 
+@@ -506,7 +525,7 @@ static int vbe_skl_pcm_open(const struct snd_skl_vbe *vbe,
+ 	ret = vbe_skl_allocate_runtime(sdev->component->card, substream);
+ 	if (ret < 0)
+ 		goto ret_err;
+-	ret = vbe_skl_add_substream_info(vbe, substream);
++	ret = vbe_skl_add_substream_info(vbe, vm_id, substream);
+ 	if (ret < 0)
+ 		goto ret_err;
+ 	substream->ref_count++;  /* set it used */
+@@ -525,10 +544,22 @@ static int vbe_skl_pcm_close(const struct skl *sdev, int vm_id,
+ 		const struct vbe_ipc_msg *msg)
+ {
+ 	struct snd_soc_pcm_runtime *rtd;
+-	int ret;
++	int ret, cnt;
+ 	struct snd_pcm_substream *substream = substr_info->substream;
+ 	struct vfe_pcm_result *vbe_result = msg->rx_data;
+ 
++	const struct snd_sg_buf *sg_buf =
++			snd_pcm_substream_sgbuf(substr_info->substream);
++	u64 native_addr = substr_info->native_dma_addr;
++
++	/* restore original dma pages */
++	sg_buf->table[0].addr = native_addr;
++	native_addr &= ~(u64)0xfff;
++	for (cnt = 1; cnt < sg_buf->pages; cnt++) {
++		native_addr += PAGE_SIZE;
++		sg_buf->table[cnt].addr = native_addr;
++	}
++
+ 	list_del(&substr_info->list);
+ 	kfree(substr_info);
+ 
+@@ -552,7 +583,7 @@ static int vbe_skl_pcm_prepare(const struct skl *sdev, int vm_id,
+ 	const struct vfe_pcm_dma_conf *dma_params = msg->tx_data;
+ 	struct vfe_pcm_result *vbe_result = msg->rx_data;
+ 
+-	ret = vbe_skl_prepare_dma(substream, vm_id, dma_params);
++	ret = vbe_skl_prepare_dma(substr_info, vm_id, dma_params);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -565,6 +596,22 @@ static int vbe_skl_pcm_prepare(const struct skl *sdev, int vm_id,
+ 	return ret;
+ }
+ 
++void vbe_skl_pcm_close_all(struct snd_skl_vbe *vbe,
++		struct snd_skl_vbe_client *client)
++{
++	const struct vbe_substream_info *info;
++	struct vbe_ipc_msg msg;
++	int ret;
++
++	msg.rx_data = NULL;
++	list_for_each_entry(info, &client->substr_info_list, list) {
++		ret = vbe_skl_pcm_close(vbe->sdev, 0, info, &msg);
++		if (ret < 0)
++			dev_err(vbe->dev,
++				"Could not close PCM %.64s\n", info->pcm->id);
++	}
++}
++
+ struct snd_pcm_hw_params hw_params;
+ 
+ static int vbe_skl_pcm_hw_params(const struct skl *sdev, int vm_id,
+@@ -760,8 +807,6 @@ static int vbe_skl_msg_cfg_handle(struct snd_skl_vbe *vbe,
+ 
+ 	switch (msg->header->cmd) {
+ 	case VFE_MSG_CFG_HDA:
+-		kctl_init_proxy(vbe->dev, &vbe_kctl_ops);
+-		kctl_notify_machine_ready(sdev->component->card);
+ 		return vbe_skl_cfg_hda(sdev, vm_id, msg);
+ 	default:
+ 		dev_err(vbe->dev, "Unknown command %d for config get message.\n",
+@@ -795,13 +840,24 @@ static int vbe_skl_msg_pcm_handle(const struct snd_skl_vbe *vbe,
+ 	const struct vbe_substream_info *substream_info;
+ 	char *pcm_id;
+ 	int direction;
++	/* TODO: call vbe_client_find with proper client_id */
++	struct snd_skl_vbe_client *client = list_first_entry_or_null(
++			&vbe->client_list, struct snd_skl_vbe_client, list);
++
++
++	if (!client) {
++		dev_err(vbe->dev,
++			"Can not find active client [%d].\n", vm_id);
++		return -EINVAL;
++	}
+ 
+ 	if (msg->header->cmd == VFE_MSG_PCM_OPEN)
+ 		return vbe_skl_pcm_open(vbe, sdev, vm_id, msg);
+ 
+ 	pcm_id = msg->header->desc.pcm.pcm_id;
+ 	direction = msg->header->desc.pcm.direction;
+-	substream_info = vbe_find_substream_info_by_pcm(vbe, pcm_id, direction);
++	substream_info = vbe_find_substream_info_by_pcm(client,
++			pcm_id, direction);
+ 
+ 	if (!substream_info) {
+ 		dev_err(vbe->dev,
+@@ -870,7 +926,6 @@ static int vbe_skl_not_fwd(const struct snd_skl_vbe *vbe,
+ 		return vbe_skl_msg_kcontrol_handle(vbe, vm_id, &msg);
+ 	case VFE_MSG_TPLG:
+ 		return vbe_skl_msg_tplg_handle(vbe, sdev, vm_id, &msg);
+-		break;
+ 	case VFE_MSG_CFG:
+ 		return vbe_skl_msg_cfg_handle(vbe, sdev, vm_id, &msg);
+ 	}
+@@ -1020,19 +1075,21 @@ static void vbe_skl_ipc_fe_not_reply_get(struct snd_skl_vbe *vbe, int vq_idx)
+ 	unsigned long flags;
+ 	bool sent;
+ 
+-	if (list_empty(&vbe->pending_msg_list))
+-		return;
++	while (!list_empty(&vbe->pending_msg_list)) {
++		vq = &vbe->vqs[vq_idx];
++		entry = list_first_entry(&vbe->pending_msg_list,
++				struct vfe_pending_msg, list);
+ 
+-	vq = &vbe->vqs[vq_idx];
+-	entry = list_first_entry(&vbe->pending_msg_list,
+-				 struct vfe_pending_msg, list);
++		sent = vbe_skl_try_send(vbe, vq,
++				(void *)&entry->msg, entry->sizeof_msg);
+ 
+-	sent = vbe_skl_try_send(vbe, vq,
+-		(void *)&entry->msg, entry->sizeof_msg);
+-
+-	if (sent == true) {
+-		list_del(&entry->list);
+-		kfree(entry);
++		if (sent == true) {
++			list_del(&entry->list);
++			kfree(entry);
++		} else {
++			/* break and handle in next kick */
++			break;
++		}
+ 	}
+ }
+ 
+@@ -1064,26 +1121,40 @@ void vbe_skl_handle_kick(const struct snd_skl_vbe *vbe, int vq_idx)
+ 
+ int vbe_skl_attach(struct snd_skl_vbe *vbe, struct skl *skl)
+ {
+-	vbe->sdev = skl;
++	static bool kctl_init;
+ 
+-	vbe->nops.hda_irq_ack = skl->skl_sst->hda_irq_ack;
+-	skl->skl_sst->hda_irq_ack = vbe_stream_update;
++	if (!kctl_init) {
++		kctl_init_proxy(vbe->dev, &vbe_kctl_ops);
++		kctl_notify_machine_ready(vbe->sdev->component->card);
++		kctl_init = true;
++	}
+ 
+ 	return 0;
+ }
+ 
+ int vbe_skl_detach(struct snd_skl_vbe *vbe, struct skl *skl)
+ {
+-	if (!vbe->sdev)
+-		return 0;
+-
+-	skl->skl_sst->request_tplg = vbe->nops.request_tplg;
+-	skl->skl_sst->hda_irq_ack = vbe->nops.hda_irq_ack;
+-
+ 	/* TODO: Notify FE, close all streams opened by FE and delete all
+ 	 * pending messages
+ 	 */
+ 
+-	vbe->sdev = NULL;
+ 	return 0;
+ }
++
++void vbe_skl_bind(struct snd_skl_vbe *vbe, struct skl *skl)
++{
++	vbe->sdev = skl;
++	vbe->nops.request_tplg = skl->skl_sst->request_tplg;
++	vbe->nops.hda_irq_ack = skl->skl_sst->hda_irq_ack;
++	skl->skl_sst->hda_irq_ack = vbe_stream_update;
++}
++
++void vbe_skl_unbind(struct snd_skl_vbe *vbe, struct skl *skl)
++{
++	if (!vbe->sdev)
++		return;
++
++	skl->skl_sst->request_tplg = vbe->nops.request_tplg;
++	skl->skl_sst->hda_irq_ack = vbe->nops.hda_irq_ack;
++	vbe->sdev = NULL;
++}
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index 1a5840f85d72..af2643a5e134 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -40,6 +40,8 @@ extern void vbe_skl_handle_kick(const struct snd_skl_vbe *vbe, int vq_idx);
+ 
+ int vbe_skl_attach(struct snd_skl_vbe *vbe, struct skl *skl);
+ int vbe_skl_detach(struct snd_skl_vbe *vbe, struct skl *skl);
++void vbe_skl_bind(struct snd_skl_vbe *vbe, struct skl *skl);
++void vbe_skl_unbind(struct snd_skl_vbe *vbe, struct skl *skl);
+ struct vskl *get_virtio_audio(void);
+ 
+ struct vskl_native_ops {
+@@ -50,6 +52,7 @@ struct vskl_native_ops {
+ struct vbe_substream_info {
+ 	struct snd_pcm *pcm;
+ 	struct snd_pcm_substream *substream;
++	dma_addr_t native_dma_addr;
+ 	int direction;
+ 
+ 	struct snd_skl_vbe *vbe;
+@@ -79,6 +82,7 @@ struct snd_skl_vbe_client {
+ 	struct snd_skl_vbe *vbe;
+ 	int vhm_client_id;
+ 	int max_vcpu;
++	struct list_head substr_info_list;
+ 	struct list_head list;
+ 	struct vhm_request *req_buf;
+ };
+@@ -92,5 +96,9 @@ struct vskl {
+ 
+ void skl_notify_stream_update(struct hdac_bus *bus,
+ 		struct snd_pcm_substream *substr);
++struct snd_skl_vbe_client *vbe_client_find(struct snd_skl_vbe *vbe,
++	int client_id);
++void vbe_skl_pcm_close_all(struct snd_skl_vbe *vbe,
++		struct snd_skl_vbe_client *client);
+ 
+ #endif
+-- 
+2.17.1
+

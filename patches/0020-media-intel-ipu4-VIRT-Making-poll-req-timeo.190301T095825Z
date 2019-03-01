@@ -1,0 +1,119 @@
+From 140bc1f508909e17d1d2db856b56b4f3d4faf22d Mon Sep 17 00:00:00 2001
+From: "Bandi, Kushal" <kushal.bandi@intel.com>
+Date: Thu, 24 Jan 2019 19:16:12 -0700
+Subject: [PATCH 20/23] media: intel-ipu4: [VIRT] Making poll & req timeout as
+ mod param.
+
+Timeout needs adjustment based on number of streams.
+Time taken for completion of a given virtio req msg varies.
+In order maintain synchronization between BE & FE for that req msg
+value of timeouts can adjusted.
+
+This mod param is for in built ipu virtio driver.
+Hence following variable can be added as kernel cmdline arg
+
+eg.
+intel-ipu-virt.wait_timeout=6000 where 6000 is in msec
+
+Change-Id: I21ca688712eb0593dba9a7746bb996b8cad1e781
+Tracked-On: PKT-1760
+Tracked-On: OAM-75615
+Signed-off-by: Bandi, Kushal <kushal.bandi@intel.com>
+---
+ drivers/media/pci/intel/virtio/Makefile.virt          |  2 +-
+ .../pci/intel/virtio/intel-ipu4-virtio-be-stream.c    | 11 +++++++++--
+ drivers/media/pci/intel/virtio/intel-ipu4-virtio-fe.c | 11 +++++++++--
+ 3 files changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/pci/intel/virtio/Makefile.virt b/drivers/media/pci/intel/virtio/Makefile.virt
+index df41ac23a501..43c2afb38ffa 100644
+--- a/drivers/media/pci/intel/virtio/Makefile.virt
++++ b/drivers/media/pci/intel/virtio/Makefile.virt
+@@ -2,7 +2,7 @@ ifndef IPU_STEP
+   $(error No IPU_STEP was defined. Stopping.)
+ endif
+ 
+-TARGET_MODULE:=intel-ipu-virt-$(IPU_STEP)
++TARGET_MODULE:=intel-ipu-virt
+ 
+ $(TARGET_MODULE)-objs += ../virtio/intel-ipu4-virtio-common.o
+ 
+diff --git a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-stream.c b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-stream.c
+index a0d672123b9a..f86d2b3cc9b9 100644
+--- a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-stream.c
++++ b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-stream.c
+@@ -10,6 +10,7 @@
+ #include <linux/poll.h>
+ #include <linux/hashtable.h>
+ #include <linux/pagemap.h>
++#include <linux/module.h>
+ 
+ #include <media/ici.h>
+ #include <linux/vhm/acrn_vhm_mm.h>
+@@ -20,11 +21,17 @@
+ #include "intel-ipu4-virtio-be.h"
+ 
+ #define MAX_SIZE 6 // max 2^6
+-#define POLL_WAIT 20000 //20s
++#define POLL_WAIT 5000 //5s
+ 
+ #define dev_to_stream(dev) \
+ 	container_of(dev, struct ici_isys_stream, strm_dev)
+ 
++static int wait_timeout = POLL_WAIT;
++module_param(wait_timeout, int, 0644);
++MODULE_PARM_DESC(wait_timeout,
++		 "ipu mediator wait timeout in milliseconds "
++		 "(default 5000 - 5.0 seconds)");
++
+ DECLARE_HASHTABLE(STREAM_NODE_HASH, MAX_SIZE);
+ static bool hash_initialised;
+ static spinlock_t stream_node_hash_lock;
+@@ -233,7 +240,7 @@ int process_poll(struct ipu4_virtio_req_info *req_info)
+ 			as->buf_list.wait,
+ 			!list_empty(&as->buf_list.putbuf_list) ||
+ 			!as->ip.streaming,
+-			POLL_WAIT);
++			wait_timeout);
+ 		if((time_remain == -ERESTARTSYS) ||
+ 			time_remain == 0 ||
+ 			!as->ip.streaming) {
+diff --git a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-fe.c b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-fe.c
+index 517b48d2ede1..28d90e478b31 100644
+--- a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-fe.c
++++ b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-fe.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/err.h>
+ #include <linux/delay.h>
++#include <linux/module.h>
+ #include <linux/scatterlist.h>
+ #include <linux/spinlock.h>
+ #include <linux/virtio.h>
+@@ -15,7 +16,13 @@
+ 
+ static DEFINE_IDA(index_ida);
+ 
+-#define REQ_TIMEOUT 22000 //22s
++#define WAIT_TIMEOUT 6000 //6s
++
++static int wait_timeout = WAIT_TIMEOUT;
++module_param(wait_timeout, int, 0644);
++MODULE_PARM_DESC(wait_timeout,
++		 "ipu mediator wait timeout in milliseconds "
++		 "(default 6000 - 6.0 seconds)");
+ 
+ struct ipu4_virtio_uos {
+ 	struct virtqueue *vq[IPU_VIRTIO_QUEUE_MAX];
+@@ -161,7 +168,7 @@ static int ipu_virtio_fe_send_req(int vmid, struct ipu4_virtio_req *req,
+ 	req->completed = false;
+ 	ipu_virtio_fe_register_buffer(ipu4_virtio_fe, req, sizeof(*req), idx);
+ 	ret = wait_event_timeout(*req->wait,
+-						req->completed,REQ_TIMEOUT);
++						req->completed, wait_timeout);
+ 
+ 	if(ret)
+ 		return req->stat;
+-- 
+2.17.1
+

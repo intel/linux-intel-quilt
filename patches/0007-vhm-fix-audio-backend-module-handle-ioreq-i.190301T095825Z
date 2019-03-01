@@ -1,0 +1,70 @@
+From b4854a66df484d868a1a6e50f7150fc33954da83 Mon Sep 17 00:00:00 2001
+From: Shuo A Liu <shuo.a.liu@intel.com>
+Date: Thu, 10 Jan 2019 16:21:28 +0100
+Subject: [PATCH 07/23] vhm: fix audio backend module handle ioreq incorrectly
+
+While we get all ioreq from vhm module, we need only handle those
+belongs us. Without this patch, audio backend take all ioreqs and mark
+them as completed which is not correct.
+Also, REQ_STATE_COMPLETE should be marked in acrn_ioreq_complete_request,
+so we needn't do that before it.
+
+Change-Id: I2b1d56bdbddd4ff95afa30fb79de084327ba3e64
+Signed-off-by: Shuo A Liu <shuo.a.liu@intel.com>
+Tracked-On: OAM-76301
+Reviewed-by: Janca, Grzegorz <grzegorz.janca@intel.com>
+Reviewed-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tested-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+---
+ .../soc/intel/skylake/virtio/skl-virt-audio.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virt-audio.c b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+index e2b288e8ba7e..718658b8dc87 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virt-audio.c
++++ b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+@@ -49,7 +49,7 @@ static int vskl_vbs_handle_kick(int client_id, unsigned long *ioreqs_map)
+ {
+ 	struct vhm_request *req;
+ 	struct snd_skl_vbe_client *client;
+-	int i, handle;
++	int vcpu, handle;
+ 	struct vskl *vskl = get_virtio_audio();
+ 	struct snd_skl_vbe *vbe = &vskl->vbe;
+ 
+@@ -69,14 +69,16 @@ static int vskl_vbs_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 	}
+ 
+ 	/* go through all vcpu for the valid request buffer */
+-	for (i = 0; i < client->max_vcpu; i++) {
+-		req = &client->req_buf[i];
+-		handle = 0;
+-
+-		/* ignore if not processing state */
+-		if (atomic_read(&req->processed) != REQ_STATE_PROCESSING)
++	while (1) {
++		vcpu = find_first_bit(ioreqs_map, client->max_vcpu);
++		if (vcpu == client->max_vcpu)
++			break;
++		req = &client->req_buf[vcpu];
++		if (atomic_read(&req->processed) != REQ_STATE_PROCESSING ||
++				req->client != client->vhm_client_id)
+ 			continue;
+ 
++		handle = 0;
+ 		dev_dbg(vskl->dev,
+ 			"ioreq type %d, direction %d, addr 0x%llx, size 0x%llx, value 0x%x\n",
+ 			 req->type,
+@@ -96,8 +98,7 @@ static int vskl_vbs_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 				(handle = 1) : (handle = 0);
+ 		}
+ 
+-		atomic_set(&req->processed, REQ_STATE_COMPLETE);
+-		acrn_ioreq_complete_request(client->vhm_client_id, i, req);
++		acrn_ioreq_complete_request(client->vhm_client_id, vcpu, req);
+ 
+ 		/* handle VQ kick if needed */
+ 		if (handle)
+-- 
+2.17.1
+

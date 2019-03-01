@@ -1,0 +1,140 @@
+From 2a22a1d93dd53d1c05dc88b4401924917859e04b Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Mon, 11 Feb 2019 13:47:35 +0100
+Subject: [PATCH 10/23] ASoC: Intel: Skl: Virt: Add static map of domain_ids
+
+If an ALSA control doesn't belong to any widget, BE is unable to check
+access rights of that control due to unassigned domain_id. The change
+provides static, hardcoded map between control and domain_id to fix
+this issue. This is just a temporary workaround. The permanent solution
+requires code refactoring
+
+Change-Id: Ic92bc8276b30e0f7fa72e6c211d3ed7804c23b77
+Tracked-On: OAM-76301
+Reviewed-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+Tested-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+---
+ sound/soc/intel/skylake/skl-pcm.c             |  2 +-
+ sound/soc/intel/skylake/skl-sst-ipc.h         |  2 ++
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 30 +++++++++++++++----
+ .../soc/intel/skylake/virtio/skl-virtio-be.h  |  8 +++++
+ 4 files changed, 35 insertions(+), 7 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 7cbf1ee7b237..efb36d5ad986 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -1402,7 +1402,7 @@ static struct snd_soc_dai_driver skl_fe_dai[] = {
+ /* BE cpu dais and compress dais*/
+ static struct snd_soc_dai_driver skl_platform_dai[] = {
+ #if IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_SOS_TDF8532_MACH) || \
+-    IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) || \
++	IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) || \
+ 	IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_ULL_MACH)
+ {
+ 	.name = "SSP5 Pin",
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 551598ea8e6d..5cdec13bbe50 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -252,6 +252,8 @@ struct skl_notify_kctrl_info {
+ };
+ 
+ struct skl;
++struct hdac_stream;
++struct hdac_bus;
+ 
+ struct skl_sst {
+ 	struct device *dev;
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 08c43caf0ca5..fd0dccde2801 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -35,6 +35,12 @@
+ #include "../skl-topology.h"
+ #include "skl-virtio.h"
+ 
++static struct vbe_static_kctl_domain kctl_domain_map[] = {
++		KCTL_DOMAIN_ITEM("BtHfp_ssp0_in pcm cfg", 0x1),
++		KCTL_DOMAIN_ITEM("BtHfp_ssp0_out pcm cfg", 0x1),
++		KCTL_DOMAIN_ITEM("Speaker Switch", 0x1),
++};
++
+ static struct snd_skl_vbe *get_virtio_audio_be(void)
+ {
+ 	return &get_virtio_audio()->vbe;
+@@ -200,10 +206,6 @@ static void vbe_skl_send_or_enqueue(const struct snd_skl_vbe *vbe,
+ 	if (vbe_skl_try_send(vbe, vq,
+ 		(void *)&pen_msg->msg, pen_msg->sizeof_msg) == false) {
+ 		save_msg = kzalloc(sizeof(*save_msg), GFP_KERNEL);
+-		if (!save_msg) {
+-			dev_err(vbe->dev, "Failed to allocate kctl_req memory");
+-			return;
+-		}
+ 		*save_msg = *pen_msg;
+ 		list_add_tail(&save_msg->list, &vbe->pending_msg_list);
+ 	}
+@@ -751,6 +753,20 @@ static u32 vbe_skl_kcontrol_find_domain_id(const struct snd_kcontrol *kcontrol,
+ 	return 0;
+ }
+ 
++static u32 vbe_skl_get_static_domain_id(struct snd_ctl_elem_id *ctl_id)
++{
++	u32 idx, num = ARRAY_SIZE(kctl_domain_map);
++	u32 size = strnlen(ctl_id->name, sizeof(ctl_id->name));
++
++	for (idx = 0; idx < num; ++idx) {
++		if ((kctl_domain_map[idx].str_size == size) &&
++			(strncmp(ctl_id->name,
++				kctl_domain_map[idx].name, size) == 0))
++			return kctl_domain_map[idx].domain_flag;
++	}
++	return 0;
++}
++
+ static int vbe_skl_kcontrol_get_domain_id(const struct snd_kcontrol *kcontrol,
+ 		u32 *domain_id)
+ {
+@@ -769,9 +785,11 @@ static int vbe_skl_kcontrol_get_domain_id(const struct snd_kcontrol *kcontrol,
+ 	*domain_id = 0;
+ 
+ 	if (priv == sdev->component ||
+-		priv == sdev->component->card)
++		priv == sdev->component->card) {
++		/* temporary solution for controls without widget */
++		*domain_id = vbe_skl_get_static_domain_id(&kcontrol->id);
+ 		return 0;
+-
++	}
+ 
+ 	w = vbe_skl_find_kcontrol_widget(sdev, kcontrol);
+ 	if (w) {
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index cbe621e41d2d..9ccfed50792a 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -34,6 +34,8 @@ struct snd_skl_vbe;
+ #define skl_get_vbe(skl) (&(skl_to_vskl(skl))->vbe)
+ #define vskl_get_vbe(vskl) (&vskl->vbe)
+ 
++#define KCTL_DOMAIN_ITEM(STR, DOMAIN_FLAG) {STR, sizeof(STR)-1, DOMAIN_FLAG}
++
+ extern int snd_skl_vbe_register(struct skl *sdev, struct snd_skl_vbe **svbe);
+ extern int snd_skl_vbe_register_client(struct snd_skl_vbe *vbe);
+ extern void vbe_skl_handle_kick(const struct snd_skl_vbe *vbe, int vq_idx);
+@@ -95,6 +97,12 @@ struct vskl {
+ 	struct skl *skl;
+ };
+ 
++struct vbe_static_kctl_domain {
++	const char *name;
++	u32 str_size;
++	u32 domain_flag;
++};
++
+ void skl_notify_stream_update(struct hdac_bus *bus,
+ 		struct snd_pcm_substream *substr);
+ struct snd_skl_vbe_client *vbe_client_find(struct snd_skl_vbe *vbe,
+-- 
+2.17.1
+

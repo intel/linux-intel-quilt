@@ -1,0 +1,174 @@
+From 23ad30e71a8173955a451a0d3012f65c095a1f8e Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Mon, 18 Feb 2019 18:57:09 +0100
+Subject: [PATCH 14/23] ASoC: Intel: Skylake: Remove memory available check.
+
+Current memory availability check is a stub, while actual memory
+management takes place in firmware. Leave this task to firmware entirely
+and remove redundant code.
+
+Change-Id: Ief33515bb03a856c5b7ad1adc6ac261b0cb744b1
+Tracked-On: OAM-76478
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Reviewed-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+Tested-by: gkblditp <gkblditp@intel.com>
+---
+ sound/soc/intel/skylake/skl-topology.c | 61 --------------------------
+ sound/soc/intel/skylake/skl.h          |  6 ---
+ 2 files changed, 67 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index e58857876416..805c7c1aea30 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -386,51 +386,6 @@ int is_skl_dsp_widget_type(struct snd_soc_dapm_widget *w,
+ 	}
+ }
+ 
+-/*
+- * Each pipelines needs memory to be allocated. Check if we have free memory
+- * from available pool.
+- */
+-static bool skl_is_pipe_mem_avail(struct skl *skl,
+-				struct skl_module_cfg *mconfig)
+-{
+-	struct skl_sst *ctx = skl->skl_sst;
+-
+-	if (skl->resource.mem + mconfig->pipe->memory_pages >
+-				skl->resource.max_mem) {
+-		dev_err(ctx->dev,
+-				"%s: module_id %d instance %d\n", __func__,
+-				mconfig->id.module_id,
+-				mconfig->id.instance_id);
+-		dev_err(ctx->dev,
+-				"exceeds ppl memory available %d mem %d\n",
+-				skl->resource.max_mem, skl->resource.mem);
+-		return false;
+-	} else {
+-		return true;
+-	}
+-}
+-
+-/*
+- * Add the mem to the mem pool. This is freed when pipe is deleted.
+- * Note: DSP does actual memory management we only keep track for complete
+- * pool
+- */
+-static void skl_tplg_alloc_pipe_mem(struct skl *skl,
+-				struct skl_module_cfg *mconfig)
+-{
+-	skl->resource.mem += mconfig->pipe->memory_pages;
+-}
+-
+-/*
+- * Free the memory when tearing down
+- */
+-static void
+-skl_tplg_free_pipe_mem(struct skl *skl, struct skl_module_cfg *mconfig)
+-{
+-	skl->resource.mem -= mconfig->pipe->memory_pages;
+-}
+-
+-
+ static void skl_dump_mconfig(struct skl_sst *ctx,
+ 					struct skl_module_cfg *mcfg)
+ {
+@@ -1204,7 +1159,6 @@ skl_tplg_get_pipe_config(struct skl *skl, struct skl_module_cfg *mconfig)
+ /*
+  * Mixer module represents a pipeline. So in the Pre-PMU event of mixer we
+  * need create the pipeline. So we do following:
+- *   - check the resources
+  *   - Create the pipeline
+  *   - Initialize the modules in pipeline
+  *   - finally bind all modules together
+@@ -1235,9 +1189,6 @@ static int skl_tplg_mixer_dapm_pre_pmu_event(struct snd_soc_dapm_widget *w,
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	if (!skl_is_pipe_mem_avail(skl, mconfig))
+-		return -ENOMEM;
+-
+ 	/*
+ 	 * Create a list of modules for pipe.
+ 	 * This list contains modules from source to sink
+@@ -1246,8 +1197,6 @@ static int skl_tplg_mixer_dapm_pre_pmu_event(struct snd_soc_dapm_widget *w,
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	skl_tplg_alloc_pipe_mem(skl, mconfig);
+-
+ 	/* Init all pipe modules from source to sink */
+ 	ret = skl_tplg_init_pipe_modules(skl, s_pipe);
+ 	if (ret < 0)
+@@ -1796,7 +1745,6 @@ static int skl_tplg_mixer_dapm_pre_pmd_event(struct snd_soc_dapm_widget *w,
+ 
+ /*
+  * in the Post-PMD event of mixer we need to do following:
+- *   - Free the mem used
+  *   - Unbind the modules within the pipeline
+  *   - Delete the pipeline (modules are not required to be explicitly
+  *     deleted, pipeline delete is enough here
+@@ -1814,8 +1762,6 @@ static int skl_tplg_mixer_dapm_post_pmd_event(struct snd_soc_dapm_widget *w,
+ 	if (s_pipe->state == SKL_PIPE_INVALID)
+ 		return -EINVAL;
+ 
+-	skl_tplg_free_pipe_mem(skl, mconfig);
+-
+ 	list_for_each_entry(w_module, &s_pipe->w_list, node) {
+ 		if (list_empty(&skl->bind_list))
+ 			break;
+@@ -4356,8 +4302,6 @@ void skl_cleanup_resources(struct skl *skl)
+ 	if (!card || !card->instantiated)
+ 		return;
+ 
+-	skl->resource.mem = 0;
+-
+ 	list_for_each_entry(w, &card->widgets, list) {
+ 		if (is_skl_dsp_widget_type(w, ctx->dev) && w->priv != NULL)
+ 			skl_clear_pin_config(soc_component, w);
+@@ -5331,9 +5275,6 @@ static void skl_tplg_set_pipe_type(struct skl *skl, struct skl_pipe *pipe)
+ 		pipe->passthru = false;
+ }
+ 
+-/* This will be read from topology manifest, currently defined here */
+-#define SKL_FW_MAX_MEM 1000000
+-
+ /*
+  * SKL topology init routine
+  */
+@@ -5368,8 +5309,6 @@ int skl_tplg_init(struct snd_soc_component *component, struct hdac_bus *bus)
+ 		return -EINVAL;
+ 	}
+ 
+-	skl->resource.max_mem = SKL_FW_MAX_MEM;
+-
+ 	skl->tplg = fw;
+ 	ret = skl_tplg_create_pipe_widget_list(component);
+ 	if (ret < 0)
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index bafc0686c525..c900bdf691e5 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -67,11 +67,6 @@ static inline void skl_virt_device_unregister(struct skl *skl)
+ }
+ #endif
+ 
+-struct skl_dsp_resource {
+-	u32 max_mem;
+-	u32 mem;
+-};
+-
+ struct skl_debug;
+ 
+ struct skl_astate_param {
+@@ -151,7 +146,6 @@ struct skl {
+ 	struct nhlt_acpi_table *nhlt; /* nhlt ptr */
+ 	struct skl_sst *skl_sst; /* sst skl ctx */
+ 
+-	struct skl_dsp_resource resource;
+ 	struct list_head ppl_list;
+ 	struct list_head bind_list;
+ 
+-- 
+2.17.1
+
