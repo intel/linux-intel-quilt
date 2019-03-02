@@ -1,0 +1,69 @@
+From 57115efcb6d47dbfdee7a656d12db77229ba9450 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pawe=C5=82=20Har=C5=82ozi=C5=84ski?=
+ <pawel.harlozinski@intel.com>
+Date: Wed, 6 Feb 2019 15:51:22 +0100
+Subject: [PATCH 01/23] ASoC: Intel: Skylake: fix for BXT HW data loss in 16/16
+ -> 32/32 copier
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This commit fixes Broxton hardware bug: playback data loss when using
+copier with input 16 bit sample size in 16 bit container, output 32 bit
+sample size in 32 bit container.
+
+Workaruond method:
+clear PPCTL.PROCEN bit for corresponding stream index
+before writing to Stream Descriptor Format register (SDxFMT)
+and set PPCTL.PROCEN again after that.
+
+Change-Id: Ia52be62af306afe40b4371f7da1f08e108f0418b
+Tracked-On: ACI-5615
+Tracked-On: OAM-75492
+Signed-off-by: Paweł Harłoziński <pawel.harlozinski@intel.com>
+Reviewed-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+Tested-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+Tested-by: gkblditp <gkblditp@intel.com>
+---
+ sound/soc/intel/skylake/skl-pcm.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 9a2fffa4ecd2..ec0cb11c0d29 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -37,6 +37,8 @@
+ #define HDA_QUAD 4
+ #define HDA_8_CH 8
+ 
++#define IS_BXT(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x5a98)
++
+ static const struct snd_pcm_hardware azx_pcm_hw = {
+ 	.info =			(SNDRV_PCM_INFO_MMAP |
+ 				 SNDRV_PCM_INFO_INTERLEAVED |
+@@ -183,6 +185,7 @@ int skl_pcm_host_dma_prepare(struct device *dev, struct skl_pipe_params *params)
+ 	struct hdac_ext_stream *stream;
+ 	struct snd_pcm_runtime *runtime;
+ 	int err;
++	struct skl *skl = bus_to_skl(bus);
+ 
+ 	hstream = snd_hdac_get_stream(bus, params->stream,
+ 					params->host_dma_id + 1);
+@@ -203,7 +206,14 @@ int skl_pcm_host_dma_prepare(struct device *dev, struct skl_pipe_params *params)
+ 	if (err < 0)
+ 		return err;
+ 
++	if (IS_BXT(skl->pci))	/* workaround for BXT HW bug */
++		snd_hdac_ext_stream_decouple(bus, stream, false);
++
+ 	err = snd_hdac_stream_setup(hdac_stream(stream));
++
++	if (IS_BXT(skl->pci))	/* workaround for BXT HW bug */
++		snd_hdac_ext_stream_decouple(bus, stream, true);
++
+ 	if (err < 0)
+ 		return err;
+ 
+-- 
+2.17.1
+

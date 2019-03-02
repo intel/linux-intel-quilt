@@ -1,0 +1,543 @@
+From 769951d0b7ade3a5d03e6976563fad1885fc1013 Mon Sep 17 00:00:00 2001
+From: "Furtak, Pawel" <pawel.furtak@intel.com>
+Date: Thu, 20 Dec 2018 15:32:00 +0100
+Subject: [PATCH 06/23] ASoC: Intel: Skl: Virt: Choose topology based on GOS
+ domain
+
+To implement permission control based on domains, topology should
+contain additional information like domain name, id and name of
+sub-topology file. This patch adds the information to manifests
+and removes corresponding hardcodes. Also domain id is no longer
+Guest OS module parameter, instead it is read from topology by
+Service OS and sent to Guest OS through IPC.
+
+Change-Id: Ia4829abb79f28814aefb9c0cb1e1a74d8ea8b5aa
+Tracked-On: OAM-76301
+Signed-off-by: Furtak, Pawel <pawel.furtak@intel.com>
+Reviewed-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tested-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+---
+ include/uapi/sound/snd_sst_tokens.h           | 11 ++-
+ sound/soc/intel/skylake/skl-messages.c        |  1 +
+ sound/soc/intel/skylake/skl-sst-ipc.h         |  2 +
+ sound/soc/intel/skylake/skl-topology.c        | 76 ++++++++++++++++++-
+ sound/soc/intel/skylake/skl-topology.h        |  7 ++
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 63 ++++++++++++---
+ .../intel/skylake/virtio/skl-virtio-common.h  |  7 +-
+ .../soc/intel/skylake/virtio/skl-virtio-fe.c  | 71 +++++++++--------
+ .../soc/intel/skylake/virtio/skl-virtio-fe.h  |  2 +-
+ 9 files changed, 188 insertions(+), 52 deletions(-)
+
+diff --git a/include/uapi/sound/snd_sst_tokens.h b/include/uapi/sound/snd_sst_tokens.h
+index 353899e33a3b..70b141d8b5a7 100644
+--- a/include/uapi/sound/snd_sst_tokens.h
++++ b/include/uapi/sound/snd_sst_tokens.h
+@@ -283,7 +283,13 @@
+  *
+  * %SKL_TKN_U32_FMT_CFG_IDX:    Format config index
+  *
+- * %SKL_TKN_U32_DOMAIN_ID:      Widget domain ID
++ * %SKL_TKN_U32_DOMAIN_ID:      Domain identifier
++ *
++ * %SKL_TKN_STR_DOMAIN_NAME:    Domain name
++ *
++ * %SKL_TKN_STR_DOMAIN_TPLG:    Subtopology file name assigned to domain
++ *
++ * %SKL_TKN_U32_MOD_DOMAIN_ID:  Module domain ID
+  *
+  * %SKL_TKN_U32_CTL_DOMAIN_ID:  Control domain ID
+  *
+@@ -405,6 +411,9 @@ enum SKL_TKNS {
+ 	SKL_TKN_U32_FMT_CFG_IDX,
+ 
+ 	SKL_TKN_U32_DOMAIN_ID,
++	SKL_TKN_STR_DOMAIN_NAME,
++	SKL_TKN_STR_DOMAIN_TPLG,
++	SKL_TKN_U32_MOD_DOMAIN_ID,
+ 	SKL_TKN_U32_CTL_DOMAIN_ID,
+ 	SKL_TKN_STR_CTL_NAME,
+ 	SKL_TKN_MAX = SKL_TKN_STR_CTL_NAME,
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 744617279cb0..39cd014dad4a 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1243,6 +1243,7 @@ int skl_init_dsp(struct skl *skl)
+ 	dev_dbg(bus->dev, "dsp registration status=%d\n", ret);
+ 
+ 	INIT_LIST_HEAD(&skl->skl_sst->notify_kctls);
++	INIT_LIST_HEAD(&skl->skl_sst->tplg_domains);
+ 
+ 	/* Set DMA clock controls */
+ 	ret = skl_dsp_set_dma_clk_controls(skl->skl_sst);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index bff6c0c948b1..551598ea8e6d 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -325,6 +325,8 @@ struct skl_sst {
+ 	struct skl_sysfs_tree *sysfs_tree;
+ 
+ 	struct list_head notify_kctls;
++
++	struct list_head tplg_domains;
+ };
+ 
+ struct skl_ipc_init_instance_msg {
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index d0d4092b5807..0553c096e847 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -3483,6 +3483,23 @@ static int skl_tplg_fill_pin(struct device *dev,
+ 	return 0;
+ }
+ 
++static int skl_tplg_fill_tplg_domain_info(struct device *dev,
++		struct skl *skl,
++		struct snd_soc_tplg_vendor_value_elem *tkn_elem)
++{
++	struct skl_tplg_domain *tplg_domain;
++
++	if (list_empty(&skl->skl_sst->tplg_domains))
++		return -EINVAL;
++
++	tplg_domain = list_last_entry(&skl->skl_sst->tplg_domains,
++		struct skl_tplg_domain, list);
++
++	tplg_domain->domain_id = tkn_elem->value;
++
++	return 0;
++}
++
+ static int skl_tplg_fill_kctl_domain(struct device *dev,
+ 		struct skl_module_cfg *mconfig,
+ 		struct snd_soc_tplg_vendor_value_elem *tkn_elem)
+@@ -3931,7 +3948,7 @@ static int skl_tplg_get_token(struct device *dev,
+ 
+ 		break;
+ 
+-	case SKL_TKN_U32_DOMAIN_ID:
++	case SKL_TKN_U32_MOD_DOMAIN_ID:
+ 		mconfig->domain_id = tkn_elem->value;
+ 		break;
+ 
+@@ -4603,11 +4620,49 @@ static int skl_tplg_fill_str_ctl_tkn(struct device *dev,
+ 	return 1;
+ }
+ 
++static int skl_tplg_fill_str_tplg_domain_tkn(struct device *dev,
++		struct snd_soc_tplg_vendor_string_elem *str_elem,
++		struct skl *skl)
++{
++	struct skl_tplg_domain *tplg_domain;
++
++	switch (str_elem->token) {
++	case SKL_TKN_STR_DOMAIN_NAME:
++		tplg_domain =
++			devm_kzalloc(dev, sizeof(*tplg_domain), GFP_KERNEL);
++
++		if (!tplg_domain)
++			return -ENOMEM;
++
++		strncpy(tplg_domain->domain_name,
++			str_elem->string,
++			ARRAY_SIZE(tplg_domain->domain_name));
++		list_add_tail(&tplg_domain->list, &skl->skl_sst->tplg_domains);
++		break;
++	case SKL_TKN_STR_DOMAIN_TPLG:
++		if (list_empty(&skl->skl_sst->tplg_domains))
++			return -EINVAL;
++
++		tplg_domain = list_last_entry(&skl->skl_sst->tplg_domains,
++			struct skl_tplg_domain, list);
++
++		strncpy(tplg_domain->tplg_name,
++			str_elem->string,
++			ARRAY_SIZE(tplg_domain->tplg_name));
++		break;
++	default:
++		dev_err(dev, "Not a domain token %d\n", str_elem->token);
++		break;
++	}
++
++	return 0;
++}
++
+ static int skl_tplg_fill_str_mfest_tkn(struct device *dev,
+ 		struct snd_soc_tplg_vendor_string_elem *str_elem,
+ 		struct skl *skl)
+ {
+-	int tkn_count = 0;
++	int ret, tkn_count = 0;
+ 	static int ref_count;
+ 
+ 	switch (str_elem->token) {
+@@ -4622,7 +4677,12 @@ static int skl_tplg_fill_str_mfest_tkn(struct device *dev,
+ 			ARRAY_SIZE(skl->skl_sst->lib_info[ref_count].name));
+ 		ref_count++;
+ 		break;
+-
++	case SKL_TKN_STR_DOMAIN_NAME:
++	case SKL_TKN_STR_DOMAIN_TPLG:
++		ret = skl_tplg_fill_str_tplg_domain_tkn(dev, str_elem, skl);
++		if (ret < 0)
++			return ret;
++	break;
+ 	default:
+ 		dev_err(dev, "Not a string token %d\n", str_elem->token);
+ 		break;
+@@ -4644,6 +4704,8 @@ static int skl_tplg_get_str_tkn(struct device *dev,
+ 	while (tkn_count < array->num_elems) {
+ 		switch (str_elem->token) {
+ 		case SKL_TKN_STR_LIB_NAME:
++		case SKL_TKN_STR_DOMAIN_NAME:
++		case SKL_TKN_STR_DOMAIN_TPLG:
+ 			ret = skl_tplg_fill_str_mfest_tkn(dev, str_elem, skl);
+ 			break;
+ 		case SKL_TKN_STR_CTL_NAME:
+@@ -5026,6 +5088,14 @@ static int skl_tplg_get_int_tkn(struct device *dev,
+ 			return ret;
+ 		break;
+ 
++	case SKL_TKN_U32_DOMAIN_ID:
++		ret = skl_tplg_fill_tplg_domain_info(dev,
++			skl, tkn_elem);
++
++		if (ret < 0)
++			return ret;
++		break;
++
+ 	default:
+ 		dev_err(dev, "Not a manifest token %d\n", tkn_elem->token);
+ 		return -EINVAL;
+diff --git a/sound/soc/intel/skylake/skl-topology.h b/sound/soc/intel/skylake/skl-topology.h
+index d4b7d595e5fb..11fa46ecca19 100644
+--- a/sound/soc/intel/skylake/skl-topology.h
++++ b/sound/soc/intel/skylake/skl-topology.h
+@@ -428,6 +428,13 @@ struct skl_gain_data {
+ 	u32 volume[MAX_NUM_CHANNELS];
+ };
+ 
++struct skl_tplg_domain {
++	unsigned char domain_name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
++	unsigned char tplg_name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
++	u32 domain_id;
++	struct list_head list;
++};
++
+ struct skl_kctl_domain {
+ 	unsigned char name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
+ 	u32 domain_id;
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 8125cbde26df..5f59c373c8d1 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -90,6 +90,33 @@ struct snd_soc_dapm_widget *vbe_skl_find_kcontrol_widget(
+ 	return NULL;
+ }
+ 
++struct skl_tplg_domain *vbe_skl_find_tplg_domain_by_name(
++	const struct skl *skl, char *domain_name)
++{
++	struct skl_tplg_domain *tplg_domain;
++
++	list_for_each_entry(tplg_domain, &skl->skl_sst->tplg_domains, list) {
++		if (strncmp(tplg_domain->domain_name, domain_name,
++				ARRAY_SIZE(tplg_domain->domain_name)) == 0)
++			return tplg_domain;
++	}
++
++	return NULL;
++}
++
++struct skl_tplg_domain *vbe_skl_find_tplg_domain_by_id(
++	const struct skl *skl, u32 domain_id)
++{
++	struct skl_tplg_domain *tplg_domain;
++
++	list_for_each_entry(tplg_domain, &skl->skl_sst->tplg_domains, list) {
++		if (tplg_domain->domain_id == domain_id)
++			return tplg_domain;
++	}
++
++	return NULL;
++}
++
+ inline int vbe_skl_is_valid_pcm_id(char *pcm_id)
+ {
+ 	if (pcm_id == NULL || strlen(pcm_id) == 0 ||
+@@ -595,29 +622,41 @@ static int vbe_skl_send_tplg_data(struct snd_skl_vbe *vbe,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_tplg_size(struct snd_skl_vbe *vbe, const struct skl *sdev,
++static int vbe_skl_tplg_info(struct snd_skl_vbe *vbe, const struct skl *skl,
+ 	int vm_id, const struct vbe_ipc_msg *msg)
+ {
++	struct skl_tplg_domain *tplg_domain;
+ 	const struct firmware *tplg;
+ 	char *tplg_name;
+ 	int chunks, data, ret;
+-	struct vfe_tplg_size *tplg_size = msg->rx_data;
++	struct vfe_tplg_info *tplg_info = msg->rx_data;
+ 
+-	if (!tplg_size)
++	if (!tplg_info)
+ 		return -EINVAL;
+ 
+-	//TODO: get tplg file name by guest domain ID
+-	tplg_name = "guest_tplg.bin";
++	tplg_domain = vbe_skl_find_tplg_domain_by_name(skl,
++		msg->header->domain_name);
++	if (!tplg_domain) {
++		dev_err(vbe->dev,
++			"Could not find topology definition for Guest %s",
++			msg->header->domain_name);
++		return -EINVAL;
++	}
++
++	tplg_name = tplg_domain->tplg_name;
+ 	ret = request_firmware(&tplg, tplg_name, vbe->dev);
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	tplg_size->chunk_size = SKL_VIRTIO_TPLG_CHUNK_SIZE;
+-	tplg_size->size = tplg->size;
+-	tplg_size->chunks = tplg_size->size / SKL_VIRTIO_TPLG_CHUNK_SIZE +
+-		tplg_size->size % SKL_VIRTIO_TPLG_CHUNK_SIZE ? 1 : 0;
++	strncpy(tplg_info->tplg_name, tplg_domain->tplg_name,
++		ARRAY_SIZE(tplg_info->tplg_name));
++	tplg_info->domain_id = tplg_domain->domain_id;
++	tplg_info->chunk_size = SKL_VIRTIO_TPLG_CHUNK_SIZE;
++	tplg_info->size = tplg->size;
++	tplg_info->chunks = tplg_info->size / SKL_VIRTIO_TPLG_CHUNK_SIZE +
++		tplg_info->size % SKL_VIRTIO_TPLG_CHUNK_SIZE ? 1 : 0;
+ 
+-	vbe_skl_send_tplg_data(vbe, sdev, tplg, vm_id);
++	vbe_skl_send_tplg_data(vbe, skl, tplg, vm_id);
+ 
+ 	release_firmware(tplg);
+ 
+@@ -739,8 +778,8 @@ int vbe_skl_msg_tplg_handle(const struct snd_skl_vbe *vbe,
+ 	u32 domain_id = msg->header->domain_id;
+ 
+ 	switch (msg->header->cmd) {
+-	case VFE_MSG_TPLG_SIZE:
+-		return vbe_skl_tplg_size(vbe, sdev, vm_id, msg);
++	case VFE_MSG_TPLG_INFO:
++		return vbe_skl_tplg_info(vbe, sdev, vm_id, msg);
+ 	default:
+ 		dev_err(vbe->dev, "Unknown command %d for tplg [%s].\n",
+ 			msg->header->cmd);
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-common.h b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+index 0ddb833aebc8..bde10f93df8a 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-common.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+@@ -28,6 +28,7 @@
+ #define SKL_VIRTIO_IPC_REPLY 1
+ 
+ #define SKL_VIRTIO_DOMAIN_NAME_LEN 20
++#define SKL_VIRTIO_DOMAIN_TPLG_LEN 40
+ #define SKL_VIRTIO_TPLG_CHUNK_SIZE 2048
+ 
+ struct vfe_dsp_ipc_msg {
+@@ -152,7 +153,9 @@ struct vfe_hw_pos_request {
+ 	u64 stream_pos;
+ };
+ 
+-struct vfe_tplg_size {
++struct vfe_tplg_info {
++	char tplg_name[SKL_VIRTIO_DOMAIN_TPLG_LEN];
++	u32 domain_id;
+ 	u32 chunk_size;
+ 	u32 chunks;
+ 	u64 size;
+@@ -201,7 +204,7 @@ enum vfe_ipc_msg_type {
+ 
+ 	VFE_MSG_KCTL_SET = VFE_MSG_KCTL | 0x01,
+ 
+-	VFE_MSG_TPLG_SIZE = VFE_MSG_TPLG | 0x01,
++	VFE_MSG_TPLG_INFO = VFE_MSG_TPLG | 0x01,
+ 	VFE_MSG_TPLG_DATA = VFE_MSG_TPLG | 0x02,
+ 
+ 	VFE_MSG_CFG_HDA = VFE_MSG_CFG | 0x01,
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index c530ccc7fc08..422526b162a5 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -90,22 +90,6 @@ inline int vfe_is_valid_fe_substream(struct snd_pcm_substream *substream)
+ 	return vfe_is_valid_pcm_id(substream->pcm->id);
+ }
+ 
+-const struct snd_pcm *vfe_skl_find_pcm_by_name(struct skl *skl, char *pcm_name)
+-{
+-	const struct snd_soc_pcm_runtime *rtd;
+-	int ret = vfe_is_valid_pcm_id(pcm_name);
+-
+-	if (ret < 0)
+-		return NULL;
+-
+-	list_for_each_entry(rtd, &skl->component->card->rtd_list, list) {
+-		if (strncmp(rtd->pcm->id, pcm_name,
+-				ARRAY_SIZE(rtd->pcm->id)) == 0)
+-			return rtd->pcm;
+-	}
+-	return NULL;
+-}
+-
+ static inline vfe_vq_kick(struct snd_skl_vfe *vfe, struct virtqueue *vq)
+ {
+ 	unsigned long irq_flags;
+@@ -124,7 +108,6 @@ static int vfe_send_virtio_msg(struct snd_skl_vfe *vfe,
+ 	if (!vq)
+ 		return -EINVAL;
+ 
+-
+ 	spin_lock_irqsave(&vfe->ipc_vq_lock, irq_flags);
+ 	if (out)
+ 		ret = virtqueue_add_outbuf(vq, sgs, sg_count, data, GFP_KERNEL);
+@@ -144,6 +127,22 @@ static int vfe_send_virtio_msg(struct snd_skl_vfe *vfe,
+ 	return 0;
+ }
+ 
++const struct snd_pcm *vfe_skl_find_pcm_by_name(struct skl *skl, char *pcm_name)
++{
++	const struct snd_soc_pcm_runtime *rtd;
++	int ret = vfe_is_valid_pcm_id(pcm_name);
++
++	if (ret < 0)
++		return NULL;
++
++	list_for_each_entry(rtd, &skl->component->card->rtd_list, list) {
++		if (strncmp(rtd->pcm->id, pcm_name,
++				ARRAY_SIZE(rtd->pcm->id)) == 0)
++			return rtd->pcm;
++	}
++	return NULL;
++}
++
+ static int vfe_send_msg(struct snd_skl_vfe *vfe,
+ 	struct vfe_msg_header *msg_header, void *tx_data, int tx_size,
+ 	void *rx_data, int rx_size)
+@@ -467,7 +466,6 @@ static void vfe_message_loop(struct work_struct *work)
+ 		}
+ 		vfe_put_inbox_buffer(vfe, header);
+ 	}
+-	vfe_put_inbox_buffer(vfe, header);
+ }
+ 
+ static int vfe_skl_kcontrol_get_domain_id(const struct snd_kcontrol *kcontrol,
+@@ -820,6 +818,7 @@ static int vfe_skl_init_dsp(struct skl *skl)
+ 		return -ENOMEM;
+ 
+ 	INIT_LIST_HEAD(&skl->skl_sst->notify_kctls);
++	INIT_LIST_HEAD(&skl->skl_sst->tplg_domains);
+ 
+ 	return ret;
+ }
+@@ -913,11 +912,20 @@ void vfe_skl_pci_dev_release(struct device *dev)
+ 
+ static int vfe_request_topology(struct skl *skl, const struct firmware **fw)
+ {
++	int ret;
+ 	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+ 
+-	mutex_lock(&vfe->tplg_init_lock);
++	ret = wait_event_timeout(vfe->tplg.waitq,
++		vfe->tplg.load_completed,
++		msecs_to_jiffies(VFE_TPLG_LOAD_TIMEOUT));
++
++	if (ret == 0) {
++		dev_err(&vfe->vdev->dev,
++			"Failed to receive topology from BE service");
++		return -ETIMEDOUT;
++	}
++
+ 	*fw = &vfe->tplg.tplg_data;
+-	mutex_unlock(&vfe->tplg_init_lock);
+ 
+ 	return 0;
+ }
+@@ -925,43 +933,41 @@ static int vfe_request_topology(struct skl *skl, const struct firmware **fw)
+ static int vfe_init_tplg(struct snd_skl_vfe *vfe, struct skl *skl)
+ {
+ 	struct vfe_msg_header msg_header;
+-	struct vfe_tplg_size tplg_size;
++	struct vfe_tplg_info tplg_info;
+ 	int ret;
+ 	u8 *tplg_data;
+ 
+-	mutex_init(&vfe->tplg_init_lock);
+-	mutex_lock(&vfe->tplg_init_lock);
+ 
+ 	mutex_init(&vfe->tplg.tplg_lock);
+ 	init_waitqueue_head(&vfe->tplg.waitq);
+ 	vfe->tplg.load_completed = false;
+ 
+-	strcpy(skl->tplg_name, "5a98-INTEL-NHLT-GPA-11-tplg.bin");
+ 	skl->skl_sst->request_tplg = vfe_request_topology;
+ 
+ 	mutex_lock(&vfe->tplg.tplg_lock);
+-	msg_header.cmd = VFE_MSG_TPLG_SIZE;
++	msg_header.cmd = VFE_MSG_TPLG_INFO;
+ 	ret = vfe_send_msg(vfe, &msg_header,
+-		NULL, 0, &tplg_size, sizeof(tplg_size));
++		NULL, 0, &tplg_info, sizeof(tplg_info));
+ 	if (ret < 0)
+ 		goto error_handl;
+ 
++	//TODO: get result from vBE
++
+ 	tplg_data = devm_kzalloc(&vfe->vdev->dev,
+-		tplg_size.size, GFP_KERNEL);
++		tplg_info.size, GFP_KERNEL);
+ 	if (!tplg_data) {
+ 		ret = -ENOMEM;
+ 		goto error_handl;
+ 	}
+ 
++	domain_id = tplg_info.domain_id;
+ 	vfe->tplg.tplg_data.data = tplg_data;
+-	vfe->tplg.tplg_data.size = tplg_size.size;
++	vfe->tplg.tplg_data.size = tplg_info.size;
++	strncpy(skl->tplg_name, tplg_info.tplg_name,
++		ARRAY_SIZE(skl->tplg_name));
+ 
+ error_handl:
+ 	mutex_unlock(&vfe->tplg.tplg_lock);
+-	if (ret == 0)
+-		wait_event(vfe->tplg.waitq, vfe->tplg.load_completed);
+-
+-	mutex_unlock(&vfe->tplg_init_lock);
+ 
+ 	return ret;
+ }
+@@ -1198,7 +1204,6 @@ static struct virtio_driver vfe_audio_driver = {
+ 
+ module_virtio_driver(vfe_audio_driver);
+ module_param(domain_name, charp, 0444);
+-module_param(domain_id, uint, 0444);
+ 
+ MODULE_DEVICE_TABLE(virtio, id_table);
+ MODULE_DESCRIPTION("Intel Broxton Virtio FE Driver");
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index ec6cae0c3b89..7456b53c5672 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -13,6 +13,7 @@
+ #include "skl-virtio-common.h"
+ 
+ #define VFE_MSG_MSEC_TIMEOUT 100
++#define VFE_TPLG_LOAD_TIMEOUT 1000
+ #define VFE_MSG_BUFF_NUM 3
+ 
+ struct vfe_substream_info {
+@@ -42,7 +43,6 @@ struct snd_skl_vfe {
+ 
+ 	struct kctl_proxy kcon_proxy;
+ 	struct vskl_vfe_tplg tplg;
+-	struct mutex tplg_init_lock;
+ 
+ 	struct work_struct init_work;
+ 
+-- 
+2.17.1
+

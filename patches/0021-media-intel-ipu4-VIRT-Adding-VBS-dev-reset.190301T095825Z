@@ -1,0 +1,68 @@
+From b7e1730b172d3cc1de48d08d598e9028e2b6843b Mon Sep 17 00:00:00 2001
+From: "Bandi, Kushal" <kushal.bandi@intel.com>
+Date: Tue, 26 Feb 2019 14:58:04 -0800
+Subject: [PATCH 21/23] media: intel-ipu4: [VIRT] Adding VBS dev reset
+
+IPU BE as VBS client is not getting destoryed.
+Causing memory leak.
+Hence adding hooks for IPU BE to cleanly destoryed
+during system suspend.
+
+Change-Id: I35774d09fe1af6a6fe7ea639e22306489f5c5f1f
+Tracked-On: PKT-1760
+Tracked-On: OAM-76373
+Signed-off-by: Bandi, Kushal <kushal.bandi@intel.com>
+---
+ .../pci/intel/virtio/intel-ipu4-virtio-be.c   | 21 +++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be.c b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be.c
+index a4e0d87e224f..c29294b186fe 100644
+--- a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be.c
++++ b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be.c
+@@ -51,9 +51,9 @@ static int ipu_vbk_hash_initialized;
+ static int ipu_vbk_connection_cnt;
+ /* function declarations */
+ static int handle_kick(int client_id, long unsigned int *req_cnt);
+-static void ipu_vbk_reset(struct ipu4_virtio_be_priv *rng);
+-static void ipu_vbk_stop(struct ipu4_virtio_be_priv *rng);
+-static void ipu_vbk_flush(struct ipu4_virtio_be_priv *rng);
++static int ipu_vbk_reset(struct ipu4_virtio_be_priv *priv);
++static void ipu_vbk_stop(struct ipu4_virtio_be_priv *priv);
++static void ipu_vbk_flush(struct ipu4_virtio_be_priv *priv);
+ 
+ #ifdef RUNTIME_CTRL
+ static int ipu_vbk_enable_vq(struct ipu4_virtio_be_priv *rng,
+@@ -388,6 +388,13 @@ static long ipu_vbk_ioctl(struct file *f, unsigned int ioctl,
+ 		/* Increment counter */
+ 		ipu_vbk_connection_cnt++;
+ 		return r;
++	case VBS_RESET_DEV:
++		r = ipu_vbk_reset(priv);
++		if (r < 0) {
++			pr_err("VBS_RESET_DEV: virtio_vqs_ioctl failed!\n");
++			return -EFAULT;
++		}
++		return r;
+ 	default:
+ 		/*mutex_lock(&n->dev.mutex);*/
+ 		r = virtio_dev_ioctl(&priv->dev, ioctl, argp);
+@@ -434,8 +441,14 @@ int notify_fe(int status, struct ipu4_virtio_req_info *req_info)
+ }
+ 
+ /* device specific function to cleanup itself */
+-static void ipu_vbk_reset(struct ipu4_virtio_be_priv *rng)
++static int ipu_vbk_reset(struct ipu4_virtio_be_priv *priv)
+ {
++	int r = 0;
++
++	r = virtio_dev_deregister(&priv->dev);
++	virtio_dev_reset(&priv->dev);
++
++	return r;
+ }
+ 
+ /* device specific function */
+-- 
+2.17.1
+

@@ -1,0 +1,1715 @@
+From 1fd1aa3c0f1b02f7c2b1a6ff6fc5feb65436fcd7 Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Mon, 10 Dec 2018 16:34:16 +0100
+Subject: [PATCH 03/23] ASoC: Intel: Skylake: Virt: Synchronistation of ALSA
+ controls
+
+Synchronization of kcontrols between Guset OS and Service OS by
+wrapping put callback with function that forwards kcontrol name and
+value to the other OS (GOS or SOS) through IPC.
+Add separate machine driver for Service OS. The new version is
+created based on tdf8532(bxt_tdf8532.c). It is extended with another
+Speaker Switch kcontrol, which enables two simultaneous playback on
+Guest and Service OS.
+
+Change-Id: I076c3d94df804086d2350d63a5e1f36487978e1b
+Tracked-On: OAM-76301
+Signed-off-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tested-by: gkblditp <gkblditp@intel.com>
+---
+ sound/soc/intel/boards/Kconfig                |  16 +
+ sound/soc/intel/boards/Makefile               |   2 +
+ sound/soc/intel/boards/bxt_sos_tdf8532.c      | 451 ++++++++++++++++++
+ sound/soc/intel/skylake/skl-pcm.c             |  16 +-
+ sound/soc/intel/skylake/virtio/Makefile       |   5 +-
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 241 +++++-----
+ .../soc/intel/skylake/virtio/skl-virtio-be.h  |   5 +-
+ .../intel/skylake/virtio/skl-virtio-card.c    |   7 +-
+ .../intel/skylake/virtio/skl-virtio-common.h  |  67 ++-
+ .../soc/intel/skylake/virtio/skl-virtio-fe.c  | 227 ++++-----
+ .../soc/intel/skylake/virtio/skl-virtio-fe.h  |  13 +-
+ .../intel/skylake/virtio/skl-virtio-kctl.c    | 135 ++++++
+ .../intel/skylake/virtio/skl-virtio-miscdev.c |  22 +-
+ sound/soc/intel/skylake/virtio/skl-virtio.h   |   3 +
+ 14 files changed, 930 insertions(+), 280 deletions(-)
+ create mode 100644 sound/soc/intel/boards/bxt_sos_tdf8532.c
+ create mode 100644 sound/soc/intel/skylake/virtio/skl-virtio-kctl.c
+
+diff --git a/sound/soc/intel/boards/Kconfig b/sound/soc/intel/boards/Kconfig
+index 069ae85c555b..347628e1c670 100644
+--- a/sound/soc/intel/boards/Kconfig
++++ b/sound/soc/intel/boards/Kconfig
+@@ -239,6 +239,22 @@ config SND_SOC_INTEL_BXT_RT298_MACH
+ 	   Say Y or m if you have such a device. This is a recommended option.
+ 	   If unsure select "N".
+ 
++config SND_SOC_INTEL_BXT_SOS_TDF8532_MACH
++	tristate
++	select SND_SOC_TDF8532
++
++config SND_SOC_INTEL_BXT_SOS_TDF8532
++	bool
++	prompt "Broxton with TDF8532 in I2S mode and SOS support"
++	depends on MFD_INTEL_LPSS && I2C && ACPI
++	select SND_SOC_INTEL_BXT_SOS_TDF8532_MACH
++	help
++	  This adds support for ASoC machine driver for Broxton IVI GP MRB
++	  platforms with TDF8532 I2S audio codec. This version of machine driver
++	  supports virtio sound card BE on Service OS.
++	  Say Y or m if you have such a device. This is a recommended option.
++	  If unsure select "N".
++
+ config SND_SOC_INTEL_KBL_RT5663_MAX98927_MACH
+ 	tristate "KBL with RT5663 and MAX98927 in I2S Mode"
+ 	depends on MFD_INTEL_LPSS && I2C && ACPI
+diff --git a/sound/soc/intel/boards/Makefile b/sound/soc/intel/boards/Makefile
+index f69831624273..a3c2878a36f8 100644
+--- a/sound/soc/intel/boards/Makefile
++++ b/sound/soc/intel/boards/Makefile
+@@ -6,6 +6,7 @@ snd-soc-sst-bdw-rt5677-mach-objs := bdw-rt5677.o
+ snd-soc-sst-broadwell-objs := broadwell.o
+ snd-soc-sst-bxt-da7219_max98357a-objs := bxt_da7219_max98357a.o
+ snd-soc-sst-bxt-rt298-objs := bxt_rt298.o
++snd-soc-sst_bxt_sos_tdf8532-objs := bxt_sos_tdf8532.o
+ snd-soc-sst-glk-rt5682_max98357a-objs := glk_rt5682_max98357a.o
+ snd-soc-sst_bxt_tdf8532-objs := bxt_tdf8532.o
+ snd-soc-sst-bytcr-rt5640-objs := bytcr_rt5640.o
+@@ -40,6 +41,7 @@ obj-$(CONFIG_SND_SOC_INTEL_BYT_RT5640_MACH) += snd-soc-sst-byt-rt5640-mach.o
+ obj-$(CONFIG_SND_SOC_INTEL_BYT_MAX98090_MACH) += snd-soc-sst-byt-max98090-mach.o
+ obj-$(CONFIG_SND_SOC_INTEL_BXT_DA7219_MAX98357A_MACH) += snd-soc-sst-bxt-da7219_max98357a.o
+ obj-$(CONFIG_SND_SOC_INTEL_BXT_RT298_MACH) += snd-soc-sst-bxt-rt298.o
++obj-$(CONFIG_SND_SOC_INTEL_BXT_SOS_TDF8532_MACH) += snd-soc-sst_bxt_sos_tdf8532.o
+ obj-$(CONFIG_SND_SOC_INTEL_GLK_RT5682_MAX98357A_MACH) += snd-soc-sst-glk-rt5682_max98357a.o
+ obj-$(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) += snd-soc-sst_bxt_tdf8532.o
+ obj-$(CONFIG_SND_SOC_INTEL_BROADWELL_MACH) += snd-soc-sst-broadwell.o
+diff --git a/sound/soc/intel/boards/bxt_sos_tdf8532.c b/sound/soc/intel/boards/bxt_sos_tdf8532.c
+new file mode 100644
+index 000000000000..46b5e045d8b5
+--- /dev/null
++++ b/sound/soc/intel/boards/bxt_sos_tdf8532.c
+@@ -0,0 +1,451 @@
++// SPDX-License-Identifier: GPL-2.0+
++//
++// bxt_sos_tdf8532.c  --  Intel Broxton-P I2S Machine Driver with SOS support
++//
++// Copyright (C) 2019 Intel Corporation.
++//
++// Authors: Jablonski, Wojciech <wojciech.jablonski@intel.com>
++//
++//  Intel Broxton-P I2S Machine Driver for IVI reference platform. This version
++//  of machine driver supports virtio sound card BE on Service OS
++//  The driver created based on regular tdf8532(bxt_tdf8532.c)
++
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/soc.h>
++#include <sound/pcm_params.h>
++
++static const struct snd_kcontrol_new broxton_tdf8532_controls[] = {
++	SOC_DAPM_PIN_SWITCH("Speaker"),
++	SOC_DAPM_PIN_SWITCH("SpeakerSos"),
++};
++
++static const struct snd_soc_dapm_widget broxton_tdf8532_widgets[] = {
++	SND_SOC_DAPM_SPK("Speaker", NULL),
++	SND_SOC_DAPM_SPK("SpeakerSos", NULL),
++	SND_SOC_DAPM_MIC("DiranaCp", NULL),
++	SND_SOC_DAPM_HP("DiranaPb", NULL),
++	SND_SOC_DAPM_MIC("HdmiIn", NULL),
++	SND_SOC_DAPM_MIC("TestPinCp", NULL),
++	SND_SOC_DAPM_HP("TestPinPb", NULL),
++	SND_SOC_DAPM_MIC("BtHfpDl", NULL),
++	SND_SOC_DAPM_HP("BtHfpUl", NULL),
++	SND_SOC_DAPM_MIC("ModemDl", NULL),
++	SND_SOC_DAPM_HP("ModemUl", NULL),
++};
++
++static const struct snd_soc_dapm_route broxton_tdf8532_map[] = {
++
++	/* Speaker BE connections */
++	{ "Speaker", NULL, "ssp4 Tx"},
++	{ "ssp4 Tx", NULL, "codec0_out"},
++
++	{ "SpeakerSos", NULL, "ssp4 Tx"},
++	{ "ssp4 Tx", NULL, "codec0_out"},
++
++	{ "dirana_in", NULL, "ssp2 Rx"},
++	{ "ssp2 Rx", NULL, "DiranaCp"},
++
++	{ "dirana_aux_in", NULL, "ssp2 Rx"},
++	{ "ssp2 Rx", NULL, "DiranaCp"},
++
++	{ "dirana_tuner_in", NULL, "ssp2 Rx"},
++	{ "ssp2 Rx", NULL, "DiranaCp"},
++
++	{ "DiranaPb", NULL, "ssp2 Tx"},
++	{ "ssp2 Tx", NULL, "dirana_out"},
++
++	{ "hdmi_ssp1_in", NULL, "ssp1 Rx"},
++	{ "ssp1 Rx", NULL, "HdmiIn"},
++
++	{ "TestPin_ssp5_in", NULL, "ssp5 Rx"},
++	{ "ssp5 Rx", NULL, "TestPinCp"},
++
++	{ "TestPinPb", NULL, "ssp5 Tx"},
++	{ "ssp5 Tx", NULL, "TestPin_ssp5_out"},
++
++	{ "BtHfp_ssp0_in", NULL, "ssp0 Rx"},
++	{ "ssp0 Rx", NULL, "BtHfpDl"},
++
++	{ "BtHfpUl", NULL, "ssp0 Tx"},
++	{ "ssp0 Tx", NULL, "BtHfp_ssp0_out"},
++
++	{ "Modem_ssp3_in", NULL, "ssp3 Rx"},
++	{ "ssp3 Rx", NULL, "ModemDl"},
++
++	{ "ModemUl", NULL, "ssp3 Tx"},
++	{ "ssp3 Tx", NULL, "Modem_ssp3_out"},
++};
++
++static int bxt_tdf8532_ssp2_fixup(struct snd_soc_pcm_runtime *rtd,
++				struct snd_pcm_hw_params *params)
++{
++	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
++
++	/* set SSP to 32 bit */
++	snd_mask_none(fmt);
++	snd_mask_set(fmt, SNDRV_PCM_FORMAT_S32_LE);
++
++	return 0;
++}
++
++/* broxton digital audio interface glue - connects codec <--> CPU */
++static struct snd_soc_dai_link broxton_tdf8532_dais[] = {
++	/* Front End DAI links */
++	{
++		.name = "Speaker Port",
++		.stream_name = "Speaker",
++		.cpu_dai_name = "Speaker Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "SpeakerSos Port",
++		.stream_name = "SpeakerSos",
++		.cpu_dai_name = "SpeakerSos Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "Dirana Capture Port",
++		.stream_name = "Dirana Cp",
++		.cpu_dai_name = "Dirana Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "Dirana Playback Port",
++		.stream_name = "Dirana Pb",
++		.cpu_dai_name = "Dirana Pb Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "TestPin Capture Port",
++		.stream_name = "TestPin Cp",
++		.cpu_dai_name = "TestPin Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "TestPin Playback Port",
++		.stream_name = "TestPin Pb",
++		.cpu_dai_name = "TestPin Pb Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "BtHfp Capture Port",
++		.stream_name = "BtHfp Cp",
++		.cpu_dai_name = "BtHfp Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "BtHfp Playback Port",
++		.stream_name = "BtHfp Pb",
++		.cpu_dai_name = "BtHfp Pb Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "Modem Capture Port",
++		.stream_name = "Modem Cp",
++		.cpu_dai_name = "Modem Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "Modem Playback Port",
++		.stream_name = "Modem Pb",
++		.cpu_dai_name = "Modem Pb Pin",
++		.platform_name = "0000:00:0e.0",
++		.nonatomic = 1,
++		.dynamic = 1,
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.trigger = {
++			SND_SOC_DPCM_TRIGGER_POST,
++			SND_SOC_DPCM_TRIGGER_POST
++		},
++		.dpcm_playback = 1,
++	},
++	{
++		.name = "HDMI Capture Port",
++		.stream_name = "HDMI Cp",
++		.cpu_dai_name = "HDMI Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "Dirana Aux Capture Port",
++		.stream_name = "Dirana Aux Cp",
++		.cpu_dai_name = "Dirana Aux Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	{
++		.name = "Dirana Tuner Capture Port",
++		.stream_name = "Dirana Tuner Cp",
++		.cpu_dai_name = "Dirana Tuner Cp Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.dpcm_capture = 1,
++		.ignore_suspend = 1,
++		.nonatomic = 1,
++		.dynamic = 1,
++	},
++	/* Probe DAI links*/
++	{
++		.name = "Bxt Compress Probe playback",
++		.stream_name = "Probe Playback",
++		.cpu_dai_name = "Compress Probe0 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.nonatomic = 1,
++	},
++	{
++		.name = "Bxt Compress Probe capture",
++		.stream_name = "Probe Capture",
++		.cpu_dai_name = "Compress Probe1 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.init = NULL,
++		.nonatomic = 1,
++	},
++	/* Trace Buffer DAI links */
++	{
++		.name = "Bxt Trace Buffer0",
++		.stream_name = "Core 0 Trace Buffer",
++		.cpu_dai_name = "TraceBuffer0 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.capture_only = true,
++		.ignore_suspend = 1,
++	},
++	{
++		.name = "Bxt Trace Buffer1",
++		.stream_name = "Core 1 Trace Buffer",
++		.cpu_dai_name = "TraceBuffer1 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.capture_only = true,
++		.ignore_suspend = 1,
++	},
++	/* Back End DAI links */
++	{
++		/* SSP0 - BT */
++		.name = "SSP0-Codec",
++		.id = 0,
++		.cpu_dai_name = "SSP0 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_capture = 1,
++		.dpcm_playback = 1,
++		.no_pcm = 1,
++	},
++	{
++		/* SSP1 - HDMI-In */
++		.name = "SSP1-Codec",
++		.id = 1,
++		.cpu_dai_name = "SSP1 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_capture = 1,
++		.no_pcm = 1,
++	},
++	{
++		/* SSP2 - Dirana */
++		.name = "SSP2-Codec",
++		.id = 2,
++		.cpu_dai_name = "SSP2 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_capture = 1,
++		.dpcm_playback = 1,
++		.no_pcm = 1,
++		.be_hw_params_fixup = bxt_tdf8532_ssp2_fixup,
++	},
++	{
++		/* SSP3 - Modem */
++		.name = "SSP3-Codec",
++		.id = 3,
++		.cpu_dai_name = "SSP3 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_capture = 1,
++		.dpcm_playback = 1,
++		.no_pcm = 1,
++	},
++	{
++		/* SSP4 - Amplifier */
++		.name = "SSP4-Codec",
++		.id = 4,
++		.cpu_dai_name = "SSP4 Pin",
++		.codec_name = "i2c-INT34C3:00",
++		.codec_dai_name = "tdf8532-hifi",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_playback = 1,
++		.no_pcm = 1,
++	},
++	{
++		/* SSP5 - TestPin */
++		.name = "SSP5-Codec",
++		.id = 5,
++		.cpu_dai_name = "SSP5 Pin",
++		.codec_name = "snd-soc-dummy",
++		.codec_dai_name = "snd-soc-dummy-dai",
++		.platform_name = "0000:00:0e.0",
++		.ignore_suspend = 1,
++		.dpcm_capture = 1,
++		.dpcm_playback = 1,
++		.no_pcm = 1,
++	},
++};
++
++static int bxt_add_dai_link(struct snd_soc_card *card,
++			struct snd_soc_dai_link *link)
++{
++	link->platform_name = "0000:00:0e.0";
++	link->nonatomic = 1;
++	return 0;
++}
++
++/* broxton audio machine driver for TDF8532 */
++static struct snd_soc_card broxton_tdf8532 = {
++	.name = "broxton_tdf8532",
++	.dai_link = broxton_tdf8532_dais,
++	.num_links = ARRAY_SIZE(broxton_tdf8532_dais),
++	.controls = broxton_tdf8532_controls,
++	.num_controls = ARRAY_SIZE(broxton_tdf8532_controls),
++	.dapm_widgets = broxton_tdf8532_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(broxton_tdf8532_widgets),
++	.dapm_routes = broxton_tdf8532_map,
++	.num_dapm_routes = ARRAY_SIZE(broxton_tdf8532_map),
++	.fully_routed = true,
++	.add_dai_link = bxt_add_dai_link,
++};
++
++static int broxton_tdf8532_audio_probe(struct platform_device *pdev)
++{
++	dev_info(&pdev->dev, "%s registering %s\n", __func__, pdev->name);
++	broxton_tdf8532.dev = &pdev->dev;
++	return snd_soc_register_card(&broxton_tdf8532);
++}
++
++static int broxton_tdf8532_audio_remove(struct platform_device *pdev)
++{
++	snd_soc_unregister_card(&broxton_tdf8532);
++	return 0;
++}
++
++static struct platform_driver broxton_tdf8532_audio = {
++	.probe = broxton_tdf8532_audio_probe,
++	.remove = broxton_tdf8532_audio_remove,
++	.driver = {
++		.name = "bxt_tdf8532",
++		.pm = &snd_soc_pm_ops,
++	},
++};
++
++module_platform_driver(broxton_tdf8532_audio)
++
++/* Module information */
++MODULE_DESCRIPTION("Intel SST Audio for Broxton GP MRB SOS");
++MODULE_LICENSE("GPL v2");
++MODULE_ALIAS("platform:gpmrb_machine");
++MODULE_ALIAS("platform:bxt_tdf8532");
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index ec0cb11c0d29..7cbf1ee7b237 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -997,6 +997,19 @@ static struct snd_soc_dai_driver skl_fe_dai[] = {
+ 		.formats = SNDRV_PCM_FMTBIT_S32_LE,
+ 	}
+ },
++#if IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_SOS_TDF8532_MACH)
++{
++	.name = "SpeakerSos Pin",
++	.ops = &skl_pcm_dai_ops,
++	.playback = {
++		.stream_name = "SpeakerSos Playback",
++		.channels_min = HDA_QUAD,
++		.channels_max = HDA_QUAD,
++		.rates = SNDRV_PCM_RATE_48000,
++		.formats = SNDRV_PCM_FMTBIT_S32_LE,
++	}
++},
++#endif
+ {
+ 	.name = "Dirana Cp Pin",
+ 	.ops = &skl_pcm_dai_ops,
+@@ -1388,7 +1401,8 @@ static struct snd_soc_dai_driver skl_fe_dai[] = {
+ 
+ /* BE cpu dais and compress dais*/
+ static struct snd_soc_dai_driver skl_platform_dai[] = {
+-#if IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) || \
++#if IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_SOS_TDF8532_MACH) || \
++    IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_TDF8532_MACH) || \
+ 	IS_ENABLED(CONFIG_SND_SOC_INTEL_BXT_ULL_MACH)
+ {
+ 	.name = "SSP5 Pin",
+diff --git a/sound/soc/intel/skylake/virtio/Makefile b/sound/soc/intel/skylake/virtio/Makefile
+index f9b693c44405..1c2aa5f6ba8d 100644
+--- a/sound/soc/intel/skylake/virtio/Makefile
++++ b/sound/soc/intel/skylake/virtio/Makefile
+@@ -1,10 +1,11 @@
+ snd-soc-skl-virtio-sst-objs := virtio/skl-virtio-sst.o
+ snd-soc-skl-virtio-card-objs := virtio/skl-virtio-card.o
+-snd-soc-skl-virtio-fe-objs := virtio/skl-virtio-fe.o
++snd-soc-skl-virtio-fe-objs := virtio/skl-virtio-fe.o virtio/skl-virtio-kctl.o
+ 
+ obj-$(CONFIG_SND_SOC_INTEL_SKYLAKE_VIRTIO_FE) := snd-soc-skl-virtio-sst.o \
+ snd-soc-skl-virtio-fe.o snd-soc-skl-virtio-card.o
+ 
+ ifdef CONFIG_SND_SOC_INTEL_SKYLAKE_VIRTIO_BE
+-snd-soc-skl-objs += virtio/skl-virtio-be.o virtio/skl-virtio-miscdev.o
++snd-soc-skl-objs += virtio/skl-virtio-be.o virtio/skl-virtio-miscdev.o \
++virtio/skl-virtio-kctl.o
+ endif
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 43d98a587a89..66eaf60fbad1 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -33,6 +33,7 @@
+ #include "../skl.h"
+ #include "../skl-sst-ipc.h"
+ #include "../skl-topology.h"
++#include "skl-virtio.h"
+ 
+ const struct vbe_substream_info *vbe_find_substream_info_by_pcm(
+ 	const struct snd_skl_vbe *vbe, char *pcm_id, int direction)
+@@ -69,23 +70,6 @@ static const struct vbe_substream_info *vbe_skl_find_substream_info(
+ 	return NULL;
+ }
+ 
+-static const struct snd_kcontrol *vbe_skl_find_kcontrol_by_name(
+-	const struct skl *skl, char *kcontrol_name)
+-{
+-	const struct snd_kcontrol *kcontrol;
+-
+-	if (unlikely(!skl || !skl->component || !skl->component->card))
+-		return NULL;
+-
+-	list_for_each_entry(
+-		kcontrol, &skl->component->card->snd_card->controls, list) {
+-		if (strncmp(kcontrol->id.name, kcontrol_name,
+-			ARRAY_SIZE(kcontrol->id.name)) == 0)
+-			return kcontrol;
+-	}
+-	return NULL;
+-}
+-
+ struct snd_soc_dapm_widget *vbe_skl_find_kcontrol_widget(
+ 	const struct skl *sdev,	const struct snd_kcontrol *kcontrol)
+ {
+@@ -144,42 +128,80 @@ const struct snd_pcm *vbe_skl_find_pcm_by_name(struct skl *skl, char *pcm_name)
+ 	return rtd ? rtd->pcm : NULL;
+ }
+ 
+-static bool vbe_skl_fill_posn_vqbuf(const struct snd_skl_vbe *vbe,
+-		const struct virtio_vq_info *vq,
+-		const struct vfe_hw_pos_request *posn)
++static bool vbe_skl_try_send(const struct snd_skl_vbe *vbe,
++		const struct virtio_vq_info *vq, void *buff,
++		unsigned int size)
+ {
+-	const struct device *dev = vbe->dev;
+ 	const struct iovec iov;
++	struct vfe_inbox_buff *save_buff;
+ 	u16 idx;
+-	int ret;
+-
+-	if (virtio_vq_has_descs(vq)) {
+-		ret = virtio_vq_getchain(vq, &idx, &iov, 1, NULL);
+-		if (ret <= 0)
+-			return false;
+ 
+-		if (iov.iov_len < sizeof(const struct vfe_hw_pos_request)) {
+-			dev_err(dev, "iov len %lu, expecting len %lu\n",
+-				iov.iov_len, sizeof(*posn));
++	if (virtio_vq_has_descs(vq) &&
++		(virtio_vq_getchain(vq, &idx, &iov, 1, NULL) > 0)) {
++		if (iov.iov_len < size) {
++			dev_err(vbe->dev, "iov len %lu, expecting len %lu\n",
++				iov.iov_len, size);
+ 			virtio_vq_relchain(vq, idx, iov.iov_len);
+ 		}
+-		memcpy(iov.iov_base, posn, sizeof(*posn));
++		memcpy(iov.iov_base, buff, size);
+ 		virtio_vq_relchain(vq, idx, iov.iov_len);
++		virtio_vq_endchains(vq, true);
+ 		return true;
+ 	}
+ 	return false;
+ }
+ 
++
++static void vbe_skl_send_or_enqueue(const struct snd_skl_vbe *vbe,
++		const struct virtio_vq_info *vq,
++		struct vfe_pending_msg *pen_msg)
++{
++	struct vfe_pending_msg *save_msg;
++
++	if (vbe_skl_try_send(vbe, vq,
++		(void *)&pen_msg->msg, pen_msg->sizeof_msg) == false) {
++		save_msg = kzalloc(sizeof(*save_msg), GFP_KERNEL);
++		if (!save_msg) {
++			dev_err(vbe->dev, "Failed to allocate kctl_req memory");
++			return;
++		}
++		*save_msg = *pen_msg;
++		list_add_tail(&save_msg->list, &vbe->pending_msg_list);
++	}
++}
++
++int vbe_send_kctl_msg(struct snd_kcontrol *kcontrol,
++		struct snd_ctl_elem_value *ucontrol,
++		struct vfe_kctl_result *result)
++{
++	struct vfe_pending_msg kctl_msg;
++	const struct snd_skl_vbe *vbe = get_first_vbe();
++	const struct virtio_vq_info *vq = &vbe->vqs[SKL_VIRTIO_IPC_NOT_RX_VQ];
++	bool endchain;
++
++	kctl_msg.msg.posn.msg_type = VFE_MSG_KCTL_SET;
++	strncpy(kctl_msg.msg.kctln.kcontrol.kcontrol_id, kcontrol->id.name,
++			ARRAY_SIZE(kcontrol->id.name));
++
++	kctl_msg.msg.kctln.kcontrol_value.value = *ucontrol;
++
++	kctl_msg.sizeof_msg = sizeof(struct vfe_kctl_noti);
++
++	vbe_skl_send_or_enqueue(vbe, vq, &kctl_msg);
++
++	result->ret = 0;
++	return 0;
++}
++
+ void skl_notify_stream_update(struct hdac_bus *bus,
+ 		struct snd_pcm_substream *substream)
+ {
+ 	const struct skl *skl = bus_to_skl(bus);
+ 	const struct vbe_substream_info *substr_info;
+ 	const struct snd_soc_pcm_runtime *rtd;
+-	struct vfe_hw_pos_request pos_req, *hw_pos_req;
++	struct vfe_pending_msg pos_req;
+ 	const struct snd_skl_vbe *vbe;
+ 	const struct virtio_vq_info *vq;
+-	bool endchain;
+ 
+ 	substr_info = vbe_skl_find_substream_info(skl, substream);
+ 	if (!substr_info)
+@@ -187,33 +209,18 @@ void skl_notify_stream_update(struct hdac_bus *bus,
+ 
+ 	rtd = substream->private_data;
+ 
+-	pos_req.stream_dir = substr_info->direction;
+-	pos_req.stream_pos = rtd->ops.pointer(substream);
+-	strncpy(pos_req.pcm_id, substream->pcm->id,
++	pos_req.msg.posn.msg_type = VFE_MSG_POS_NOTI;
++	pos_req.msg.posn.stream_dir = substr_info->direction;
++	pos_req.msg.posn.stream_pos = rtd->ops.pointer(substream);
++	strncpy(pos_req.msg.posn.pcm_id, substream->pcm->id,
+ 		ARRAY_SIZE(substream->pcm->id));
+ 
++	pos_req.sizeof_msg = sizeof(struct vfe_hw_pos_request);
++
+ 	vbe = substr_info->vbe;
+ 	vq = &vbe->vqs[SKL_VIRTIO_IPC_NOT_RX_VQ];
+ 
+-	/*
+-	 * let's try to get a notification RX vq available buffer
+-	 * If there is an available buffer, let's notify immediately
+-	 */
+-	endchain = vbe_skl_fill_posn_vqbuf(vbe, vq, &pos_req);
+-	if (endchain == true) {
+-		virtio_vq_endchains(vq, true);
+-		return;
+-	}
+-
+-	hw_pos_req = kzalloc(sizeof(*hw_pos_req), GFP_KERNEL);
+-	if (!hw_pos_req)
+-		return;
+-
+-	*hw_pos_req = pos_req;
+-	list_add_tail(&hw_pos_req->list, &vbe->posn_list);
+-
+-	if (endchain == true)
+-		virtio_vq_endchains(vq, true);
++	vbe_skl_send_or_enqueue(vbe, vq, &pos_req);
+ }
+ 
+ int vbe_skl_allocate_runtime(const struct snd_soc_card *card,
+@@ -596,11 +603,15 @@ static int vbe_skl_kcontrol_get_domain_id(const struct skl *sdev,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_kcontrol_check_permission(const struct skl *sdev,
+-	int domain_id, const struct snd_kcontrol *kcontrol)
++static int vbe_skl_kcontrol_check_permission(u32 domain_id,
++		const struct snd_kcontrol *kcontrol)
+ {
+ 	int kcontrol_domain_id;
+ 	int ret;
++	struct skl *sdev = snd_skl_get_virtio_audio();
++
++	if (sdev == NULL)
++		return -EINVAL;
+ 
+ 	ret = vbe_skl_kcontrol_get_domain_id(sdev, kcontrol,
+ 		&kcontrol_domain_id);
+@@ -613,30 +624,6 @@ static int vbe_skl_kcontrol_check_permission(const struct skl *sdev,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_kcontrol_put(const struct skl *sdev, int vm_id,
+-		const struct snd_kcontrol *kcontrol,
+-		const struct vbe_ipc_msg *msg)
+-{
+-	const struct vfe_kctl_value *kcontrol_val =
+-			(struct vfe_kctl_value *)msg->tx_data;
+-	struct vfe_kctl_result *result = msg->rx_data;
+-	int ret = 0;
+-
+-	ret = vbe_skl_kcontrol_check_permission(sdev,
+-		msg->header->domain_id, kcontrol);
+-	if (ret < 0)
+-		goto ret_result;
+-
+-	if (kcontrol->put)
+-		ret = kcontrol->put(kcontrol, &kcontrol_val->value);
+-
+-ret_result:
+-	if (result)
+-		result->ret = ret;
+-
+-	return ret;
+-}
+-
+ static int vbe_skl_cfg_hda(const struct skl *sdev, int vm_id,
+ 		const struct vbe_ipc_msg *msg)
+ {
+@@ -662,38 +649,18 @@ static int vbe_skl_cfg_hda(const struct skl *sdev, int vm_id,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_msg_kcontrol_handle(const struct snd_skl_vbe *vbe,
+-		const struct skl *sdev,
+-		int vm_id, const struct vbe_ipc_msg *msg)
+-{
+-	const struct vfe_kctl_info *kctl_desc = &msg->header->desc.kcontrol;
+-	const struct snd_kcontrol *kcontrol =
+-		vbe_skl_find_kcontrol_by_name(sdev, kctl_desc->kcontrol_id);
+-
+-	if (!kcontrol) {
+-		dev_err(vbe->dev, "Can not find kcontrol [%s].\n",
+-			kctl_desc->kcontrol_id);
+-		return -ENODEV;
+-	}
+-
+-	switch (msg->header->cmd) {
+-	case VFE_MSG_KCTL_SET:
+-		return vbe_skl_kcontrol_put(sdev, vm_id, kcontrol, msg);
+-	default:
+-		dev_err(vbe->dev, "Unknown command %d for kcontrol [%s].\n",
+-			msg->header->cmd, kctl_desc->kcontrol_id);
+-	break;
+-	}
+-
+-	return 0;
+-}
+-
+-static int vbe_skl_msg_cfg_handle(const struct snd_skl_vbe *vbe,
++static int vbe_skl_msg_cfg_handle(struct snd_skl_vbe *vbe,
+ 		const struct skl *sdev,
+ 		int vm_id, struct vbe_ipc_msg *msg)
+ {
++	struct kctl_ops kt_ops;
++
+ 	switch (msg->header->cmd) {
+ 	case VFE_MSG_CFG_HDA:
++		kt_ops.check_permission = &vbe_skl_kcontrol_check_permission;
++		kt_ops.send_noti = &vbe_send_kctl_msg;
++		kctl_init_proxy(vbe->dev, &kt_ops);
++		kctl_notify_machine_ready(sdev->component->card);
+ 		return vbe_skl_cfg_hda(sdev, vm_id, msg);
+ 	default:
+ 		dev_err(vbe->dev, "Unknown command %d for config get message.\n",
+@@ -741,6 +708,24 @@ static int vbe_skl_msg_pcm_handle(const struct snd_skl_vbe *vbe,
+ 	return 0;
+ }
+ 
++int vbe_skl_msg_kcontrol_handle(const struct snd_skl_vbe *vbe,
++		int vm_id, const struct vbe_ipc_msg *msg)
++{
++	const struct vfe_kctl_info *kctl_desc = &msg->header->desc.kcontrol;
++	u32 domain_id = msg->header->domain_id;
++
++	switch (msg->header->cmd) {
++	case VFE_MSG_KCTL_SET:
++		return kctl_ipc_handle(domain_id, kctl_desc,
++				msg->tx_data, msg->rx_data);
++	default:
++		dev_err(vbe->dev, "Unknown command %d for kcontrol [%s].\n",
++			msg->header->cmd, kctl_desc->kcontrol_id);
++	break;
++	}
++
++	return 0;
++}
+ static int vbe_skl_not_fwd(const struct snd_skl_vbe *vbe,
+ 	const struct skl *sdev, int vm_id, void *ipc_bufs[SKL_VIRTIO_NOT_VQ_SZ],
+ 	size_t ipc_lens[SKL_VIRTIO_NOT_VQ_SZ])
+@@ -763,7 +748,7 @@ static int vbe_skl_not_fwd(const struct snd_skl_vbe *vbe,
+ 	case VFE_MSG_PCM:
+ 		return vbe_skl_msg_pcm_handle(vbe, sdev, vm_id, &msg);
+ 	case VFE_MSG_KCTL:
+-		return vbe_skl_msg_kcontrol_handle(vbe, sdev, vm_id, &msg);
++		return vbe_skl_msg_kcontrol_handle(vbe, vm_id, &msg);
+ 	case VFE_MSG_TPLG:
+ 		//not supported yet
+ 		break;
+@@ -783,20 +768,20 @@ static int vbe_skl_ipc_fwd(const struct snd_skl_vbe *vbe,
+ 	int ret;
+ 
+ 	dev_dbg(vbe->dev, "IPC forward request. Header:0X%016llX tx_data:%p\n",
+-				ipc_data->header,
+-				ipc_data->data_size ? &ipc_data->data : NULL);
++			ipc_data->header,
++			ipc_data->data_size ? &ipc_data->data : NULL);
+ 	dev_dbg(vbe->dev, "tx_size:%zu rx_data:%p rx_size:%zu\n",
+-				ipc_data->data_size,
+-				*reply_sz ? reply_buf : NULL,
+-				*reply_sz);
++			ipc_data->data_size,
++			*reply_sz ? reply_buf : NULL,
++			*reply_sz);
+ 
+ 	/* Tx IPC and wait for response */
+ 	ret = *reply_sz <= 0 ? 0 : sst_ipc_tx_message_wait(&skl_sst->ipc,
+-				ipc_data->header,
+-				ipc_data->data_size ? &ipc_data->data : NULL,
+-				ipc_data->data_size,
+-				*reply_sz ? reply_buf : NULL,
+-				reply_sz);
++			ipc_data->header,
++			ipc_data->data_size ? &ipc_data->data : NULL,
++			ipc_data->data_size,
++			*reply_sz ? reply_buf : NULL,
++			reply_sz);
+ 
+ 	if (ret < 0) {
+ 		dev_dbg(vbe->dev, "IPC reply error:%d\n", ret);
+@@ -804,7 +789,7 @@ static int vbe_skl_ipc_fwd(const struct snd_skl_vbe *vbe,
+ 	}
+ 	if (*reply_sz > 0) {
+ 		print_hex_dump(KERN_DEBUG, "IPC response:", DUMP_PREFIX_OFFSET,
+-				8, 4, (char *)reply_buf, *reply_sz, false);
++			8, 4, (char *)reply_buf, *reply_sz, false);
+ 	}
+ 
+ 	return 0;
+@@ -912,23 +897,23 @@ static void vbe_skl_ipc_fe_cmd_get(const struct snd_skl_vbe *vbe, int vq_idx)
+ static void vbe_skl_ipc_fe_not_reply_get(struct snd_skl_vbe *vbe, int vq_idx)
+ {
+ 	const struct virtio_vq_info *vq;
+-	const struct vfe_hw_pos_request *entry;
++	const struct vfe_pending_msg *entry;
+ 	unsigned long flags;
+-	bool endchain;
++	bool sent;
+ 
+-	if (list_empty(&vbe->posn_list))
++	if (list_empty(&vbe->pending_msg_list))
+ 		return;
+ 
+ 	vq = &vbe->vqs[vq_idx];
+-	entry = list_first_entry(&vbe->posn_list,
+-				 struct vfe_hw_pos_request, list);
++	entry = list_first_entry(&vbe->pending_msg_list,
++				 struct vfe_pending_msg, list);
+ 
+-	endchain = vbe_skl_fill_posn_vqbuf(vbe, vq, entry);
++	sent = vbe_skl_try_send(vbe, vq,
++		(void *)&entry->msg, entry->sizeof_msg);
+ 
+-	if (endchain == true) {
++	if (sent == true) {
+ 		list_del(&entry->list);
+ 		kfree(entry);
+-		virtio_vq_endchains(vq, true);
+ 	}
+ }
+ 
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index 67b1b7c752ac..93ab96d27281 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -26,6 +26,8 @@ struct snd_skl_vbe;
+ extern int snd_skl_vbe_register(struct skl *sdev, struct snd_skl_vbe **svbe);
+ extern int snd_skl_vbe_register_client(struct snd_skl_vbe *vbe);
+ extern void vbe_skl_handle_kick(const struct snd_skl_vbe *vbe, int vq_idx);
++extern struct snd_skl_vbe *get_first_vbe(void);
++extern void *snd_skl_get_virtio_audio(void);
+ 
+ struct vbe_substream_info {
+ 	struct snd_pcm *pcm;
+@@ -42,13 +44,14 @@ struct snd_skl_vbe {
+ 	struct device *dev;
+ 	struct virtio_dev_info dev_info;
+ 	struct virtio_vq_info vqs[SKL_VIRTIO_NUM_OF_VQS];
++	struct kctl_proxy kcon_proxy;
+ 
+ 	spinlock_t posn_lock;
+ 
+ 	struct list_head client_list;
+ 	struct list_head substr_info_list;
+ 	struct list_head list;
+-	struct list_head posn_list;
++	struct list_head pending_msg_list;
+ 
+ 	int vmid;  /* vm id number */
+ };
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-card.c b/sound/soc/intel/skylake/virtio/skl-virtio-card.c
+index 0f35a641fa16..fa17f67b4473 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-card.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-card.c
+@@ -21,7 +21,7 @@
+ #include <sound/soc.h>
+ #include <sound/jack.h>
+ 
+-#include "skl-virtio-fe.h"
++#include "skl-virtio.h"
+ 
+ struct snd_kcontrol_new skl_virtio_controls[] = {
+ 	SOC_DAPM_PIN_SWITCH("Speaker"),
+@@ -333,18 +333,15 @@ static struct snd_soc_card skl_virtio_card = {
+ 
+ static int skl_virtio_card_probe(struct platform_device *pdev)
+ {
+-	struct snd_skl_vfe *vfe;
+ 	int ret;
+ 	struct snd_soc_card *card = &skl_virtio_card;
+ 
+ 	card->dev = &pdev->dev;
+-	vfe = dev_get_drvdata(&pdev->dev);
+ 	ret = devm_snd_soc_register_card(&pdev->dev, card);
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	vfe->notify_machine_probe(vfe, pdev, card);
+-
++	kctl_notify_machine_ready(card);
+ 	return ret;
+ }
+ 
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-common.h b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+index 5f1819a4de0e..89e759fc01a0 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-common.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+@@ -121,13 +121,6 @@ struct vfe_pcm_hw_params {
+ 	uint32_t host_period_bytes;
+ };
+ 
+-struct vfe_hw_pos_request {
+-	char pcm_id[64];
+-	u32 stream_dir;
+-	u64 stream_pos;
+-	struct list_head list;
+-};
+-
+ struct vfe_pcm_result {
+ 	int ret;
+ };
+@@ -147,6 +140,34 @@ struct vfe_hda_cfg {
+ 	u8 pb_streams;
+ };
+ 
++struct vfe_inbox_header {
++	int msg_type;
++};
++
++struct vfe_hw_pos_request {
++	int msg_type;
++	char pcm_id[64];
++	u32 stream_dir;
++	u64 stream_pos;
++};
++
++struct vfe_kctl_noti {
++	int msg_type;
++	struct vfe_kctl_info kcontrol;
++	struct vfe_kctl_value kcontrol_value;
++};
++
++union inbox_msg {
++	struct vfe_hw_pos_request posn;
++	struct vfe_kctl_noti kctln;
++};
++
++struct vfe_pending_msg {
++	union inbox_msg msg;
++	unsigned int sizeof_msg;
++	struct list_head list;
++};
++
+ #define VFE_MSG_TYPE_OFFSET 8
+ #define VFE_MSG_TYPE_MASK (0xFF << VFE_MSG_TYPE_OFFSET)
+ 
+@@ -155,6 +176,7 @@ enum vfe_ipc_msg_type {
+ 	VFE_MSG_KCTL = 2 << VFE_MSG_TYPE_OFFSET,
+ 	VFE_MSG_TPLG = 3 << VFE_MSG_TYPE_OFFSET,
+ 	VFE_MSG_CFG = 4 << VFE_MSG_TYPE_OFFSET,
++	VFE_MSG_POS = 5 << VFE_MSG_TYPE_OFFSET,
+ 
+ 	VFE_MSG_PCM_OPEN = VFE_MSG_PCM | 0x01,
+ 	VFE_MSG_PCM_CLOSE = VFE_MSG_PCM | 0x02,
+@@ -165,6 +187,37 @@ enum vfe_ipc_msg_type {
+ 	VFE_MSG_KCTL_SET = VFE_MSG_KCTL | 0x01,
+ 
+ 	VFE_MSG_CFG_HDA = VFE_MSG_CFG | 0x01,
++
++	VFE_MSG_POS_NOTI = VFE_MSG_POS | 0x01,
++};
++
++struct kctl_wrapper {
++	struct snd_kcontrol *kcontrol;
++	struct list_head list;
++	snd_kcontrol_put_t *put;
++};
++
++typedef int (*kctl_send_op)(struct snd_kcontrol *kcontrol,
++		struct snd_ctl_elem_value *ucontrol,
++		struct vfe_kctl_result *result);
++
++typedef int (*kctl_perm_op)(u32 domain_id,
++		const struct snd_kcontrol *kcontrol);
++
++struct kctl_ops {
++	kctl_send_op send_noti;
++	kctl_perm_op check_permission;
++};
++
++struct kctl_proxy {
++	struct device *alloc_dev;
++	struct kctl_ops ops;
++	struct list_head kcontrols_list;
+ };
+ 
++struct kctl_proxy *get_kctl_proxy(void);
++int kctl_ipc_handle(u32 domain_id, const struct vfe_kctl_info *kctl_info,
++	struct vfe_kctl_value *kcontrol_val, struct vfe_kctl_result *result);
++void kctl_init_proxy(struct device *dev, struct kctl_ops *kt_ops);
++
+ #endif
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 2a6812e1d323..b6952cbcaf57 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -49,6 +49,11 @@ static struct snd_skl_vfe *get_virtio_audio_fe(void)
+ 	return skl_vfe;
+ }
+ 
++struct kctl_proxy *get_kctl_proxy(void)
++{
++	return &get_virtio_audio_fe()->kcon_proxy;
++}
++
+ struct vfe_substream_info *vfe_find_substream_info_by_pcm(
+ 	struct snd_skl_vfe *vfe, char *pcm_id, int direction)
+ {
+@@ -85,19 +90,6 @@ inline int vfe_is_valid_fe_substream(struct snd_pcm_substream *substream)
+ 	return vfe_is_valid_pcm_id(substream->pcm->id);
+ }
+ 
+-struct vfe_kcontrol *vfe_find_kcontrol(struct snd_skl_vfe *vfe,
+-	struct snd_kcontrol *kcontrol)
+-{
+-	struct vfe_kcontrol *vfe_kcontrol;
+-
+-	list_for_each_entry(vfe_kcontrol, &vfe->kcontrols_list, list) {
+-		if (kcontrol == vfe_kcontrol->kcontrol)
+-			return vfe_kcontrol;
+-	}
+-
+-	return NULL;
+-}
+-
+ const struct snd_pcm *vfe_skl_find_pcm_by_name(struct skl *skl, char *pcm_name)
+ {
+ 	const struct snd_soc_pcm_runtime *rtd;
+@@ -114,6 +106,14 @@ const struct snd_pcm *vfe_skl_find_pcm_by_name(struct skl *skl, char *pcm_name)
+ 	return NULL;
+ }
+ 
++static inline vfe_vq_kick(struct snd_skl_vfe *vfe, struct virtqueue *vq)
++{
++	unsigned long irq_flags;
++	spin_lock_irqsave(&vfe->ipc_vq_lock, irq_flags);
++	virtqueue_kick(vq);
++	spin_unlock_irqrestore(&vfe->ipc_vq_lock, irq_flags);
++}
++
+ static int vfe_send_virtio_msg(struct snd_skl_vfe *vfe,
+ 	struct virtqueue *vq, struct scatterlist *sgs, int sg_count,
+ 	void *data, bool out)
+@@ -139,9 +139,7 @@ static int vfe_send_virtio_msg(struct snd_skl_vfe *vfe,
+ 		return ret;
+ 	}
+ 
+-	spin_lock_irqsave(&vfe->ipc_vq_lock, irq_flags);
+-	virtqueue_kick(vq);
+-	spin_unlock_irqrestore(&vfe->ipc_vq_lock, irq_flags);
++	vfe_vq_kick(vfe, vq);
+ 
+ 	return 0;
+ }
+@@ -224,21 +222,10 @@ static int vfe_send_msg(struct snd_skl_vfe *vfe,
+ 	return -ENOMEM;
+ }
+ 
+-static int vfe_send_pos_request(struct snd_skl_vfe *vfe,
+-		struct vfe_hw_pos_request *request)
+-{
+-	struct scatterlist sg;
+-
+-	sg_init_one(&sg, request, sizeof(*request));
+-
+-	return vfe_send_virtio_msg(vfe, vfe->ipc_not_rx_vq,
+-			&sg, 1, request, false);
+-}
+-
+-static int vfe_send_kctl_msg(struct snd_skl_vfe *vfe,
+-	struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol,
+-	struct vfe_kctl_result *result)
++static int vfe_send_kctl_msg(struct snd_kcontrol *kcontrol,
++	struct snd_ctl_elem_value *ucontrol, struct vfe_kctl_result *result)
+ {
++	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+ 	struct vfe_kctl_value kcontrol_value;
+ 	struct vfe_msg_header msg_header;
+ 	struct vfe_kctl_info *kctl_desc = &msg_header.desc.kcontrol;
+@@ -253,6 +240,22 @@ static int vfe_send_kctl_msg(struct snd_skl_vfe *vfe,
+ 			sizeof(struct vfe_kctl_result));
+ }
+ 
++static int vfe_skl_kcontrol_check_permission(u32 domain_id,
++		const struct snd_kcontrol *kcontrol)
++{
++	return 0;
++}
++
++static int vfe_put_inbox_buffer(struct snd_skl_vfe *vfe,
++		void *buff)
++{
++	struct scatterlist sg;
++
++	sg_init_one(&sg, buff, sizeof(union inbox_msg));
++
++	return vfe_send_virtio_msg(vfe, vfe->ipc_not_rx_vq,
++			&sg, 1, buff, false);
++}
+ 
+ //TODO: make it to use same mechanism as vfe_send_pcm_msg
+ static int vfe_send_dsp_ipc_msg(struct snd_skl_vfe *vfe,
+@@ -392,71 +395,58 @@ static void vfe_not_handle_rx(struct virtqueue *vq)
+ 	struct snd_skl_vfe *vfe;
+ 
+ 	vfe = vq->vdev->priv;
+-	schedule_work(&vfe->posn_update_work);
++	schedule_work(&vfe->message_loop_work);
+ }
+ 
+-static void vfe_posn_update(struct work_struct *work)
++static void vfe_handle_posn(struct snd_skl_vfe *vfe,
++		struct vfe_hw_pos_request *pos_req)
+ {
+-	struct snd_pcm_substream *substream;
+-	struct vfe_hw_pos_request *pos_req;
+-	struct virtqueue *vq;
+ 	unsigned long irq_flags;
+-	unsigned int buflen = 0;
+ 	struct vfe_substream_info *substr_info;
+-	struct snd_skl_vfe *vfe =
+-		container_of(work, struct snd_skl_vfe, posn_update_work);
+-
+-	vq = vfe->ipc_not_rx_vq;
+-
+-	while (true) {
+-		spin_lock_irqsave(&vfe->ipc_vq_lock, irq_flags);
+-		pos_req = virtqueue_get_buf(vq, &buflen);
+-		spin_unlock_irqrestore(&vfe->ipc_vq_lock, irq_flags);
+-
+-		if (pos_req == NULL)
+-			break;
+ 
+-		spin_lock_irqsave(&vfe->substream_info_lock, irq_flags);
+-		substr_info = vfe_find_substream_info_by_pcm(vfe,
+-			pos_req->pcm_id, pos_req->stream_dir);
+-
+-		// substream may be already closed on FE side
+-		if (!substr_info) {
+-			spin_unlock_irqrestore(&vfe->substream_info_lock,
+-				irq_flags);
+-			goto send_back_msg;
+-		}
+-
+-		substr_info->hw_ptr = pos_req->stream_pos;
+-		substream = substr_info->substream;
+-		spin_unlock_irqrestore(&vfe->substream_info_lock, irq_flags);
++	spin_lock_irqsave(&vfe->substream_info_lock, irq_flags);
++	substr_info = vfe_find_substream_info_by_pcm(vfe,
++		pos_req->pcm_id, pos_req->stream_dir);
++	spin_unlock_irqrestore(&vfe->substream_info_lock, irq_flags);
+ 
+-		snd_pcm_period_elapsed(substream);
++	// substream may be already closed on FE side
++	if (!substr_info)
++		return;
+ 
+-send_back_msg:
+-		vfe_send_pos_request(vfe, pos_req);
+-	}
++	substr_info->hw_ptr = pos_req->stream_pos;
++	snd_pcm_period_elapsed(substr_info->substream);
+ }
+ 
+-int vfe_kcontrol_put(struct snd_kcontrol *kcontrol,
+-	struct snd_ctl_elem_value *ucontrol)
++static void vfe_message_loop(struct work_struct *work)
+ {
++	struct vfe_inbox_header *header;
++	struct vfe_kctl_noti *kctln;
++	struct virtqueue *vq;
++	unsigned int buflen = 0;
+ 	struct vfe_kctl_result result;
+-	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+-	struct vfe_kcontrol *vfe_kcontrol = vfe_find_kcontrol(vfe, kcontrol);
+-	int ret = 0;
+ 
+-	ret = vfe_send_kctl_msg(vfe, kcontrol, ucontrol, &result);
+-	if (ret < 0)
+-		return ret;
+-
+-	if (result.ret < 0)
+-		return result.ret;
++	struct snd_skl_vfe *vfe =
++		container_of(work, struct snd_skl_vfe, message_loop_work);
+ 
+-	if (vfe_kcontrol->put)
+-		ret = vfe_kcontrol->put(kcontrol, ucontrol);
++	vq = vfe->ipc_not_rx_vq;
+ 
+-	return ret;
++	while ((header = virtqueue_get_buf(vq, &buflen)) != NULL) {
++		switch (header->msg_type) {
++		case VFE_MSG_POS_NOTI:
++			vfe_handle_posn(vfe,
++				(struct vfe_hw_pos_request *)header);
++			break;
++		case VFE_MSG_KCTL_SET:
++			kctln = (struct vfe_kctl_noti *)header;
++			kctl_ipc_handle(0u, &kctln->kcontrol,
++				&kctln->kcontrol_value, &result);
++			break;
++		default:
++			dev_err(&vfe->vdev->dev,
++				"Invalid msg Type (%d)\n", header->msg_type);
++		}
++	}
++	vfe_put_inbox_buffer(vfe, header);
+ }
+ 
+ static struct vfe_msg_header
+@@ -704,37 +694,6 @@ static struct pci_device_id vfe_pci_device_id = {
+ 	.driver_data = (unsigned long)&vfe_acpi_mach
+ };
+ 
+-int vfe_wrap_kcontrol(struct snd_skl_vfe *vfe, struct snd_kcontrol *kcontrol)
+-{
+-	struct vfe_kcontrol *vfe_kcontrol = devm_kzalloc(&vfe->vdev->dev,
+-		sizeof(*vfe_kcontrol), GFP_KERNEL);
+-
+-	if (!vfe_kcontrol)
+-		return -ENOMEM;
+-
+-	vfe_kcontrol->kcontrol = kcontrol;
+-	vfe_kcontrol->put = kcontrol->put;
+-	kcontrol->put = vfe_kcontrol_put;
+-
+-	list_add(&vfe_kcontrol->list, &vfe->kcontrols_list);
+-	return 0;
+-}
+-
+-int vfe_wrap_native_driver(struct snd_skl_vfe *vfe,
+-	struct platform_device *pdev, struct snd_soc_card *card)
+-{
+-	struct snd_kcontrol *kctl;
+-	int ret;
+-
+-	list_for_each_entry(kctl, &card->snd_card->controls, list) {
+-		ret = vfe_wrap_kcontrol(vfe, kctl);
+-		if (ret < 0)
+-			return ret;
+-	}
+-
+-	return 0;
+-}
+-
+ static struct snd_pcm_ops vfe_platform_ops = {
+ 	.open = vfe_pcm_open,
+ 	.close = vfe_pcm_close,
+@@ -982,11 +941,11 @@ static int vfe_init_vqs(struct snd_skl_vfe *vfe)
+ 	int ret;
+ 	struct virtio_device *vdev = vfe->vdev;
+ 	vq_callback_t *cbs[SKL_VIRTIO_NUM_OF_VQS] =	{
+-			vfe_cmd_tx_done,
+-			vfe_cmd_handle_rx,
+-			vfe_not_tx_done,
+-			vfe_not_handle_rx
+-	};
++				vfe_cmd_tx_done,
++				vfe_cmd_handle_rx,
++				vfe_not_tx_done,
++				vfe_not_handle_rx
++		};
+ 
+ 	/* find virt queue for vfe to send/receive IPC message. */
+ 	ret = virtio_find_vqs(vfe->vdev, SKL_VIRTIO_NUM_OF_VQS,
+@@ -1006,10 +965,27 @@ static int vfe_init_vqs(struct snd_skl_vfe *vfe)
+ 	return 0;
+ }
+ 
++static void vfe_send_queues(struct virtio_device *vdev)
++{
++	int idx;
++	struct snd_skl_vfe *vfe = vdev->priv;
++
++	for (idx = 0; idx < VFE_MSG_BUFF_NUM; ++idx) {
++		vfe->in_buff[idx] = devm_kmalloc(&vdev->dev,
++				sizeof(union inbox_msg), GFP_KERNEL);
++		if (!vfe->in_buff[idx])
++			return -ENOMEM;
++
++		vfe_put_inbox_buffer(vfe, vfe->in_buff[idx]);
++	}
++	vfe_vq_kick(vfe, vfe->ipc_not_rx_vq);
++}
++
+ static int vfe_init(struct virtio_device *vdev)
+ {
+ 	struct snd_skl_vfe *vfe;
+ 	int ret;
++	struct kctl_ops kt_ops;
+ 
+ 	vfe = devm_kzalloc(&vdev->dev, sizeof(*vfe), GFP_KERNEL);
+ 	if (!vfe)
+@@ -1023,23 +999,20 @@ static int vfe_init(struct virtio_device *vdev)
+ 	spin_lock_init(&vfe->substream_info_lock);
+ 	INIT_LIST_HEAD(&vfe->substr_info_list);
+ 	spin_lock_init(&vfe->ipc_vq_lock);
+-	INIT_WORK(&vfe->posn_update_work, vfe_posn_update);
+ 	INIT_LIST_HEAD(&vfe->expired_msg_list);
+ 	INIT_WORK(&vfe->msg_timeout_work, vfe_not_tx_timeout_handler);
+ 
+-	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
+-	vfe->notify_machine_probe = vfe_wrap_native_driver;
+-
+ 	ret = vfe_init_vqs(vfe);
+ 	if (ret < 0)
+ 		goto err;
+ 
+-	vfe->pos_not = devm_kmalloc(&vdev->dev,
+-			sizeof(*vfe->pos_not), GFP_KERNEL);
+-	if (!vfe->pos_not)
+-		goto no_mem;
++	INIT_WORK(&vfe->message_loop_work, vfe_message_loop);
++
++	kctl_init_proxy(&vdev->dev, &kt_ops);
++
++	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
+ 
+-	vfe_send_pos_request(vfe, vfe->pos_not);
++	vfe_send_queues(vdev);
+ 
+ 	ret = vfe_skl_init(vdev);
+ 	if (ret < 0)
+@@ -1082,7 +1055,7 @@ static void vfe_remove(struct virtio_device *vdev)
+ 	if (!vfe)
+ 		return;
+ 
+-	cancel_work_sync(&vfe->posn_update_work);
++	cancel_work_sync(&vfe->message_loop_work);
+ 	vfe_machine_device_unregister(&vfe->sdev);
+ }
+ 
+@@ -1109,7 +1082,7 @@ static int vfe_restore(struct virtio_device *vdev)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	vfe_send_pos_request(vfe, vfe->pos_not);
++	vfe_send_queues(vdev);
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index 77ddd7cfde95..18303829c740 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -13,6 +13,7 @@
+ #include "skl-virtio-common.h"
+ 
+ #define VFE_MSG_MSEC_TIMEOUT 100
++#define VFE_MSG_BUFF_NUM 3
+ 
+ struct vfe_substream_info {
+ 	struct snd_pcm *pcm;
+@@ -23,23 +24,19 @@ struct vfe_substream_info {
+ 	struct list_head list;
+ };
+ 
+-struct vfe_kcontrol {
+-	struct snd_kcontrol *kcontrol;
+-	struct list_head list;
+-
+-	snd_kcontrol_put_t *put;
+-};
+-
+ struct snd_skl_vfe {
+ 	struct skl sdev;
+ 	struct virtio_device *vdev;
+ 
+ 	struct ipc_message *msg;
+-	struct vfe_hw_pos_request *pos_not;
++	void *in_buff[VFE_MSG_BUFF_NUM];
++
++	struct kctl_proxy kcon_proxy;
+ 
+ 	/* position update work */
+ 	struct work_struct posn_update_work;
+ 	struct work_struct msg_timeout_work;
++	struct work_struct message_loop_work;
+ 
+ 	spinlock_t ipc_vq_lock;
+ 	/* IPC cmd from frontend to backend */
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-kctl.c b/sound/soc/intel/skylake/virtio/skl-virtio-kctl.c
+new file mode 100644
+index 000000000000..01283716996e
+--- /dev/null
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-kctl.c
+@@ -0,0 +1,135 @@
++// SPDX-License-Identifier: GPL-2.0+
++//
++// skl-virtio-kctl.c  -- kcontrol synchronization mechanism
++//
++// Copyright (C) 2019 Intel Corporation.
++//
++// Authors: Furtak, Pawel <pawel.furtak@intel.com>
++//          Janca, Grzegorz <grzegorz.janca@intel.com>
++//          Jablonski, Wojciech <wojciech.jablonski@intel.com>
++//
++// Synchronization of kcontrols between GOS and SOS by wrapping put callback
++// with function that forwards kcontrol name and value to the other OS GOS/SOS
++
++#include <linux/vmalloc.h>
++#include <linux/device.h>
++#include "skl-virtio-common.h"
++
++static struct kctl_wrapper *kctl_find_by_name(
++		struct kctl_proxy *proxy, const char *kcontrol_name)
++{
++	struct kctl_wrapper *kwrapper;
++	struct snd_kcontrol *kcontrol;
++
++	list_for_each_entry(kwrapper, &proxy->kcontrols_list, list) {
++		kcontrol = kwrapper->kcontrol;
++		if (strncmp(kcontrol->id.name, kcontrol_name,
++			ARRAY_SIZE(kcontrol->id.name)) == 0)
++			return kwrapper;
++	}
++	return NULL;
++}
++
++void kctl_init_proxy(struct device *dev, struct kctl_ops *kt_ops)
++{
++	struct kctl_proxy *proxy = get_kctl_proxy();
++
++	INIT_LIST_HEAD(&proxy->kcontrols_list);
++	proxy->ops = *kt_ops;
++	proxy->alloc_dev = dev;
++}
++
++struct kctl_wrapper *kctl_find_by_address(struct kctl_proxy *proxy,
++	struct snd_kcontrol *kcontrol)
++{
++	struct kctl_wrapper *kwrapper;
++
++	list_for_each_entry(kwrapper, &proxy->kcontrols_list, list) {
++		if (kcontrol == kwrapper->kcontrol)
++			return kwrapper;
++	}
++	return NULL;
++}
++
++int kctl_put(struct snd_kcontrol *kcontrol,
++	struct snd_ctl_elem_value *ucontrol)
++{
++	struct vfe_kctl_result result;
++	struct kctl_proxy *proxy = get_kctl_proxy();
++	struct kctl_wrapper *vfe_kcontrol =
++			kctl_find_by_address(proxy, kcontrol);
++	int ret;
++
++	ret = proxy->ops.send_noti(kcontrol, ucontrol, &result);
++	if (ret < 0)
++		return ret;
++
++	if (result.ret < 0)
++		return result.ret;
++
++	if (vfe_kcontrol->put)
++		ret = vfe_kcontrol->put(kcontrol, ucontrol);
++
++	return ret;
++}
++
++int kctl_wrap_kcontrol(struct kctl_proxy *proxy,
++		struct snd_kcontrol *kcontrol)
++{
++	struct kctl_wrapper *vfe_kcontrol = devm_kzalloc(proxy->alloc_dev,
++		sizeof(*vfe_kcontrol), GFP_KERNEL);
++
++	if (!vfe_kcontrol)
++		return -ENOMEM;
++
++	vfe_kcontrol->kcontrol = kcontrol;
++	vfe_kcontrol->put = kcontrol->put;
++	kcontrol->put = kctl_put;
++
++	list_add(&vfe_kcontrol->list, &proxy->kcontrols_list);
++	return 0;
++}
++
++void kctl_notify_machine_ready(struct snd_soc_card *card)
++{
++	struct snd_kcontrol *kctl;
++	struct kctl_proxy *proxy = get_kctl_proxy();
++	int ret;
++
++	list_for_each_entry(kctl, &card->snd_card->controls, list) {
++		ret = kctl_wrap_kcontrol(proxy, kctl);
++		if (ret < 0)
++			return;
++	}
++}
++EXPORT_SYMBOL(kctl_notify_machine_ready);
++
++
++int kctl_ipc_handle(u32 domain_id, const struct vfe_kctl_info *kctl_info,
++	struct vfe_kctl_value *kcontrol_val, struct vfe_kctl_result *result)
++{
++	struct kctl_proxy *proxy = get_kctl_proxy();
++	struct kctl_wrapper *kcontrol =
++		kctl_find_by_name(proxy, kctl_info->kcontrol_id);
++	int ret;
++
++	if (!kcontrol) {
++		dev_err(proxy->alloc_dev, "Can not find kcontrol [%s].\n",
++				kctl_info->kcontrol_id);
++		ret = -ENODEV;
++		goto ret_result;
++	}
++
++	ret = proxy->ops.check_permission(domain_id, kcontrol->kcontrol);
++	if (ret < 0)
++		goto ret_result;
++
++	if (kcontrol->put)
++		ret = kcontrol->put(kcontrol->kcontrol, &kcontrol_val->value);
++
++ret_result:
++	if (result)
++		result->ret = ret;
++
++	return ret;
++}
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-miscdev.c b/sound/soc/intel/skylake/virtio/skl-virtio-miscdev.c
+index 647fbc0eeb5e..a3b4f2f94a91 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-miscdev.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-miscdev.c
+@@ -43,6 +43,26 @@ void *snd_skl_get_virtio_audio(void)
+ 	return NULL;
+ }
+ 
++struct snd_skl_vbe *get_first_vbe()
++{
++	struct skl *sdev = snd_skl_get_virtio_audio();
++
++	return list_first_entry_or_null(&sdev->vbe_list,
++			struct snd_skl_vbe, list);
++}
++
++struct kctl_proxy *get_kctl_proxy(void)
++{
++	struct snd_skl_vbe *vbe = get_first_vbe();
++
++	if (vbe != NULL)
++		return &vbe->kcon_proxy;
++
++	return NULL;
++}
++
++
++
+ /* find client from client ID */
+ static struct snd_skl_vbe_client *vbe_client_find(struct skl *sdev,
+ 								int client_id)
+@@ -137,7 +157,7 @@ int snd_skl_virtio_register_vbe(struct skl *sdev, struct snd_skl_vbe **svbe)
+ 
+ 	INIT_LIST_HEAD(&vbe->client_list);
+ 	INIT_LIST_HEAD(&vbe->substr_info_list);
+-	INIT_LIST_HEAD(&vbe->posn_list);
++	INIT_LIST_HEAD(&vbe->pending_msg_list);
+ 	spin_lock_init(&vbe->posn_lock);
+ 	vbe->sdev = sdev;
+ 	vbe->dev = dev;
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio.h b/sound/soc/intel/skylake/virtio/skl-virtio.h
+index 935652be541a..1a37ae599b85 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio.h
+@@ -32,4 +32,7 @@ extern void vfe_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx);
+ 
+ #endif
+ 
++void kctl_notify_machine_ready(struct snd_soc_card *card);
++
+ #endif //__SOUND_SOC_SKL_VIRTIO_H
++
+-- 
+2.17.1
+
