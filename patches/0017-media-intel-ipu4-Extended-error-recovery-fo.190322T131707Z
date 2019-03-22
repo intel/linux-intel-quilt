@@ -1,0 +1,152 @@
+From aa76f72a2964b00527cab20d068728c91cd2cc66 Mon Sep 17 00:00:00 2001
+From: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+Date: Thu, 14 Mar 2019 01:45:44 +0800
+Subject: [PATCH 17/27] media: intel-ipu4: Extended error recovery for
+ multistreaming use cases
+
+In case of any error in one stream all of them will be
+recovered with forced isys power cycle. Additionally
+recovery will be also triggered in case of any firmware issues
+at starting stream.
+
+Change-Id: I018548aabbd706a6ce42a84d5ec8ce38d289f3bf
+Tracked-On: OLINUX-2730
+Tracked-On: PKT-1822
+Signed-off-by: Bandi,Kushal <kushal.bandi@intel.com>
+Signed-off-by: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+---
+ drivers/media/pci/intel/ipu-isys-csi2.c       |  3 +--
+ drivers/media/pci/intel/ipu-isys-csi2.h       |  1 +
+ drivers/media/pci/intel/ipu-isys-video.c      | 13 +++++++++++--
+ drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c | 11 ++++++++++-
+ 4 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ipu-isys-csi2.c b/drivers/media/pci/intel/ipu-isys-csi2.c
+index 3ebe555ecedb..1e0400c90e40 100644
+--- a/drivers/media/pci/intel/ipu-isys-csi2.c
++++ b/drivers/media/pci/intel/ipu-isys-csi2.c
+@@ -913,8 +913,7 @@ void ipu_isys_csi2_wait_last_eof(struct ipu_isys_csi2 *csi2)
+ 		reinit_completion(&csi2->eof_completion);
+ 		csi2->wait_for_sync[i] = true;
+ 		spin_unlock_irqrestore(&csi2->isys->lock, flags);
+-		tout = wait_for_completion_timeout(&csi2->eof_completion,
+-			csi2->isys->csi2_in_error_state ? 0 : IPU_EOF_TIMEOUT_JIFFIES);
++		tout = wait_for_completion_timeout(&csi2->eof_completion, IPU_EOF_TIMEOUT_JIFFIES);
+ 		if (!tout)
+ 			dev_err(&csi2->isys->adev->dev,
+ 				"csi2-%d: timeout at sync to eof of vc %d\n",
+diff --git a/drivers/media/pci/intel/ipu-isys-csi2.h b/drivers/media/pci/intel/ipu-isys-csi2.h
+index 6c39745d3a89..c1e6f34eff14 100644
+--- a/drivers/media/pci/intel/ipu-isys-csi2.h
++++ b/drivers/media/pci/intel/ipu-isys-csi2.h
+@@ -186,5 +186,6 @@ int ipu_isys_csi2_set_skew_cal(struct ipu_isys_csi2 *csi2, int enable);
+ void ipu_isys_csi2_start_wdt(struct ipu_isys_csi2 *csi2,
+ 			unsigned int timeout);
+ void ipu_isys_csi2_stop_wdt(struct ipu_isys_csi2 *csi2);
++void ipu_isys_csi2_trigger_error_all(struct ipu_isys *isys);
+ 
+ #endif /* IPU_ISYS_CSI2_H */
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index 1c70e5c54ca7..409301960596 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -169,6 +169,8 @@ const struct ipu_isys_pixelformat ipu_isys_pfmts_packed[] = {
+ 	{}
+ };
+ 
++void ipu_isys_csi2_trigger_error_all(struct ipu_isys *isys);
++
+ static int video_open(struct file *file)
+ {
+ 	struct ipu_isys_video *av = video_drvdata(file);
+@@ -180,6 +182,7 @@ static int video_open(struct file *file)
+ 	mutex_lock(&isys->mutex);
+ 
+ 	if (isys->reset_needed || isp->flr_done) {
++		ipu_isys_csi2_trigger_error_all(av->isys);
+ 		mutex_unlock(&isys->mutex);
+ 		dev_warn(&isys->adev->dev, "isys power cycle required\n");
+ 		return -EIO;
+@@ -1373,6 +1376,7 @@ static void stop_streaming_firmware(struct ipu_isys_video *av)
+ 	if (use_stream_stop)
+ 		send_type = IPU_FW_ISYS_SEND_TYPE_STREAM_STOP;
+ 
++	mutex_lock(&av->isys->mutex);
+ 	rval = ipu_fw_isys_simple_cmd(av->isys, ip->stream_handle,
+ 				      send_type);
+ 
+@@ -1382,13 +1386,15 @@ static void stop_streaming_firmware(struct ipu_isys_video *av)
+ 	}
+ 
+ 	tout = wait_for_completion_timeout(&ip->stream_stop_completion,
+-		av->isys->csi2_in_error_state ? 0 : IPU_LIB_CALL_TIMEOUT_JIFFIES);
++					IPU_LIB_CALL_TIMEOUT_JIFFIES);
+ 	if (!tout)
+ 		dev_err(dev, "stream stop time out\n");
+ 	else if (ip->error)
+ 		dev_err(dev, "stream stop error: %d\n", ip->error);
+ 	else
+ 		dev_dbg(dev, "stop stream: complete\n");
++
++	mutex_unlock(&av->isys->mutex);
+ }
+ 
+ static void close_streaming_firmware(struct ipu_isys_video *av)
+@@ -1400,6 +1406,8 @@ static void close_streaming_firmware(struct ipu_isys_video *av)
+ 
+ 	reinit_completion(&ip->stream_close_completion);
+ 
++	mutex_lock(&av->isys->mutex);
++
+ 	rval = ipu_fw_isys_simple_cmd(av->isys, ip->stream_handle,
+ 				      IPU_FW_ISYS_SEND_TYPE_STREAM_CLOSE);
+ 	if (rval < 0) {
+@@ -1408,7 +1416,7 @@ static void close_streaming_firmware(struct ipu_isys_video *av)
+ 	}
+ 
+ 	tout = wait_for_completion_timeout(&ip->stream_close_completion,
+-		av->isys->csi2_in_error_state ? 0 : IPU_LIB_CALL_TIMEOUT_JIFFIES);
++				IPU_LIB_CALL_TIMEOUT_JIFFIES);
+ 	if (!tout)
+ 		dev_err(dev, "stream close time out\n");
+ 	else if (ip->error)
+@@ -1418,6 +1426,7 @@ static void close_streaming_firmware(struct ipu_isys_video *av)
+ 
+ 	put_stream_opened(av);
+ 	put_stream_handle(av);
++	mutex_unlock(&av->isys->mutex);
+ }
+ 
+ void
+diff --git a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+index cee0afce2411..ad06e5de374a 100644
+--- a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
++++ b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+@@ -50,6 +50,15 @@ static void trigger_error(struct ipu_isys_csi2 *csi2)
+ 	spin_unlock_irqrestore(&csi2->isys->lock, flags);
+ }
+ 
++void ipu_isys_csi2_trigger_error_all(struct ipu_isys *isys)
++{
++	int i;
++
++	isys->reset_needed = true;
++	for (i = 0; i < isys->pdata->ipdata->csi2.nports; i++) {
++		trigger_error(&isys->csi2[i]);
++	}
++}
+ 
+ static u32
+ build_cse_ipc_commands(struct ipu_ipc_buttress_bulk_msg *target,
+@@ -326,7 +335,7 @@ void ipu_isys_csi2_error(struct ipu_isys_csi2 *csi2)
+ 		dev_err_ratelimited(&csi2->isys->adev->dev,
+ 				"csi2-%i received fatal error\n",
+ 				csi2->index);
+-		trigger_error(csi2);
++		ipu_isys_csi2_trigger_error_all(csi2->isys);
+ 	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(errors); i++) {
+-- 
+2.17.1
+

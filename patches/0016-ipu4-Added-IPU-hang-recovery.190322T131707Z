@@ -1,0 +1,333 @@
+From 543949bb57cbda2edd5c99f5b0a4b770f5520517 Mon Sep 17 00:00:00 2001
+From: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+Date: Thu, 14 Mar 2019 01:25:36 +0800
+Subject: [PATCH 16/27] ipu4: Added IPU hang recovery
+
+This change introduces watchdog that will set error visible by user
+space when:
+- There is no EOF for given period of time
+- There is fatal CSI error detected
+
+When user space application will receive that error it can do IPU power
+cycle and restart stream, as a recovery procedure.
+
+There are two parameters exposed that controls watchdog:
+- csi_watchdog_enable - enables or disables watchdog and error checking
+- csi_watchdog_timeout - defines watchdog timeout in millisecond
+  (defualt 500ms)
+
+Change-Id: I6e26ec8be64c380055d6d40b36b5b191e8f96ff0
+Tracked-On: OLINUX-2730
+Tracked-On: PKT-1822
+Signed-off-by: Mateusz Polrola <mateuszx.potrola@intel.com>
+Signed-off-by: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+---
+ drivers/media/pci/intel/ipu-isys-csi2.c       |   5 +-
+ drivers/media/pci/intel/ipu-isys-csi2.h       |  13 ++
+ drivers/media/pci/intel/ipu-isys-queue.c      |   4 +-
+ drivers/media/pci/intel/ipu-isys-video.c      |  23 +++-
+ drivers/media/pci/intel/ipu-isys.h            |   1 +
+ drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c | 113 ++++++++++++++++++
+ 6 files changed, 154 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ipu-isys-csi2.c b/drivers/media/pci/intel/ipu-isys-csi2.c
+index 0f3e122439c0..3ebe555ecedb 100644
+--- a/drivers/media/pci/intel/ipu-isys-csi2.c
++++ b/drivers/media/pci/intel/ipu-isys-csi2.c
+@@ -871,6 +871,9 @@ void ipu_isys_csi2_eof_event(struct ipu_isys_csi2 *csi2, unsigned int vc)
+ 	csi2->in_frame[vc] = false;
+ 	if (csi2->wait_for_sync[vc])
+ 		complete(&csi2->eof_completion);
++	if (csi2->wdt_enable)
++		mod_timer(&csi2->eof_timer, jiffies + csi2->eof_wdt_timeout);
++
+ 	spin_unlock_irqrestore(&csi2->isys->lock, flags);
+ 
+ 	for (i = 0; i < IPU_ISYS_MAX_STREAMS; i++) {
+@@ -911,7 +914,7 @@ void ipu_isys_csi2_wait_last_eof(struct ipu_isys_csi2 *csi2)
+ 		csi2->wait_for_sync[i] = true;
+ 		spin_unlock_irqrestore(&csi2->isys->lock, flags);
+ 		tout = wait_for_completion_timeout(&csi2->eof_completion,
+-						   IPU_EOF_TIMEOUT_JIFFIES);
++			csi2->isys->csi2_in_error_state ? 0 : IPU_EOF_TIMEOUT_JIFFIES);
+ 		if (!tout)
+ 			dev_err(&csi2->isys->adev->dev,
+ 				"csi2-%d: timeout at sync to eof of vc %d\n",
+diff --git a/drivers/media/pci/intel/ipu-isys-csi2.h b/drivers/media/pci/intel/ipu-isys-csi2.h
+index d7f2df3eb805..6c39745d3a89 100644
+--- a/drivers/media/pci/intel/ipu-isys-csi2.h
++++ b/drivers/media/pci/intel/ipu-isys-csi2.h
+@@ -6,6 +6,10 @@
+ 
+ #include <media/media-entity.h>
+ #include <media/v4l2-device.h>
++#include <linux/workqueue.h>
++#include <linux/mutex.h>
++#include <linux/timer.h>
++
+ 
+ #include "ipu-isys-queue.h"
+ #include "ipu-isys-subdev.h"
+@@ -105,6 +109,12 @@ struct ipu_isys_csi2 {
+ 	unsigned int stream_count;
+ 
+ 	struct v4l2_ctrl *store_csi2_header;
++	struct timer_list eof_timer;
++	struct work_struct wdt_work;
++	struct workqueue_struct *wdt_wq;
++	unsigned long eof_wdt_timeout;
++	int wdt_enable;
++
+ };
+ 
+ struct ipu_isys_csi2_timing {
+@@ -173,5 +183,8 @@ void ipu_isys_csi2_isr(struct ipu_isys_csi2 *csi2);
+ void ipu_isys_csi2_error(struct ipu_isys_csi2 *csi2);
+ bool ipu_isys_csi2_skew_cal_required(struct ipu_isys_csi2 *csi2);
+ int ipu_isys_csi2_set_skew_cal(struct ipu_isys_csi2 *csi2, int enable);
++void ipu_isys_csi2_start_wdt(struct ipu_isys_csi2 *csi2,
++			unsigned int timeout);
++void ipu_isys_csi2_stop_wdt(struct ipu_isys_csi2 *csi2);
+ 
+ #endif /* IPU_ISYS_CSI2_H */
+diff --git a/drivers/media/pci/intel/ipu-isys-queue.c b/drivers/media/pci/intel/ipu-isys-queue.c
+index a88c0d7e9ca9..e601b1c92372 100644
+--- a/drivers/media/pci/intel/ipu-isys-queue.c
++++ b/drivers/media/pci/intel/ipu-isys-queue.c
+@@ -1164,7 +1164,9 @@ void ipu_isys_queue_buf_done(struct ipu_isys_buffer *ib)
+ 		 */
+ 		atomic_set(&ib->str2mmio_flag, 0);
+ 	} else {
+-		vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
++		vb2_buffer_done(vb, vb->vb2_queue->error ?
++		VB2_BUF_STATE_ERROR :
++		VB2_BUF_STATE_DONE);
+ 	}
+ }
+ 
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index d149354364e4..1c70e5c54ca7 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -39,6 +39,14 @@ static unsigned int num_stream_support = IPU_ISYS_NUM_STREAMS;
+ module_param(num_stream_support, uint, 0660);
+ MODULE_PARM_DESC(num_stream_support, "IPU project support number of stream");
+ 
++static bool csi_watchdog_enable = 1;
++module_param(csi_watchdog_enable, bool, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
++MODULE_PARM_DESC(csi_watchdog_enable, "IPU4 CSI watchdog enable");
++
++static unsigned int csi_watchdog_timeout = 500;
++module_param(csi_watchdog_timeout, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
++MODULE_PARM_DESC(csi_watchdog_timeout, "IPU4 CSI watchdog timeout");
++
+ static bool use_stream_stop;
+ module_param(use_stream_stop, bool, 0660);
+ MODULE_PARM_DESC(use_stream_stop, "Use STOP command if running in CSI capture mode");
+@@ -204,6 +212,7 @@ static int video_open(struct file *file)
+ 
+ 	mutex_lock(&isys->mutex);
+ 
++	isys->csi2_in_error_state = 0;
+ 	if (isys->video_opened++) {
+ 		/* Already open */
+ 		mutex_unlock(&isys->mutex);
+@@ -1333,7 +1342,7 @@ static int start_stream_firmware(struct ipu_isys_video *av,
+ 	}
+ 
+ 	tout = wait_for_completion_timeout(&ip->stream_close_completion,
+-					   IPU_LIB_CALL_TIMEOUT_JIFFIES);
++		av->isys->csi2_in_error_state ? 0 : IPU_LIB_CALL_TIMEOUT_JIFFIES);
+ 	if (!tout)
+ 		dev_err(dev, "stream close time out\n");
+ 	else if (ip->error)
+@@ -1373,7 +1382,7 @@ static void stop_streaming_firmware(struct ipu_isys_video *av)
+ 	}
+ 
+ 	tout = wait_for_completion_timeout(&ip->stream_stop_completion,
+-					   IPU_LIB_CALL_TIMEOUT_JIFFIES);
++		av->isys->csi2_in_error_state ? 0 : IPU_LIB_CALL_TIMEOUT_JIFFIES);
+ 	if (!tout)
+ 		dev_err(dev, "stream stop time out\n");
+ 	else if (ip->error)
+@@ -1399,7 +1408,7 @@ static void close_streaming_firmware(struct ipu_isys_video *av)
+ 	}
+ 
+ 	tout = wait_for_completion_timeout(&ip->stream_close_completion,
+-					   IPU_LIB_CALL_TIMEOUT_JIFFIES);
++		av->isys->csi2_in_error_state ? 0 : IPU_LIB_CALL_TIMEOUT_JIFFIES);
+ 	if (!tout)
+ 		dev_err(dev, "stream close time out\n");
+ 	else if (ip->error)
+@@ -1607,6 +1616,9 @@ int ipu_isys_video_set_streaming(struct ipu_isys_video *av,
+ 	}
+ 
+ 	if (!state) {
++		if (csi_watchdog_enable)
++			ipu_isys_csi2_stop_wdt(ip->csi2);
++
+ 		stop_streaming_firmware(av);
+ 
+ 		/* stop external sub-device now. */
+@@ -1690,6 +1702,11 @@ int ipu_isys_video_set_streaming(struct ipu_isys_video *av,
+ 			rval = v4l2_subdev_call(esd, video, s_stream, state);
+ 		if (rval)
+ 			goto out_media_entity_stop_streaming_firmware;
++
++		if (csi_watchdog_enable)
++			ipu_isys_csi2_start_wdt(ip->csi2,
++			csi_watchdog_timeout);
++
+ 	} else {
+ 		close_streaming_firmware(av);
+ 		av->ip.stream_id = 0;
+diff --git a/drivers/media/pci/intel/ipu-isys.h b/drivers/media/pci/intel/ipu-isys.h
+index 847961062c9f..5b0961b84a4b 100644
+--- a/drivers/media/pci/intel/ipu-isys.h
++++ b/drivers/media/pci/intel/ipu-isys.h
+@@ -109,6 +109,7 @@ struct ipu_isys {
+ 	bool csi2_cse_ipc_not_supported;
+ 	unsigned int video_opened;
+ 	unsigned int stream_opened;
++	unsigned int csi2_in_error_state;
+ #if !defined(CONFIG_VIDEO_INTEL_IPU4) && !defined(CONFIG_VIDEO_INTEL_IPU4P)
+ 	unsigned int sensor_types[N_IPU_FW_ISYS_SENSOR_TYPE];
+ #endif
+diff --git a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+index 50eb7a9ab6e4..cee0afce2411 100644
+--- a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
++++ b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+@@ -20,6 +20,37 @@
+ #define CSI2_UPDATE_TIME_TRY_NUM   3
+ #define CSI2_UPDATE_TIME_MAX_DIFF  20
+ 
++
++static unsigned int ipu_isys_csi2_fatal_errors[] = {
++	CSI2_CSIRX_FIFO_OVERFLOW,
++	CSI2_CSIRX_FRAME_SYNC_ERROR,
++	CSI2_CSIRX_DPHY_NONRECOVERABLE_SYNC_ERROR
++};
++
++static int ipu_isys_csi2_is_fatal_error(unsigned int error)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(ipu_isys_csi2_fatal_errors); ++i)
++		if (error & ipu_isys_csi2_fatal_errors[i])
++		return 1;
++	return 0;
++}
++
++static void trigger_error(struct ipu_isys_csi2 *csi2)
++{
++	unsigned long flags;
++
++	if (!csi2->isys)
++		return;
++
++	spin_lock_irqsave(&csi2->isys->lock, flags);
++	if (csi2->wdt_enable)
++		queue_work(csi2->wdt_wq, &csi2->wdt_work);
++	spin_unlock_irqrestore(&csi2->isys->lock, flags);
++}
++
++
+ static u32
+ build_cse_ipc_commands(struct ipu_ipc_buttress_bulk_msg *target,
+ 		       u32 nbr_msgs, u32 opcodel, u32 reg, u32 data)
+@@ -291,6 +322,13 @@ void ipu_isys_csi2_error(struct ipu_isys_csi2 *csi2)
+ 	status = csi2->receiver_errors;
+ 	csi2->receiver_errors = 0;
+ 
++	if (ipu_isys_csi2_is_fatal_error(status)) {
++		dev_err_ratelimited(&csi2->isys->adev->dev,
++				"csi2-%i received fatal error\n",
++				csi2->index);
++		trigger_error(csi2);
++	}
++
+ 	for (i = 0; i < ARRAY_SIZE(errors); i++) {
+ 		if (!(status & BIT(i)))
+ 			continue;
+@@ -711,3 +749,78 @@ int ipu_isys_csi2_set_skew_cal(struct ipu_isys_csi2 *csi2, int enable)
+ 
+ 	return 0;
+ }
++
++static void eof_wdt_handler(struct work_struct *w)
++{
++	unsigned long flags;
++	struct ipu_isys_csi2 *csi2;
++	struct ipu_isys_pipeline *ip;
++	struct ipu_isys_queue *aq;
++
++	if (!w)
++		return;
++
++	csi2 = container_of(w, struct ipu_isys_csi2, wdt_work);
++
++	if (!(csi2 && csi2->isys))
++		return;
++
++	spin_lock_irqsave(&csi2->isys->lock, flags);
++	if (csi2->wdt_enable) {
++		dev_err_ratelimited(&csi2->isys->adev->dev,
++			"csi2-%i non recoverable error\n",
++			csi2->index);
++		ip = to_ipu_isys_pipeline(csi2->asd.sd.entity.pipe);
++		list_for_each_entry(aq, &ip->queues, node) {
++			vb2_queue_error(&aq->vbq);
++			wake_up_interruptible(&aq->vbq.done_wq);
++		}
++		csi2->isys->csi2_in_error_state = 1;
++	}
++	spin_unlock_irqrestore(&csi2->isys->lock, flags);
++}
++
++static void eof_timer_handler(struct timer_list *data)
++{
++	struct ipu_isys_csi2 *csi2 = container_of(data, struct ipu_isys_csi2, eof_timer);
++	trigger_error(csi2);
++}
++
++void ipu_isys_csi2_start_wdt(
++	struct ipu_isys_csi2 *csi2,
++	unsigned int timeout)
++{
++	unsigned long flags;
++
++	if (!csi2->wdt_wq)
++		csi2->wdt_wq = create_singlethread_workqueue("eof_wdt");
++
++	if (!csi2->wdt_wq)
++		return;
++
++	INIT_WORK(&csi2->wdt_work, eof_wdt_handler);
++	spin_lock_irqsave(&csi2->isys->lock, flags);
++	csi2->eof_wdt_timeout = msecs_to_jiffies(timeout);
++	timer_setup(&csi2->eof_timer, eof_timer_handler, 0);
++	mod_timer(&csi2->eof_timer, jiffies + csi2->eof_wdt_timeout);
++	csi2->wdt_enable = true;
++	spin_unlock_irqrestore(&csi2->isys->lock, flags);
++}
++
++void ipu_isys_csi2_stop_wdt(
++	struct ipu_isys_csi2 *csi2)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&csi2->isys->lock, flags);
++	csi2->wdt_enable = false;
++	spin_unlock_irqrestore(&csi2->isys->lock, flags);
++
++	del_timer_sync(&csi2->eof_timer);
++	if (csi2->wdt_wq) {
++		flush_workqueue(csi2->wdt_wq);
++		destroy_workqueue(csi2->wdt_wq);
++		csi2->wdt_wq = NULL;
++	}
++}
++
+-- 
+2.17.1
+
