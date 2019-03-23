@@ -1,0 +1,118 @@
+From c1b8622d487d5d74df060c8131d825d143b57e52 Mon Sep 17 00:00:00 2001
+From: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+Date: Thu, 14 Mar 2019 02:01:15 +0800
+Subject: [PATCH 18/27] media: intel-ipu4: Send recovery error signal to
+ userspace
+
+This change introduces sending SIGUSR1 to process that
+has started given stream when it receives any error.
+
+Change-Id: Ib6a04d6d093a35c409d57d2935f3c396cc2d933f
+Tracked-On: OLINUX-2730
+Tracked-On: PKT-1822
+Signed-off-by: Mateusz Polrola <mateuszx.potrola@intel.com>
+Signed-off-by: kgopala2 <karthik.l.gopalakrishnan@intel.com>
+---
+ drivers/media/pci/intel/ipu-isys-csi2.h       |  3 ++-
+ drivers/media/pci/intel/ipu-isys-video.c      | 17 ++++++++++++-----
+ drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c | 14 ++++++++++++++
+ 3 files changed, 28 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ipu-isys-csi2.h b/drivers/media/pci/intel/ipu-isys-csi2.h
+index c1e6f34eff14..c6f513c50f12 100644
+--- a/drivers/media/pci/intel/ipu-isys-csi2.h
++++ b/drivers/media/pci/intel/ipu-isys-csi2.h
+@@ -114,7 +114,8 @@ struct ipu_isys_csi2 {
+ 	struct workqueue_struct *wdt_wq;
+ 	unsigned long eof_wdt_timeout;
+ 	int wdt_enable;
+-
++	struct task_struct *current_owner;
++	bool error_signal_send;
+ };
+ 
+ struct ipu_isys_csi2_timing {
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index 409301960596..49a42e1b9f7c 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -1625,8 +1625,11 @@ int ipu_isys_video_set_streaming(struct ipu_isys_video *av,
+ 	}
+ 
+ 	if (!state) {
+-		if (csi_watchdog_enable)
+-			ipu_isys_csi2_stop_wdt(ip->csi2);
++		if (ip->csi2) {
++			if (csi_watchdog_enable)
++				ipu_isys_csi2_stop_wdt(ip->csi2);
++			ip->csi2->current_owner = NULL;
++		}
+ 
+ 		stop_streaming_firmware(av);
+ 
+@@ -1712,9 +1715,13 @@ int ipu_isys_video_set_streaming(struct ipu_isys_video *av,
+ 		if (rval)
+ 			goto out_media_entity_stop_streaming_firmware;
+ 
+-		if (csi_watchdog_enable)
+-			ipu_isys_csi2_start_wdt(ip->csi2,
+-			csi_watchdog_timeout);
++		if (ip->csi2) {
++			ip->csi2->current_owner = current;
++			ip->csi2->error_signal_send = false;
++			if (csi_watchdog_enable)
++				ipu_isys_csi2_start_wdt(ip->csi2,
++				csi_watchdog_timeout);
++		}
+ 
+ 	} else {
+ 		close_streaming_firmware(av);
+diff --git a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+index ad06e5de374a..5292575db411 100644
+--- a/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
++++ b/drivers/media/pci/intel/ipu4/ipu4-isys-csi2.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0
+ // Copyright (C) 2013 - 2018 Intel Corporation
+ 
++#include <linux/sched/signal.h>
+ #include "ipu.h"
+ #include "ipu-buttress.h"
+ #include "ipu-isys.h"
+@@ -41,6 +42,9 @@ static void trigger_error(struct ipu_isys_csi2 *csi2)
+ {
+ 	unsigned long flags;
+ 
++	if (!csi2->isys)
++		return;
++
+ 	if (!csi2->isys)
+ 		return;
+ 
+@@ -765,6 +769,7 @@ static void eof_wdt_handler(struct work_struct *w)
+ 	struct ipu_isys_csi2 *csi2;
+ 	struct ipu_isys_pipeline *ip;
+ 	struct ipu_isys_queue *aq;
++	struct siginfo info;
+ 
+ 	if (!w)
+ 		return;
+@@ -785,6 +790,15 @@ static void eof_wdt_handler(struct work_struct *w)
+ 			wake_up_interruptible(&aq->vbq.done_wq);
+ 		}
+ 		csi2->isys->csi2_in_error_state = 1;
++		if (csi2->current_owner && !csi2->error_signal_send) {
++			memset(&info, 0, sizeof(struct siginfo));
++			info.si_signo = SIGUSR1;
++			info.si_code = 0;
++			info.si_int = 0;
++			send_sig_info(SIGUSR1, &info, csi2->current_owner);
++			csi2->error_signal_send = true;
++		}
++
+ 	}
+ 	spin_unlock_irqrestore(&csi2->isys->lock, flags);
+ }
+-- 
+2.17.1
+
