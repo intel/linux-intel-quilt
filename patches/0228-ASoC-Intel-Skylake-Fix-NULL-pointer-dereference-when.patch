@@ -1,0 +1,59 @@
+From 8187090da830c419ac758c11d6cbd77864c41cb0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Amadeusz=20S=C5=82awi=C5=84ski?=
+ <amadeuszx.slawinski@intel.com>
+Date: Wed, 24 Oct 2018 15:42:34 +0200
+Subject: [PATCH 228/292] ASoC: Intel: Skylake: Fix NULL pointer dereference
+ when unloading snd_soc_skl_ssp_clk
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When driver is probed, we iterate over NHLT and check if clk entries are
+present. If entry is present we call register_skl_clk and keep the result
+in data->clk[].
+Currently data->clk is indexed using NHLT table iterator, while when
+freeing we use number of registered entries. Let's just use
+data->avail_clk_cnt as index, so it can be reset back in unregister_src_clk.
+
+Change-Id: Ia2e5d8572047e02383f9ee4a82c9f776a68cb618
+Signed-off-by: Amadeusz Sławiński <amadeuszx.slawinski@intel.com>
+Reviewed-on:
+---
+ sound/soc/intel/skylake/skl-ssp-clk.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-ssp-clk.c b/sound/soc/intel/skylake/skl-ssp-clk.c
+index cda1b5fa7436..ab6e0139abee 100644
+--- a/sound/soc/intel/skylake/skl-ssp-clk.c
++++ b/sound/soc/intel/skylake/skl-ssp-clk.c
+@@ -276,10 +276,8 @@ static void unregister_parent_src_clk(struct skl_clk_parent *pclk,
+ 
+ static void unregister_src_clk(struct skl_clk_data *dclk)
+ {
+-	u8 cnt = dclk->avail_clk_cnt;
+-
+-	while (cnt--)
+-		clkdev_drop(dclk->clk[cnt]->lookup);
++	while (dclk->avail_clk_cnt--)
++		clkdev_drop(dclk->clk[dclk->avail_clk_cnt]->lookup);
+ }
+ 
+ static int skl_register_parent_clks(struct device *dev,
+@@ -381,9 +379,11 @@ static int skl_clk_dev_probe(struct platform_device *pdev)
+ 		if (clks[i].rate_cfg[0].rate == 0)
+ 			continue;
+ 
+-		data->clk[i] = register_skl_clk(dev, &clks[i], clk_pdata, i);
+-		if (IS_ERR(data->clk[i])) {
+-			ret = PTR_ERR(data->clk[i]);
++		data->clk[data->avail_clk_cnt] = register_skl_clk(dev,
++				&clks[i], clk_pdata, i);
++
++		if (IS_ERR(data->clk[data->avail_clk_cnt])) {
++			ret = PTR_ERR(data->clk[data->avail_clk_cnt]);
+ 			goto err_unreg_skl_clk;
+ 		}
+ 
+-- 
+2.21.0
+

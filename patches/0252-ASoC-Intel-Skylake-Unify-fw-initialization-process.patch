@@ -1,0 +1,170 @@
+From 1e4fd5a32f5e5fc01bf0b346278a9900aa27250a Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Mon, 8 Oct 2018 12:40:11 +0200
+Subject: [PATCH 252/292] ASoC: Intel: Skylake: Unify fw initialization
+ process.
+
+FW initialization flow is shared across SKL, CNL and BXT platforms.
+Skylake child platforms should not define their own routines, instead,
+they should re-use their's parent one.
+
+In consequence, this change provides CNL load library support during fw
+initialization.
+
+Change-Id: Iec65f4b73fd772c3e2d10e18645839ff430b4c90
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Reviewed-on:
+Reviewed-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+Tested-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c      | 27 --------------------------
+ sound/soc/intel/skylake/cnl-sst-dsp.h  |  1 -
+ sound/soc/intel/skylake/cnl-sst.c      | 19 ------------------
+ sound/soc/intel/skylake/skl-messages.c | 10 +++++-----
+ sound/soc/intel/skylake/skl-sst-dsp.h  |  1 -
+ 5 files changed, 5 insertions(+), 53 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 1b11b5e1eb9a..e5d7cb45a4e2 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -684,33 +684,6 @@ int bxt_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ }
+ EXPORT_SYMBOL_GPL(bxt_sst_dsp_init);
+ 
+-int bxt_sst_init_fw(struct device *dev, struct skl_sst *ctx)
+-{
+-	int ret;
+-	struct sst_dsp *sst = ctx->dsp;
+-
+-	ret = sst->fw_ops.load_fw(sst);
+-	if (ret < 0) {
+-		dev_err(dev, "Load base fw failed: %x\n", ret);
+-		return ret;
+-	}
+-
+-	skl_dsp_init_core_state(sst);
+-
+-	if (ctx->lib_count > 1) {
+-		ret = sst->fw_ops.load_library(sst, ctx->lib_info,
+-						ctx->lib_count);
+-		if (ret < 0) {
+-			dev_err(dev, "Load Library failed : %x\n", ret);
+-			return ret;
+-		}
+-	}
+-	ctx->is_first_boot = false;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(bxt_sst_init_fw);
+-
+ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx)
+ {
+ 
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.h b/sound/soc/intel/skylake/cnl-sst-dsp.h
+index 09bd218df5c4..b0891da2c2c2 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.h
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.h
+@@ -106,7 +106,6 @@ void cnl_ipc_free(struct sst_generic_ipc *ipc);
+ int cnl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ 		     const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+ 		     struct skl_sst **dsp);
+-int cnl_sst_init_fw(struct device *dev, struct skl_sst *ctx);
+ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx);
+ 
+ #endif /*__CNL_SST_DSP_H__*/
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index bf1b0769c590..efe97e78a50e 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -590,25 +590,6 @@ int cnl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ }
+ EXPORT_SYMBOL_GPL(cnl_sst_dsp_init);
+ 
+-int cnl_sst_init_fw(struct device *dev, struct skl_sst *ctx)
+-{
+-	int ret;
+-	struct sst_dsp *sst = ctx->dsp;
+-
+-	ret = ctx->dsp->fw_ops.load_fw(sst);
+-	if (ret < 0) {
+-		dev_err(dev, "load base fw failed: %d", ret);
+-		return ret;
+-	}
+-
+-	skl_dsp_init_core_state(sst);
+-
+-	ctx->is_first_boot = false;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(cnl_sst_init_fw);
+-
+ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx)
+ {
+ 	if (ctx->dsp->fw)
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 5253532befd7..a4fc25d9a5fb 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -288,7 +288,7 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = bxt_sst_dsp_init,
+-		.init_fw = bxt_sst_init_fw,
++		.init_fw = skl_sst_init_fw,
+ 		.cleanup = bxt_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -296,7 +296,7 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = bxt_sst_dsp_init,
+-		.init_fw = bxt_sst_init_fw,
++		.init_fw = skl_sst_init_fw,
+ 		.cleanup = bxt_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -304,7 +304,7 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 4,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = cnl_sst_dsp_init,
+-		.init_fw = cnl_sst_init_fw,
++		.init_fw = skl_sst_init_fw,
+ 		.cleanup = cnl_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -312,7 +312,7 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 4,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = cnl_sst_dsp_init,
+-		.init_fw = cnl_sst_init_fw,
++		.init_fw = skl_sst_init_fw,
+ 		.cleanup = cnl_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -320,7 +320,7 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 4,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = cnl_sst_dsp_init,
+-		.init_fw = cnl_sst_init_fw,
++		.init_fw = skl_sst_init_fw,
+ 		.cleanup = cnl_sst_dsp_cleanup
+ 	},
+ #if IS_ENABLED(CONFIG_SND_SOC_INTEL_SKYLAKE_VIRTIO_FE)
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 4dd9086a57ef..7f5528c25947 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -301,7 +301,6 @@ int bxt_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ 		const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+ 		struct skl_sst **dsp);
+ int skl_sst_init_fw(struct device *dev, struct skl_sst *ctx);
+-int bxt_sst_init_fw(struct device *dev, struct skl_sst *ctx);
+ void skl_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx);
+ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_sst *ctx);
+ int bxt_load_library(struct sst_dsp *ctx, struct skl_lib_info *linfo,
+-- 
+2.21.0
+
