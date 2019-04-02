@@ -1,0 +1,66 @@
+From 7d9bcafa764167613b914e6677c9367a29d8928d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Amadeusz=20S=C5=82awi=C5=84ski?=
+ <amadeuszx.slawinski@intel.com>
+Date: Tue, 27 Nov 2018 12:14:17 +0100
+Subject: [PATCH 237/292] ALSA: hdac: Fix codec name after machine driver is
+ unloaded and reloaded
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This resets internal index used for enumarating codecs, this will only
+work on assumption that platform has one codec. Anyway if there is more,
+it won't work with current machine drivers, because as far as I can tell
+we can't guarantee order in which they are enumerated. This workarounds
+the fact that all intel machine drivers have the following defined:
+.codec_name = "ehdaudio0D2",
+however when we unload and reload machine driver idx gets incremented,
+so .codec_name would've need to be set to ehdaudio1D2 on first reload
+and so on...
+
+Change-Id: I09a41c8e83fde4d66d2609e3ccd43593d54df07f
+Signed-off-by: Amadeusz Sławiński <amadeuszx.slawinski@intel.com>
+Reviewed-on:
+---
+ sound/hda/ext/hdac_ext_bus.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/sound/hda/ext/hdac_ext_bus.c b/sound/hda/ext/hdac_ext_bus.c
+index 3f4f823cb0e0..685167af1773 100644
+--- a/sound/hda/ext/hdac_ext_bus.c
++++ b/sound/hda/ext/hdac_ext_bus.c
+@@ -77,6 +77,8 @@ static const struct hdac_io_ops hdac_ext_default_io = {
+ 	.dma_free_pages = hdac_ext_dma_free_pages,
+ };
+ 
++static int idx;
++
+ /**
+  * snd_hdac_ext_bus_init - initialize a HD-audio extended bus
+  * @ebus: the pointer to extended bus object
+@@ -93,7 +95,6 @@ int snd_hdac_ext_bus_init(struct hdac_bus *bus, struct device *dev,
+ 			const struct hdac_ext_bus_ops *ext_ops)
+ {
+ 	int ret;
+-	static int idx;
+ 
+ 	/* check if io ops are provided, if not load the defaults */
+ 	if (io_ops == NULL)
+@@ -121,6 +122,14 @@ EXPORT_SYMBOL_GPL(snd_hdac_ext_bus_init);
+ void snd_hdac_ext_bus_exit(struct hdac_bus *bus)
+ {
+ 	snd_hdac_bus_exit(bus);
++	/* FIXME: this is workaround
++	 * reset index used for bus->idx, because machine drivers expect
++	 * the codec name to be ehdaudio0D2, where 0 is bus->idx
++	 * we only perform reset if there is one used device, if there is more
++	 * all bets are off
++	 */
++	if (idx == 1)
++		idx = 0;
+ 	WARN_ON(!list_empty(&bus->hlink_list));
+ }
+ EXPORT_SYMBOL_GPL(snd_hdac_ext_bus_exit);
+-- 
+2.21.0
+

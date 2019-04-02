@@ -1,0 +1,83 @@
+From 046739778522646e740943f45b5a75495f139ce1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Amadeusz=20S=C5=82awi=C5=84ski?=
+ <amadeuszx.slawinski@intel.com>
+Date: Mon, 10 Dec 2018 11:06:21 +0100
+Subject: [PATCH 241/292] ASoC: core: Provide function for cleaning up
+ dynamically registered DAI
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This will be used to clean up dynamically registered DAIs one by one,
+when we clean up topology on module unload in following commit.
+
+Change-Id: I20e171b7a538b344ee0e6d2b3d2a5206365bf4ae
+Signed-off-by: Amadeusz Sławiński <amadeuszx.slawinski@intel.com>
+Reviewed-on:
+---
+ include/sound/soc.h  |  2 ++
+ sound/soc/soc-core.c | 28 ++++++++++++++++++++--------
+ 2 files changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/include/sound/soc.h b/include/sound/soc.h
+index e665f111b0d2..c61686fc03b2 100644
+--- a/include/sound/soc.h
++++ b/include/sound/soc.h
+@@ -1523,6 +1523,8 @@ struct snd_soc_dai_link *snd_soc_find_dai_link(struct snd_soc_card *card,
+ 
+ int snd_soc_register_dai(struct snd_soc_component *component,
+ 	struct snd_soc_dai_driver *dai_drv);
++void snd_soc_unregister_dai(struct snd_soc_component *component,
++	struct snd_soc_dai *dai);
+ 
+ struct snd_soc_dai *snd_soc_find_dai(
+ 	const struct snd_soc_dai_link_component *dlc);
+diff --git a/sound/soc/soc-core.c b/sound/soc/soc-core.c
+index 8bf08799538c..79145714bfbe 100644
+--- a/sound/soc/soc-core.c
++++ b/sound/soc/soc-core.c
+@@ -2903,7 +2903,24 @@ static inline char *fmt_multiple_name(struct device *dev,
+ }
+ 
+ /**
+- * snd_soc_unregister_dai - Unregister DAIs from the ASoC core
++ * snd_soc_unregister_dai - Unregister dynamically created DAI
++ *
++ * @component: The component for which the DAI should be unregistered
++ * @dai: DAI which should be unregistered
++ */
++void snd_soc_unregister_dai(struct snd_soc_component *component,
++	struct snd_soc_dai *dai)
++{
++	dev_dbg(component->dev, "ASoC: Unregistered DAI '%s'\n",
++		dai->name);
++	list_del(&dai->list);
++	kfree(dai->name);
++	kfree(dai);
++}
++EXPORT_SYMBOL_GPL(snd_soc_unregister_dai);
++
++/**
++ * snd_soc_unregister_dais - Unregister DAIs from the ASoC core
+  *
+  * @component: The component for which the DAIs should be unregistered
+  */
+@@ -2911,13 +2928,8 @@ static void snd_soc_unregister_dais(struct snd_soc_component *component)
+ {
+ 	struct snd_soc_dai *dai, *_dai;
+ 
+-	for_each_component_dais_safe(component, dai, _dai) {
+-		dev_dbg(component->dev, "ASoC: Unregistered DAI '%s'\n",
+-			dai->name);
+-		list_del(&dai->list);
+-		kfree(dai->name);
+-		kfree(dai);
+-	}
++	for_each_component_dais_safe(component, dai, _dai)
++		snd_soc_unregister_dai(component, dai);
+ }
+ 
+ /* Create a DAI and add it to the component's DAI list */
+-- 
+2.21.0
+
