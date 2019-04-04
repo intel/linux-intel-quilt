@@ -1,0 +1,102 @@
+From 01cf3612b661e2dfefdcffd8e93e4281b12ac5b2 Mon Sep 17 00:00:00 2001
+From: Zhen Han <zhen.han@intel.com>
+Date: Fri, 8 Mar 2019 14:17:27 +0800
+Subject: [PATCH 152/165] ASoC: Intel: Skylake: Virt: Change SCHED policy to
+ FIFO
+
+This patch eliminates glitch issues by changing scheduling policy to
+FIFO in threads related to virtio audio mediator.
+
+Change-Id: If101ad0d2269d6ded21f536aba8be303897872cc
+Tracked-On: OAM-75325
+Signed-off-by: Zhen Han
+Signed-off-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virt-audio.c | 4 ++++
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.c  | 9 ++++++++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virt-audio.c b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+index 0b712db04fe9..a34d3f0ed2c8 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virt-audio.c
++++ b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+@@ -18,6 +18,8 @@
+ #include <linux/file.h>
+ #include <linux/slab.h>
+ #include <linux/pci.h>
++#include <uapi/linux/sched/types.h>
++#include <linux/sched.h>
+ 
+ #include "skl-virtio-be.h"
+ #include "skl-virtio.h"
+@@ -51,6 +53,7 @@ static int vskl_vbs_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 	struct snd_skl_vbe_client *client;
+ 	int vcpu, handle;
+ 	struct vskl *vskl = get_virtio_audio();
++	struct sched_param param = { .sched_priority = 10};
+ 	struct snd_skl_vbe *vbe = &vskl->vbe;
+ 
+ 	if (!vskl) {
+@@ -58,6 +61,7 @@ static int vskl_vbs_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 		return -EINVAL;
+ 	}
+ 
++	sched_setscheduler(current, SCHED_FIFO, &param);
+ 	dev_dbg(vskl->dev, "virtio audio kick handling!\n");
+ 
+ 	/* get the client this notification is for/from? */
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 17d5e3de45f5..f44f20051f78 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -29,6 +29,8 @@
+ #include <linux/virtio_config.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/pci.h>
++#include <uapi/linux/sched/types.h>
++#include <linux/sched.h>
+ #include <sound/pcm_params.h>
+ 
+ #include <sound/soc-acpi.h>
+@@ -317,10 +319,12 @@ static void vfe_cmd_handle_rx(struct virtqueue *vq)
+ static void vfe_not_tx_timeout_handler(struct work_struct *work)
+ {
+ 	struct vfe_ipc_msg *msg;
++	struct sched_param param = { .sched_priority = 10};
+ 	struct snd_skl_vfe *vfe =
+ 		container_of(work, struct snd_skl_vfe,
+ 		msg_timeout_work);
+ 
++	sched_setscheduler(current, SCHED_FIFO, &param);
+ 	while (!list_empty(&vfe->expired_msg_list)) {
+ 		msg = list_first_entry(&vfe->expired_msg_list,
+ 			struct vfe_ipc_msg, list);
+@@ -388,9 +392,11 @@ static void vfe_handle_posn(struct work_struct *work)
+ {
+ 	struct vfe_updated_substream *updated_stream_desc;
+ 	unsigned long irq_flags;
++	struct sched_param param = { .sched_priority = 10};
+ 	struct snd_skl_vfe *vfe =
+ 		container_of(work, struct snd_skl_vfe, posn_update_work);
+ 
++	sched_setscheduler(current, SCHED_FIFO, &param);
+ 	while (!list_empty(&vfe->updated_streams)) {
+ 		spin_lock_irqsave(&vfe->updated_streams_lock, irq_flags);
+ 		updated_stream_desc = list_first_entry(&vfe->updated_streams,
+@@ -437,11 +443,12 @@ static void vfe_message_loop(struct work_struct *work)
+ 	struct virtqueue *vq;
+ 	unsigned int buflen = 0;
+ 	struct vfe_kctl_result result;
+-
++	struct sched_param param = { .sched_priority = 10};
+ 	struct snd_skl_vfe *vfe =
+ 		container_of(work, struct snd_skl_vfe, message_loop_work);
+ 
+ 	vq = vfe->ipc_not_rx_vq;
++	sched_setscheduler(current, SCHED_FIFO, &param);
+ 
+ 	while ((header = virtqueue_get_buf(vq, &buflen)) != NULL) {
+ 		switch (header->msg_type) {
+-- 
+2.17.1
+

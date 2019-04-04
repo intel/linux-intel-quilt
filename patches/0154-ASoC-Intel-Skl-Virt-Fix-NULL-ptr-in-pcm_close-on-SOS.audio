@@ -1,0 +1,78 @@
+From bd925fabba228ff1ad2b32f0133c4e7a99d8cd76 Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Tue, 5 Mar 2019 13:30:52 +0100
+Subject: [PATCH 154/165] ASoC: Intel: Skl: Virt: Fix NULL ptr in pcm_close on
+ SOS
+
+In current version of pcm_close there is an assumption that DMA
+buffer has been allocated, when restoring original/native DMA pages.
+However some scenarios require call to  pcm_close earlier, before
+DMA allocation. This patch fixes this issue by checking if DMA
+buffer exist.
+
+Change-Id: Ie0caab49b98d3519ba74db3cea8b7bbe6242dc7a
+Signed-off-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tracked-On: OAM-76768
+---
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 22 ++++++++++---------
+ sound/soc/intel/skylake/virtio/skl-virtio.h   |  2 ++
+ 2 files changed, 14 insertions(+), 10 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 374d5d7ef8bc..faee11b064d8 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -542,17 +542,19 @@ static int vbe_skl_pcm_close(const struct skl *sdev, int vm_id,
+ 	int ret, cnt;
+ 	struct snd_pcm_substream *substream = substr_info->substream;
+ 	struct vfe_pcm_result *vbe_result = msg->rx_data;
+-
+-	const struct snd_sg_buf *sg_buf =
+-			snd_pcm_substream_sgbuf(substr_info->substream);
++	struct snd_sg_buf *sg_buf;
+ 	u64 native_addr = substr_info->native_dma_addr;
+ 
+-	/* restore original dma pages */
+-	sg_buf->table[0].addr = native_addr;
+-	native_addr &= ~(u64)0xfff;
+-	for (cnt = 1; cnt < sg_buf->pages; cnt++) {
+-		native_addr += PAGE_SIZE;
+-		sg_buf->table[cnt].addr = native_addr;
++	if (snd_pcm_get_dma_buf(substream)) {
++		sg_buf = snd_pcm_substream_sgbuf(substream);
++
++		/* restore original dma pages */
++		sg_buf->table[0].addr = native_addr;
++		native_addr &= ~(u64)0xfff;
++		for (cnt = 1; cnt < sg_buf->pages; cnt++) {
++			native_addr += PAGE_SIZE;
++			sg_buf->table[cnt].addr = native_addr;
++		}
+ 	}
+ 
+ 	if (substr_info->pos_desc) {
+@@ -735,7 +737,7 @@ static u32 vbe_skl_kcontrol_find_domain_id(const struct snd_kcontrol *kcontrol,
+ 	return 0;
+ }
+ 
+-static u32 vbe_skl_get_static_domain_id(struct snd_ctl_elem_id *ctl_id)
++static u32 vbe_skl_get_static_domain_id(const struct snd_ctl_elem_id *ctl_id)
+ {
+ 	u32 idx, num = ARRAY_SIZE(kctl_domain_map);
+ 	u32 size = strnlen(ctl_id->name, sizeof(ctl_id->name));
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio.h b/sound/soc/intel/skylake/virtio/skl-virtio.h
+index 390d31885437..d2a031107630 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio.h
+@@ -11,6 +11,8 @@
+ #define __SOUND_SOC_SKL_VIRTIO_H
+ 
+ #if IS_ENABLED(CONFIG_SND_SOC_INTEL_SKYLAKE_VIRTIO_FE)
++struct skl_sst;
++struct skl_dsp_loader_ops;
+ 
+ extern int vfe_sst_dsp_init(struct device *dev, void __iomem *mmio_base,
+ 		int irq, const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+-- 
+2.17.1
+
