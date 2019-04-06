@@ -1,0 +1,85 @@
+From b3469f0ae5cb58a76f9d14dd7516ff8f0da4ecb4 Mon Sep 17 00:00:00 2001
+From: "Furtak, Pawel" <pawel.furtak@intel.com>
+Date: Wed, 20 Mar 2019 10:49:15 +0100
+Subject: [PATCH 2/4] ASoC: Intel: Skl: Virt: Handle FE notifications in
+ separate work
+
+Synchronous handling of time consuming operation in ioreq handler
+on BE side may lead to performance drops on FE side. This patch
+defer handling of Guest notification to another thread to avoid
+such problems.
+
+Change-Id: I479703ccc80511201e036bb3db037d2f049c3f0a
+Tracked-On: OAM-77677
+Signed-off-by: Furtak, Pawel <pawel.furtak@intel.com>
+
+Reviewed-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tested-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virtio-be.c | 15 +++++++++++++--
+ sound/soc/intel/skylake/virtio/skl-virtio-be.h |  2 ++
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 72d5300cc19c..f9a819ae8fd4 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -1127,8 +1127,7 @@ void vbe_skl_handle_kick(struct snd_skl_vbe *vbe, int vq_idx)
+ 		vbe_handle_irq_queue(vbe, vq_idx);
+ 		break;
+ 	case SKL_VIRTIO_IPC_NOT_TX_VQ:
+-		/* IPC notification reply from FE to DSP */
+-		vbe_skl_ipc_fe_not_get(vbe, vq_idx);
++		schedule_work(&vbe->not_tx_handler_work);
+ 		break;
+ 	case SKL_VIRTIO_IPC_NOT_RX_VQ:
+ 		/* IPC notification from DSP to FE - NOT kick */
+@@ -1140,6 +1139,14 @@ void vbe_skl_handle_kick(struct snd_skl_vbe *vbe, int vq_idx)
+ 	}
+ }
+ 
++static void not_tx_handler(struct work_struct *work)
++{
++	struct snd_skl_vbe *vbe =
++		container_of(work, struct snd_skl_vbe, not_tx_handler_work);
++
++	vbe_skl_ipc_fe_not_get(vbe, SKL_VIRTIO_IPC_NOT_TX_VQ);
++}
++
+ int vbe_skl_attach(struct snd_skl_vbe *vbe, struct skl *skl)
+ {
+ 	static bool kctl_init;
+@@ -1151,6 +1158,8 @@ int vbe_skl_attach(struct snd_skl_vbe *vbe, struct skl *skl)
+ 
+ 		kctl_init_proxy(vbe->dev, &vbe_kctl_ops);
+ 		kctl_notify_machine_ready(skl->component->card);
++
++		INIT_WORK(&vbe->not_tx_handler_work, not_tx_handler);
+ 		kctl_init = true;
+ 	}
+ 
+@@ -1163,6 +1172,8 @@ int vbe_skl_detach(struct snd_skl_vbe *vbe, struct skl *skl)
+ 	 * pending messages
+ 	 */
+ 
++	cancel_work_sync(&vbe->not_tx_handler_work);
++
+ 	return 0;
+ }
+ 
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index 50c027e00436..0d6f95007d92 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -75,6 +75,8 @@ struct snd_skl_vbe {
+ 	struct list_head list;
+ 	struct list_head pending_msg_list;
+ 
++	struct work_struct not_tx_handler_work;
++
+ 	struct vskl_native_ops nops;
+ 
+ 	int vmid;  /* vm id number */
+-- 
+2.17.1
+
