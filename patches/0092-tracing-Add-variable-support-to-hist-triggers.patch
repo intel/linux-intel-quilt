@@ -1,7 +1,7 @@
-From 9361b59eb940e491345dd55f645040f9bd73d270 Mon Sep 17 00:00:00 2001
+From 7deacb5c4308b1ebd26ed91cd43d50d8d72de776 Mon Sep 17 00:00:00 2001
 From: Tom Zanussi <tom.zanussi@linux.intel.com>
 Date: Mon, 15 Jan 2018 20:51:49 -0600
-Subject: [PATCH 0092/2292] tracing: Add variable support to hist triggers
+Subject: [PATCH 0092/2304] tracing: Add variable support to hist triggers
 
 Add support for saving the value of a current event's event field by
 assigning it to a variable that can be read by a subsequent event.
@@ -45,7 +45,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  1 file changed, 331 insertions(+), 39 deletions(-)
 
 diff --git a/kernel/trace/trace_events_hist.c b/kernel/trace/trace_events_hist.c
-index 6d268e2..b430154 100644
+index a15593e..1bc92b9 100644
 --- a/kernel/trace/trace_events_hist.c
 +++ b/kernel/trace/trace_events_hist.c
 @@ -30,6 +30,13 @@ typedef u64 (*hist_field_fn_t) (struct hist_field *field, void *event,
@@ -632,7 +632,7 @@ index 6d268e2..b430154 100644
  }
  
  static inline void add_to_key(char *compound_key, void *key,
-@@ -1144,6 +1397,9 @@ hist_trigger_entry_print(struct seq_file *m,
+@@ -1145,6 +1398,9 @@ hist_trigger_entry_print(struct seq_file *m,
  	for (i = 1; i < hist_data->n_vals; i++) {
  		field_name = hist_field_name(hist_data->fields[i], 0);
  
@@ -642,7 +642,7 @@ index 6d268e2..b430154 100644
  		if (hist_data->fields[i]->flags & HIST_FIELD_FL_HEX) {
  			seq_printf(m, "  %s: %10llx", field_name,
  				   tracing_map_read_sum(elt, i));
-@@ -1267,6 +1523,9 @@ static void hist_field_print(struct seq_file *m, struct hist_field *hist_field)
+@@ -1268,6 +1524,9 @@ static void hist_field_print(struct seq_file *m, struct hist_field *hist_field)
  {
  	const char *field_name = hist_field_name(hist_field, 0);
  
@@ -652,7 +652,7 @@ index 6d268e2..b430154 100644
  	if (hist_field->flags & HIST_FIELD_FL_TIMESTAMP)
  		seq_puts(m, "common_timestamp");
  	else if (field_name)
-@@ -1285,7 +1544,8 @@ static int event_hist_trigger_print(struct seq_file *m,
+@@ -1286,7 +1545,8 @@ static int event_hist_trigger_print(struct seq_file *m,
  				    struct event_trigger_data *data)
  {
  	struct hist_trigger_data *hist_data = data->private_data;
@@ -662,7 +662,7 @@ index 6d268e2..b430154 100644
  	unsigned int i;
  
  	seq_puts(m, "hist:");
-@@ -1296,25 +1556,47 @@ static int event_hist_trigger_print(struct seq_file *m,
+@@ -1297,25 +1557,47 @@ static int event_hist_trigger_print(struct seq_file *m,
  	seq_puts(m, "keys=");
  
  	for_each_hist_key_field(i, hist_data) {
@@ -714,7 +714,7 @@ index 6d268e2..b430154 100644
  		}
  	}
  
-@@ -1322,7 +1604,10 @@ static int event_hist_trigger_print(struct seq_file *m,
+@@ -1323,7 +1605,10 @@ static int event_hist_trigger_print(struct seq_file *m,
  
  	for (i = 0; i < hist_data->n_sort_keys; i++) {
  		struct tracing_map_sort_key *sort_key;
@@ -726,7 +726,7 @@ index 6d268e2..b430154 100644
  
  		sort_key = &hist_data->sort_keys[i];
  		idx = sort_key->field_idx;
-@@ -1335,8 +1620,11 @@ static int event_hist_trigger_print(struct seq_file *m,
+@@ -1336,8 +1621,11 @@ static int event_hist_trigger_print(struct seq_file *m,
  
  		if (idx == HITCOUNT_IDX)
  			seq_puts(m, "hitcount");
@@ -739,7 +739,7 @@ index 6d268e2..b430154 100644
  
  		if (sort_key->descending)
  			seq_puts(m, ".descending");
-@@ -1633,7 +1921,7 @@ static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
+@@ -1634,7 +1922,7 @@ static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
  		test->ops->free(test->ops, test);
  
  	if (hist_data->enable_timestamps) {
@@ -748,7 +748,7 @@ index 6d268e2..b430154 100644
  			tracing_set_time_stamp_abs(file->tr, false);
  	}
  }
-@@ -1666,12 +1954,16 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
+@@ -1667,12 +1955,16 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
  	struct hist_trigger_attrs *attrs;
  	struct event_trigger_ops *trigger_ops;
  	struct hist_trigger_data *hist_data;
@@ -765,7 +765,7 @@ index 6d268e2..b430154 100644
  	/* separate the trigger from the filter (k:v [if filter]) */
  	trigger = strsep(&param, " \t");
  	if (!trigger)
-@@ -1684,7 +1976,7 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
+@@ -1685,7 +1977,7 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
  	if (attrs->map_bits)
  		hist_trigger_bits = attrs->map_bits;
  
@@ -774,7 +774,7 @@ index 6d268e2..b430154 100644
  	if (IS_ERR(hist_data)) {
  		destroy_hist_trigger_attrs(attrs);
  		return PTR_ERR(hist_data);
-@@ -1713,7 +2005,7 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
+@@ -1714,7 +2006,7 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
  			goto out_free;
  	}
  

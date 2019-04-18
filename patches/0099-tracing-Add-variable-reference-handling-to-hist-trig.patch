@@ -1,7 +1,7 @@
-From a7c43f29fec0fcde77de36b718ded0c345a887d9 Mon Sep 17 00:00:00 2001
+From 74dfdf12257f4c5b8c60625e5bd3988c5feececc Mon Sep 17 00:00:00 2001
 From: Tom Zanussi <tom.zanussi@linux.intel.com>
 Date: Mon, 15 Jan 2018 20:51:56 -0600
-Subject: [PATCH 0099/2292] tracing: Add variable reference handling to hist
+Subject: [PATCH 0099/2304] tracing: Add variable reference handling to hist
  triggers
 
 Add the necessary infrastructure to allow the variables defined on one
@@ -36,10 +36,10 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  4 files changed, 656 insertions(+), 16 deletions(-)
 
 diff --git a/kernel/trace/trace.c b/kernel/trace/trace.c
-index 0126557..90ad6b1 100644
+index 3f38b81..897c42e 100644
 --- a/kernel/trace/trace.c
 +++ b/kernel/trace/trace.c
-@@ -7803,6 +7803,7 @@ static int instance_mkdir(const char *name)
+@@ -7802,6 +7802,7 @@ static int instance_mkdir(const char *name)
  
  	INIT_LIST_HEAD(&tr->systems);
  	INIT_LIST_HEAD(&tr->events);
@@ -47,7 +47,7 @@ index 0126557..90ad6b1 100644
  
  	if (allocate_trace_buffers(tr, trace_buf_size) < 0)
  		goto out_free_tr;
-@@ -8555,6 +8556,7 @@ __init static int tracer_alloc_buffers(void)
+@@ -8554,6 +8555,7 @@ __init static int tracer_alloc_buffers(void)
  
  	INIT_LIST_HEAD(&global_trace.systems);
  	INIT_LIST_HEAD(&global_trace.events);
@@ -77,7 +77,7 @@ index 92936a6..5975d5f 100644
  extern int unregister_event_command(struct event_command *cmd);
  extern int register_trigger_hist_enable_disable_cmds(void);
 diff --git a/kernel/trace/trace_events_hist.c b/kernel/trace/trace_events_hist.c
-index 6e60cb79..2bc1f76 100644
+index c03da55..45a5008 100644
 --- a/kernel/trace/trace_events_hist.c
 +++ b/kernel/trace/trace_events_hist.c
 @@ -59,7 +59,12 @@ struct hist_field {
@@ -757,7 +757,7 @@ index 6e60cb79..2bc1f76 100644
  	for_each_hist_val_field(i, hist_data) {
  		hist_field = hist_data->fields[i];
  		hist_val = hist_field->fn(hist_field, elt, rbe, rec);
-@@ -1675,6 +2215,7 @@ static void event_hist_trigger(struct event_trigger_data *data, void *rec,
+@@ -1676,6 +2216,7 @@ static void event_hist_trigger(struct event_trigger_data *data, void *rec,
  	struct hist_trigger_data *hist_data = data->private_data;
  	bool use_compound_key = (hist_data->n_keys > 1);
  	unsigned long entries[HIST_STACKTRACE_DEPTH];
@@ -765,7 +765,7 @@ index 6e60cb79..2bc1f76 100644
  	char compound_key[HIST_KEY_SIZE_MAX];
  	struct tracing_map_elt *elt = NULL;
  	struct stack_trace stacktrace;
-@@ -1714,9 +2255,15 @@ static void event_hist_trigger(struct event_trigger_data *data, void *rec,
+@@ -1715,9 +2256,15 @@ static void event_hist_trigger(struct event_trigger_data *data, void *rec,
  	if (use_compound_key)
  		key = compound_key;
  
@@ -783,7 +783,7 @@ index 6e60cb79..2bc1f76 100644
  }
  
  static void hist_trigger_stacktrace_print(struct seq_file *m,
-@@ -1933,8 +2480,11 @@ static void hist_field_print(struct seq_file *m, struct hist_field *hist_field)
+@@ -1934,8 +2481,11 @@ static void hist_field_print(struct seq_file *m, struct hist_field *hist_field)
  
  	if (hist_field->flags & HIST_FIELD_FL_TIMESTAMP)
  		seq_puts(m, "common_timestamp");
@@ -796,7 +796,7 @@ index 6e60cb79..2bc1f76 100644
  
  	if (hist_field->flags) {
  		const char *flags_str = get_hist_field_flags(hist_field);
-@@ -2074,7 +2624,11 @@ static void event_hist_trigger_free(struct event_trigger_ops *ops,
+@@ -2075,7 +2625,11 @@ static void event_hist_trigger_free(struct event_trigger_ops *ops,
  	if (!data->ref) {
  		if (data->name)
  			del_named_trigger(data);
@@ -808,7 +808,7 @@ index 6e60cb79..2bc1f76 100644
  		destroy_hist_data(hist_data);
  	}
  }
-@@ -2287,23 +2841,55 @@ static int hist_register_trigger(char *glob, struct event_trigger_ops *ops,
+@@ -2288,23 +2842,55 @@ static int hist_register_trigger(char *glob, struct event_trigger_ops *ops,
  			goto out;
  	}
  
@@ -868,7 +868,7 @@ index 6e60cb79..2bc1f76 100644
  static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
  				    struct event_trigger_data *data,
  				    struct trace_event_file *file)
-@@ -2336,11 +2922,30 @@ static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
+@@ -2337,11 +2923,30 @@ static void hist_unregister_trigger(char *glob, struct event_trigger_ops *ops,
  	}
  }
  
@@ -899,7 +899,7 @@ index 6e60cb79..2bc1f76 100644
  	list_for_each_entry_safe(test, n, &file->triggers, list) {
  		if (test->cmd_ops->trigger_type == ETT_EVENT_HIST) {
  			hist_data = test->private_data;
-@@ -2416,6 +3021,11 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
+@@ -2417,6 +3022,11 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
  	}
  
  	if (remove) {
@@ -911,7 +911,7 @@ index 6e60cb79..2bc1f76 100644
  		cmd_ops->unreg(glob+1, trigger_ops, trigger_data, file);
  		ret = 0;
  		goto out_free;
-@@ -2433,14 +3043,33 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
+@@ -2434,14 +3044,33 @@ static int event_hist_trigger_func(struct event_command *cmd_ops,
  		goto out_free;
  	} else if (ret < 0)
  		goto out_free;
