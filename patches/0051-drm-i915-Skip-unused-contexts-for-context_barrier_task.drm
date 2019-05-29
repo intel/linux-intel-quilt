@@ -1,0 +1,58 @@
+From d144a703fb357b05fb1a781e5b748614a56c2937 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 29 Apr 2019 10:07:35 +0100
+Subject: [PATCH 051/186] drm/i915: Skip unused contexts for
+ context_barrier_task()
+
+If the context has not been used yet, it needs no barrier, and in the
+process fix up the selftest in mock_contexts.
+
+Testcase: igt/gem_ctx_clone/vm
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190429090735.326-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_gem_context.c           | 6 +++---
+ drivers/gpu/drm/i915/selftests/i915_gem_context.c | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 939c17070780..65cefc520e79 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -924,15 +924,15 @@ static int context_barrier_task(struct i915_gem_context *ctx,
+ 	for_each_gem_engine(ce, i915_gem_context_lock_engines(ctx), it) {
+ 		struct i915_request *rq;
+ 
+-		if (!(ce->engine->mask & engines))
+-			continue;
+-
+ 		if (I915_SELFTEST_ONLY(context_barrier_inject_fault &
+ 				       ce->engine->mask)) {
+ 			err = -ENXIO;
+ 			break;
+ 		}
+ 
++		if (!(ce->engine->mask & engines) || !ce->state)
++			continue;
++
+ 		rq = intel_context_create_request(ce);
+ 		if (IS_ERR(rq)) {
+ 			err = PTR_ERR(rq);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+index b62f005e4d50..34ac5cc6d59f 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+@@ -1665,7 +1665,7 @@ static int mock_context_barrier(void *arg)
+ 		goto out;
+ 	}
+ 	if (counter == 0) {
+-		pr_err("Did not retire immediately for all inactive engines\n");
++		pr_err("Did not retire immediately for all unused engines\n");
+ 		err = -EINVAL;
+ 		goto out;
+ 	}
+-- 
+2.17.1
+

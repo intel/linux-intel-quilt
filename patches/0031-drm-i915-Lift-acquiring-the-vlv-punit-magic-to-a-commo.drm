@@ -1,0 +1,816 @@
+From f94879fc01385830169aeaa25cc2eab6d3aab15f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 09:17:19 +0100
+Subject: [PATCH 031/186] drm/i915: Lift acquiring the vlv punit magic to a
+ common sb-get
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+As we now employ a very heavy pm_qos around the punit access, we want to
+minimise the number of synchronous requests by performing one for the
+whole punit sequence rather than around individual accesses. The
+sideband lock is used for this, so push the pm_qos into the sideband
+lock acquisition and release, moving it from the lowlevel punit rw
+routine to the callers. In the first step, we move the punit magic into
+the common sideband lock so that we can acquire a bunch of ports
+simultaneously, and if need be extend the workaround protection later.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426081725.31217-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_drv.h         | 124 +++++++++++++++++++++---
+ drivers/gpu/drm/i915/intel_cdclk.c      |   6 +-
+ drivers/gpu/drm/i915/intel_display.c    |  37 +++----
+ drivers/gpu/drm/i915/intel_dp.c         |   4 +-
+ drivers/gpu/drm/i915/intel_dpio_phy.c   |  37 +++----
+ drivers/gpu/drm/i915/intel_dsi_vbt.c    |   8 +-
+ drivers/gpu/drm/i915/intel_hdmi.c       |   4 +-
+ drivers/gpu/drm/i915/intel_pm.c         |   4 +-
+ drivers/gpu/drm/i915/intel_runtime_pm.c |   8 +-
+ drivers/gpu/drm/i915/intel_sideband.c   |  45 ++++++---
+ drivers/gpu/drm/i915/vlv_dsi.c          |   8 +-
+ drivers/gpu/drm/i915/vlv_dsi_pll.c      |  14 +--
+ 12 files changed, 206 insertions(+), 93 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 662dbd2e3245..b2215fb7f562 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -3442,25 +3442,119 @@ int skl_pcode_request(struct drm_i915_private *dev_priv, u32 mbox, u32 request,
+ 		      u32 reply_mask, u32 reply, int timeout_base_ms);
+ 
+ /* intel_sideband.c */
+-u32 vlv_punit_read(struct drm_i915_private *dev_priv, u32 addr);
+-int vlv_punit_write(struct drm_i915_private *dev_priv, u32 addr, u32 val);
+-u32 vlv_nc_read(struct drm_i915_private *dev_priv, u8 addr);
+-u32 vlv_iosf_sb_read(struct drm_i915_private *dev_priv, u8 port, u32 reg);
+-void vlv_iosf_sb_write(struct drm_i915_private *dev_priv, u8 port, u32 reg, u32 val);
+-u32 vlv_cck_read(struct drm_i915_private *dev_priv, u32 reg);
+-void vlv_cck_write(struct drm_i915_private *dev_priv, u32 reg, u32 val);
+-u32 vlv_ccu_read(struct drm_i915_private *dev_priv, u32 reg);
+-void vlv_ccu_write(struct drm_i915_private *dev_priv, u32 reg, u32 val);
+-u32 vlv_bunit_read(struct drm_i915_private *dev_priv, u32 reg);
+-void vlv_bunit_write(struct drm_i915_private *dev_priv, u32 reg, u32 val);
+-u32 vlv_dpio_read(struct drm_i915_private *dev_priv, enum pipe pipe, int reg);
+-void vlv_dpio_write(struct drm_i915_private *dev_priv, enum pipe pipe, int reg, u32 val);
++
++enum {
++	VLV_IOSF_SB_BUNIT,
++	VLV_IOSF_SB_CCK,
++	VLV_IOSF_SB_CCU,
++	VLV_IOSF_SB_DPIO,
++	VLV_IOSF_SB_FLISDSI,
++	VLV_IOSF_SB_GPIO,
++	VLV_IOSF_SB_NC,
++	VLV_IOSF_SB_PUNIT,
++};
++
++void vlv_iosf_sb_get(struct drm_i915_private *i915, unsigned long ports);
++u32 vlv_iosf_sb_read(struct drm_i915_private *i915, u8 port, u32 reg);
++void vlv_iosf_sb_write(struct drm_i915_private *i915,
++		       u8 port, u32 reg, u32 val);
++void vlv_iosf_sb_put(struct drm_i915_private *i915, unsigned long ports);
++
++static inline void vlv_bunit_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_BUNIT));
++}
++
++u32 vlv_bunit_read(struct drm_i915_private *i915, u32 reg);
++void vlv_bunit_write(struct drm_i915_private *i915, u32 reg, u32 val);
++
++static inline void vlv_bunit_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_BUNIT));
++}
++
++static inline void vlv_cck_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_CCK));
++}
++
++u32 vlv_cck_read(struct drm_i915_private *i915, u32 reg);
++void vlv_cck_write(struct drm_i915_private *i915, u32 reg, u32 val);
++
++static inline void vlv_cck_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_CCK));
++}
++
++static inline void vlv_ccu_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_CCU));
++}
++
++u32 vlv_ccu_read(struct drm_i915_private *i915, u32 reg);
++void vlv_ccu_write(struct drm_i915_private *i915, u32 reg, u32 val);
++
++static inline void vlv_ccu_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_CCU));
++}
++
++static inline void vlv_dpio_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_DPIO));
++}
++
++u32 vlv_dpio_read(struct drm_i915_private *i915, enum pipe pipe, int reg);
++void vlv_dpio_write(struct drm_i915_private *i915,
++		    enum pipe pipe, int reg, u32 val);
++
++static inline void vlv_dpio_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_DPIO));
++}
++
++static inline void vlv_flisdsi_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_FLISDSI));
++}
++
++u32 vlv_flisdsi_read(struct drm_i915_private *i915, u32 reg);
++void vlv_flisdsi_write(struct drm_i915_private *i915, u32 reg, u32 val);
++
++static inline void vlv_flisdsi_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_FLISDSI));
++}
++
++static inline void vlv_nc_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_NC));
++}
++
++u32 vlv_nc_read(struct drm_i915_private *i915, u8 addr);
++
++static inline void vlv_nc_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_NC));
++}
++
++static inline void vlv_punit_get(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_get(i915, BIT(VLV_IOSF_SB_PUNIT));
++}
++
++u32 vlv_punit_read(struct drm_i915_private *i915, u32 addr);
++int vlv_punit_write(struct drm_i915_private *i915, u32 addr, u32 val);
++
++static inline void vlv_punit_put(struct drm_i915_private *i915)
++{
++	vlv_iosf_sb_put(i915, BIT(VLV_IOSF_SB_PUNIT));
++}
++
+ u32 intel_sbi_read(struct drm_i915_private *dev_priv, u16 reg,
+ 		   enum intel_sbi_destination destination);
+ void intel_sbi_write(struct drm_i915_private *dev_priv, u16 reg, u32 value,
+ 		     enum intel_sbi_destination destination);
+-u32 vlv_flisdsi_read(struct drm_i915_private *dev_priv, u32 reg);
+-void vlv_flisdsi_write(struct drm_i915_private *dev_priv, u32 reg, u32 val);
+ 
+ /* intel_dpio_phy.c */
+ void bxt_port_to_phy_channel(struct drm_i915_private *dev_priv, enum port port,
+diff --git a/drivers/gpu/drm/i915/intel_cdclk.c b/drivers/gpu/drm/i915/intel_cdclk.c
+index ae40a8679314..5845d0a37599 100644
+--- a/drivers/gpu/drm/i915/intel_cdclk.c
++++ b/drivers/gpu/drm/i915/intel_cdclk.c
+@@ -557,7 +557,8 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
+ 	}
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_iosf_sb_get(dev_priv,
++			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_BUNIT));
+ 
+ 	if (cdclk == 400000) {
+ 		u32 divider;
+@@ -591,7 +592,8 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
+ 		val |= 3000 / 250; /* 3.0 usec */
+ 	vlv_bunit_write(dev_priv, BUNIT_REG_BISOC, val);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_iosf_sb_put(dev_priv,
++			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_BUNIT));
+ 
+ 	intel_update_cdclk(dev_priv);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index b0ec42b670d3..79f536112281 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -152,10 +152,10 @@ int vlv_get_hpll_vco(struct drm_i915_private *dev_priv)
+ 	int hpll_freq, vco_freq[] = { 800, 1600, 2000, 2400 };
+ 
+ 	/* Obtain SKU information */
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 	hpll_freq = vlv_cck_read(dev_priv, CCK_FUSE_REG) &
+ 		CCK_FUSE_HPLL_FREQ_MASK;
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	return vco_freq[hpll_freq] * 1000;
+ }
+@@ -166,9 +166,9 @@ int vlv_get_cck_clock(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 	int divider;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 	val = vlv_cck_read(dev_priv, reg);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	divider = val & CCK_FREQUENCY_VALUES;
+ 
+@@ -1093,9 +1093,9 @@ void assert_dsi_pll(struct drm_i915_private *dev_priv, bool state)
+ 	u32 val;
+ 	bool cur_state;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 	val = vlv_cck_read(dev_priv, CCK_REG_DSI_PLL_CONTROL);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	cur_state = val & DSI_PLL_VCO_EN;
+ 	I915_STATE_WARN(cur_state != state,
+@@ -1405,14 +1405,14 @@ static void _chv_enable_pll(struct intel_crtc *crtc,
+ 	enum dpio_channel port = vlv_pipe_to_channel(pipe);
+ 	u32 tmp;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Enable back the 10bit clock to display controller */
+ 	tmp = vlv_dpio_read(dev_priv, pipe, CHV_CMN_DW14(port));
+ 	tmp |= DPIO_DCLKP_EN;
+ 	vlv_dpio_write(dev_priv, pipe, CHV_CMN_DW14(port), tmp);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	/*
+ 	 * Need to wait > 100ns between dclkp clock enable bit and PLL enable.
+@@ -1569,14 +1569,14 @@ static void chv_disable_pll(struct drm_i915_private *dev_priv, enum pipe pipe)
+ 	I915_WRITE(DPLL(pipe), val);
+ 	POSTING_READ(DPLL(pipe));
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Disable 10bit clock to display controller */
+ 	val = vlv_dpio_read(dev_priv, pipe, CHV_CMN_DW14(port));
+ 	val &= ~DPIO_DCLKP_EN;
+ 	vlv_dpio_write(dev_priv, pipe, CHV_CMN_DW14(port), val);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void vlv_wait_port_ready(struct drm_i915_private *dev_priv,
+@@ -7276,7 +7276,7 @@ static void vlv_prepare_pll(struct intel_crtc *crtc,
+ 	if ((pipe_config->dpll_hw_state.dpll & DPLL_VCO_ENABLE) == 0)
+ 		return;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	bestn = pipe_config->dpll.n;
+ 	bestm1 = pipe_config->dpll.m1;
+@@ -7353,7 +7353,8 @@ static void vlv_prepare_pll(struct intel_crtc *crtc,
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PLL_DW7(pipe), coreclk);
+ 
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PLL_DW11(pipe), 0x87871000);
+-	mutex_unlock(&dev_priv->sb_lock);
++
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ static void chv_prepare_pll(struct intel_crtc *crtc,
+@@ -7386,7 +7387,7 @@ static void chv_prepare_pll(struct intel_crtc *crtc,
+ 	dpio_val = 0;
+ 	loopfilter = 0;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* p1 and p2 divider */
+ 	vlv_dpio_write(dev_priv, pipe, CHV_CMN_DW13(port),
+@@ -7458,7 +7459,7 @@ static void chv_prepare_pll(struct intel_crtc *crtc,
+ 			vlv_dpio_read(dev_priv, pipe, CHV_CMN_DW14(port)) |
+ 			DPIO_AFC_RECAL);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ /**
+@@ -8084,9 +8085,9 @@ static void vlv_crtc_clock_get(struct intel_crtc *crtc,
+ 	if ((pipe_config->dpll_hw_state.dpll & DPLL_VCO_ENABLE) == 0)
+ 		return;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 	mdiv = vlv_dpio_read(dev_priv, pipe, VLV_PLL_DW3(pipe));
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	clock.m1 = (mdiv >> DPIO_M1DIV_SHIFT) & 7;
+ 	clock.m2 = mdiv & DPIO_M2DIV_MASK;
+@@ -8195,13 +8196,13 @@ static void chv_crtc_clock_get(struct intel_crtc *crtc,
+ 	if ((pipe_config->dpll_hw_state.dpll & DPLL_VCO_ENABLE) == 0)
+ 		return;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 	cmn_dw13 = vlv_dpio_read(dev_priv, pipe, CHV_CMN_DW13(port));
+ 	pll_dw0 = vlv_dpio_read(dev_priv, pipe, CHV_PLL_DW0(port));
+ 	pll_dw1 = vlv_dpio_read(dev_priv, pipe, CHV_PLL_DW1(port));
+ 	pll_dw2 = vlv_dpio_read(dev_priv, pipe, CHV_PLL_DW2(port));
+ 	pll_dw3 = vlv_dpio_read(dev_priv, pipe, CHV_PLL_DW3(port));
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	clock.m1 = (pll_dw1 & 0x7) == DPIO_CHV_M1_DIV_BY_2 ? 2 : 0;
+ 	clock.m2 = (pll_dw0 & 0xff) << 22;
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 560274d1c50b..4fc25dcc97d4 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -3148,12 +3148,12 @@ static void chv_post_disable_dp(struct intel_encoder *encoder,
+ 
+ 	intel_dp_link_down(encoder, old_crtc_state);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Assert data lane reset */
+ 	chv_data_lane_soft_reset(encoder, old_crtc_state, true);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ static void
+diff --git a/drivers/gpu/drm/i915/intel_dpio_phy.c b/drivers/gpu/drm/i915/intel_dpio_phy.c
+index ab4ac7158b79..c784f3daaf51 100644
+--- a/drivers/gpu/drm/i915/intel_dpio_phy.c
++++ b/drivers/gpu/drm/i915/intel_dpio_phy.c
+@@ -648,7 +648,7 @@ void chv_set_phy_signal_level(struct intel_encoder *encoder,
+ 	u32 val;
+ 	int i;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Clear calc init */
+ 	val = vlv_dpio_read(dev_priv, pipe, VLV_PCS01_DW10(ch));
+@@ -729,8 +729,7 @@ void chv_set_phy_signal_level(struct intel_encoder *encoder,
+ 		vlv_dpio_write(dev_priv, pipe, VLV_PCS23_DW10(ch), val);
+ 	}
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
+-
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void chv_data_lane_soft_reset(struct intel_encoder *encoder,
+@@ -800,7 +799,7 @@ void chv_phy_pre_pll_enable(struct intel_encoder *encoder,
+ 
+ 	chv_phy_powergate_lanes(encoder, true, lane_mask);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Assert data lane reset */
+ 	chv_data_lane_soft_reset(encoder, crtc_state, true);
+@@ -855,7 +854,7 @@ void chv_phy_pre_pll_enable(struct intel_encoder *encoder,
+ 		val |= CHV_CMN_USEDCLKCHANNEL;
+ 	vlv_dpio_write(dev_priv, pipe, CHV_CMN_DW19(ch), val);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void chv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+@@ -870,7 +869,7 @@ void chv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+ 	int data, i, stagger;
+ 	u32 val;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* allow hardware to manage TX FIFO reset source */
+ 	val = vlv_dpio_read(dev_priv, pipe, VLV_PCS01_DW11(ch));
+@@ -935,7 +934,7 @@ void chv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+ 	/* Deassert data lane reset */
+ 	chv_data_lane_soft_reset(encoder, crtc_state, false);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void chv_phy_release_cl2_override(struct intel_encoder *encoder)
+@@ -956,7 +955,7 @@ void chv_phy_post_pll_disable(struct intel_encoder *encoder,
+ 	enum pipe pipe = to_intel_crtc(old_crtc_state->base.crtc)->pipe;
+ 	u32 val;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* disable left/right clock distribution */
+ 	if (pipe != PIPE_B) {
+@@ -969,7 +968,7 @@ void chv_phy_post_pll_disable(struct intel_encoder *encoder,
+ 		vlv_dpio_write(dev_priv, pipe, _CHV_CMN_DW1_CH1, val);
+ 	}
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	/*
+ 	 * Leave the power down bit cleared for at least one
+@@ -993,7 +992,8 @@ void vlv_set_phy_signal_level(struct intel_encoder *encoder,
+ 	enum dpio_channel port = vlv_dport_to_channel(dport);
+ 	enum pipe pipe = intel_crtc->pipe;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
++
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW5(port), 0x00000000);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW4(port), demph_reg_value);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW2(port),
+@@ -1006,7 +1006,8 @@ void vlv_set_phy_signal_level(struct intel_encoder *encoder,
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW11(port), 0x00030000);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW9(port), preemph_reg_value);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW5(port), DPIO_TX_OCALINIT_EN);
+-	mutex_unlock(&dev_priv->sb_lock);
++
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void vlv_phy_pre_pll_enable(struct intel_encoder *encoder,
+@@ -1019,7 +1020,8 @@ void vlv_phy_pre_pll_enable(struct intel_encoder *encoder,
+ 	enum pipe pipe = crtc->pipe;
+ 
+ 	/* Program Tx lane resets to default */
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
++
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW0(port),
+ 			 DPIO_PCS_TX_LANE2_RESET |
+ 			 DPIO_PCS_TX_LANE1_RESET);
+@@ -1033,7 +1035,8 @@ void vlv_phy_pre_pll_enable(struct intel_encoder *encoder,
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW12(port), 0x00750f00);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW11(port), 0x00001500);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_TX_DW14(port), 0x40400000);
+-	mutex_unlock(&dev_priv->sb_lock);
++
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void vlv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+@@ -1047,7 +1050,7 @@ void vlv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+ 	enum pipe pipe = crtc->pipe;
+ 	u32 val;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Enable clock channels for this port */
+ 	val = vlv_dpio_read(dev_priv, pipe, VLV_PCS01_DW8(port));
+@@ -1063,7 +1066,7 @@ void vlv_phy_pre_encoder_enable(struct intel_encoder *encoder,
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW14(port), 0x00760018);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW23(port), 0x00400888);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ void vlv_phy_reset_lanes(struct intel_encoder *encoder,
+@@ -1075,8 +1078,8 @@ void vlv_phy_reset_lanes(struct intel_encoder *encoder,
+ 	enum dpio_channel port = vlv_dport_to_channel(dport);
+ 	enum pipe pipe = crtc->pipe;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW0(port), 0x00000000);
+ 	vlv_dpio_write(dev_priv, pipe, VLV_PCS_DW1(port), 0x00e00060);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+diff --git a/drivers/gpu/drm/i915/intel_dsi_vbt.c b/drivers/gpu/drm/i915/intel_dsi_vbt.c
+index 3074448446bc..2304488f2d35 100644
+--- a/drivers/gpu/drm/i915/intel_dsi_vbt.c
++++ b/drivers/gpu/drm/i915/intel_dsi_vbt.c
+@@ -248,7 +248,7 @@ static void vlv_exec_gpio(struct drm_i915_private *dev_priv,
+ 	pconf0 = VLV_GPIO_PCONF0(map->base_offset);
+ 	padval = VLV_GPIO_PAD_VAL(map->base_offset);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_iosf_sb_get(dev_priv, BIT(VLV_IOSF_SB_GPIO));
+ 	if (!map->init) {
+ 		/* FIXME: remove constant below */
+ 		vlv_iosf_sb_write(dev_priv, port, pconf0, 0x2000CC00);
+@@ -257,7 +257,7 @@ static void vlv_exec_gpio(struct drm_i915_private *dev_priv,
+ 
+ 	tmp = 0x4 | value;
+ 	vlv_iosf_sb_write(dev_priv, port, padval, tmp);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_iosf_sb_put(dev_priv, BIT(VLV_IOSF_SB_GPIO));
+ }
+ 
+ static void chv_exec_gpio(struct drm_i915_private *dev_priv,
+@@ -303,12 +303,12 @@ static void chv_exec_gpio(struct drm_i915_private *dev_priv,
+ 	cfg0 = CHV_GPIO_PAD_CFG0(family_num, gpio_index);
+ 	cfg1 = CHV_GPIO_PAD_CFG1(family_num, gpio_index);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_iosf_sb_get(dev_priv, BIT(VLV_IOSF_SB_GPIO));
+ 	vlv_iosf_sb_write(dev_priv, port, cfg1, 0);
+ 	vlv_iosf_sb_write(dev_priv, port, cfg0,
+ 			  CHV_GPIO_GPIOEN | CHV_GPIO_GPIOCFG_GPO |
+ 			  CHV_GPIO_GPIOTXSTATE(value));
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_iosf_sb_put(dev_priv, BIT(VLV_IOSF_SB_GPIO));
+ }
+ 
+ static void bxt_exec_gpio(struct drm_i915_private *dev_priv,
+diff --git a/drivers/gpu/drm/i915/intel_hdmi.c b/drivers/gpu/drm/i915/intel_hdmi.c
+index 34be2cfd0ec8..ac2248cfa6a6 100644
+--- a/drivers/gpu/drm/i915/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/intel_hdmi.c
+@@ -2620,12 +2620,12 @@ static void chv_hdmi_post_disable(struct intel_encoder *encoder,
+ 	struct drm_device *dev = encoder->base.dev;
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Assert data lane reset */
+ 	chv_data_lane_soft_reset(encoder, old_crtc_state, true);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ }
+ 
+ static void chv_hdmi_pre_enable(struct intel_encoder *encoder,
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 7aa9a8c12b54..6c2f416b95a6 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -7803,9 +7803,9 @@ static void cherryview_init_gt_powersave(struct drm_i915_private *dev_priv)
+ 
+ 	vlv_init_gpll_ref_freq(dev_priv);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 	val = vlv_cck_read(dev_priv, CCK_FUSE_REG);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	switch ((val >> 2) & 0x7) {
+ 	case 3:
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index 6150e35bf7b5..cca1d318ce56 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -1558,7 +1558,7 @@ static void chv_dpio_cmn_power_well_enable(struct drm_i915_private *dev_priv,
+ 				    1))
+ 		DRM_ERROR("Display PHY %d is not power up\n", phy);
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 
+ 	/* Enable dynamic power down */
+ 	tmp = vlv_dpio_read(dev_priv, pipe, CHV_CMN_DW28);
+@@ -1581,7 +1581,7 @@ static void chv_dpio_cmn_power_well_enable(struct drm_i915_private *dev_priv,
+ 		vlv_dpio_write(dev_priv, pipe, CHV_CMN_DW30, tmp);
+ 	}
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	dev_priv->chv_phy_control |= PHY_COM_LANE_RESET_DEASSERT(phy);
+ 	I915_WRITE(DISPLAY_PHY_CONTROL, dev_priv->chv_phy_control);
+@@ -1644,9 +1644,9 @@ static void assert_chv_phy_powergate(struct drm_i915_private *dev_priv, enum dpi
+ 	else
+ 		reg = _CHV_CMN_DW6_CH1;
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_dpio_get(dev_priv);
+ 	val = vlv_dpio_read(dev_priv, pipe, reg);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_dpio_put(dev_priv);
+ 
+ 	/*
+ 	 * This assumes !override is only used when the port is disabled.
+diff --git a/drivers/gpu/drm/i915/intel_sideband.c b/drivers/gpu/drm/i915/intel_sideband.c
+index fc8913461622..b2fc605e2e29 100644
+--- a/drivers/gpu/drm/i915/intel_sideband.c
++++ b/drivers/gpu/drm/i915/intel_sideband.c
+@@ -73,6 +73,22 @@ static void __vlv_punit_put(struct drm_i915_private *i915)
+ 	iosf_mbi_punit_release();
+ }
+ 
++void vlv_iosf_sb_get(struct drm_i915_private *i915, unsigned long ports)
++{
++	if (ports & BIT(VLV_IOSF_SB_PUNIT))
++		__vlv_punit_get(i915);
++
++	mutex_lock(&i915->sb_lock);
++}
++
++void vlv_iosf_sb_put(struct drm_i915_private *i915, unsigned long ports)
++{
++	mutex_unlock(&i915->sb_lock);
++
++	if (ports & BIT(VLV_IOSF_SB_PUNIT))
++		__vlv_punit_put(i915);
++}
++
+ static int vlv_sideband_rw(struct drm_i915_private *i915,
+ 			   u32 devfn, u32 port, u32 opcode,
+ 			   u32 addr, u32 *val)
+@@ -82,6 +98,8 @@ static int vlv_sideband_rw(struct drm_i915_private *i915,
+ 	int err;
+ 
+ 	lockdep_assert_held(&i915->sb_lock);
++	if (port == IOSF_PORT_PUNIT)
++		iosf_mbi_assert_punit_acquired();
+ 
+ 	/* Flush the previous comms, just in case it failed last time. */
+ 	if (intel_wait_for_register(uncore,
+@@ -125,16 +143,14 @@ u32 vlv_punit_read(struct drm_i915_private *i915, u32 addr)
+ {
+ 	u32 val = 0;
+ 
+-	WARN_ON(!mutex_is_locked(&i915->pcu_lock));
++	lockdep_assert_held(&i915->pcu_lock);
+ 
+-	mutex_lock(&i915->sb_lock);
+-	__vlv_punit_get(i915);
++	vlv_punit_get(i915);
+ 
+ 	vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_PUNIT,
+ 			SB_CRRDDA_NP, addr, &val);
+ 
+-	__vlv_punit_put(i915);
+-	mutex_unlock(&i915->sb_lock);
++	vlv_punit_put(i915);
+ 
+ 	return val;
+ }
+@@ -143,16 +159,14 @@ int vlv_punit_write(struct drm_i915_private *i915, u32 addr, u32 val)
+ {
+ 	int err;
+ 
+-	WARN_ON(!mutex_is_locked(&i915->pcu_lock));
++	lockdep_assert_held(&i915->pcu_lock);
+ 
+-	mutex_lock(&i915->sb_lock);
+-	__vlv_punit_get(i915);
++	vlv_punit_get(i915);
+ 
+ 	err = vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_PUNIT,
+ 			      SB_CRWRDA_NP, addr, &val);
+ 
+-	__vlv_punit_put(i915);
+-	mutex_unlock(&i915->sb_lock);
++	vlv_punit_put(i915);
+ 
+ 	return err;
+ }
+@@ -177,12 +191,10 @@ u32 vlv_nc_read(struct drm_i915_private *i915, u8 addr)
+ {
+ 	u32 val = 0;
+ 
+-	WARN_ON(!mutex_is_locked(&i915->pcu_lock));
+-
+-	mutex_lock(&i915->sb_lock);
++	vlv_nc_get(i915);
+ 	vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_NC,
+ 			SB_CRRDDA_NP, addr, &val);
+-	mutex_unlock(&i915->sb_lock);
++	vlv_nc_put(i915);
+ 
+ 	return val;
+ }
+@@ -281,7 +293,8 @@ u32 intel_sbi_read(struct drm_i915_private *dev_priv, u16 reg,
+ 		   enum intel_sbi_destination destination)
+ {
+ 	u32 value = 0;
+-	WARN_ON(!mutex_is_locked(&dev_priv->sb_lock));
++
++	lockdep_assert_held(&dev_priv->sb_lock);
+ 
+ 	if (intel_wait_for_register(&dev_priv->uncore,
+ 				    SBI_CTL_STAT, SBI_BUSY, 0,
+@@ -321,7 +334,7 @@ void intel_sbi_write(struct drm_i915_private *dev_priv, u16 reg, u32 value,
+ {
+ 	u32 tmp;
+ 
+-	WARN_ON(!mutex_is_locked(&dev_priv->sb_lock));
++	lockdep_assert_held(&dev_priv->sb_lock);
+ 
+ 	if (intel_wait_for_register(&dev_priv->uncore,
+ 				    SBI_CTL_STAT, SBI_BUSY, 0,
+diff --git a/drivers/gpu/drm/i915/vlv_dsi.c b/drivers/gpu/drm/i915/vlv_dsi.c
+index e0b1ec821960..dc1839bfde3e 100644
+--- a/drivers/gpu/drm/i915/vlv_dsi.c
++++ b/drivers/gpu/drm/i915/vlv_dsi.c
+@@ -248,7 +248,7 @@ static int dpi_send_cmd(struct intel_dsi *intel_dsi, u32 cmd, bool hs,
+ 
+ static void band_gap_reset(struct drm_i915_private *dev_priv)
+ {
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_flisdsi_get(dev_priv);
+ 
+ 	vlv_flisdsi_write(dev_priv, 0x08, 0x0001);
+ 	vlv_flisdsi_write(dev_priv, 0x0F, 0x0005);
+@@ -257,7 +257,7 @@ static void band_gap_reset(struct drm_i915_private *dev_priv)
+ 	vlv_flisdsi_write(dev_priv, 0x0F, 0x0000);
+ 	vlv_flisdsi_write(dev_priv, 0x08, 0x0000);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_flisdsi_put(dev_priv);
+ }
+ 
+ static int bdw_get_pipemisc_bpp(struct intel_crtc *crtc)
+@@ -515,11 +515,11 @@ static void vlv_dsi_device_ready(struct intel_encoder *encoder)
+ 
+ 	DRM_DEBUG_KMS("\n");
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_flisdsi_get(dev_priv);
+ 	/* program rcomp for compliance, reduce from 50 ohms to 45 ohms
+ 	 * needed everytime after power gate */
+ 	vlv_flisdsi_write(dev_priv, 0x04, 0x0004);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_flisdsi_put(dev_priv);
+ 
+ 	/* bandgap reset is needed after everytime we do power gate */
+ 	band_gap_reset(dev_priv);
+diff --git a/drivers/gpu/drm/i915/vlv_dsi_pll.c b/drivers/gpu/drm/i915/vlv_dsi_pll.c
+index 5e7b1fb2db5d..25b811174f5c 100644
+--- a/drivers/gpu/drm/i915/vlv_dsi_pll.c
++++ b/drivers/gpu/drm/i915/vlv_dsi_pll.c
+@@ -149,7 +149,7 @@ void vlv_dsi_pll_enable(struct intel_encoder *encoder,
+ 
+ 	DRM_DEBUG_KMS("\n");
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 
+ 	vlv_cck_write(dev_priv, CCK_REG_DSI_PLL_CONTROL, 0);
+ 	vlv_cck_write(dev_priv, CCK_REG_DSI_PLL_DIVIDER, config->dsi_pll.div);
+@@ -166,11 +166,11 @@ void vlv_dsi_pll_enable(struct intel_encoder *encoder,
+ 	if (wait_for(vlv_cck_read(dev_priv, CCK_REG_DSI_PLL_CONTROL) &
+ 						DSI_PLL_LOCK, 20)) {
+ 
+-		mutex_unlock(&dev_priv->sb_lock);
++		vlv_cck_put(dev_priv);
+ 		DRM_ERROR("DSI PLL lock failed\n");
+ 		return;
+ 	}
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	DRM_DEBUG_KMS("DSI PLL locked\n");
+ }
+@@ -182,14 +182,14 @@ void vlv_dsi_pll_disable(struct intel_encoder *encoder)
+ 
+ 	DRM_DEBUG_KMS("\n");
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 
+ 	tmp = vlv_cck_read(dev_priv, CCK_REG_DSI_PLL_CONTROL);
+ 	tmp &= ~DSI_PLL_VCO_EN;
+ 	tmp |= DSI_PLL_LDO_GATE;
+ 	vlv_cck_write(dev_priv, CCK_REG_DSI_PLL_CONTROL, tmp);
+ 
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ }
+ 
+ bool bxt_dsi_pll_is_enabled(struct drm_i915_private *dev_priv)
+@@ -266,10 +266,10 @@ u32 vlv_dsi_get_pclk(struct intel_encoder *encoder,
+ 
+ 	DRM_DEBUG_KMS("\n");
+ 
+-	mutex_lock(&dev_priv->sb_lock);
++	vlv_cck_get(dev_priv);
+ 	pll_ctl = vlv_cck_read(dev_priv, CCK_REG_DSI_PLL_CONTROL);
+ 	pll_div = vlv_cck_read(dev_priv, CCK_REG_DSI_PLL_DIVIDER);
+-	mutex_unlock(&dev_priv->sb_lock);
++	vlv_cck_put(dev_priv);
+ 
+ 	config->dsi_pll.ctrl = pll_ctl & ~DSI_PLL_LOCK;
+ 	config->dsi_pll.div = pll_div;
+-- 
+2.17.1
+

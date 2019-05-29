@@ -1,0 +1,64 @@
+From ca7aaf4af6d5c1071fa2076672f9dda3f6edc168 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Fri, 19 Apr 2019 11:43:00 +0200
+Subject: [PATCH 009/150] ASoC: Intel: Skylake: Read HIPCT extension before
+ clearing DONE bit
+
+Host clears DONE bit to signal IPC target it has completed the
+operation. Once this is done, IPC target i.e. DSP may proceed with next
+reply, filling the registers with new portion of data.
+
+Because of this, host should always read all registers prior to clearing
+DONE and BUSY bit to ensure no desynchronization happens the time in
+between clearing bits and reading message data (here, extension).
+
+Change-Id: Iebcaa124f93bfec6164efde5def4f839f1325342
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/cnl-sst.c     | 2 +-
+ sound/soc/intel/skylake/skl-sst-ipc.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index 5258782a52c0..092fa3287b70 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -314,6 +314,7 @@ static irqreturn_t cnl_dsp_irq_thread_handler(int irq, void *context)
+ 
+ 	hipcida = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCIDA);
+ 	hipctdr = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDR);
++	hipctdd = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDD);
+ 
+ 	/* reply message from dsp */
+ 	if (hipcida & CNL_ADSP_REG_HIPCIDA_DONE) {
+@@ -333,7 +334,6 @@ static irqreturn_t cnl_dsp_irq_thread_handler(int irq, void *context)
+ 
+ 	/* new message from dsp */
+ 	if (hipctdr & CNL_ADSP_REG_HIPCTDR_BUSY) {
+-		hipctdd = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDD);
+ 		header.primary = hipctdr;
+ 		header.extension = hipctdd;
+ 		dev_dbg(dsp->dev, "IPC irq: Firmware respond primary:%x",
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 7033bbb6a583..fd32840a101c 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -510,6 +510,7 @@ irqreturn_t skl_dsp_irq_thread_handler(int irq, void *context)
+ 
+ 	hipcie = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCIE);
+ 	hipct = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCT);
++	hipcte = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCTE);
+ 
+ 	/* reply message from DSP */
+ 	if (hipcie & SKL_ADSP_REG_HIPCIE_DONE) {
+@@ -529,7 +530,6 @@ irqreturn_t skl_dsp_irq_thread_handler(int irq, void *context)
+ 
+ 	/* New message from DSP */
+ 	if (hipct & SKL_ADSP_REG_HIPCT_BUSY) {
+-		hipcte = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCTE);
+ 		header.primary = hipct;
+ 		header.extension = hipcte;
+ 		dev_dbg(dsp->dev, "IPC irq: Firmware respond primary:%x\n",
+-- 
+2.17.1
+

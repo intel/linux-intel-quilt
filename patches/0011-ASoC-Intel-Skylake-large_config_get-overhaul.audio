@@ -1,0 +1,172 @@
+From 698312aaaceb2471654d027ff473fffafb5df17f Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 8 May 2019 21:00:39 +0200
+Subject: [PATCH 011/150] ASoC: Intel: Skylake: large_config_get overhaul
+
+In its current state, LARGE_CONFIG_GET message is both prepared and
+processed incorrectly. Host is expected to first send single
+LARGE_CONFIG_GET request to DSP and read data_off_size to obtain total
+payload size received. From then on, it should loop for each frame
+exceeding inbox size. If entire payload is contained within the very
+first frame, no loop should be executed.
+
+The behavior of LARGE_CONFIG_GET message changes when TL(V) array is
+specified which is also not accounted for.
+
+Due to upcoming changes, restrict TLV payload to single frame - no
+looping added - to maintain sanity while still fixing all the issues
+found. Caller may still retrieve data for every TL(V) required by
+simply splitting array into chunks and sending that many requests.
+
+Change-Id: Ica06ea48cef0920e47722edf869981d9d8cc4104
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c | 10 +++-
+ sound/soc/intel/skylake/skl-sst-ipc.c  | 64 +++++++++++++-------------
+ sound/soc/intel/skylake/skl-sst-ipc.h  |  9 +++-
+ 3 files changed, 49 insertions(+), 34 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 63a52bcc958e..523c5ca97f8d 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1362,11 +1362,19 @@ int skl_get_module_params(struct skl_dev *skl, u32 *params, int size,
+ 			  u32 param_id, struct skl_module_cfg *mcfg)
+ {
+ 	struct skl_ipc_large_config_msg msg;
++	u32 *payload;
++	size_t bytes, sz = size;
++	int ret;
+ 
+ 	msg.module_id = mcfg->id.module_id;
+ 	msg.instance_id = mcfg->id.pvt_id;
+ 	msg.param_data_size = size;
+ 	msg.large_param_id = param_id;
+ 
+-	return skl_ipc_get_large_config(&skl->ipc, &msg, params);
++	ret = skl_ipc_get_large_config(&skl->ipc, &msg, &payload, NULL, &bytes);
++	if (!ret) {
++		memcpy(params, payload, min(sz, bytes));
++		kfree(payload);
++	}
++	return ret;
+ }
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index b72e6fd97c99..0e1c9f62dbd2 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -961,52 +961,52 @@ int skl_ipc_set_large_config(struct sst_generic_ipc *ipc,
+ EXPORT_SYMBOL_GPL(skl_ipc_set_large_config);
+ 
+ int skl_ipc_get_large_config(struct sst_generic_ipc *ipc,
+-		struct skl_ipc_large_config_msg *msg, u32 *param)
++		struct skl_ipc_large_config_msg *msg, u32 **payload,
++		struct skl_tlv *tlv, size_t *bytes)
+ {
+ 	struct skl_ipc_header header = {0};
+-	u64 *reply, *ipc_header = (u64 *)(&header);
+-	int ret = 0;
+-	size_t sz_remaining, rx_size, data_offset;
++	u64 reply;
++	u8 *buf, *nbuf;
++	size_t size;
++	int ret, i;
++
++	*payload = NULL;
++	if (tlv) {
++		for (i = size = 0; i * sizeof(*tlv) < *bytes; i++)
++			size += tlv[i].length;
++		/* For now, restrict payload to single inbox frame */
++		if (size > SKL_ADSP_W0_UP_SZ)
++			return -E2BIG;
++	}
++	buf = kzalloc(SKL_ADSP_W1_SZ, GFP_KERNEL);
++	if (!buf)
++		return -ENOMEM;
+ 
+ 	header.primary = IPC_MSG_TARGET(IPC_MOD_MSG);
+ 	header.primary |= IPC_MSG_DIR(IPC_MSG_REQUEST);
+ 	header.primary |= IPC_GLB_TYPE(IPC_MOD_LARGE_CONFIG_GET);
+ 	header.primary |= IPC_MOD_INSTANCE_ID(msg->instance_id);
+ 	header.primary |= IPC_MOD_ID(msg->module_id);
+-
+-	header.extension = IPC_DATA_OFFSET_SZ(msg->param_data_size);
++	header.extension = IPC_DATA_OFFSET_SZ(SKL_ADSP_W1_SZ);
+ 	header.extension |= IPC_LARGE_PARAM_ID(msg->large_param_id);
+ 	header.extension |= IPC_FINAL_BLOCK(1);
+ 	header.extension |= IPC_INITIAL_BLOCK(1);
+ 
+-	sz_remaining = msg->param_data_size;
+-	data_offset = 0;
+-
+-	while (sz_remaining != 0) {
+-		rx_size = sz_remaining > SKL_ADSP_W1_SZ
+-				? SKL_ADSP_W1_SZ : sz_remaining;
+-		if (rx_size == sz_remaining)
+-			header.extension |= IPC_FINAL_BLOCK(1);
+-
+-		ret = sst_ipc_tx_message_wait(ipc, *ipc_header, NULL, 0,
+-				NULL, ((char *)param) + data_offset,
+-				msg->param_data_size);
+-		if (ret < 0) {
+-			dev_err(ipc->dev,
+-				"ipc: get large config fail, err: %d\n", ret);
+-			return ret;
+-		}
+-		sz_remaining -= rx_size;
+-		data_offset = msg->param_data_size - sz_remaining;
+-
+-		/* clear the fields */
+-		header.extension &= IPC_INITIAL_BLOCK_CLEAR;
+-		header.extension &= IPC_DATA_OFFSET_SZ_CLEAR;
+-		/* fill the fields */
+-		header.extension |= IPC_INITIAL_BLOCK(1);
+-		header.extension |= IPC_DATA_OFFSET_SZ(data_offset);
++	ret = sst_ipc_tx_message_wait(ipc, *(u64 *)(&header),
++			tlv, tlv ? *bytes : 0, &reply,
++			buf, SKL_ADSP_W1_SZ);
++	if (ret < 0) {
++		dev_err(ipc->dev, "ipc: get large config fail, err: %d\n", ret);
++		return ret;
+ 	}
+ 
++	size = (reply >> 32) & IPC_DATA_OFFSET_SZ_MASK;
++	nbuf = krealloc(buf, size, GFP_KERNEL);
++	if (ZERO_OR_NULL_PTR(nbuf))
++		return -ENOMEM;
++
++	*payload = (u32 *)nbuf;
++	*bytes = size;
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(skl_ipc_get_large_config);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 11fc03ea0427..a70247d6148c 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -23,6 +23,12 @@
+ struct sst_dsp;
+ struct sst_generic_ipc;
+ 
++struct skl_tlv {
++	u32 type;
++	u32 length;
++	u32 value[0];
++};
++
+ enum skl_ipc_pipeline_state {
+ 	PPL_INVALID_STATE =	0,
+ 	PPL_UNINITIALIZED =	1,
+@@ -147,7 +153,8 @@ int skl_ipc_set_large_config(struct sst_generic_ipc *ipc,
+ 		struct skl_ipc_large_config_msg *msg, u32 *param);
+ 
+ int skl_ipc_get_large_config(struct sst_generic_ipc *ipc,
+-		struct skl_ipc_large_config_msg *msg, u32 *param);
++		struct skl_ipc_large_config_msg *msg, u32 **payload,
++		struct skl_tlv *tlv, size_t *bytes);
+ 
+ int skl_sst_ipc_load_library(struct sst_generic_ipc *ipc,
+ 			u8 dma_id, u8 table_id, bool wait);
+-- 
+2.17.1
+

@@ -1,0 +1,203 @@
+From 75689be18f6ef1d8f69f759f6b00d4f05d506279 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 6 Mar 2019 14:21:46 +0100
+Subject: [PATCH 041/150] ASoC: Intel: Skylake: Implement Probe IPC API
+
+Probe is one of cAVS firmware features which allows for data extraction
+and injection directly from or to module.
+Exposes six IPCs: set & get of injection DMAs, injection DMA detach,
+set & get of connected probe points and probe points disconnection.
+This change adds all required types and methods to support each and
+every request that driver could sent to firmware.
+
+Change-Id: Ie48c6a53f42e9569057f60e9ebab7ac7e8d74d01
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c | 100 +++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h  |  57 ++++++++++++++
+ 2 files changed, 157 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 3349fe2c2af9..a0dc148f3bd4 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1349,3 +1349,103 @@ int skl_get_module_params(struct skl_dev *skl, u32 *params, int size,
+ 	}
+ 	return ret;
+ }
++
++int skl_probe_get_dma(struct skl_dev *skl,
++		struct skl_probe_dma **dma, size_t *num_dma)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++	u32 *payload;
++	size_t bytes;
++	int ret;
++
++	*dma = NULL;
++	*num_dma = 0;
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.large_param_id = SKL_PROBE_INJECTION_DMA;
++
++	ret = skl_ipc_get_large_config(&skl->ipc, &msg, &payload, NULL, &bytes);
++	if (ret < 0 || !bytes)
++		return ret;
++
++	*dma = (struct skl_probe_dma *)payload;
++	*num_dma = bytes / sizeof(**dma);
++
++	return 0;
++}
++
++int skl_probe_dma_attach(struct skl_dev *skl,
++		struct skl_probe_dma *dma, size_t num_dma)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.param_data_size = sizeof(*dma) * num_dma;
++	msg.large_param_id = SKL_PROBE_INJECTION_DMA;
++
++	return skl_ipc_set_large_config(&skl->ipc, &msg, (u32 *)dma);
++}
++
++int skl_probe_dma_detach(struct skl_dev *skl,
++		union skl_connector_node_id *node_id, size_t num_node_id)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.param_data_size = sizeof(*node_id) * num_node_id;
++	msg.large_param_id = SKL_PROBE_INJECTION_DMA_DETACH;
++
++	return skl_ipc_set_large_config(&skl->ipc, &msg, (u32 *)node_id);
++}
++
++int skl_probe_get_points(struct skl_dev *skl,
++		struct skl_probe_point_desc **desc, size_t *num_desc)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++	u32 *payload;
++	size_t bytes;
++	int ret;
++
++	*desc = NULL;
++	*num_desc = 0;
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.large_param_id = SKL_PROBE_POINTS;
++
++	ret = skl_ipc_get_large_config(&skl->ipc, &msg, &payload, NULL, &bytes);
++	if (ret < 0 || !bytes)
++		return ret;
++
++	*desc = (struct skl_probe_point_desc *)payload;
++	*num_desc = bytes / sizeof(**desc);
++
++	return 0;
++}
++
++int skl_probe_points_connect(struct skl_dev *skl,
++		struct skl_probe_point_desc *desc, size_t num_desc)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.param_data_size = sizeof(*desc) * num_desc;
++	msg.large_param_id = SKL_PROBE_POINTS;
++
++	return skl_ipc_set_large_config(&skl->ipc, &msg, (u32 *)desc);
++}
++
++int skl_probe_points_disconnect(struct skl_dev *skl,
++		union skl_probe_point_id *id, size_t num_id)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++
++	msg.module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++	msg.instance_id = 0;
++	msg.param_data_size = sizeof(*id) * num_id;
++	msg.large_param_id = SKL_PROBE_POINTS_DISCONNECT;
++
++	return skl_ipc_set_large_config(&skl->ipc, &msg, (u32 *)id);
++}
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 73f2d0f1fc45..d22ce9b3dfcd 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -150,6 +150,50 @@ static const guid_t skl_copier_mod_uuid =
+ 	GUID_INIT(0x9BA00C83, 0xCA12, 0x4A83, 0x94, 0x3C,
+ 		0x1F, 0xA2, 0xE8, 0x2F, 0x9D, 0xDA);
+ 
++static const guid_t skl_probe_mod_uuid =
++	GUID_INIT(0x7CAD0808, 0xAB10, 0xCD23, 0xEF, 0x45,
++		0x12, 0xAB, 0x34, 0xCD, 0x56, 0xEF);
++
++enum skl_probe_runtime_param {
++	SKL_PROBE_INJECTION_DMA = 1,
++	SKL_PROBE_INJECTION_DMA_DETACH,
++	SKL_PROBE_POINTS,
++	SKL_PROBE_POINTS_DISCONNECT,
++};
++
++struct skl_probe_dma {
++	union skl_connector_node_id node_id;
++	unsigned int dma_buffer_size;
++} __packed;
++
++enum skl_probe_type {
++	SKL_PROBE_TYPE_INPUT = 0,
++	SKL_PROBE_TYPE_OUTPUT,
++	SKL_PROBE_TYPE_INTERNAL
++};
++
++union skl_probe_point_id {
++	unsigned int value;
++	struct {
++		unsigned int module_id:16;
++		unsigned int instance_id:8;
++		enum skl_probe_type type:2;
++		unsigned int index:6;
++	} id;
++} __packed;
++
++enum skl_connection_purpose {
++	SKL_CONNECTION_PURPOSE_EXTRACT = 0,
++	SKL_CONNECTION_PURPOSE_INJECT,
++	SKL_CONNECTION_PURPOSE_INJECT_REEXTRACT,
++};
++
++struct skl_probe_point_desc {
++	union skl_probe_point_id id;
++	enum skl_connection_purpose purpose __aligned(4);
++	union skl_connector_node_id node_id;
++} __packed;
++
+ enum skl_ipc_pipeline_state {
+ 	PPL_INVALID_STATE =	0,
+ 	PPL_UNINITIALIZED =	1,
+@@ -441,4 +485,17 @@ void skl_ipc_tx_data_copy(struct ipc_message *msg, char *tx_data,
+ int skl_ipc_fw_cfg_get(struct sst_generic_ipc *ipc, struct skl_fw_cfg *cfg);
+ int skl_ipc_hw_cfg_get(struct sst_generic_ipc *ipc, struct skl_hw_cfg *cfg);
+ 
++int skl_probe_get_dma(struct skl_dev *skl,
++		struct skl_probe_dma **dma, size_t *num_dma);
++int skl_probe_dma_attach(struct skl_dev *skl,
++		struct skl_probe_dma *dma, size_t num_dma);
++int skl_probe_dma_detach(struct skl_dev *skl,
++		union skl_connector_node_id *node_id, size_t num_node_id);
++int skl_probe_get_points(struct skl_dev *skl,
++		struct skl_probe_point_desc **desc, size_t *num_desc);
++int skl_probe_points_connect(struct skl_dev *skl,
++		struct skl_probe_point_desc *desc, size_t num_desc);
++int skl_probe_points_disconnect(struct skl_dev *skl,
++		union skl_probe_point_id *id, size_t num_id);
++
+ #endif /* __SKL_IPC_H */
+-- 
+2.17.1
+

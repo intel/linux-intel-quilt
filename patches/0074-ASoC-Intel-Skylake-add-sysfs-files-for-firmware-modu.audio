@@ -1,0 +1,443 @@
+From eda0885aae19c42b3f1263fef3b318e72626b94b Mon Sep 17 00:00:00 2001
+From: "Pawse, GuruprasadX" <guruprasadx.pawse@intel.com>
+Date: Mon, 30 Jan 2017 20:12:52 +0530
+Subject: [PATCH 074/150] ASoC: Intel: Skylake: add sysfs files for firmware
+ modules
+
+This patch adds sysfs files for firmware modules.
+
+Below is the structure of sysfs files created:
+/sys/bus/pci/devices/<DOMAIN:BUS:DEVICE.FUNCTION>/dsp/modules/<UUID>
+	|---id:			module id
+	|---hash:		module hash
+	|---loaded:		module state loaded/unloaded
+
+Change-Id: Ia097a3cc1409a33b2a82b1d1cdc634fb4b0eee90
+Signed-off-by: Pawse, GuruprasadX <guruprasadx.pawse@intel.com>
+Reviewed-on:
+Reviewed-by: R, Dharageswari <dharageswari.r@intel.com>
+Reviewed-by: Kp, Jeeja <jeeja.kp@intel.com>
+Reviewed-by: Prodduvaka, Leoni
+Tested-by: Sm, Bhadur A <bhadur.a.sm@intel.com>
+
+ASoC: Intel: Skylake: Fix Audio memory leakage at boot time
+
+Fix kmemleak issues in skl_module_sysfs_init functions by,
+instead of allocating memory, we use local variable of type
+"char array" and snprintf to write uuid.
+
+kmemleak backtrace:
+
+unreferenced object 0xffff880267946e00 (size 64):
+  comm "insmod", pid 2340, jiffies 4294672904 (age 92.133s)
+  hex dump (first 32 bytes):
+    36 36 42 34 34 30 32 44 2d 42 34 36 38 2d 34 32  66B4402D-B468-42
+    46 32 2d 38 31 41 37 2d 42 33 37 31 32 31 38 36  F2-81A7-B3712186
+  backtrace:
+    [<ffffffff81ae64ca>] kmemleak_alloc+0x4a/0xa0
+    [<ffffffff812006b4>] __kmalloc_track_caller+0x124/0x200
+    [<ffffffff81404126>] kvasprintf+0x66/0xd0
+    [<ffffffff8140427e>] kasprintf+0x4e/0x70
+    [<ffffffffc035dafa>] skl_module_sysfs_init+0x13a/0x260 [snd_soc_skl_ipc]
+    [<ffffffffc036f906>] skl_platform_soc_probe+0x246/0x480 [snd_soc_skl]
+    [<ffffffff818f5a0c>] snd_soc_platform_drv_probe+0x1c/0x20
+    [<ffffffff818f9307>] soc_probe_component+0x227/0x3c0
+    [<ffffffff818fb857>] snd_soc_register_card+0x687/0xf00
+    [<ffffffffc03910ba>] broxton_tdf8532_audio_probe+0x3a/0x3d [snd_soc_sst_bxt_tdf8532]
+    [<ffffffff8164283e>] platform_drv_probe+0x3e/0xa0
+    [<ffffffff8164066f>] driver_probe_device+0xef/0x410
+    [<ffffffff81640a37>] __driver_attach+0xa7/0xf0
+    [<ffffffff8163e130>] bus_for_each_dev+0x70/0xc0
+    [<ffffffff8163fefe>] driver_attach+0x1e/0x20
+    [<ffffffff8163f987>] bus_add_driver+0x1c7/0x270
+---
+ sound/soc/intel/skylake/skl-messages.c  |  27 +--
+ sound/soc/intel/skylake/skl-pcm.c       |   3 +
+ sound/soc/intel/skylake/skl-sst-dsp.h   |   7 +
+ sound/soc/intel/skylake/skl-sst-utils.c | 222 +++++++++++++++++++++++-
+ sound/soc/intel/skylake/skl.h           |   3 +
+ 5 files changed, 248 insertions(+), 14 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index a0b9184d5779..6f6f6b57f412 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -295,6 +295,7 @@ int skl_free_dsp(struct skl_dev *skl)
+ 	/* disable  ppcap interrupt */
+ 	snd_hdac_ext_bus_ppcap_int_enable(bus, false);
+ 
++	skl_module_sysfs_exit(skl);
+ 	skl_sst_dsp_cleanup(skl);
+ 
+ 	kfree(skl->cores.state);
+@@ -1097,7 +1098,7 @@ skl_module_fmt *skl_get_pin_format(struct skl_module_cfg *mconfig,
+  * This function checks for source module and destination module format
+  * mismatch
+  */
+-static void skl_module_format_mismatch_detection(struct skl_sst *ctx,
++static void skl_module_format_mismatch_detection(struct skl_dev *skl,
+ 					struct skl_module_cfg *src_mcfg,
+ 					struct skl_module_cfg *dst_mcfg,
+ 					int src_index, int dst_index)
+@@ -1108,32 +1109,32 @@ static void skl_module_format_mismatch_detection(struct skl_sst *ctx,
+ 	dst_fmt = skl_get_pin_format(dst_mcfg, SKL_INPUT_PIN, dst_index);
+ 
+ 	if(memcmp(src_fmt, dst_fmt, sizeof(*src_fmt))) {
+-		dev_warn(ctx->dev, "#### src and dst format mismatch: ####\n");
+-		dev_warn(ctx->dev, "pipe=%d src module_id=%d src instance_id=%d\n",
++		dev_warn(skl->dev, "#### src and dst format mismatch: ####\n");
++		dev_warn(skl->dev, "pipe=%d src module_id=%d src instance_id=%d\n",
+ 					src_mcfg->pipe->ppl_id,
+ 					src_mcfg->id.module_id,
+ 					src_mcfg->id.pvt_id);
+ 
+-		dev_warn(ctx->dev, "pipe=%d dst module_id=%d dst instance_id=%d\n",
++		dev_warn(skl->dev, "pipe=%d dst module_id=%d dst instance_id=%d\n",
+ 					dst_mcfg->pipe->ppl_id,
+ 					dst_mcfg->id.module_id,
+ 					dst_mcfg->id.pvt_id);
+ 
+-		dev_warn(ctx->dev, "channels: src=%d dst=%d\n",
++		dev_warn(skl->dev, "channels: src=%d dst=%d\n",
+ 				src_fmt->channels, dst_fmt->channels);
+-		dev_warn(ctx->dev, "s_freq: src=%d dst=%d\n",
++		dev_warn(skl->dev, "s_freq: src=%d dst=%d\n",
+ 				src_fmt->s_freq, dst_fmt->s_freq);
+-		dev_warn(ctx->dev, "bit_depth: src=%d dst=%d\n",
++		dev_warn(skl->dev, "bit_depth: src=%d dst=%d\n",
+ 				src_fmt->bit_depth, dst_fmt->bit_depth);
+-		dev_warn(ctx->dev, "valid_bit_depth: src=%d dst=%d\n",
++		dev_warn(skl->dev, "valid_bit_depth: src=%d dst=%d\n",
+ 				src_fmt->valid_bit_depth, dst_fmt->valid_bit_depth);
+-		dev_warn(ctx->dev, "ch_cfg: src=%d dst=%d\n",
++		dev_warn(skl->dev, "ch_cfg: src=%d dst=%d\n",
+ 				src_fmt->ch_cfg, dst_fmt->ch_cfg);
+-		dev_warn(ctx->dev, "interleaving_style: src=%d dst=%d\n",
++		dev_warn(skl->dev, "interleaving_style: src=%d dst=%d\n",
+ 				src_fmt->interleaving_style, dst_fmt->interleaving_style);
+-		dev_warn(ctx->dev, "sample_type: src=%d dst=%d\n",
++		dev_warn(skl->dev, "sample_type: src=%d dst=%d\n",
+ 				src_fmt->sample_type, dst_fmt->sample_type);
+-		dev_warn(ctx->dev, "ch_map: src=0x%08x dst=0x%08x\n",
++		dev_warn(skl->dev, "ch_map: src=0x%08x dst=0x%08x\n",
+ 				src_fmt->ch_map, dst_fmt->ch_map);
+ 	}
+ }
+@@ -1204,7 +1205,7 @@ int skl_bind_modules(struct skl_dev *skl,
+ 	dev_dbg(skl->dev, "src queue = %d dst queue =%d\n",
+ 			 msg.src_queue, msg.dst_queue);
+ 
+-	skl_module_format_mismatch_detection(ctx, src_mcfg, dst_mcfg,
++	skl_module_format_mismatch_detection(skl, src_mcfg, dst_mcfg,
+ 						src_index, dst_index);
+ 
+ 	msg.module_id = src_mcfg->id.module_id;
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 2ef178d43e66..91bca656f266 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -1657,6 +1657,9 @@ static int skl_platform_soc_probe(struct snd_soc_component *component)
+ 					skl->cfg.astate_cfg->count,
+ 					skl->cfg.astate_cfg);
+ 		}
++
++		/* create sysfs to list modules downloaded by driver */
++		skl_module_sysfs_init(skl, &component->dev->kobj);
+ 	}
+ 	pm_runtime_mark_last_busy(component->dev);
+ 	pm_runtime_put_autosuspend(component->dev);
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 0d772ec34dec..ee5edf86fb45 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -129,6 +129,8 @@ struct skl_dev;
+ 
+ #define DSP_BUF                PAGE_SIZE
+ 
++#define DEFAULT_HASH_SHA256_LEN 32
++
+ /* DSP Core state */
+ enum skl_dsp_states {
+ 	SKL_DSP_RUNNING = 1,
+@@ -199,6 +201,7 @@ struct uuid_module {
+ 	int num_configs;
+ 
+ 	struct list_head list;
++	u8 hash[DEFAULT_HASH_SHA256_LEN];
+ };
+ 
+ struct skl_load_module_info {
+@@ -279,4 +282,8 @@ int bxt_set_dsp_D0i0(struct sst_dsp *ctx);
+ int bxt_schedule_dsp_D0i3(struct sst_dsp *ctx);
+ 
+ void bxt_set_dsp_D0i3(struct work_struct *work);
++
++int skl_module_sysfs_init(struct skl_dev *skl, struct kobject *fw_modules_kobj);
++
++void skl_module_sysfs_exit(struct skl_dev *skl);
+ #endif /*__SKL_SST_DSP_H__*/
+diff --git a/sound/soc/intel/skylake/skl-sst-utils.c b/sound/soc/intel/skylake/skl-sst-utils.c
+index 43efd30783ec..4e15ca018a9b 100644
+--- a/sound/soc/intel/skylake/skl-sst-utils.c
++++ b/sound/soc/intel/skylake/skl-sst-utils.c
+@@ -24,11 +24,35 @@
+ 
+ 
+ #define UUID_STR_SIZE 37
+-#define DEFAULT_HASH_SHA256_LEN 32
+ 
+ /* FW Extended Manifest Header id = $AE1 */
+ #define SKL_EXT_MANIFEST_HEADER_MAGIC   0x31454124
+ 
++#define UUID_ATTR_RO(_name) \
++	struct uuid_attribute uuid_attr_##_name = __ATTR_RO(_name)
++
++struct skl_sysfs_tree {
++	struct kobject *dsp_kobj;
++	struct kobject *modules_kobj;
++	struct skl_sysfs_module **mod_obj;
++};
++
++struct skl_sysfs_module {
++	struct kobject kobj;
++	struct uuid_module *uuid_mod;
++	struct list_head *module_list;
++	int fw_ops_load_mod;
++};
++
++struct uuid_attribute {
++	struct attribute	attr;
++	ssize_t (*show)(struct skl_sysfs_module *modinfo_obj,
++			struct uuid_attribute *attr, char *buf);
++	ssize_t (*store)(struct skl_sysfs_module *modinfo_obj,
++			struct uuid_attribute *attr, const char *buf,
++			size_t count);
++};
++
+ struct UUID {
+ 	u8 id[16];
+ };
+@@ -348,6 +372,7 @@ int snd_skl_parse_manifest(struct sst_dsp *ctx, const struct firmware *fw,
+ 				return -ENOMEM;
+ 			}
+ 		}
++		memcpy(&module->hash, mod_entry->hash1, sizeof(module->hash));
+ 
+ 		list_add_tail(&module->list, &skl->module_list);
+ 
+@@ -478,3 +503,198 @@ void skl_release_library(struct skl_lib_info *linfo, int lib_count)
+ 		}
+ 	}
+ }
++
++static ssize_t uuid_attr_show(struct kobject *kobj, struct attribute *attr,
++				char *buf)
++{
++	struct uuid_attribute *uuid_attr =
++		container_of(attr, struct uuid_attribute, attr);
++	struct skl_sysfs_module *modinfo_obj =
++		container_of(kobj, struct skl_sysfs_module, kobj);
++
++	if (uuid_attr->show)
++		return uuid_attr->show(modinfo_obj, uuid_attr, buf);
++
++	return 0;
++}
++
++static const struct sysfs_ops uuid_sysfs_ops = {
++	.show	= uuid_attr_show,
++};
++
++static void uuid_release(struct kobject *kobj)
++{
++	struct skl_sysfs_module *modinfo_obj =
++		container_of(kobj, struct skl_sysfs_module, kobj);
++
++	kfree(modinfo_obj);
++}
++
++static struct kobj_type uuid_ktype = {
++	.release        = uuid_release,
++	.sysfs_ops	= &uuid_sysfs_ops,
++};
++
++static ssize_t loaded_show(struct skl_sysfs_module *modinfo_obj,
++				struct uuid_attribute *attr, char *buf)
++{
++	struct skl_module_table *module_list;
++
++	if ((!modinfo_obj->fw_ops_load_mod) ||
++		(modinfo_obj->fw_ops_load_mod &&
++		!modinfo_obj->uuid_mod->is_loadable))
++		return sprintf(buf, "%d\n", true);
++
++	if (list_empty(modinfo_obj->module_list))
++		return sprintf(buf, "%d\n", false);
++
++	list_for_each_entry(module_list, modinfo_obj->module_list, list) {
++		if (module_list->mod_info->mod_id
++					== modinfo_obj->uuid_mod->id)
++			return sprintf(buf, "%d\n", module_list->usage_cnt);
++	}
++
++	return sprintf(buf, "%d\n", false);
++}
++
++static ssize_t hash_show(struct skl_sysfs_module *modinfo_obj,
++				struct uuid_attribute *attr, char *buf)
++{
++	int ret = 0;
++	int i;
++
++	for (i = 0; i < DEFAULT_HASH_SHA256_LEN; i++)
++		ret += sprintf(buf + ret, "%d ",
++					modinfo_obj->uuid_mod->hash[i]);
++	ret += sprintf(buf + ret, "\n");
++
++	return ret;
++}
++
++
++static ssize_t id_show(struct skl_sysfs_module *modinfo_obj,
++				struct uuid_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%d\n", modinfo_obj->uuid_mod->id);
++}
++
++static UUID_ATTR_RO(loaded);
++static UUID_ATTR_RO(hash);
++static UUID_ATTR_RO(id);
++
++static struct attribute *modules_attrs[] = {
++	&uuid_attr_loaded.attr,
++	&uuid_attr_hash.attr,
++	&uuid_attr_id.attr,
++	NULL,
++};
++
++static const struct attribute_group uuid_group = {
++	.attrs = modules_attrs,
++};
++
++static void free_uuid_node(struct kobject *kobj,
++			     const struct attribute_group *group)
++{
++	if (kobj) {
++		sysfs_remove_group(kobj, group);
++		kobject_put(kobj);
++	}
++}
++
++void skl_module_sysfs_exit(struct skl_dev *skl)
++{
++	struct skl_sysfs_tree *tree = skl->sysfs_tree;
++	struct skl_sysfs_module **m;
++
++	if (!tree)
++		return;
++
++	if (tree->mod_obj) {
++		for (m = tree->mod_obj; *m; m++)
++			free_uuid_node(&(*m)->kobj, &uuid_group);
++		kfree(tree->mod_obj);
++	}
++
++	if (tree->modules_kobj)
++		kobject_put(tree->modules_kobj);
++
++	if (tree->dsp_kobj)
++		kobject_put(tree->dsp_kobj);
++
++	kfree(tree);
++	skl->sysfs_tree = NULL;
++}
++EXPORT_SYMBOL_GPL(skl_module_sysfs_exit);
++
++int skl_module_sysfs_init(struct skl_dev *skl, struct kobject *kobj)
++{
++	struct uuid_module *module;
++	struct skl_sysfs_module *modinfo_obj;
++	int count = 0;
++	int max_mod = 0;
++	int ret = 0;
++	char uuid_name[sizeof(module->uuid)];
++
++	if (list_empty(&skl->module_list))
++		return 0;
++
++	skl->sysfs_tree = kzalloc(sizeof(*skl->sysfs_tree), GFP_KERNEL);
++	if (!skl->sysfs_tree) {
++		ret = -ENOMEM;
++		goto err_sysfs_exit;
++	}
++
++	skl->sysfs_tree->dsp_kobj = kobject_create_and_add("dsp", kobj);
++	if (!skl->sysfs_tree->dsp_kobj)
++		goto err_sysfs_exit;
++
++	skl->sysfs_tree->modules_kobj = kobject_create_and_add("modules",
++						skl->sysfs_tree->dsp_kobj);
++	if (!skl->sysfs_tree->modules_kobj)
++		goto err_sysfs_exit;
++
++	list_for_each_entry(module, &skl->module_list, list)
++		max_mod++;
++
++	skl->sysfs_tree->mod_obj = kcalloc(max_mod + 1,
++			sizeof(*skl->sysfs_tree->mod_obj), GFP_KERNEL);
++	if (!skl->sysfs_tree->mod_obj) {
++		ret = -ENOMEM;
++		goto err_sysfs_exit;
++	}
++
++	list_for_each_entry(module, &skl->module_list, list) {
++		modinfo_obj = kzalloc(sizeof(*modinfo_obj), GFP_KERNEL);
++		if (!modinfo_obj) {
++			ret = -ENOMEM;
++			goto err_sysfs_exit;
++		}
++
++		snprintf(uuid_name, sizeof(uuid_name), "%pUL", &module->uuid);
++		ret = kobject_init_and_add(&modinfo_obj->kobj, &uuid_ktype,
++				skl->sysfs_tree->modules_kobj, uuid_name);
++		if (ret < 0)
++			goto err_sysfs_exit;
++
++		ret = sysfs_create_group(&modinfo_obj->kobj, &uuid_group);
++		if (ret < 0)
++			goto err_sysfs_exit;
++
++		modinfo_obj->uuid_mod = module;
++		modinfo_obj->module_list = &skl->dsp->module_list;
++		modinfo_obj->fw_ops_load_mod =
++				(skl->dsp->fw_ops.load_mod == NULL) ? 0 : 1;
++
++		skl->sysfs_tree->mod_obj[count] = modinfo_obj;
++		count++;
++	}
++
++	return 0;
++
++err_sysfs_exit:
++	skl_module_sysfs_exit(skl);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(skl_module_sysfs_init);
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index b0b855d7160f..96bd7088896a 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -148,6 +148,9 @@ struct skl_dev {
+ 	/* Callback to update dynamic clock and power gating registers */
+ 	void (*clock_power_gating)(struct device *dev, bool enable);
+ 
++	/* sysfs for module info */
++	struct skl_sysfs_tree *sysfs_tree;
++
+ 	/* probe stream management */
+ 	struct hdac_ext_stream *extractor;
+ 	unsigned int num_probe_streams;
+-- 
+2.17.1
+

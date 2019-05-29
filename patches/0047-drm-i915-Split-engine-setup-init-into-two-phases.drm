@@ -1,0 +1,849 @@
+From 82e90402879c4388cf69bf285caba72ba95ce164 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 17:33:33 +0100
+Subject: [PATCH 047/186] drm/i915: Split engine setup/init into two phases
+
+In the next patch, we require the engine vfuncs setup prior to
+initialising the pinned kernel contexts, so split the vfunc setup from
+the engine initialisation and call it earlier.
+
+v2: s/setup_xcs/setup_common/ for intel_ring_submission_setup()
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426163336.15906-6-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine.h        |   8 +-
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c     |  99 ++++----
+ drivers/gpu/drm/i915/gt/intel_lrc.c           |  74 ++----
+ drivers/gpu/drm/i915/gt/intel_lrc.h           |   5 +-
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c    | 232 +++++++++---------
+ drivers/gpu/drm/i915/gt/intel_workarounds.c   |   3 +-
+ drivers/gpu/drm/i915/gt/mock_engine.c         |  48 ++--
+ drivers/gpu/drm/i915/gt/mock_engine.h         |   2 +
+ drivers/gpu/drm/i915/i915_gem.c               |   6 +
+ .../gpu/drm/i915/selftests/mock_gem_device.c  |  12 +-
+ 10 files changed, 245 insertions(+), 244 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine.h b/drivers/gpu/drm/i915/gt/intel_engine.h
+index a228dc1774d8..3e53f53bc52b 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine.h
+@@ -362,14 +362,12 @@ __intel_ring_space(unsigned int head, unsigned int tail, unsigned int size)
+ 	return (head - tail - CACHELINE_BYTES) & (size - 1);
+ }
+ 
+-int intel_engine_setup_common(struct intel_engine_cs *engine);
++int intel_engines_setup(struct drm_i915_private *i915);
+ int intel_engine_init_common(struct intel_engine_cs *engine);
+ void intel_engine_cleanup_common(struct intel_engine_cs *engine);
+ 
+-int intel_init_render_ring_buffer(struct intel_engine_cs *engine);
+-int intel_init_bsd_ring_buffer(struct intel_engine_cs *engine);
+-int intel_init_blt_ring_buffer(struct intel_engine_cs *engine);
+-int intel_init_vebox_ring_buffer(struct intel_engine_cs *engine);
++int intel_ring_submission_setup(struct intel_engine_cs *engine);
++int intel_ring_submission_init(struct intel_engine_cs *engine);
+ 
+ int intel_engine_stop_cs(struct intel_engine_cs *engine);
+ void intel_engine_cancel_stop_cs(struct intel_engine_cs *engine);
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index 5a6b81836902..7682f16fa567 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -50,35 +50,24 @@
+ 
+ struct engine_class_info {
+ 	const char *name;
+-	int (*init_legacy)(struct intel_engine_cs *engine);
+-	int (*init_execlists)(struct intel_engine_cs *engine);
+-
+ 	u8 uabi_class;
+ };
+ 
+ static const struct engine_class_info intel_engine_classes[] = {
+ 	[RENDER_CLASS] = {
+ 		.name = "rcs",
+-		.init_execlists = logical_render_ring_init,
+-		.init_legacy = intel_init_render_ring_buffer,
+ 		.uabi_class = I915_ENGINE_CLASS_RENDER,
+ 	},
+ 	[COPY_ENGINE_CLASS] = {
+ 		.name = "bcs",
+-		.init_execlists = logical_xcs_ring_init,
+-		.init_legacy = intel_init_blt_ring_buffer,
+ 		.uabi_class = I915_ENGINE_CLASS_COPY,
+ 	},
+ 	[VIDEO_DECODE_CLASS] = {
+ 		.name = "vcs",
+-		.init_execlists = logical_xcs_ring_init,
+-		.init_legacy = intel_init_bsd_ring_buffer,
+ 		.uabi_class = I915_ENGINE_CLASS_VIDEO,
+ 	},
+ 	[VIDEO_ENHANCEMENT_CLASS] = {
+ 		.name = "vecs",
+-		.init_execlists = logical_xcs_ring_init,
+-		.init_legacy = intel_init_vebox_ring_buffer,
+ 		.uabi_class = I915_ENGINE_CLASS_VIDEO_ENHANCE,
+ 	},
+ };
+@@ -416,48 +405,39 @@ int intel_engines_init_mmio(struct drm_i915_private *dev_priv)
+ 
+ /**
+  * intel_engines_init() - init the Engine Command Streamers
+- * @dev_priv: i915 device private
++ * @i915: i915 device private
+  *
+  * Return: non-zero if the initialization failed.
+  */
+-int intel_engines_init(struct drm_i915_private *dev_priv)
++int intel_engines_init(struct drm_i915_private *i915)
+ {
++	int (*init)(struct intel_engine_cs *engine);
+ 	struct intel_engine_cs *engine;
+ 	enum intel_engine_id id, err_id;
+ 	int err;
+ 
+-	for_each_engine(engine, dev_priv, id) {
+-		const struct engine_class_info *class_info =
+-			&intel_engine_classes[engine->class];
+-		int (*init)(struct intel_engine_cs *engine);
+-
+-		if (HAS_EXECLISTS(dev_priv))
+-			init = class_info->init_execlists;
+-		else
+-			init = class_info->init_legacy;
++	if (HAS_EXECLISTS(i915))
++		init = intel_execlists_submission_init;
++	else
++		init = intel_ring_submission_init;
+ 
+-		err = -EINVAL;
++	for_each_engine(engine, i915, id) {
+ 		err_id = id;
+ 
+-		if (GEM_DEBUG_WARN_ON(!init))
+-			goto cleanup;
+-
+ 		err = init(engine);
+ 		if (err)
+ 			goto cleanup;
+-
+-		GEM_BUG_ON(!engine->submit_request);
+ 	}
+ 
+ 	return 0;
+ 
+ cleanup:
+-	for_each_engine(engine, dev_priv, id) {
++	for_each_engine(engine, i915, id) {
+ 		if (id >= err_id) {
+ 			kfree(engine);
+-			dev_priv->engine[id] = NULL;
++			i915->engine[id] = NULL;
+ 		} else {
+-			dev_priv->gt.cleanup_engine(engine);
++			i915->gt.cleanup_engine(engine);
+ 		}
+ 	}
+ 	return err;
+@@ -575,16 +555,7 @@ static int init_status_page(struct intel_engine_cs *engine)
+ 	return ret;
+ }
+ 
+-/**
+- * intel_engines_setup_common - setup engine state not requiring hw access
+- * @engine: Engine to setup.
+- *
+- * Initializes @engine@ structure members shared between legacy and execlists
+- * submission modes which do not require hardware access.
+- *
+- * Typically done early in the submission mode specific engine setup stage.
+- */
+-int intel_engine_setup_common(struct intel_engine_cs *engine)
++static int intel_engine_setup_common(struct intel_engine_cs *engine)
+ {
+ 	int err;
+ 
+@@ -618,6 +589,52 @@ int intel_engine_setup_common(struct intel_engine_cs *engine)
+ 	return err;
+ }
+ 
++/**
++ * intel_engines_setup- setup engine state not requiring hw access
++ * @i915: Device to setup.
++ *
++ * Initializes engine structure members shared between legacy and execlists
++ * submission modes which do not require hardware access.
++ *
++ * Typically done early in the submission mode specific engine setup stage.
++ */
++int intel_engines_setup(struct drm_i915_private *i915)
++{
++	int (*setup)(struct intel_engine_cs *engine);
++	struct intel_engine_cs *engine;
++	enum intel_engine_id id;
++	int err;
++
++	if (HAS_EXECLISTS(i915))
++		setup = intel_execlists_submission_setup;
++	else
++		setup = intel_ring_submission_setup;
++
++	for_each_engine(engine, i915, id) {
++		err = intel_engine_setup_common(engine);
++		if (err)
++			goto cleanup;
++
++		err = setup(engine);
++		if (err)
++			goto cleanup;
++
++		GEM_BUG_ON(!engine->cops);
++	}
++
++	return 0;
++
++cleanup:
++	for_each_engine(engine, i915, id) {
++		if (engine->cops)
++			i915->gt.cleanup_engine(engine);
++		else
++			kfree(engine);
++		i915->engine[id] = NULL;
++	}
++	return err;
++}
++
+ void intel_engines_set_scheduler_caps(struct drm_i915_private *i915)
+ {
+ 	static const struct {
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index fcd0c173eb87..7f35cded366f 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1697,8 +1697,8 @@ static int intel_init_workaround_bb(struct intel_engine_cs *engine)
+ 	unsigned int i;
+ 	int ret;
+ 
+-	if (GEM_DEBUG_WARN_ON(engine->id != RCS0))
+-		return -EINVAL;
++	if (engine->class != RENDER_CLASS)
++		return 0;
+ 
+ 	switch (INTEL_GEN(engine->i915)) {
+ 	case 11:
+@@ -2444,15 +2444,8 @@ logical_ring_default_irqs(struct intel_engine_cs *engine)
+ 	engine->irq_keep_mask = GT_CONTEXT_SWITCH_INTERRUPT << shift;
+ }
+ 
+-static int
+-logical_ring_setup(struct intel_engine_cs *engine)
++int intel_execlists_submission_setup(struct intel_engine_cs *engine)
+ {
+-	int err;
+-
+-	err = intel_engine_setup_common(engine);
+-	if (err)
+-		return err;
+-
+ 	/* Intentionally left blank. */
+ 	engine->buffer = NULL;
+ 
+@@ -2462,10 +2455,16 @@ logical_ring_setup(struct intel_engine_cs *engine)
+ 	logical_ring_default_vfuncs(engine);
+ 	logical_ring_default_irqs(engine);
+ 
++	if (engine->class == RENDER_CLASS) {
++		engine->init_context = gen8_init_rcs_context;
++		engine->emit_flush = gen8_emit_flush_render;
++		engine->emit_fini_breadcrumb = gen8_emit_fini_breadcrumb_rcs;
++	}
++
+ 	return 0;
+ }
+ 
+-static int logical_ring_init(struct intel_engine_cs *engine)
++int intel_execlists_submission_init(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *i915 = engine->i915;
+ 	struct intel_engine_execlists * const execlists = &engine->execlists;
+@@ -2477,6 +2476,15 @@ static int logical_ring_init(struct intel_engine_cs *engine)
+ 		return ret;
+ 
+ 	intel_engine_init_workarounds(engine);
++	intel_engine_init_whitelist(engine);
++
++	if (intel_init_workaround_bb(engine))
++		/*
++		 * We continue even if we fail to initialize WA batch
++		 * because we only expect rare glitches but nothing
++		 * critical to prevent us from using GPU
++		 */
++		DRM_ERROR("WA batch buffer initialization failed\n");
+ 
+ 	if (HAS_LOGICAL_RING_ELSQ(i915)) {
+ 		execlists->submit_reg = i915->uncore.regs +
+@@ -2509,50 +2517,6 @@ static int logical_ring_init(struct intel_engine_cs *engine)
+ 	return 0;
+ }
+ 
+-int logical_render_ring_init(struct intel_engine_cs *engine)
+-{
+-	int ret;
+-
+-	ret = logical_ring_setup(engine);
+-	if (ret)
+-		return ret;
+-
+-	/* Override some for render ring. */
+-	engine->init_context = gen8_init_rcs_context;
+-	engine->emit_flush = gen8_emit_flush_render;
+-	engine->emit_fini_breadcrumb = gen8_emit_fini_breadcrumb_rcs;
+-
+-	ret = logical_ring_init(engine);
+-	if (ret)
+-		return ret;
+-
+-	ret = intel_init_workaround_bb(engine);
+-	if (ret) {
+-		/*
+-		 * We continue even if we fail to initialize WA batch
+-		 * because we only expect rare glitches but nothing
+-		 * critical to prevent us from using GPU
+-		 */
+-		DRM_ERROR("WA batch buffer initialization failed: %d\n",
+-			  ret);
+-	}
+-
+-	intel_engine_init_whitelist(engine);
+-
+-	return 0;
+-}
+-
+-int logical_xcs_ring_init(struct intel_engine_cs *engine)
+-{
+-	int err;
+-
+-	err = logical_ring_setup(engine);
+-	if (err)
+-		return err;
+-
+-	return logical_ring_init(engine);
+-}
+-
+ static u32 intel_lr_indirect_ctx_offset(struct intel_engine_cs *engine)
+ {
+ 	u32 indirect_ctx_offset;
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.h b/drivers/gpu/drm/i915/gt/intel_lrc.h
+index 1a33ec74af8c..a0dc907a7249 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.h
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.h
+@@ -66,8 +66,9 @@ enum {
+ 
+ /* Logical Rings */
+ void intel_logical_ring_cleanup(struct intel_engine_cs *engine);
+-int logical_render_ring_init(struct intel_engine_cs *engine);
+-int logical_xcs_ring_init(struct intel_engine_cs *engine);
++
++int intel_execlists_submission_setup(struct intel_engine_cs *engine);
++int intel_execlists_submission_init(struct intel_engine_cs *engine);
+ 
+ /* Logical Ring Contexts */
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index 4afb19e7c647..5e342727eab3 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1534,54 +1534,6 @@ static const struct intel_context_ops ring_context_ops = {
+ 	.destroy = ring_context_destroy,
+ };
+ 
+-static int intel_init_ring_buffer(struct intel_engine_cs *engine)
+-{
+-	struct i915_timeline *timeline;
+-	struct intel_ring *ring;
+-	int err;
+-
+-	err = intel_engine_setup_common(engine);
+-	if (err)
+-		return err;
+-
+-	timeline = i915_timeline_create(engine->i915, engine->status_page.vma);
+-	if (IS_ERR(timeline)) {
+-		err = PTR_ERR(timeline);
+-		goto err;
+-	}
+-	GEM_BUG_ON(timeline->has_initial_breadcrumb);
+-
+-	ring = intel_engine_create_ring(engine, timeline, 32 * PAGE_SIZE);
+-	i915_timeline_put(timeline);
+-	if (IS_ERR(ring)) {
+-		err = PTR_ERR(ring);
+-		goto err;
+-	}
+-
+-	err = intel_ring_pin(ring);
+-	if (err)
+-		goto err_ring;
+-
+-	GEM_BUG_ON(engine->buffer);
+-	engine->buffer = ring;
+-
+-	err = intel_engine_init_common(engine);
+-	if (err)
+-		goto err_unpin;
+-
+-	GEM_BUG_ON(ring->timeline->hwsp_ggtt != engine->status_page.vma);
+-
+-	return 0;
+-
+-err_unpin:
+-	intel_ring_unpin(ring);
+-err_ring:
+-	intel_ring_put(ring);
+-err:
+-	intel_engine_cleanup_common(engine);
+-	return err;
+-}
+-
+ void intel_engine_cleanup(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *dev_priv = engine->i915;
+@@ -2190,24 +2142,6 @@ static int gen6_ring_flush(struct i915_request *rq, u32 mode)
+ 	return gen6_flush_dw(rq, mode, MI_INVALIDATE_TLB);
+ }
+ 
+-static void intel_ring_init_irq(struct drm_i915_private *dev_priv,
+-				struct intel_engine_cs *engine)
+-{
+-	if (INTEL_GEN(dev_priv) >= 6) {
+-		engine->irq_enable = gen6_irq_enable;
+-		engine->irq_disable = gen6_irq_disable;
+-	} else if (INTEL_GEN(dev_priv) >= 5) {
+-		engine->irq_enable = gen5_irq_enable;
+-		engine->irq_disable = gen5_irq_disable;
+-	} else if (INTEL_GEN(dev_priv) >= 3) {
+-		engine->irq_enable = i9xx_irq_enable;
+-		engine->irq_disable = i9xx_irq_disable;
+-	} else {
+-		engine->irq_enable = i8xx_irq_enable;
+-		engine->irq_disable = i8xx_irq_disable;
+-	}
+-}
+-
+ static void i9xx_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = i9xx_submit_request;
+@@ -2223,13 +2157,33 @@ static void gen6_bsd_set_default_submission(struct intel_engine_cs *engine)
+ 	engine->submit_request = gen6_bsd_submit_request;
+ }
+ 
+-static void intel_ring_default_vfuncs(struct drm_i915_private *dev_priv,
+-				      struct intel_engine_cs *engine)
++static void setup_irq(struct intel_engine_cs *engine)
++{
++	struct drm_i915_private *i915 = engine->i915;
++
++	if (INTEL_GEN(i915) >= 6) {
++		engine->irq_enable = gen6_irq_enable;
++		engine->irq_disable = gen6_irq_disable;
++	} else if (INTEL_GEN(i915) >= 5) {
++		engine->irq_enable = gen5_irq_enable;
++		engine->irq_disable = gen5_irq_disable;
++	} else if (INTEL_GEN(i915) >= 3) {
++		engine->irq_enable = i9xx_irq_enable;
++		engine->irq_disable = i9xx_irq_disable;
++	} else {
++		engine->irq_enable = i8xx_irq_enable;
++		engine->irq_disable = i8xx_irq_disable;
++	}
++}
++
++static void setup_common(struct intel_engine_cs *engine)
+ {
++	struct drm_i915_private *i915 = engine->i915;
++
+ 	/* gen8+ are only supported with execlists */
+-	GEM_BUG_ON(INTEL_GEN(dev_priv) >= 8);
++	GEM_BUG_ON(INTEL_GEN(i915) >= 8);
+ 
+-	intel_ring_init_irq(dev_priv, engine);
++	setup_irq(engine);
+ 
+ 	engine->resume = xcs_resume;
+ 	engine->reset.prepare = reset_prepare;
+@@ -2245,117 +2199,96 @@ static void intel_ring_default_vfuncs(struct drm_i915_private *dev_priv,
+ 	 * engine->emit_init_breadcrumb().
+ 	 */
+ 	engine->emit_fini_breadcrumb = i9xx_emit_breadcrumb;
+-	if (IS_GEN(dev_priv, 5))
++	if (IS_GEN(i915, 5))
+ 		engine->emit_fini_breadcrumb = gen5_emit_breadcrumb;
+ 
+ 	engine->set_default_submission = i9xx_set_default_submission;
+ 
+-	if (INTEL_GEN(dev_priv) >= 6)
++	if (INTEL_GEN(i915) >= 6)
+ 		engine->emit_bb_start = gen6_emit_bb_start;
+-	else if (INTEL_GEN(dev_priv) >= 4)
++	else if (INTEL_GEN(i915) >= 4)
+ 		engine->emit_bb_start = i965_emit_bb_start;
+-	else if (IS_I830(dev_priv) || IS_I845G(dev_priv))
++	else if (IS_I830(i915) || IS_I845G(i915))
+ 		engine->emit_bb_start = i830_emit_bb_start;
+ 	else
+ 		engine->emit_bb_start = i915_emit_bb_start;
+ }
+ 
+-int intel_init_render_ring_buffer(struct intel_engine_cs *engine)
++static void setup_rcs(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_private *dev_priv = engine->i915;
+-	int ret;
+-
+-	intel_ring_default_vfuncs(dev_priv, engine);
++	struct drm_i915_private *i915 = engine->i915;
+ 
+-	if (HAS_L3_DPF(dev_priv))
++	if (HAS_L3_DPF(i915))
+ 		engine->irq_keep_mask = GT_RENDER_L3_PARITY_ERROR_INTERRUPT;
+ 
+ 	engine->irq_enable_mask = GT_RENDER_USER_INTERRUPT;
+ 
+-	if (INTEL_GEN(dev_priv) >= 7) {
++	if (INTEL_GEN(i915) >= 7) {
+ 		engine->init_context = intel_rcs_ctx_init;
+ 		engine->emit_flush = gen7_render_ring_flush;
+ 		engine->emit_fini_breadcrumb = gen7_rcs_emit_breadcrumb;
+-	} else if (IS_GEN(dev_priv, 6)) {
++	} else if (IS_GEN(i915, 6)) {
+ 		engine->init_context = intel_rcs_ctx_init;
+ 		engine->emit_flush = gen6_render_ring_flush;
+ 		engine->emit_fini_breadcrumb = gen6_rcs_emit_breadcrumb;
+-	} else if (IS_GEN(dev_priv, 5)) {
++	} else if (IS_GEN(i915, 5)) {
+ 		engine->emit_flush = gen4_render_ring_flush;
+ 	} else {
+-		if (INTEL_GEN(dev_priv) < 4)
++		if (INTEL_GEN(i915) < 4)
+ 			engine->emit_flush = gen2_render_ring_flush;
+ 		else
+ 			engine->emit_flush = gen4_render_ring_flush;
+ 		engine->irq_enable_mask = I915_USER_INTERRUPT;
+ 	}
+ 
+-	if (IS_HASWELL(dev_priv))
++	if (IS_HASWELL(i915))
+ 		engine->emit_bb_start = hsw_emit_bb_start;
+ 
+ 	engine->resume = rcs_resume;
+-
+-	ret = intel_init_ring_buffer(engine);
+-	if (ret)
+-		return ret;
+-
+-	return 0;
+ }
+ 
+-int intel_init_bsd_ring_buffer(struct intel_engine_cs *engine)
++static void setup_vcs(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_private *dev_priv = engine->i915;
+-
+-	intel_ring_default_vfuncs(dev_priv, engine);
++	struct drm_i915_private *i915 = engine->i915;
+ 
+-	if (INTEL_GEN(dev_priv) >= 6) {
++	if (INTEL_GEN(i915) >= 6) {
+ 		/* gen6 bsd needs a special wa for tail updates */
+-		if (IS_GEN(dev_priv, 6))
++		if (IS_GEN(i915, 6))
+ 			engine->set_default_submission = gen6_bsd_set_default_submission;
+ 		engine->emit_flush = gen6_bsd_ring_flush;
+ 		engine->irq_enable_mask = GT_BSD_USER_INTERRUPT;
+ 
+-		if (IS_GEN(dev_priv, 6))
++		if (IS_GEN(i915, 6))
+ 			engine->emit_fini_breadcrumb = gen6_xcs_emit_breadcrumb;
+ 		else
+ 			engine->emit_fini_breadcrumb = gen7_xcs_emit_breadcrumb;
+ 	} else {
+ 		engine->emit_flush = bsd_ring_flush;
+-		if (IS_GEN(dev_priv, 5))
++		if (IS_GEN(i915, 5))
+ 			engine->irq_enable_mask = ILK_BSD_USER_INTERRUPT;
+ 		else
+ 			engine->irq_enable_mask = I915_BSD_USER_INTERRUPT;
+ 	}
+-
+-	return intel_init_ring_buffer(engine);
+ }
+ 
+-int intel_init_blt_ring_buffer(struct intel_engine_cs *engine)
++static void setup_bcs(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_private *dev_priv = engine->i915;
+-
+-	GEM_BUG_ON(INTEL_GEN(dev_priv) < 6);
+-
+-	intel_ring_default_vfuncs(dev_priv, engine);
++	struct drm_i915_private *i915 = engine->i915;
+ 
+ 	engine->emit_flush = gen6_ring_flush;
+ 	engine->irq_enable_mask = GT_BLT_USER_INTERRUPT;
+ 
+-	if (IS_GEN(dev_priv, 6))
++	if (IS_GEN(i915, 6))
+ 		engine->emit_fini_breadcrumb = gen6_xcs_emit_breadcrumb;
+ 	else
+ 		engine->emit_fini_breadcrumb = gen7_xcs_emit_breadcrumb;
+-
+-	return intel_init_ring_buffer(engine);
+ }
+ 
+-int intel_init_vebox_ring_buffer(struct intel_engine_cs *engine)
++static void setup_vecs(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_private *dev_priv = engine->i915;
+-
+-	GEM_BUG_ON(INTEL_GEN(dev_priv) < 7);
++	struct drm_i915_private *i915 = engine->i915;
+ 
+-	intel_ring_default_vfuncs(dev_priv, engine);
++	GEM_BUG_ON(INTEL_GEN(i915) < 7);
+ 
+ 	engine->emit_flush = gen6_ring_flush;
+ 	engine->irq_enable_mask = PM_VEBOX_USER_INTERRUPT;
+@@ -2363,6 +2296,73 @@ int intel_init_vebox_ring_buffer(struct intel_engine_cs *engine)
+ 	engine->irq_disable = hsw_vebox_irq_disable;
+ 
+ 	engine->emit_fini_breadcrumb = gen7_xcs_emit_breadcrumb;
++}
++
++int intel_ring_submission_setup(struct intel_engine_cs *engine)
++{
++	setup_common(engine);
++
++	switch (engine->class) {
++	case RENDER_CLASS:
++		setup_rcs(engine);
++		break;
++	case VIDEO_DECODE_CLASS:
++		setup_vcs(engine);
++		break;
++	case COPY_ENGINE_CLASS:
++		setup_bcs(engine);
++		break;
++	case VIDEO_ENHANCEMENT_CLASS:
++		setup_vecs(engine);
++		break;
++	default:
++		MISSING_CASE(engine->class);
++		return -ENODEV;
++	}
++
++	return 0;
++}
++
++int intel_ring_submission_init(struct intel_engine_cs *engine)
++{
++	struct i915_timeline *timeline;
++	struct intel_ring *ring;
++	int err;
++
++	timeline = i915_timeline_create(engine->i915, engine->status_page.vma);
++	if (IS_ERR(timeline)) {
++		err = PTR_ERR(timeline);
++		goto err;
++	}
++	GEM_BUG_ON(timeline->has_initial_breadcrumb);
++
++	ring = intel_engine_create_ring(engine, timeline, 32 * PAGE_SIZE);
++	i915_timeline_put(timeline);
++	if (IS_ERR(ring)) {
++		err = PTR_ERR(ring);
++		goto err;
++	}
++
++	err = intel_ring_pin(ring);
++	if (err)
++		goto err_ring;
+ 
+-	return intel_init_ring_buffer(engine);
++	GEM_BUG_ON(engine->buffer);
++	engine->buffer = ring;
++
++	err = intel_engine_init_common(engine);
++	if (err)
++		goto err_unpin;
++
++	GEM_BUG_ON(ring->timeline->hwsp_ggtt != engine->status_page.vma);
++
++	return 0;
++
++err_unpin:
++	intel_ring_unpin(ring);
++err_ring:
++	intel_ring_put(ring);
++err:
++	intel_engine_cleanup_common(engine);
++	return err;
+ }
+diff --git a/drivers/gpu/drm/i915/gt/intel_workarounds.c b/drivers/gpu/drm/i915/gt/intel_workarounds.c
+index 11b4dbf19c72..43e290306551 100644
+--- a/drivers/gpu/drm/i915/gt/intel_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/intel_workarounds.c
+@@ -1076,7 +1076,8 @@ void intel_engine_init_whitelist(struct intel_engine_cs *engine)
+ 	struct drm_i915_private *i915 = engine->i915;
+ 	struct i915_wa_list *w = &engine->whitelist;
+ 
+-	GEM_BUG_ON(engine->id != RCS0);
++	if (engine->class != RENDER_CLASS)
++		return;
+ 
+ 	wa_init_start(w, "whitelist");
+ 
+diff --git a/drivers/gpu/drm/i915/gt/mock_engine.c b/drivers/gpu/drm/i915/gt/mock_engine.c
+index 21f413ff5b8e..85cdbfe1d989 100644
+--- a/drivers/gpu/drm/i915/gt/mock_engine.c
++++ b/drivers/gpu/drm/i915/gt/mock_engine.c
+@@ -239,7 +239,6 @@ struct intel_engine_cs *mock_engine(struct drm_i915_private *i915,
+ 				    int id)
+ {
+ 	struct mock_engine *engine;
+-	int err;
+ 
+ 	GEM_BUG_ON(id >= I915_NUM_ENGINES);
+ 
+@@ -265,37 +264,44 @@ struct intel_engine_cs *mock_engine(struct drm_i915_private *i915,
+ 	engine->base.reset.finish = mock_reset_finish;
+ 	engine->base.cancel_requests = mock_cancel_requests;
+ 
+-	if (i915_timeline_init(i915, &engine->base.timeline, NULL))
+-		goto err_free;
+-	i915_timeline_set_subclass(&engine->base.timeline, TIMELINE_ENGINE);
+-
+-	intel_engine_init_breadcrumbs(&engine->base);
+-	intel_engine_init_execlists(&engine->base);
+-	intel_engine_init__pm(&engine->base);
+-
+ 	/* fake hw queue */
+ 	spin_lock_init(&engine->hw_lock);
+ 	timer_setup(&engine->hw_delay, hw_delay_complete, 0);
+ 	INIT_LIST_HEAD(&engine->hw_queue);
+ 
+-	engine->base.kernel_context =
+-		intel_context_instance(i915->kernel_context, &engine->base);
+-	if (IS_ERR(engine->base.kernel_context))
++	return &engine->base;
++}
++
++int mock_engine_init(struct intel_engine_cs *engine)
++{
++	struct drm_i915_private *i915 = engine->i915;
++	int err;
++
++	intel_engine_init_breadcrumbs(engine);
++	intel_engine_init_execlists(engine);
++	intel_engine_init__pm(engine);
++
++	if (i915_timeline_init(i915, &engine->timeline, NULL))
+ 		goto err_breadcrumbs;
++	i915_timeline_set_subclass(&engine->timeline, TIMELINE_ENGINE);
++
++	engine->kernel_context =
++		intel_context_instance(i915->kernel_context, engine);
++	if (IS_ERR(engine->kernel_context))
++		goto err_timeline;
+ 
+-	err = intel_context_pin(engine->base.kernel_context);
+-	intel_context_put(engine->base.kernel_context);
++	err = intel_context_pin(engine->kernel_context);
++	intel_context_put(engine->kernel_context);
+ 	if (err)
+-		goto err_breadcrumbs;
++		goto err_timeline;
+ 
+-	return &engine->base;
++	return 0;
+ 
++err_timeline:
++	i915_timeline_fini(&engine->timeline);
+ err_breadcrumbs:
+-	intel_engine_fini_breadcrumbs(&engine->base);
+-	i915_timeline_fini(&engine->base.timeline);
+-err_free:
+-	kfree(engine);
+-	return NULL;
++	intel_engine_fini_breadcrumbs(engine);
++	return -ENOMEM;
+ }
+ 
+ void mock_engine_flush(struct intel_engine_cs *engine)
+diff --git a/drivers/gpu/drm/i915/gt/mock_engine.h b/drivers/gpu/drm/i915/gt/mock_engine.h
+index 44b35a85e9d1..3f9b698c49d2 100644
+--- a/drivers/gpu/drm/i915/gt/mock_engine.h
++++ b/drivers/gpu/drm/i915/gt/mock_engine.h
+@@ -42,6 +42,8 @@ struct mock_engine {
+ struct intel_engine_cs *mock_engine(struct drm_i915_private *i915,
+ 				    const char *name,
+ 				    int id);
++int mock_engine_init(struct intel_engine_cs *engine);
++
+ void mock_engine_flush(struct intel_engine_cs *engine);
+ void mock_engine_reset(struct intel_engine_cs *engine);
+ void mock_engine_free(struct intel_engine_cs *engine);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index a06fa52957ec..ba13132bdef4 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -4517,6 +4517,12 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ 		goto err_ggtt;
+ 	}
+ 
++	ret = intel_engines_setup(dev_priv);
++	if (ret) {
++		GEM_BUG_ON(ret == -EIO);
++		goto err_unlock;
++	}
++
+ 	ret = i915_gem_contexts_init(dev_priv);
+ 	if (ret) {
+ 		GEM_BUG_ON(ret == -EIO);
+diff --git a/drivers/gpu/drm/i915/selftests/mock_gem_device.c b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+index c072424c6b7c..e4033d0576c4 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_gem_device.c
++++ b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+@@ -209,12 +209,16 @@ struct drm_i915_private *mock_gem_device(void)
+ 	mock_init_ggtt(i915, &i915->ggtt);
+ 
+ 	mkwrite_device_info(i915)->engine_mask = BIT(0);
+-	i915->kernel_context = mock_context(i915, NULL);
+-	if (!i915->kernel_context)
+-		goto err_unlock;
+ 
+ 	i915->engine[RCS0] = mock_engine(i915, "mock", RCS0);
+ 	if (!i915->engine[RCS0])
++		goto err_unlock;
++
++	i915->kernel_context = mock_context(i915, NULL);
++	if (!i915->kernel_context)
++		goto err_engine;
++
++	if (mock_engine_init(i915->engine[RCS0]))
+ 		goto err_context;
+ 
+ 	mutex_unlock(&i915->drm.struct_mutex);
+@@ -225,6 +229,8 @@ struct drm_i915_private *mock_gem_device(void)
+ 
+ err_context:
+ 	i915_gem_contexts_fini(i915);
++err_engine:
++	mock_engine_free(i915->engine[RCS0]);
+ err_unlock:
+ 	mutex_unlock(&i915->drm.struct_mutex);
+ 	i915_timelines_fini(i915);
+-- 
+2.17.1
+

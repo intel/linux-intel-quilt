@@ -1,0 +1,341 @@
+From 8215ef33f03d1ff0367b83a9a0545c63877786bf Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Fri, 22 Mar 2019 19:34:24 +0100
+Subject: [PATCH 026/150] ASoC: Intel: Skylake: Unify firmware loading
+ mechanism
+
+There are certain operations we want to do before and after firmware
+loading e.g.: disabling/ enabling power and clock gating. To make code
+coherent, provide skl_init_fw as a unified way for loading dsp firmware.
+
+In consequence, this change provides CNL load library support during fw
+initialization which was previously missing.
+
+skl_dsp_fw_ops already takes care of fw and library load customization.
+New post-load additions in form of fw and hw config assignments make
+this change even more welcome.
+
+Change-Id: I58f3a36ecf4558483073ea2995651f332bb122a4
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c      | 27 -----------------
+ sound/soc/intel/skylake/cnl-sst-dsp.h  |  1 -
+ sound/soc/intel/skylake/cnl-sst.c      | 19 ------------
+ sound/soc/intel/skylake/skl-messages.c |  6 ----
+ sound/soc/intel/skylake/skl-pcm.c      | 22 ++------------
+ sound/soc/intel/skylake/skl-sst-dsp.c  |  1 +
+ sound/soc/intel/skylake/skl-sst-dsp.h  |  3 +-
+ sound/soc/intel/skylake/skl-sst-ipc.c  |  9 +-----
+ sound/soc/intel/skylake/skl-sst.c      | 41 ++++++++++++++++++++++----
+ sound/soc/intel/skylake/skl.h          |  1 -
+ 10 files changed, 41 insertions(+), 89 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 3f88c4837358..057e15a44abf 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -600,33 +600,6 @@ int bxt_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ }
+ EXPORT_SYMBOL_GPL(bxt_sst_dsp_init);
+ 
+-int bxt_sst_init_fw(struct device *dev, struct skl_dev *skl)
+-{
+-	int ret;
+-	struct sst_dsp *sst = skl->dsp;
+-
+-	ret = sst->fw_ops.load_fw(sst);
+-	if (ret < 0) {
+-		dev_err(dev, "Load base fw failed: %x\n", ret);
+-		return ret;
+-	}
+-
+-	skl_dsp_init_core_state(sst);
+-
+-	if (skl->lib_count > 1) {
+-		ret = sst->fw_ops.load_library(sst, skl->lib_info,
+-						skl->lib_count);
+-		if (ret < 0) {
+-			dev_err(dev, "Load Library failed : %x\n", ret);
+-			return ret;
+-		}
+-	}
+-	skl->is_first_boot = false;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(bxt_sst_init_fw);
+-
+ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ {
+ 
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.h b/sound/soc/intel/skylake/cnl-sst-dsp.h
+index 0f38c376191e..84e120aad6a0 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.h
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.h
+@@ -105,7 +105,6 @@ void cnl_ipc_free(struct sst_generic_ipc *ipc);
+ int cnl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ 		     const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+ 		     struct skl_dev **dsp);
+-int cnl_sst_init_fw(struct device *dev, struct skl_dev *skl);
+ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl);
+ 
+ #endif /*__CNL_SST_DSP_H__*/
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index f334054ac765..402c02add03c 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -462,25 +462,6 @@ int cnl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ }
+ EXPORT_SYMBOL_GPL(cnl_sst_dsp_init);
+ 
+-int cnl_sst_init_fw(struct device *dev, struct skl_dev *skl)
+-{
+-	int ret;
+-	struct sst_dsp *sst = skl->dsp;
+-
+-	ret = skl->dsp->fw_ops.load_fw(sst);
+-	if (ret < 0) {
+-		dev_err(dev, "load base fw failed: %d", ret);
+-		return ret;
+-	}
+-
+-	skl_dsp_init_core_state(sst);
+-
+-	skl->is_first_boot = false;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(cnl_sst_init_fw);
+-
+ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ {
+ 	if (skl->dsp->fw)
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index c7781197d217..3d16900b776b 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -194,7 +194,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = skl_get_loader_ops,
+ 		.init = skl_sst_dsp_init,
+-		.init_fw = skl_sst_init_fw,
+ 		.cleanup = skl_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -202,7 +201,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = skl_get_loader_ops,
+ 		.init = skl_sst_dsp_init,
+-		.init_fw = skl_sst_init_fw,
+ 		.cleanup = skl_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -210,7 +208,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = bxt_sst_dsp_init,
+-		.init_fw = bxt_sst_init_fw,
+ 		.cleanup = bxt_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -218,7 +215,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 2,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = bxt_sst_dsp_init,
+-		.init_fw = bxt_sst_init_fw,
+ 		.cleanup = bxt_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -226,7 +222,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 4,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = cnl_sst_dsp_init,
+-		.init_fw = cnl_sst_init_fw,
+ 		.cleanup = cnl_sst_dsp_cleanup
+ 	},
+ 	{
+@@ -234,7 +229,6 @@ static const struct skl_dsp_ops dsp_ops[] = {
+ 		.num_cores = 4,
+ 		.loader_ops = bxt_get_loader_ops,
+ 		.init = cnl_sst_dsp_init,
+-		.init_fw = cnl_sst_init_fw,
+ 		.cleanup = cnl_sst_dsp_cleanup
+ 	},
+ };
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 8764dd121908..ff8d501e5900 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -1417,7 +1417,6 @@ static int skl_platform_soc_probe(struct snd_soc_component *component)
+ {
+ 	struct hdac_bus *bus = dev_get_drvdata(component->dev);
+ 	struct skl_dev *skl = bus_to_skl(bus);
+-	const struct skl_dsp_ops *ops;
+ 	int ret;
+ 
+ 	pm_runtime_get_sync(component->dev);
+@@ -1433,30 +1432,15 @@ static int skl_platform_soc_probe(struct snd_soc_component *component)
+ 			return ret;
+ 		}
+ 
+-		/* load the firmwares, since all is set */
+-		ops = skl_get_dsp_ops(skl->pci->device);
+-		if (!ops)
+-			return -EIO;
+-
+ 		if (!skl->is_first_boot) {
+ 			dev_err(component->dev, "DSP reports first boot done!!!\n");
+ 			return -EIO;
+ 		}
+ 
+-		/*
+-		 * Disable dynamic clock and power gating during firmware
+-		 * and library download
+-		 */
+-		skl->enable_miscbdcge(component->dev, false);
+-		skl->clock_power_gating(component->dev, false);
+-
+-		ret = ops->init_fw(component->dev, skl);
+-		skl->enable_miscbdcge(component->dev, true);
+-		skl->clock_power_gating(component->dev, true);
+-		if (ret < 0) {
+-			dev_err(component->dev, "Failed to boot first fw: %d\n", ret);
++		ret = skl_sst_init_fw(skl);
++		if (ret < 0)
+ 			return ret;
+-		}
++
+ 		skl_populate_modules(skl);
+ 		skl->update_d0i3c = skl_update_d0i3c;
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.c b/sound/soc/intel/skylake/skl-sst-dsp.c
+index 1e9cfe1c380c..1f44a75c5eab 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.c
++++ b/sound/soc/intel/skylake/skl-sst-dsp.c
+@@ -53,6 +53,7 @@ void skl_dsp_init_core_state(struct sst_dsp *ctx)
+ 		skl->cores.usage_count[i] = 0;
+ 	}
+ }
++EXPORT_SYMBOL_GPL(skl_dsp_init_core_state);
+ 
+ /* Get the mask for all enabled cores */
+ unsigned int skl_dsp_get_enabled_cores(struct sst_dsp *ctx)
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 65dc19467c33..d333da9d5cb4 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -247,8 +247,7 @@ int skl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ int bxt_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ 		const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+ 		struct skl_dev **dsp);
+-int skl_sst_init_fw(struct device *dev, struct skl_dev *skl);
+-int bxt_sst_init_fw(struct device *dev, struct skl_dev *skl);
++int skl_sst_init_fw(struct skl_dev *skl);
+ void skl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl);
+ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl);
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 71ddff6505b5..a0a4a114ed7a 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -652,14 +652,7 @@ int skl_ipc_tx_message_wait(struct sst_generic_ipc *ipc, u64 header,
+ 		rx_data, rx_bytes);
+ 
+ 	if (ret == -ETIMEDOUT && skl->is_first_boot) {
+-		skl->enable_miscbdcge(ipc->dev, false);
+-		skl->clock_power_gating(ipc->dev, false);
+-
+-		ret = skl->dsp_ops->init_fw(ipc->dev, skl);
+-
+-		skl->enable_miscbdcge(ipc->dev, true);
+-		skl->clock_power_gating(ipc->dev, true);
+-
++		ret = skl_sst_init_fw(skl);
+ 		dev_warn(ipc->dev, "Recover from IPC timeout: %d\n", ret);
+ 	}
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst.c b/sound/soc/intel/skylake/skl-sst.c
+index 3de0d47b3558..9cf2d1cae9f5 100644
+--- a/sound/soc/intel/skylake/skl-sst.c
++++ b/sound/soc/intel/skylake/skl-sst.c
+@@ -565,30 +565,59 @@ int skl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ }
+ EXPORT_SYMBOL_GPL(skl_sst_dsp_init);
+ 
+-int skl_sst_init_fw(struct device *dev, struct skl_dev *skl)
++int skl_sst_init_fw(struct skl_dev *skl)
+ {
+-	int ret;
+ 	struct sst_dsp *sst = skl->dsp;
++	struct device *dev = skl->dev;
++	int (*lp_check)(struct sst_dsp *dsp, bool state);
++	int ret;
++
++	lp_check = skl->ipc.ops.check_dsp_lp_on;
++	skl->enable_miscbdcge(dev, false);
++	skl->clock_power_gating(dev, false);
+ 
+ 	ret = sst->fw_ops.load_fw(sst);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Load base fw failed : %d\n", ret);
+-		return ret;
++		goto exit;
++	}
++
++	if (!skl->is_first_boot)
++		goto library_load;
++	/* Disable power check during cfg setup */
++	skl->ipc.ops.check_dsp_lp_on = NULL;
++
++	ret = skl_ipc_fw_cfg_get(&skl->ipc, &skl->fw_cfg);
++	if (ret < 0) {
++		dev_err(dev, "Failed to get fw cfg: %d\n", ret);
++		goto exit;
++	}
++
++	ret = skl_ipc_hw_cfg_get(&skl->ipc, &skl->hw_cfg);
++	if (ret < 0) {
++		dev_err(dev, "Failed to get hw cfg: %d\n", ret);
++		goto exit;
+ 	}
+ 
+ 	skl_dsp_init_core_state(sst);
+ 
++library_load:
+ 	if (skl->lib_count > 1) {
+ 		ret = sst->fw_ops.load_library(sst, skl->lib_info,
+ 						skl->lib_count);
+ 		if (ret < 0) {
+-			dev_err(dev, "Load Library failed : %x\n", ret);
+-			return ret;
++			dev_err(dev, "Load library failed : %x\n", ret);
++			goto exit;
+ 		}
+ 	}
++
+ 	skl->is_first_boot = false;
++exit:
++	skl->ipc.ops.check_dsp_lp_on = lp_check;
++	skl->enable_miscbdcge(dev, true);
++	skl->clock_power_gating(dev, true);
+ 
+-	return 0;
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(skl_sst_init_fw);
+ 
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index f3e59edce9da..58d10fc0ca39 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -171,7 +171,6 @@ struct skl_dsp_ops {
+ 			int irq, const char *fw_name,
+ 			struct skl_dsp_loader_ops loader_ops,
+ 			struct skl_dev **skl_sst);
+-	int (*init_fw)(struct device *dev, struct skl_dev *skl);
+ 	void (*cleanup)(struct device *dev, struct skl_dev *skl);
+ };
+ 
+-- 
+2.17.1
+

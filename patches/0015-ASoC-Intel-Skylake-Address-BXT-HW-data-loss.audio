@@ -1,0 +1,90 @@
+From 048aefffdf7386e2c678c9cbcfe16b37cd6f26e2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pawe=C5=82=20Har=C5=82ozi=C5=84ski?=
+ <pawel.harlozinski@intel.com>
+Date: Wed, 6 Feb 2019 15:51:22 +0100
+Subject: [PATCH 015/150] ASoC: Intel: Skylake: Address BXT HW data loss
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This commit workarounds Broxton hardware bug: playback data loss when
+using copier with input 16 bit sample size in 16 bit container, output
+32 bit sample size in 32 bit container.
+
+As a workaround method, clear PPCTL.PROCEN bit for corresponding stream
+index before writing to Stream Descriptor Format register (SDxFMT) and
+set PPCTL.PROCEN again after that.
+
+Change-Id: Ic26a18dd7bb6bd79da396da937d4c5cd01466871
+Signed-off-by: Paweł Harłoziński <pawel.harlozinski@intel.com>
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ include/sound/hda_codec.h         |  3 +++
+ sound/pci/hda/hda_intel.c         |  3 ---
+ sound/soc/intel/skylake/skl-pcm.c | 15 ++++++++++++++-
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/include/sound/hda_codec.h b/include/sound/hda_codec.h
+index cc7c8d42d4fd..ad46a082b00f 100644
+--- a/include/sound/hda_codec.h
++++ b/include/sound/hda_codec.h
+@@ -31,6 +31,9 @@
+ #include <sound/hda_verbs.h>
+ #include <sound/hda_regmap.h>
+ 
++#define IS_BXT(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x5a98)
++#define IS_CFL(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0xa348)
++
+ /*
+  * Structures
+  */
+diff --git a/sound/pci/hda/hda_intel.c b/sound/pci/hda/hda_intel.c
+index 0741eae23f10..07144bcc7059 100644
+--- a/sound/pci/hda/hda_intel.c
++++ b/sound/pci/hda/hda_intel.c
+@@ -373,9 +373,6 @@ enum {
+ 					((pci)->device == 0x0d0c) || \
+ 					((pci)->device == 0x160c))
+ 
+-#define IS_BXT(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x5a98)
+-#define IS_CFL(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0xa348)
+-
+ static char *driver_short_names[] = {
+ 	[AZX_DRIVER_ICH] = "HDA Intel",
+ 	[AZX_DRIVER_PCH] = "HDA Intel PCH",
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index bff2119cfd9c..1ed302d2b143 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -145,6 +145,7 @@ int skl_pcm_host_dma_prepare(struct device *dev, struct skl_pipe_params *params)
+ 	struct hdac_stream *hstream;
+ 	struct hdac_ext_stream *stream;
+ 	int err;
++	struct skl_dev *skl = bus_to_skl(bus);
+ 
+ 	hstream = snd_hdac_get_stream(bus, params->stream,
+ 					params->host_dma_id + 1);
+@@ -165,7 +166,19 @@ int skl_pcm_host_dma_prepare(struct device *dev, struct skl_pipe_params *params)
+ 	if (err < 0)
+ 		return err;
+ 
+-	err = snd_hdac_stream_setup(hdac_stream(stream));
++	/*
++	 * As a workaround for BXT hw bug when using 16/16 input into 32/32
++	 * output copier, clear PPCTL.PROCEN bit for given stream before
++	 * updating SDxFMT. Set PPCTL.PROCEN back again afterward
++	 */
++	if (IS_BXT(skl->pci)) {
++		snd_hdac_ext_stream_decouple(bus, stream, false);
++		err = snd_hdac_stream_setup(hdac_stream(stream));
++		snd_hdac_ext_stream_decouple(bus, stream, true);
++	} else {
++		err = snd_hdac_stream_setup(hdac_stream(stream));
++	}
++
+ 	if (err < 0)
+ 		return err;
+ 
+-- 
+2.17.1
+

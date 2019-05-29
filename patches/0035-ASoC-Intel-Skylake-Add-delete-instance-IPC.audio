@@ -1,0 +1,75 @@
+From 1dd45b800dac2827aeb229e4bdb2cdbd700aad2f Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Tue, 19 Mar 2019 14:43:54 +0100
+Subject: [PATCH 035/150] ASoC: Intel: Skylake: Add delete instance IPC
+
+Standalone modules - with no parent pipeline assigned - have to be
+deleted explicitly using Delete Instance IPC request. When owned by
+pipeline, this is not required as pipeline takes care of module cleanup
+during its deletion.
+
+Change-Id: Iafce0d81f8cc1b4531c2ee61fa98a20ca51c039b
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-sst-ipc.c | 24 +++++++++++++++++++++++-
+ sound/soc/intel/skylake/skl-sst-ipc.h |  2 ++
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 74c5aef3160a..ea8aa2d2677f 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -284,7 +284,8 @@ enum skl_ipc_module_msg {
+ 	IPC_MOD_BIND = 5,
+ 	IPC_MOD_UNBIND = 6,
+ 	IPC_MOD_SET_DX = 7,
+-	IPC_MOD_SET_D0IX = 8
++	IPC_MOD_SET_D0IX = 8,
++	IPC_MOD_DELETE_INSTANCE = 11
+ };
+ 
+ struct skl_event_timestamp_notify {
+@@ -1115,6 +1116,27 @@ int skl_ipc_set_d0ix(struct sst_generic_ipc *ipc, struct skl_ipc_d0ix_msg *msg)
+ }
+ EXPORT_SYMBOL_GPL(skl_ipc_set_d0ix);
+ 
++int skl_ipc_delete_instance(struct sst_generic_ipc *ipc,
++		unsigned int module_id, unsigned int instance_id)
++{
++	struct skl_ipc_header hdr = {0};
++	int ret;
++
++	hdr.primary = IPC_MSG_TARGET(IPC_MOD_MSG);
++	hdr.primary |= IPC_MSG_DIR(IPC_MSG_REQUEST);
++	hdr.primary |= IPC_GLB_TYPE(IPC_MOD_DELETE_INSTANCE);
++	hdr.primary |= IPC_MOD_INSTANCE_ID(instance_id);
++	hdr.primary |= IPC_MOD_ID(module_id);
++
++	ret = skl_ipc_tx_message_wait(ipc, *(u64 *)&hdr, NULL, 0,
++		NULL, NULL, 0);
++	if (ret < 0)
++		dev_err(ipc->dev, "ipc: delete instance failed, ret %d\n", ret);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(skl_ipc_delete_instance);
++
+ int skl_ipc_fw_cfg_get(struct sst_generic_ipc *ipc, struct skl_fw_cfg *cfg)
+ {
+ 	struct skl_ipc_large_config_msg msg = {0};
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index c7c6694f853f..73f2d0f1fc45 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -417,6 +417,8 @@ int skl_sst_ipc_load_library(struct sst_generic_ipc *ipc,
+ 
+ int skl_ipc_set_d0ix(struct sst_generic_ipc *ipc,
+ 		struct skl_ipc_d0ix_msg *msg);
++int skl_ipc_delete_instance(struct sst_generic_ipc *ipc,
++		unsigned int module_id, unsigned int instance_id);
+ 
+ int skl_ipc_check_D0i0(struct sst_dsp *dsp, bool state);
+ 
+-- 
+2.17.1
+

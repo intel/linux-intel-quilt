@@ -1,0 +1,495 @@
+From 02fa6cb18a7b73ae3a105426bea7ebe0ade8c6f2 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 09:17:20 +0100
+Subject: [PATCH 032/186] drm/i915: Lift sideband locking for
+ vlv_punit_(read|write)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Lift the sideband acquisition for vlv_punit_read and vlv_punit_write
+into their callers, so that we can lock the sideband once for a sequence
+of operations, rather than perform the heavyweight acquisition on each
+request.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426081725.31217-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_debugfs.c     |  5 +++
+ drivers/gpu/drm/i915/i915_sysfs.c       | 14 ++++----
+ drivers/gpu/drm/i915/intel_cdclk.c      | 23 ++++++++++---
+ drivers/gpu/drm/i915/intel_display.c    | 16 +++++----
+ drivers/gpu/drm/i915/intel_pm.c         | 46 ++++++++++++++++++++-----
+ drivers/gpu/drm/i915/intel_runtime_pm.c | 10 ++++++
+ drivers/gpu/drm/i915/intel_sideband.c   | 18 ++--------
+ 7 files changed, 89 insertions(+), 43 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 00d3ff746eb1..6d98299fac67 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -1057,7 +1057,10 @@ static int i915_frequency_info(struct seq_file *m, void *unused)
+ 			   yesno((rpmodectl & GEN6_RP_MEDIA_MODE_MASK) ==
+ 				  GEN6_RP_MEDIA_SW_MODE));
+ 
++		vlv_punit_get(dev_priv);
+ 		freq_sts = vlv_punit_read(dev_priv, PUNIT_REG_GPU_FREQ_STS);
++		vlv_punit_put(dev_priv);
++
+ 		seq_printf(m, "PUNIT_REG_GPU_FREQ_STS: 0x%08x\n", freq_sts);
+ 		seq_printf(m, "DDR freq: %d MHz\n", dev_priv->mem_freq);
+ 
+@@ -2030,8 +2033,10 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 	with_intel_runtime_pm_if_in_use(dev_priv, wakeref) {
+ 		if (IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv)) {
+ 			mutex_lock(&dev_priv->pcu_lock);
++			vlv_punit_get(dev_priv);
+ 			act_freq = vlv_punit_read(dev_priv,
+ 						  PUNIT_REG_GPU_FREQ_STS);
++			vlv_punit_put(dev_priv);
+ 			act_freq = (act_freq >> 8) & 0xff;
+ 			mutex_unlock(&dev_priv->pcu_lock);
+ 		} else {
+diff --git a/drivers/gpu/drm/i915/i915_sysfs.c b/drivers/gpu/drm/i915/i915_sysfs.c
+index 41313005af42..bfabb3de4808 100644
+--- a/drivers/gpu/drm/i915/i915_sysfs.c
++++ b/drivers/gpu/drm/i915/i915_sysfs.c
+@@ -259,25 +259,25 @@ static ssize_t gt_act_freq_mhz_show(struct device *kdev,
+ {
+ 	struct drm_i915_private *dev_priv = kdev_minor_to_i915(kdev);
+ 	intel_wakeref_t wakeref;
+-	int ret;
++	u32 freq;
+ 
+ 	wakeref = intel_runtime_pm_get(dev_priv);
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
+ 	if (IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv)) {
+-		u32 freq;
++		vlv_punit_get(dev_priv);
+ 		freq = vlv_punit_read(dev_priv, PUNIT_REG_GPU_FREQ_STS);
+-		ret = intel_gpu_freq(dev_priv, (freq >> 8) & 0xff);
++		vlv_punit_put(dev_priv);
++
++		freq = (freq >> 8) & 0xff;
+ 	} else {
+-		ret = intel_gpu_freq(dev_priv,
+-				     intel_get_cagf(dev_priv,
+-						    I915_READ(GEN6_RPSTAT1)));
++		freq = intel_get_cagf(dev_priv, I915_READ(GEN6_RPSTAT1));
+ 	}
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	intel_runtime_pm_put(dev_priv, wakeref);
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", ret);
++	return snprintf(buf, PAGE_SIZE, "%d\n", intel_gpu_freq(dev_priv, freq));
+ }
+ 
+ static ssize_t gt_cur_freq_mhz_show(struct device *kdev,
+diff --git a/drivers/gpu/drm/i915/intel_cdclk.c b/drivers/gpu/drm/i915/intel_cdclk.c
+index 5845d0a37599..9dd22203a7e8 100644
+--- a/drivers/gpu/drm/i915/intel_cdclk.c
++++ b/drivers/gpu/drm/i915/intel_cdclk.c
+@@ -464,13 +464,19 @@ static void vlv_get_cdclk(struct drm_i915_private *dev_priv,
+ {
+ 	u32 val;
+ 
++	mutex_lock(&dev_priv->pcu_lock);
++	vlv_iosf_sb_get(dev_priv,
++			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_PUNIT));
++
+ 	cdclk_state->vco = vlv_get_hpll_vco(dev_priv);
+ 	cdclk_state->cdclk = vlv_get_cck_clock(dev_priv, "cdclk",
+ 					       CCK_DISPLAY_CLOCK_CONTROL,
+ 					       cdclk_state->vco);
+ 
+-	mutex_lock(&dev_priv->pcu_lock);
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM);
++
++	vlv_iosf_sb_put(dev_priv,
++			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_PUNIT));
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	if (IS_VALLEYVIEW(dev_priv))
+@@ -545,6 +551,11 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
+ 	 */
+ 	wakeref = intel_display_power_get(dev_priv, POWER_DOMAIN_PIPE_A);
+ 
++	vlv_iosf_sb_get(dev_priv,
++			BIT(VLV_IOSF_SB_CCK) |
++			BIT(VLV_IOSF_SB_BUNIT) |
++			BIT(VLV_IOSF_SB_PUNIT));
++
+ 	mutex_lock(&dev_priv->pcu_lock);
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM);
+ 	val &= ~DSPFREQGUAR_MASK;
+@@ -557,9 +568,6 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
+ 	}
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+-	vlv_iosf_sb_get(dev_priv,
+-			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_BUNIT));
+-
+ 	if (cdclk == 400000) {
+ 		u32 divider;
+ 
+@@ -593,7 +601,9 @@ static void vlv_set_cdclk(struct drm_i915_private *dev_priv,
+ 	vlv_bunit_write(dev_priv, BUNIT_REG_BISOC, val);
+ 
+ 	vlv_iosf_sb_put(dev_priv,
+-			BIT(VLV_IOSF_SB_CCK) | BIT(VLV_IOSF_SB_BUNIT));
++			BIT(VLV_IOSF_SB_CCK) |
++			BIT(VLV_IOSF_SB_BUNIT) |
++			BIT(VLV_IOSF_SB_PUNIT));
+ 
+ 	intel_update_cdclk(dev_priv);
+ 
+@@ -630,6 +640,7 @@ static void chv_set_cdclk(struct drm_i915_private *dev_priv,
+ 	wakeref = intel_display_power_get(dev_priv, POWER_DOMAIN_PIPE_A);
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM);
+ 	val &= ~DSPFREQGUAR_MASK_CHV;
+ 	val |= (cmd << DSPFREQGUAR_SHIFT_CHV);
+@@ -639,6 +650,8 @@ static void chv_set_cdclk(struct drm_i915_private *dev_priv,
+ 		     50)) {
+ 		DRM_ERROR("timed out waiting for CDclk change\n");
+ 	}
++
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	intel_update_cdclk(dev_priv);
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 79f536112281..180d463571a1 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -152,10 +152,8 @@ int vlv_get_hpll_vco(struct drm_i915_private *dev_priv)
+ 	int hpll_freq, vco_freq[] = { 800, 1600, 2000, 2400 };
+ 
+ 	/* Obtain SKU information */
+-	vlv_cck_get(dev_priv);
+ 	hpll_freq = vlv_cck_read(dev_priv, CCK_FUSE_REG) &
+ 		CCK_FUSE_HPLL_FREQ_MASK;
+-	vlv_cck_put(dev_priv);
+ 
+ 	return vco_freq[hpll_freq] * 1000;
+ }
+@@ -166,10 +164,7 @@ int vlv_get_cck_clock(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 	int divider;
+ 
+-	vlv_cck_get(dev_priv);
+ 	val = vlv_cck_read(dev_priv, reg);
+-	vlv_cck_put(dev_priv);
+-
+ 	divider = val & CCK_FREQUENCY_VALUES;
+ 
+ 	WARN((val & CCK_FREQUENCY_STATUS) !=
+@@ -182,11 +177,18 @@ int vlv_get_cck_clock(struct drm_i915_private *dev_priv,
+ int vlv_get_cck_clock_hpll(struct drm_i915_private *dev_priv,
+ 			   const char *name, u32 reg)
+ {
++	int hpll;
++
++	vlv_cck_get(dev_priv);
++
+ 	if (dev_priv->hpll_freq == 0)
+ 		dev_priv->hpll_freq = vlv_get_hpll_vco(dev_priv);
+ 
+-	return vlv_get_cck_clock(dev_priv, name, reg,
+-				 dev_priv->hpll_freq);
++	hpll = vlv_get_cck_clock(dev_priv, name, reg, dev_priv->hpll_freq);
++
++	vlv_cck_put(dev_priv);
++
++	return hpll;
+ }
+ 
+ static void intel_update_czclk(struct drm_i915_private *dev_priv)
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 6c2f416b95a6..9db39ea9bd83 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -318,6 +318,7 @@ static void chv_set_memory_dvfs(struct drm_i915_private *dev_priv, bool enable)
+ 	u32 val;
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_DDR_SETUP2);
+ 	if (enable)
+@@ -332,6 +333,7 @@ static void chv_set_memory_dvfs(struct drm_i915_private *dev_priv, bool enable)
+ 		      FORCE_DDR_FREQ_REQ_ACK) == 0, 3))
+ 		DRM_ERROR("timed out waiting for Punit DDR DVFS request\n");
+ 
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ }
+ 
+@@ -340,6 +342,7 @@ static void chv_set_memory_pm5(struct drm_i915_private *dev_priv, bool enable)
+ 	u32 val;
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM);
+ 	if (enable)
+@@ -348,6 +351,7 @@ static void chv_set_memory_pm5(struct drm_i915_private *dev_priv, bool enable)
+ 		val &= ~DSP_MAXFIFO_PM5_ENABLE;
+ 	vlv_punit_write(dev_priv, PUNIT_REG_DSPSSPM, val);
+ 
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ }
+ 
+@@ -6140,6 +6144,7 @@ void vlv_wm_get_hw_state(struct drm_i915_private *dev_priv)
+ 
+ 	if (IS_CHERRYVIEW(dev_priv)) {
+ 		mutex_lock(&dev_priv->pcu_lock);
++		vlv_punit_get(dev_priv);
+ 
+ 		val = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM);
+ 		if (val & DSP_MAXFIFO_PM5_ENABLE)
+@@ -6169,6 +6174,7 @@ void vlv_wm_get_hw_state(struct drm_i915_private *dev_priv)
+ 				wm->level = VLV_WM_LEVEL_DDR_DVFS;
+ 		}
+ 
++		vlv_punit_put(dev_priv);
+ 		mutex_unlock(&dev_priv->pcu_lock);
+ 	}
+ 
+@@ -6743,7 +6749,9 @@ static int valleyview_set_rps(struct drm_i915_private *dev_priv, u8 val)
+ 	I915_WRITE(GEN6_PMINTRMSK, gen6_rps_pm_mask(dev_priv, val));
+ 
+ 	if (val != dev_priv->gt_pm.rps.cur_freq) {
++		vlv_punit_get(dev_priv);
+ 		err = vlv_punit_write(dev_priv, PUNIT_REG_GPU_FREQ_REQ, val);
++		vlv_punit_put(dev_priv);
+ 		if (err)
+ 			return err;
+ 
+@@ -7755,6 +7763,11 @@ static void valleyview_init_gt_powersave(struct drm_i915_private *dev_priv)
+ 
+ 	valleyview_setup_pctx(dev_priv);
+ 
++	vlv_iosf_sb_get(dev_priv,
++			BIT(VLV_IOSF_SB_PUNIT) |
++			BIT(VLV_IOSF_SB_NC) |
++			BIT(VLV_IOSF_SB_CCK));
++
+ 	vlv_init_gpll_ref_freq(dev_priv);
+ 
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_GPU_FREQ_STS);
+@@ -7792,6 +7805,11 @@ static void valleyview_init_gt_powersave(struct drm_i915_private *dev_priv)
+ 	DRM_DEBUG_DRIVER("min GPU freq: %d MHz (%u)\n",
+ 			 intel_gpu_freq(dev_priv, rps->min_freq),
+ 			 rps->min_freq);
++
++	vlv_iosf_sb_put(dev_priv,
++			BIT(VLV_IOSF_SB_PUNIT) |
++			BIT(VLV_IOSF_SB_NC) |
++			BIT(VLV_IOSF_SB_CCK));
+ }
+ 
+ static void cherryview_init_gt_powersave(struct drm_i915_private *dev_priv)
+@@ -7801,11 +7819,14 @@ static void cherryview_init_gt_powersave(struct drm_i915_private *dev_priv)
+ 
+ 	cherryview_setup_pctx(dev_priv);
+ 
++	vlv_iosf_sb_get(dev_priv,
++			BIT(VLV_IOSF_SB_PUNIT) |
++			BIT(VLV_IOSF_SB_NC) |
++			BIT(VLV_IOSF_SB_CCK));
++
+ 	vlv_init_gpll_ref_freq(dev_priv);
+ 
+-	vlv_cck_get(dev_priv);
+ 	val = vlv_cck_read(dev_priv, CCK_FUSE_REG);
+-	vlv_cck_put(dev_priv);
+ 
+ 	switch ((val >> 2) & 0x7) {
+ 	case 3:
+@@ -7838,6 +7859,11 @@ static void cherryview_init_gt_powersave(struct drm_i915_private *dev_priv)
+ 			 intel_gpu_freq(dev_priv, rps->min_freq),
+ 			 rps->min_freq);
+ 
++	vlv_iosf_sb_put(dev_priv,
++			BIT(VLV_IOSF_SB_PUNIT) |
++			BIT(VLV_IOSF_SB_NC) |
++			BIT(VLV_IOSF_SB_CCK));
++
+ 	WARN_ONCE((rps->max_freq | rps->efficient_freq | rps->rp1_freq |
+ 		   rps->min_freq) & 1,
+ 		  "Odd GPU freq values\n");
+@@ -7925,13 +7951,15 @@ static void cherryview_enable_rps(struct drm_i915_private *dev_priv)
+ 		   GEN6_RP_DOWN_IDLE_AVG);
+ 
+ 	/* Setting Fixed Bias */
+-	val = VLV_OVERRIDE_EN |
+-		  VLV_SOC_TDP_EN |
+-		  CHV_BIAS_CPU_50_SOC_50;
++	vlv_punit_get(dev_priv);
++
++	val = VLV_OVERRIDE_EN | VLV_SOC_TDP_EN | CHV_BIAS_CPU_50_SOC_50;
+ 	vlv_punit_write(dev_priv, VLV_TURBO_SOC_OVERRIDE, val);
+ 
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_GPU_FREQ_STS);
+ 
++	vlv_punit_put(dev_priv);
++
+ 	/* RPS code assumes GPLL is used */
+ 	WARN_ONCE((val & GPLLENABLE) == 0, "GPLL not enabled\n");
+ 
+@@ -8008,14 +8036,16 @@ static void valleyview_enable_rps(struct drm_i915_private *dev_priv)
+ 		   GEN6_RP_UP_BUSY_AVG |
+ 		   GEN6_RP_DOWN_IDLE_CONT);
+ 
++	vlv_punit_get(dev_priv);
++
+ 	/* Setting Fixed Bias */
+-	val = VLV_OVERRIDE_EN |
+-		  VLV_SOC_TDP_EN |
+-		  VLV_BIAS_CPU_125_SOC_875;
++	val = VLV_OVERRIDE_EN | VLV_SOC_TDP_EN | VLV_BIAS_CPU_125_SOC_875;
+ 	vlv_punit_write(dev_priv, VLV_TURBO_SOC_OVERRIDE, val);
+ 
+ 	val = vlv_punit_read(dev_priv, PUNIT_REG_GPU_FREQ_STS);
+ 
++	vlv_punit_put(dev_priv);
++
+ 	/* RPS code assumes GPLL is used */
+ 	WARN_ONCE((val & GPLLENABLE) == 0, "GPLL not enabled\n");
+ 
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index cca1d318ce56..d5e912209511 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -1201,6 +1201,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
+ 			 PUNIT_PWRGT_PWR_GATE(pw_idx);
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ #define COND \
+ 	((vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_STATUS) & mask) == state)
+@@ -1221,6 +1222,7 @@ static void vlv_set_power_well(struct drm_i915_private *dev_priv,
+ #undef COND
+ 
+ out:
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ }
+ 
+@@ -1249,6 +1251,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
+ 	ctrl = PUNIT_PWRGT_PWR_ON(pw_idx);
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ 	state = vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_STATUS) & mask;
+ 	/*
+@@ -1267,6 +1270,7 @@ static bool vlv_power_well_enabled(struct drm_i915_private *dev_priv,
+ 	ctrl = vlv_punit_read(dev_priv, PUNIT_REG_PWRGT_CTRL) & mask;
+ 	WARN_ON(ctrl != state);
+ 
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	return enabled;
+@@ -1754,6 +1758,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
+ 	u32 state, ctrl;
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ 	state = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM) & DP_SSS_MASK(pipe);
+ 	/*
+@@ -1770,6 +1775,7 @@ static bool chv_pipe_power_well_enabled(struct drm_i915_private *dev_priv,
+ 	ctrl = vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM) & DP_SSC_MASK(pipe);
+ 	WARN_ON(ctrl << 16 != state);
+ 
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	return enabled;
+@@ -1786,6 +1792,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
+ 	state = enable ? DP_SSS_PWR_ON(pipe) : DP_SSS_PWR_GATE(pipe);
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 
+ #define COND \
+ 	((vlv_punit_read(dev_priv, PUNIT_REG_DSPSSPM) & DP_SSS_MASK(pipe)) == state)
+@@ -1806,6 +1813,7 @@ static void chv_set_pipe_power_well(struct drm_i915_private *dev_priv,
+ #undef COND
+ 
+ out:
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ }
+ 
+@@ -4001,7 +4009,9 @@ static bool vlv_punit_is_power_gated(struct drm_i915_private *dev_priv, u32 reg0
+ 	bool ret;
+ 
+ 	mutex_lock(&dev_priv->pcu_lock);
++	vlv_punit_get(dev_priv);
+ 	ret = (vlv_punit_read(dev_priv, reg0) & SSPM0_SSC_MASK) == SSPM0_SSC_PWR_GATE;
++	vlv_punit_put(dev_priv);
+ 	mutex_unlock(&dev_priv->pcu_lock);
+ 
+ 	return ret;
+diff --git a/drivers/gpu/drm/i915/intel_sideband.c b/drivers/gpu/drm/i915/intel_sideband.c
+index b2fc605e2e29..7c33925f52f9 100644
+--- a/drivers/gpu/drm/i915/intel_sideband.c
++++ b/drivers/gpu/drm/i915/intel_sideband.c
+@@ -145,30 +145,18 @@ u32 vlv_punit_read(struct drm_i915_private *i915, u32 addr)
+ 
+ 	lockdep_assert_held(&i915->pcu_lock);
+ 
+-	vlv_punit_get(i915);
+-
+ 	vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_PUNIT,
+ 			SB_CRRDDA_NP, addr, &val);
+ 
+-	vlv_punit_put(i915);
+-
+ 	return val;
+ }
+ 
+ int vlv_punit_write(struct drm_i915_private *i915, u32 addr, u32 val)
+ {
+-	int err;
+-
+ 	lockdep_assert_held(&i915->pcu_lock);
+ 
+-	vlv_punit_get(i915);
+-
+-	err = vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_PUNIT,
+-			      SB_CRWRDA_NP, addr, &val);
+-
+-	vlv_punit_put(i915);
+-
+-	return err;
++	return vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_PUNIT,
++			       SB_CRWRDA_NP, addr, &val);
+ }
+ 
+ u32 vlv_bunit_read(struct drm_i915_private *i915, u32 reg)
+@@ -191,10 +179,8 @@ u32 vlv_nc_read(struct drm_i915_private *i915, u8 addr)
+ {
+ 	u32 val = 0;
+ 
+-	vlv_nc_get(i915);
+ 	vlv_sideband_rw(i915, PCI_DEVFN(0, 0), IOSF_PORT_NC,
+ 			SB_CRRDDA_NP, addr, &val);
+-	vlv_nc_put(i915);
+ 
+ 	return val;
+ }
+-- 
+2.17.1
+

@@ -1,0 +1,218 @@
+From aceadd60548ab927ab93554135c057f52c40be11 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 24 Apr 2019 21:07:15 +0100
+Subject: [PATCH 025/186] drm/i915: Introduce context->enter() and
+ context->exit()
+
+We wish to start segregating the power management into different control
+domains, both with respect to the hardware and the user interface. The
+first step is that at the lowest level flow of requests, we want to
+process a context event (and not a global GEM operation). In this patch,
+we introduce the context callbacks that in future patches will be
+redirected to per-engine interfaces leading to global operations as
+required.
+
+The intent is that this will be guarded by the timeline->mutex, except
+that retiring has not quite finished transitioning over from being
+guarded by struct_mutex. So at the moment it is protected by
+struct_mutex with a reminded to switch.
+
+v2: Rename default handlers to intel_context_enter_engine.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190424200717.1686-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_context.c       | 17 ++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_context.h       | 21 ++++++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_context_types.h |  5 +++++
+ drivers/gpu/drm/i915/gt/intel_lrc.c           |  3 +++
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c    |  3 +++
+ drivers/gpu/drm/i915/gt/mock_engine.c         |  3 +++
+ drivers/gpu/drm/i915/i915_request.c           | 22 ++++---------------
+ 7 files changed, 56 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index cea843f5cf9f..ef3eb3a5624a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -267,3 +267,20 @@ int __init i915_global_context_init(void)
+ 	i915_global_register(&global.base);
+ 	return 0;
+ }
++
++void intel_context_enter_engine(struct intel_context *ce)
++{
++	struct drm_i915_private *i915 = ce->gem_context->i915;
++
++	if (!i915->gt.active_requests++)
++		i915_gem_unpark(i915);
++}
++
++void intel_context_exit_engine(struct intel_context *ce)
++{
++	struct drm_i915_private *i915 = ce->gem_context->i915;
++
++	GEM_BUG_ON(!i915->gt.active_requests);
++	if (!--i915->gt.active_requests)
++		i915_gem_park(i915);
++}
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.h b/drivers/gpu/drm/i915/gt/intel_context.h
+index ebc861b1a49e..b732cf99efcb 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.h
++++ b/drivers/gpu/drm/i915/gt/intel_context.h
+@@ -73,6 +73,27 @@ static inline void __intel_context_pin(struct intel_context *ce)
+ 
+ void intel_context_unpin(struct intel_context *ce);
+ 
++void intel_context_enter_engine(struct intel_context *ce);
++void intel_context_exit_engine(struct intel_context *ce);
++
++static inline void intel_context_enter(struct intel_context *ce)
++{
++	if (!ce->active_count++)
++		ce->ops->enter(ce);
++}
++
++static inline void intel_context_mark_active(struct intel_context *ce)
++{
++	++ce->active_count;
++}
++
++static inline void intel_context_exit(struct intel_context *ce)
++{
++	GEM_BUG_ON(!ce->active_count);
++	if (!--ce->active_count)
++		ce->ops->exit(ce);
++}
++
+ static inline struct intel_context *intel_context_get(struct intel_context *ce)
+ {
+ 	kref_get(&ce->ref);
+diff --git a/drivers/gpu/drm/i915/gt/intel_context_types.h b/drivers/gpu/drm/i915/gt/intel_context_types.h
+index 9b9e3b7f5af8..53ff30cdfc24 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_context_types.h
+@@ -26,6 +26,9 @@ struct intel_context_ops {
+ 	int (*pin)(struct intel_context *ce);
+ 	void (*unpin)(struct intel_context *ce);
+ 
++	void (*enter)(struct intel_context *ce);
++	void (*exit)(struct intel_context *ce);
++
+ 	void (*reset)(struct intel_context *ce);
+ 	void (*destroy)(struct kref *kref);
+ };
+@@ -47,6 +50,8 @@ struct intel_context {
+ 	u32 *lrc_reg_state;
+ 	u64 lrc_desc;
+ 
++	unsigned int active_count; /* notionally protected by timeline->mutex */
++
+ 	atomic_t pin_count;
+ 	struct mutex pin_mutex; /* guards pinning and associated on-gpuing */
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index c5099f584c21..b2677317b07c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1315,6 +1315,9 @@ static const struct intel_context_ops execlists_context_ops = {
+ 	.pin = execlists_context_pin,
+ 	.unpin = execlists_context_unpin,
+ 
++	.enter = intel_context_enter_engine,
++	.exit = intel_context_exit_engine,
++
+ 	.reset = execlists_context_reset,
+ 	.destroy = execlists_context_destroy,
+ };
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index ac84a383748e..5404fe382691 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1510,6 +1510,9 @@ static const struct intel_context_ops ring_context_ops = {
+ 	.pin = ring_context_pin,
+ 	.unpin = ring_context_unpin,
+ 
++	.enter = intel_context_enter_engine,
++	.exit = intel_context_exit_engine,
++
+ 	.reset = ring_context_reset,
+ 	.destroy = ring_context_destroy,
+ };
+diff --git a/drivers/gpu/drm/i915/gt/mock_engine.c b/drivers/gpu/drm/i915/gt/mock_engine.c
+index 414afd2f27fe..bcfeb0c67997 100644
+--- a/drivers/gpu/drm/i915/gt/mock_engine.c
++++ b/drivers/gpu/drm/i915/gt/mock_engine.c
+@@ -157,6 +157,9 @@ static const struct intel_context_ops mock_context_ops = {
+ 	.pin = mock_context_pin,
+ 	.unpin = mock_context_unpin,
+ 
++	.enter = intel_context_enter_engine,
++	.exit = intel_context_exit_engine,
++
+ 	.destroy = mock_context_destroy,
+ };
+ 
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 102fa4f25bd3..4a2435974308 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -131,19 +131,6 @@ i915_request_remove_from_client(struct i915_request *request)
+ 	spin_unlock(&file_priv->mm.lock);
+ }
+ 
+-static void reserve_gt(struct drm_i915_private *i915)
+-{
+-	if (!i915->gt.active_requests++)
+-		i915_gem_unpark(i915);
+-}
+-
+-static void unreserve_gt(struct drm_i915_private *i915)
+-{
+-	GEM_BUG_ON(!i915->gt.active_requests);
+-	if (!--i915->gt.active_requests)
+-		i915_gem_park(i915);
+-}
+-
+ static void advance_ring(struct i915_request *request)
+ {
+ 	struct intel_ring *ring = request->ring;
+@@ -301,11 +288,10 @@ static void i915_request_retire(struct i915_request *request)
+ 
+ 	i915_request_remove_from_client(request);
+ 
+-	intel_context_unpin(request->hw_context);
+-
+ 	__retire_engine_upto(request->engine, request);
+ 
+-	unreserve_gt(request->i915);
++	intel_context_exit(request->hw_context);
++	intel_context_unpin(request->hw_context);
+ 
+ 	i915_sched_node_fini(&request->sched);
+ 	i915_request_put(request);
+@@ -660,8 +646,8 @@ i915_request_alloc(struct intel_engine_cs *engine, struct i915_gem_context *ctx)
+ 	if (IS_ERR(ce))
+ 		return ERR_CAST(ce);
+ 
+-	reserve_gt(i915);
+ 	mutex_lock(&ce->ring->timeline->mutex);
++	intel_context_enter(ce);
+ 
+ 	/* Move our oldest request to the slab-cache (if not in use!) */
+ 	rq = list_first_entry(&ce->ring->request_list, typeof(*rq), ring_link);
+@@ -792,8 +778,8 @@ i915_request_alloc(struct intel_engine_cs *engine, struct i915_gem_context *ctx)
+ err_free:
+ 	kmem_cache_free(global.slab_requests, rq);
+ err_unreserve:
++	intel_context_exit(ce);
+ 	mutex_unlock(&ce->ring->timeline->mutex);
+-	unreserve_gt(i915);
+ 	intel_context_unpin(ce);
+ 	return ERR_PTR(ret);
+ }
+-- 
+2.17.1
+

@@ -1,0 +1,314 @@
+From 025cf07a2ece8a2436c057926fe16b789f25f40a Mon Sep 17 00:00:00 2001
+From: Piotr Maziarz <piotrx.maziarz@intel.com>
+Date: Fri, 10 May 2019 15:33:35 +0200
+Subject: [PATCH 020/150] ASoC: Intel: Skylake: Update firmware manifest
+ parsing mechanism
+
+Since not only "UUIDs" are taken from FW manifest, current parsing
+member names are misleading, so rename them.
+
+This patch also fixes bug in counting FW size.
+
+Change-Id: I1918be28332589a23754922f26b662a96c4f53d4
+Signed-off-by: Piotr Maziarz <piotrx.maziarz@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c       |  6 +--
+ sound/soc/intel/skylake/cnl-sst.c       |  7 ++--
+ sound/soc/intel/skylake/skl-pcm.c       |  6 +--
+ sound/soc/intel/skylake/skl-sst-dsp.h   |  5 +--
+ sound/soc/intel/skylake/skl-sst-utils.c | 53 +++++++++----------------
+ sound/soc/intel/skylake/skl-sst.c       |  8 ++--
+ sound/soc/intel/skylake/skl.h           |  2 +-
+ 7 files changed, 34 insertions(+), 53 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index e0d68ded6742..3f88c4837358 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -204,9 +204,9 @@ static int bxt_load_base_firmware(struct sst_dsp *ctx)
+ 		}
+ 	}
+ 
+-	/* prase uuids on first boot */
+ 	if (skl->is_first_boot) {
+-		ret = snd_skl_parse_uuids(ctx, ctx->fw, BXT_ADSP_FW_BIN_HDR_OFFSET, 0);
++		ret = snd_skl_parse_manifest(ctx, ctx->fw,
++						BXT_ADSP_FW_BIN_HDR_OFFSET, 0);
+ 		if (ret < 0)
+ 			goto sst_load_base_firmware_failed;
+ 	}
+@@ -633,7 +633,7 @@ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 	skl_release_library(skl->lib_info, skl->lib_count);
+ 	if (skl->dsp->fw)
+ 		release_firmware(skl->dsp->fw);
+-	skl_freeup_uuid_list(skl);
++	list_del_init(&skl->module_list);
+ 	skl_ipc_free(&skl->ipc);
+ 	skl->dsp->ops->free(skl->dsp);
+ }
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index 092fa3287b70..f334054ac765 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -129,10 +129,9 @@ static int cnl_load_base_firmware(struct sst_dsp *ctx)
+ 		}
+ 	}
+ 
+-	/* parse uuids if first boot */
+ 	if (cnl->is_first_boot) {
+-		ret = snd_skl_parse_uuids(ctx, ctx->fw,
+-					  CNL_ADSP_FW_HDR_OFFSET, 0);
++		ret = snd_skl_parse_manifest(ctx, ctx->fw,
++						CNL_ADSP_FW_HDR_OFFSET, 0);
+ 		if (ret < 0)
+ 			goto cnl_load_base_firmware_failed;
+ 	}
+@@ -487,7 +486,7 @@ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 	if (skl->dsp->fw)
+ 		release_firmware(skl->dsp->fw);
+ 
+-	skl_freeup_uuid_list(skl);
++	list_del_init(&skl->module_list);
+ 	cnl_ipc_free(&skl->ipc);
+ 
+ 	skl->dsp->ops->free(skl->dsp);
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 1ed302d2b143..8764dd121908 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -1337,12 +1337,12 @@ static int skl_get_module_info(struct skl_dev *skl, struct skl_module_cfg *mconf
+ 
+ 	uuid_mod = (uuid_le *)mconfig->guid;
+ 
+-	if (list_empty(&skl->uuid_list)) {
++	if (list_empty(&skl->module_list)) {
+ 		dev_err(skl->dev, "Module list is empty\n");
+ 		return -EIO;
+ 	}
+ 
+-	list_for_each_entry(module, &skl->uuid_list, list) {
++	list_for_each_entry(module, &skl->module_list, list) {
+ 		if (uuid_le_cmp(*uuid_mod, module->uuid) == 0) {
+ 			mconfig->id.module_id = module->id;
+ 			if (mconfig->module)
+@@ -1369,7 +1369,7 @@ static int skl_get_module_info(struct skl_dev *skl, struct skl_module_cfg *mconf
+ 	if (skl->nr_modules && ret)
+ 		return ret;
+ 
+-	list_for_each_entry(module, &skl->uuid_list, list) {
++	list_for_each_entry(module, &skl->module_list, list) {
+ 		for (i = 0; i < MAX_IN_QUEUE; i++) {
+ 			pin_id = &mconfig->m_in_pin[i].id;
+ 			if (!uuid_le_cmp(pin_id->mod_uuid, module->uuid))
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index aeefeb2e6b06..c8e00fe0241a 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -239,13 +239,12 @@ int bxt_sst_init_fw(struct device *dev, struct skl_dev *skl);
+ void skl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl);
+ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl);
+ 
+-int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+-				unsigned int offset, int index);
++int snd_skl_parse_manifest(struct sst_dsp *ctx, const struct firmware *fw,
++			      unsigned int offset, int index);
+ int skl_get_pvt_id(struct skl_dev *skl, uuid_le *uuid_mod, int instance_id);
+ int skl_put_pvt_id(struct skl_dev *skl, uuid_le *uuid_mod, int *pvt_id);
+ int skl_get_pvt_instance_id_map(struct skl_dev *skl,
+ 				int module_id, int instance_id);
+-void skl_freeup_uuid_list(struct skl_dev *skl);
+ 
+ int skl_dsp_strip_extended_manifest(struct firmware *fw);
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst-utils.c b/sound/soc/intel/skylake/skl-sst-utils.c
+index a21c9da75e43..f7878941357d 100644
+--- a/sound/soc/intel/skylake/skl-sst-utils.c
++++ b/sound/soc/intel/skylake/skl-sst-utils.c
+@@ -119,7 +119,7 @@ int skl_get_pvt_instance_id_map(struct skl_dev *skl,
+ {
+ 	struct uuid_module *module;
+ 
+-	list_for_each_entry(module, &skl->uuid_list, list) {
++	list_for_each_entry(module, &skl->module_list, list) {
+ 		if (module->id == module_id)
+ 			return skl_get_pvtid_map(module, instance_id);
+ 	}
+@@ -190,7 +190,7 @@ int skl_get_pvt_id(struct skl_dev *skl, uuid_le *uuid_mod, int instance_id)
+ 	struct uuid_module *module;
+ 	int pvt_id;
+ 
+-	list_for_each_entry(module, &skl->uuid_list, list) {
++	list_for_each_entry(module, &skl->module_list, list) {
+ 		if (uuid_le_cmp(*uuid_mod, module->uuid) == 0) {
+ 
+ 			pvt_id = skl_pvtid_128(module);
+@@ -220,7 +220,7 @@ int skl_put_pvt_id(struct skl_dev *skl, uuid_le *uuid_mod, int *pvt_id)
+ 	int i;
+ 	struct uuid_module *module;
+ 
+-	list_for_each_entry(module, &skl->uuid_list, list) {
++	list_for_each_entry(module, &skl->module_list, list) {
+ 		if (uuid_le_cmp(*uuid_mod, module->uuid) == 0) {
+ 
+ 			if (*pvt_id != 0)
+@@ -242,7 +242,7 @@ EXPORT_SYMBOL_GPL(skl_put_pvt_id);
+  * Parse the firmware binary to get the UUID, module id
+  * and loadable flags
+  */
+-int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
++int snd_skl_parse_manifest(struct sst_dsp *ctx, const struct firmware *fw,
+ 			unsigned int offset, int index)
+ {
+ 	struct adsp_fw_hdr *adsp_hdr;
+@@ -254,7 +254,6 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 	struct uuid_module *module;
+ 	struct firmware stripped_fw;
+ 	unsigned int safe_file;
+-	int ret = 0;
+ 
+ 	/* Get the FW pointer to derive ADSP header */
+ 	stripped_fw.data = fw->data;
+@@ -272,17 +271,11 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 	}
+ 
+ 	adsp_hdr = (struct adsp_fw_hdr *)(buf + offset);
+-
+-	/* check 1st module entry is in file */
+-	safe_file += adsp_hdr->len + sizeof(*mod_entry);
+-	if (stripped_fw.size <= safe_file) {
+-		dev_err(ctx->dev, "Small fw file size, No module entry\n");
++	if (adsp_hdr->len != sizeof(*adsp_hdr)) {
++		dev_err(ctx->dev, "Header corrupted or unsupported FW version\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	mod_entry = (struct adsp_module_entry *)
+-		(buf + offset + adsp_hdr->len);
+-
+ 	num_entry = adsp_hdr->num_modules;
+ 
+ 	/* check all entries are in file */
+@@ -292,6 +285,8 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 		return -EINVAL;
+ 	}
+ 
++	mod_entry = (struct adsp_module_entry *)
++		(buf + offset + adsp_hdr->len);
+ 
+ 	/*
+ 	 * Read the UUID(GUID) from FW Manifest.
+@@ -302,10 +297,10 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 	 */
+ 
+ 	for (i = 0; i < num_entry; i++, mod_entry++) {
+-		module = kzalloc(sizeof(*module), GFP_KERNEL);
++		module = devm_kzalloc(ctx->dev, sizeof(*module), GFP_KERNEL);
+ 		if (!module) {
+-			ret = -ENOMEM;
+-			goto free_uuid_list;
++			list_del_init(&skl->module_list);
++			return -ENOMEM;
+ 		}
+ 
+ 		uuid_bin = (uuid_le *)mod_entry->uuid.id;
+@@ -317,11 +312,11 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 		size = sizeof(int) * mod_entry->instance_max_count;
+ 		module->instance_id = devm_kzalloc(ctx->dev, size, GFP_KERNEL);
+ 		if (!module->instance_id) {
+-			ret = -ENOMEM;
+-			goto free_uuid_list;
++			list_del_init(&skl->module_list);
++			return -ENOMEM;
+ 		}
+ 
+-		list_add_tail(&module->list, &skl->uuid_list);
++		list_add_tail(&module->list, &skl->module_list);
+ 
+ 		dev_dbg(ctx->dev,
+ 			"Adding uuid :%pUL   mod id: %d  Loadable: %d\n",
+@@ -329,21 +324,8 @@ int snd_skl_parse_uuids(struct sst_dsp *ctx, const struct firmware *fw,
+ 	}
+ 
+ 	return 0;
+-
+-free_uuid_list:
+-	skl_freeup_uuid_list(skl);
+-	return ret;
+-}
+-
+-void skl_freeup_uuid_list(struct skl_dev *skl)
+-{
+-	struct uuid_module *uuid, *_uuid;
+-
+-	list_for_each_entry_safe(uuid, _uuid, &skl->uuid_list, list) {
+-		list_del(&uuid->list);
+-		kfree(uuid);
+-	}
+ }
++EXPORT_SYMBOL(snd_skl_parse_manifest);
+ 
+ /*
+  * some firmware binary contains some extended manifest. This needs
+@@ -382,7 +364,7 @@ int skl_sst_ctx_init(struct device *dev, int irq, const char *fw_name,
+ 
+ 	skl->dev = dev;
+ 	skl_dev->thread_context = skl;
+-	INIT_LIST_HEAD(&skl->uuid_list);
++	INIT_LIST_HEAD(&skl->module_list);
+ 	skl->dsp = skl_dsp_ctx_init(dev, skl_dev, irq);
+ 	if (!skl->dsp) {
+ 		dev_err(skl->dev, "%s: no device\n", __func__);
+@@ -418,7 +400,8 @@ int skl_prepare_lib_load(struct skl_dev *skl, struct skl_lib_info *linfo,
+ 	}
+ 
+ 	if (skl->is_first_boot) {
+-		ret = snd_skl_parse_uuids(dsp, linfo->fw, hdr_offset, index);
++		ret = snd_skl_parse_manifest(dsp, linfo->fw, hdr_offset,
++						index);
+ 		if (ret < 0)
+ 			return ret;
+ 	}
+diff --git a/sound/soc/intel/skylake/skl-sst.c b/sound/soc/intel/skylake/skl-sst.c
+index 365dad7774e9..3de0d47b3558 100644
+--- a/sound/soc/intel/skylake/skl-sst.c
++++ b/sound/soc/intel/skylake/skl-sst.c
+@@ -90,11 +90,11 @@ static int skl_load_base_firmware(struct sst_dsp *ctx)
+ 		}
+ 	}
+ 
+-	/* prase uuids on first boot */
+ 	if (skl->is_first_boot) {
+-		ret = snd_skl_parse_uuids(ctx, ctx->fw, SKL_ADSP_FW_BIN_HDR_OFFSET, 0);
++		ret = snd_skl_parse_manifest(ctx, ctx->fw,
++						SKL_ADSP_FW_BIN_HDR_OFFSET, 0);
+ 		if (ret < 0) {
+-			dev_err(ctx->dev, "UUID parsing err: %d\n", ret);
++			dev_err(ctx->dev, "Manifest parsing err: %d\n", ret);
+ 			release_firmware(ctx->fw);
+ 			skl_dsp_disable_core(ctx, SKL_DSP_CORE0_MASK);
+ 			return ret;
+@@ -598,7 +598,7 @@ void skl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 	if (skl->dsp->fw)
+ 		release_firmware(skl->dsp->fw);
+ 	skl_clear_module_table(skl->dsp);
+-	skl_freeup_uuid_list(skl);
++	list_del_init(&skl->module_list);
+ 	skl_ipc_free(&skl->ipc);
+ 	skl->dsp->ops->free(skl->dsp);
+ 	if (skl->boot_complete) {
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index e478454da71e..2fbab28f8346 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -119,7 +119,7 @@ struct skl_dev {
+ 	bool miscbdcg_disabled;
+ 
+ 	/* Populate module information */
+-	struct list_head uuid_list;
++	struct list_head module_list;
+ 
+ 	/* Is firmware loaded */
+ 	bool fw_loaded;
+-- 
+2.17.1
+

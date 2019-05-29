@@ -1,0 +1,616 @@
+From 4c4a7e09cf3c9cd9f63b59938b021d43334f2f3f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 21 May 2019 22:11:33 +0100
+Subject: [PATCH 175/186] drm/i915/execlists: Virtual engine bonding
+
+Some users require that when a master batch is executed on one particular
+engine, a companion batch is run simultaneously on a specific slave
+engine. For this purpose, we introduce virtual engine bonding, allowing
+maps of master:slaves to be constructed to constrain which physical
+engines a virtual engine may select given a fence on a master engine.
+
+For the moment, we continue to ignore the issue of preemption deferring
+the master request for later. Ideally, we would like to then also remove
+the slave and run something else rather than have it stall the pipeline.
+With load balancing, we should be able to move workload around it, but
+there is a similar stall on the master pipeline while it may wait for
+the slave to be executed. At the cost of more latency for the bonded
+request, it may be interesting to launch both on their engines in
+lockstep. (Bubbles abound.)
+
+Opens: Also what about bonding an engine as its own master? It doesn't
+break anything internally, so allow the silliness.
+
+v2: Emancipate the bonds
+v3: Couple in delayed scheduling for the selftests
+v4: Handle invalid mutually exclusive bonding
+v5: Mention what the uapi does
+v6: s/nbond/num_bonds/
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190521211134.16117-9-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine_types.h  |   7 +
+ drivers/gpu/drm/i915/gt/intel_lrc.c           |  98 +++++++++
+ drivers/gpu/drm/i915/gt/intel_lrc.h           |   4 +
+ drivers/gpu/drm/i915/gt/selftest_lrc.c        | 191 ++++++++++++++++++
+ drivers/gpu/drm/i915/i915_gem_context.c       |  84 ++++++++
+ drivers/gpu/drm/i915/selftests/lib_sw_fence.c |   3 +
+ include/uapi/drm/i915_drm.h                   |  44 ++++
+ 7 files changed, 431 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_types.h b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+index 7b47e00fa082..f3fc2e8acc90 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+@@ -405,6 +405,13 @@ struct intel_engine_cs {
+ 	 */
+ 	void		(*submit_request)(struct i915_request *rq);
+ 
++	/*
++	 * Called on signaling of a SUBMIT_FENCE, passing along the signaling
++	 * request down to the bonded pairs.
++	 */
++	void            (*bond_execute)(struct i915_request *rq,
++					struct dma_fence *signal);
++
+ 	/*
+ 	 * Call when the priority on a request has changed and it and its
+ 	 * dependencies may need rescheduling. Note the request itself may
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 0b4d29d4816b..1f7bee0cae0c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -189,6 +189,18 @@ struct virtual_engine {
+ 		int prio;
+ 	} nodes[I915_NUM_ENGINES];
+ 
++	/*
++	 * Keep track of bonded pairs -- restrictions upon on our selection
++	 * of physical engines any particular request may be submitted to.
++	 * If we receive a submit-fence from a master engine, we will only
++	 * use one of sibling_mask physical engines.
++	 */
++	struct ve_bond {
++		const struct intel_engine_cs *master;
++		intel_engine_mask_t sibling_mask;
++	} *bonds;
++	unsigned int num_bonds;
++
+ 	/* And finally, which physical engines this virtual engine maps onto. */
+ 	unsigned int num_siblings;
+ 	struct intel_engine_cs *siblings[0];
+@@ -960,6 +972,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
+ 			rb_erase_cached(rb, &execlists->virtual);
+ 			RB_CLEAR_NODE(rb);
+ 
++			GEM_BUG_ON(!(rq->execution_mask & engine->mask));
+ 			rq->engine = engine;
+ 
+ 			if (engine != ve->siblings[0]) {
+@@ -3069,6 +3082,8 @@ static void virtual_context_destroy(struct kref *kref)
+ 	if (ve->context.state)
+ 		__execlists_context_fini(&ve->context);
+ 
++	kfree(ve->bonds);
++
+ 	i915_timeline_fini(&ve->base.timeline);
+ 	kfree(ve);
+ }
+@@ -3265,6 +3280,38 @@ static void virtual_submit_request(struct i915_request *rq)
+ 	tasklet_schedule(&ve->base.execlists.tasklet);
+ }
+ 
++static struct ve_bond *
++virtual_find_bond(struct virtual_engine *ve,
++		  const struct intel_engine_cs *master)
++{
++	int i;
++
++	for (i = 0; i < ve->num_bonds; i++) {
++		if (ve->bonds[i].master == master)
++			return &ve->bonds[i];
++	}
++
++	return NULL;
++}
++
++static void
++virtual_bond_execute(struct i915_request *rq, struct dma_fence *signal)
++{
++	struct virtual_engine *ve = to_virtual_engine(rq->engine);
++	struct ve_bond *bond;
++
++	bond = virtual_find_bond(ve, to_request(signal)->engine);
++	if (bond) {
++		intel_engine_mask_t old, new, cmp;
++
++		cmp = READ_ONCE(rq->execution_mask);
++		do {
++			old = cmp;
++			new = cmp & bond->sibling_mask;
++		} while ((cmp = cmpxchg(&rq->execution_mask, old, new)) != old);
++	}
++}
++
+ struct intel_context *
+ intel_execlists_create_virtual(struct i915_gem_context *ctx,
+ 			       struct intel_engine_cs **siblings,
+@@ -3305,6 +3352,7 @@ intel_execlists_create_virtual(struct i915_gem_context *ctx,
+ 
+ 	ve->base.schedule = i915_schedule;
+ 	ve->base.submit_request = virtual_submit_request;
++	ve->base.bond_execute = virtual_bond_execute;
+ 
+ 	ve->base.execlists.queue_priority_hint = INT_MIN;
+ 	tasklet_init(&ve->base.execlists.tasklet,
+@@ -3394,9 +3442,59 @@ intel_execlists_clone_virtual(struct i915_gem_context *ctx,
+ 	if (IS_ERR(dst))
+ 		return dst;
+ 
++	if (se->num_bonds) {
++		struct virtual_engine *de = to_virtual_engine(dst->engine);
++
++		de->bonds = kmemdup(se->bonds,
++				    sizeof(*se->bonds) * se->num_bonds,
++				    GFP_KERNEL);
++		if (!de->bonds) {
++			intel_context_put(dst);
++			return ERR_PTR(-ENOMEM);
++		}
++
++		de->num_bonds = se->num_bonds;
++	}
++
+ 	return dst;
+ }
+ 
++int intel_virtual_engine_attach_bond(struct intel_engine_cs *engine,
++				     const struct intel_engine_cs *master,
++				     const struct intel_engine_cs *sibling)
++{
++	struct virtual_engine *ve = to_virtual_engine(engine);
++	struct ve_bond *bond;
++	int n;
++
++	/* Sanity check the sibling is part of the virtual engine */
++	for (n = 0; n < ve->num_siblings; n++)
++		if (sibling == ve->siblings[n])
++			break;
++	if (n == ve->num_siblings)
++		return -EINVAL;
++
++	bond = virtual_find_bond(ve, master);
++	if (bond) {
++		bond->sibling_mask |= sibling->mask;
++		return 0;
++	}
++
++	bond = krealloc(ve->bonds,
++			sizeof(*bond) * (ve->num_bonds + 1),
++			GFP_KERNEL);
++	if (!bond)
++		return -ENOMEM;
++
++	bond[ve->num_bonds].master = master;
++	bond[ve->num_bonds].sibling_mask = sibling->mask;
++
++	ve->bonds = bond;
++	ve->num_bonds++;
++
++	return 0;
++}
++
+ void intel_execlists_show_requests(struct intel_engine_cs *engine,
+ 				   struct drm_printer *m,
+ 				   void (*show_request)(struct drm_printer *m,
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.h b/drivers/gpu/drm/i915/gt/intel_lrc.h
+index 5530606052e5..e029aee87adf 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.h
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.h
+@@ -123,4 +123,8 @@ struct intel_context *
+ intel_execlists_clone_virtual(struct i915_gem_context *ctx,
+ 			      struct intel_engine_cs *src);
+ 
++int intel_virtual_engine_attach_bond(struct intel_engine_cs *engine,
++				     const struct intel_engine_cs *master,
++				     const struct intel_engine_cs *sibling);
++
+ #endif /* _INTEL_LRC_H_ */
+diff --git a/drivers/gpu/drm/i915/gt/selftest_lrc.c b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+index 61637f525690..a8c50900e2d4 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_lrc.c
++++ b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+@@ -13,6 +13,7 @@
+ #include "selftests/igt_gem_utils.h"
+ #include "selftests/igt_live_test.h"
+ #include "selftests/igt_spinner.h"
++#include "selftests/lib_sw_fence.h"
+ #include "selftests/mock_context.h"
+ 
+ static int live_sanitycheck(void *arg)
+@@ -1619,6 +1620,195 @@ static int live_virtual_mask(void *arg)
+ 	return err;
+ }
+ 
++static int bond_virtual_engine(struct drm_i915_private *i915,
++			       unsigned int class,
++			       struct intel_engine_cs **siblings,
++			       unsigned int nsibling,
++			       unsigned int flags)
++#define BOND_SCHEDULE BIT(0)
++{
++	struct intel_engine_cs *master;
++	struct i915_gem_context *ctx;
++	struct i915_request *rq[16];
++	enum intel_engine_id id;
++	unsigned long n;
++	int err;
++
++	GEM_BUG_ON(nsibling >= ARRAY_SIZE(rq) - 1);
++
++	ctx = kernel_context(i915);
++	if (!ctx)
++		return -ENOMEM;
++
++	err = 0;
++	rq[0] = ERR_PTR(-ENOMEM);
++	for_each_engine(master, i915, id) {
++		struct i915_sw_fence fence = {};
++
++		if (master->class == class)
++			continue;
++
++		memset_p((void *)rq, ERR_PTR(-EINVAL), ARRAY_SIZE(rq));
++
++		rq[0] = igt_request_alloc(ctx, master);
++		if (IS_ERR(rq[0])) {
++			err = PTR_ERR(rq[0]);
++			goto out;
++		}
++		i915_request_get(rq[0]);
++
++		if (flags & BOND_SCHEDULE) {
++			onstack_fence_init(&fence);
++			err = i915_sw_fence_await_sw_fence_gfp(&rq[0]->submit,
++							       &fence,
++							       GFP_KERNEL);
++		}
++		i915_request_add(rq[0]);
++		if (err < 0)
++			goto out;
++
++		for (n = 0; n < nsibling; n++) {
++			struct intel_context *ve;
++
++			ve = intel_execlists_create_virtual(ctx,
++							    siblings,
++							    nsibling);
++			if (IS_ERR(ve)) {
++				err = PTR_ERR(ve);
++				onstack_fence_fini(&fence);
++				goto out;
++			}
++
++			err = intel_virtual_engine_attach_bond(ve->engine,
++							       master,
++							       siblings[n]);
++			if (err) {
++				intel_context_put(ve);
++				onstack_fence_fini(&fence);
++				goto out;
++			}
++
++			err = intel_context_pin(ve);
++			intel_context_put(ve);
++			if (err) {
++				onstack_fence_fini(&fence);
++				goto out;
++			}
++
++			rq[n + 1] = i915_request_create(ve);
++			intel_context_unpin(ve);
++			if (IS_ERR(rq[n + 1])) {
++				err = PTR_ERR(rq[n + 1]);
++				onstack_fence_fini(&fence);
++				goto out;
++			}
++			i915_request_get(rq[n + 1]);
++
++			err = i915_request_await_execution(rq[n + 1],
++							   &rq[0]->fence,
++							   ve->engine->bond_execute);
++			i915_request_add(rq[n + 1]);
++			if (err < 0) {
++				onstack_fence_fini(&fence);
++				goto out;
++			}
++		}
++		onstack_fence_fini(&fence);
++
++		if (i915_request_wait(rq[0],
++				      I915_WAIT_LOCKED,
++				      HZ / 10) < 0) {
++			pr_err("Master request did not execute (on %s)!\n",
++			       rq[0]->engine->name);
++			err = -EIO;
++			goto out;
++		}
++
++		for (n = 0; n < nsibling; n++) {
++			if (i915_request_wait(rq[n + 1],
++					      I915_WAIT_LOCKED,
++					      MAX_SCHEDULE_TIMEOUT) < 0) {
++				err = -EIO;
++				goto out;
++			}
++
++			if (rq[n + 1]->engine != siblings[n]) {
++				pr_err("Bonded request did not execute on target engine: expected %s, used %s; master was %s\n",
++				       siblings[n]->name,
++				       rq[n + 1]->engine->name,
++				       rq[0]->engine->name);
++				err = -EINVAL;
++				goto out;
++			}
++		}
++
++		for (n = 0; !IS_ERR(rq[n]); n++)
++			i915_request_put(rq[n]);
++		rq[0] = ERR_PTR(-ENOMEM);
++	}
++
++out:
++	for (n = 0; !IS_ERR(rq[n]); n++)
++		i915_request_put(rq[n]);
++	if (igt_flush_test(i915, I915_WAIT_LOCKED))
++		err = -EIO;
++
++	kernel_context_close(ctx);
++	return err;
++}
++
++static int live_virtual_bond(void *arg)
++{
++	static const struct phase {
++		const char *name;
++		unsigned int flags;
++	} phases[] = {
++		{ "", 0 },
++		{ "schedule", BOND_SCHEDULE },
++		{ },
++	};
++	struct drm_i915_private *i915 = arg;
++	struct intel_engine_cs *siblings[MAX_ENGINE_INSTANCE + 1];
++	unsigned int class, inst;
++	int err = 0;
++
++	if (USES_GUC_SUBMISSION(i915))
++		return 0;
++
++	mutex_lock(&i915->drm.struct_mutex);
++
++	for (class = 0; class <= MAX_ENGINE_CLASS; class++) {
++		const struct phase *p;
++		int nsibling;
++
++		nsibling = 0;
++		for (inst = 0; inst <= MAX_ENGINE_INSTANCE; inst++) {
++			if (!i915->engine_class[class][inst])
++				break;
++
++			GEM_BUG_ON(nsibling == ARRAY_SIZE(siblings));
++			siblings[nsibling++] = i915->engine_class[class][inst];
++		}
++		if (nsibling < 2)
++			continue;
++
++		for (p = phases; p->name; p++) {
++			err = bond_virtual_engine(i915,
++						  class, siblings, nsibling,
++						  p->flags);
++			if (err) {
++				pr_err("%s(%s): failed class=%d, nsibling=%d, err=%d\n",
++				       __func__, p->name, class, nsibling, err);
++				goto out_unlock;
++			}
++		}
++	}
++
++out_unlock:
++	mutex_unlock(&i915->drm.struct_mutex);
++	return err;
++}
++
+ int intel_execlists_live_selftests(struct drm_i915_private *i915)
+ {
+ 	static const struct i915_subtest tests[] = {
+@@ -1633,6 +1823,7 @@ int intel_execlists_live_selftests(struct drm_i915_private *i915)
+ 		SUBTEST(live_preempt_smoke),
+ 		SUBTEST(live_virtual_engine),
+ 		SUBTEST(live_virtual_mask),
++		SUBTEST(live_virtual_bond),
+ 	};
+ 
+ 	if (!HAS_EXECLISTS(i915))
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 68db6b28e606..5d2f8ba92b59 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -1504,8 +1504,92 @@ set_engines__load_balance(struct i915_user_extension __user *base, void *data)
+ 	return err;
+ }
+ 
++static int
++set_engines__bond(struct i915_user_extension __user *base, void *data)
++{
++	struct i915_context_engines_bond __user *ext =
++		container_of_user(base, typeof(*ext), base);
++	const struct set_engines *set = data;
++	struct i915_engine_class_instance ci;
++	struct intel_engine_cs *virtual;
++	struct intel_engine_cs *master;
++	u16 idx, num_bonds;
++	int err, n;
++
++	if (get_user(idx, &ext->virtual_index))
++		return -EFAULT;
++
++	if (idx >= set->engines->num_engines) {
++		DRM_DEBUG("Invalid index for virtual engine: %d >= %d\n",
++			  idx, set->engines->num_engines);
++		return -EINVAL;
++	}
++
++	idx = array_index_nospec(idx, set->engines->num_engines);
++	if (!set->engines->engines[idx]) {
++		DRM_DEBUG("Invalid engine at %d\n", idx);
++		return -EINVAL;
++	}
++	virtual = set->engines->engines[idx]->engine;
++
++	err = check_user_mbz(&ext->flags);
++	if (err)
++		return err;
++
++	for (n = 0; n < ARRAY_SIZE(ext->mbz64); n++) {
++		err = check_user_mbz(&ext->mbz64[n]);
++		if (err)
++			return err;
++	}
++
++	if (copy_from_user(&ci, &ext->master, sizeof(ci)))
++		return -EFAULT;
++
++	master = intel_engine_lookup_user(set->ctx->i915,
++					  ci.engine_class, ci.engine_instance);
++	if (!master) {
++		DRM_DEBUG("Unrecognised master engine: { class:%u, instance:%u }\n",
++			  ci.engine_class, ci.engine_instance);
++		return -EINVAL;
++	}
++
++	if (get_user(num_bonds, &ext->num_bonds))
++		return -EFAULT;
++
++	for (n = 0; n < num_bonds; n++) {
++		struct intel_engine_cs *bond;
++
++		if (copy_from_user(&ci, &ext->engines[n], sizeof(ci)))
++			return -EFAULT;
++
++		bond = intel_engine_lookup_user(set->ctx->i915,
++						ci.engine_class,
++						ci.engine_instance);
++		if (!bond) {
++			DRM_DEBUG("Unrecognised engine[%d] for bonding: { class:%d, instance: %d }\n",
++				  n, ci.engine_class, ci.engine_instance);
++			return -EINVAL;
++		}
++
++		/*
++		 * A non-virtual engine has no siblings to choose between; and
++		 * a submit fence will always be directed to the one engine.
++		 */
++		if (intel_engine_is_virtual(virtual)) {
++			err = intel_virtual_engine_attach_bond(virtual,
++							       master,
++							       bond);
++			if (err)
++				return err;
++		}
++	}
++
++	return 0;
++}
++
+ static const i915_user_extension_fn set_engines__extensions[] = {
+ 	[I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE] = set_engines__load_balance,
++	[I915_CONTEXT_ENGINES_EXT_BOND] = set_engines__bond,
+ };
+ 
+ static int
+diff --git a/drivers/gpu/drm/i915/selftests/lib_sw_fence.c b/drivers/gpu/drm/i915/selftests/lib_sw_fence.c
+index 2bfa72c1654b..b976c12817c5 100644
+--- a/drivers/gpu/drm/i915/selftests/lib_sw_fence.c
++++ b/drivers/gpu/drm/i915/selftests/lib_sw_fence.c
+@@ -45,6 +45,9 @@ void __onstack_fence_init(struct i915_sw_fence *fence,
+ 
+ void onstack_fence_fini(struct i915_sw_fence *fence)
+ {
++	if (!fence->flags)
++		return;
++
+ 	i915_sw_fence_commit(fence);
+ 	i915_sw_fence_fini(fence);
+ }
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index f9770948161c..e2da9027bcdf 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -1543,6 +1543,10 @@ struct drm_i915_gem_context_param {
+  * sized argument, will revert back to default settings.
+  *
+  * See struct i915_context_param_engines.
++ *
++ * Extensions:
++ *   i915_context_engines_load_balance (I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE)
++ *   i915_context_engines_bond (I915_CONTEXT_ENGINES_EXT_BOND)
+  */
+ #define I915_CONTEXT_PARAM_ENGINES	0xa
+ /* Must be kept compact -- no holes and well documented */
+@@ -1646,9 +1650,49 @@ struct i915_context_engines_load_balance {
+ 	struct i915_engine_class_instance engines[N__]; \
+ } __attribute__((packed)) name__
+ 
++/*
++ * i915_context_engines_bond:
++ *
++ * Constructed bonded pairs for execution within a virtual engine.
++ *
++ * All engines are equal, but some are more equal than others. Given
++ * the distribution of resources in the HW, it may be preferable to run
++ * a request on a given subset of engines in parallel to a request on a
++ * specific engine. We enable this selection of engines within a virtual
++ * engine by specifying bonding pairs, for any given master engine we will
++ * only execute on one of the corresponding siblings within the virtual engine.
++ *
++ * To execute a request in parallel on the master engine and a sibling requires
++ * coordination with a I915_EXEC_FENCE_SUBMIT.
++ */
++struct i915_context_engines_bond {
++	struct i915_user_extension base;
++
++	struct i915_engine_class_instance master;
++
++	__u16 virtual_index; /* index of virtual engine in ctx->engines[] */
++	__u16 num_bonds;
++
++	__u64 flags; /* all undefined flags must be zero */
++	__u64 mbz64[4]; /* reserved for future use; must be zero */
++
++	struct i915_engine_class_instance engines[0];
++} __attribute__((packed));
++
++#define I915_DEFINE_CONTEXT_ENGINES_BOND(name__, N__) struct { \
++	struct i915_user_extension base; \
++	struct i915_engine_class_instance master; \
++	__u16 virtual_index; \
++	__u16 num_bonds; \
++	__u64 flags; \
++	__u64 mbz64[4]; \
++	struct i915_engine_class_instance engines[N__]; \
++} __attribute__((packed)) name__
++
+ struct i915_context_param_engines {
+ 	__u64 extensions; /* linked chain of extension blocks, 0 terminates */
+ #define I915_CONTEXT_ENGINES_EXT_LOAD_BALANCE 0 /* see i915_context_engines_load_balance */
++#define I915_CONTEXT_ENGINES_EXT_BOND 1 /* see i915_context_engines_bond */
+ 	struct i915_engine_class_instance engines[0];
+ } __attribute__((packed));
+ 
+-- 
+2.17.1
+

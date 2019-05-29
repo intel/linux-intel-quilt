@@ -1,0 +1,87 @@
+From 03a1579c8655a7a2f9450bb8b0d0cb3bc8599fdd Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 6 Mar 2019 13:52:12 +0100
+Subject: [PATCH 039/150] ASoC: compress: Power up components before startup
+
+For some devices, components need to be power up before stream startup
+sequence commences. Update soc_compr_open to provide such functionality.
+Based on soc_pcm_open. Adjust soc_compr_free accordingly to power down
+components once compress stream is closed.
+
+Change-Id: Ida63574ab8a7f601088a5d7b27c2b8dbe172b3ef
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/soc-compress.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/sound/soc/soc-compress.c b/sound/soc/soc-compress.c
+index 03d5b9ccd3fc..0f1cd45f1665 100644
+--- a/sound/soc/soc-compress.c
++++ b/sound/soc/soc-compress.c
+@@ -19,6 +19,7 @@
+ #include <sound/soc.h>
+ #include <sound/initval.h>
+ #include <sound/soc-dpcm.h>
++#include <linux/pm_runtime.h>
+ 
+ static int soc_compr_components_open(struct snd_compr_stream *cstream,
+ 				     struct snd_soc_component **last)
+@@ -77,9 +78,16 @@ static int soc_compr_open(struct snd_compr_stream *cstream)
+ {
+ 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
+ 	struct snd_soc_component *component;
++	struct snd_soc_rtdcom_list *rtdcom;
+ 	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+ 	int ret;
+ 
++	for_each_rtdcom(rtd, rtdcom) {
++		component = rtdcom->component;
++
++		pm_runtime_get_sync(component->dev);
++	}
++
+ 	mutex_lock_nested(&rtd->pcm_mutex, rtd->pcm_subclass);
+ 
+ 	if (cpu_dai->driver->cops && cpu_dai->driver->cops->startup) {
+@@ -119,6 +127,14 @@ static int soc_compr_open(struct snd_compr_stream *cstream)
+ 		cpu_dai->driver->cops->shutdown(cstream, cpu_dai);
+ out:
+ 	mutex_unlock(&rtd->pcm_mutex);
++
++	for_each_rtdcom(rtd, rtdcom) {
++		component = rtdcom->component;
++
++		pm_runtime_mark_last_busy(component->dev);
++		pm_runtime_put_autosuspend(component->dev);
++	}
++
+ 	return ret;
+ }
+ 
+@@ -245,6 +261,8 @@ static void close_delayed_work(struct work_struct *work)
+ static int soc_compr_free(struct snd_compr_stream *cstream)
+ {
+ 	struct snd_soc_pcm_runtime *rtd = cstream->private_data;
++	struct snd_soc_component *component;
++	struct snd_soc_rtdcom_list *rtdcom;
+ 	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+ 	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+ 	int stream;
+@@ -293,6 +311,14 @@ static int soc_compr_free(struct snd_compr_stream *cstream)
+ 	}
+ 
+ 	mutex_unlock(&rtd->pcm_mutex);
++
++	for_each_rtdcom(rtd, rtdcom) {
++		component = rtdcom->component;
++
++		pm_runtime_mark_last_busy(component->dev);
++		pm_runtime_put_autosuspend(component->dev);
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+
