@@ -1,0 +1,176 @@
+From 39b752f47491a3bbfb9ac6e9c53ef80aae3460ec Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Fri, 22 Mar 2019 15:01:03 +0100
+Subject: [PATCH 11/13] ASoC: Intel: Skl: Virt: Load audio firmware over virtio
+
+Discrepancy of audio firmware versions between Guest OS and
+Service OS might lead to some issues. Manual alignment of the
+firmware version isn't the best solution. With this patch all audio
+firmware files are sent from Service OS to Guest OS over virtio.
+
+Change-Id: Ic913d27b96c576c242fb17a8be7cd062a1ee463b
+Tracked-On: OAM-80927
+Signed-off-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+---
+ .../soc/intel/skylake/virtio/skl-virtio-be.c  | 25 +++++++++++++
+ .../soc/intel/skylake/virtio/skl-virtio-fe.c  |  1 +
+ .../soc/intel/skylake/virtio/skl-virtio-fe.h  |  2 +
+ .../soc/intel/skylake/virtio/skl-virtio-sst.c | 37 ++++++++++++++++---
+ 4 files changed, 60 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index 64e2071f948b..fff230cccf7a 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -33,6 +33,7 @@
+ #include "../skl.h"
+ #include "../skl-sst-ipc.h"
+ #include "../skl-topology.h"
++#include "../../common/sst-dsp-priv.h"
+ #include "skl-virtio.h"
+ 
+ static struct vbe_static_kctl_domain kctl_domain_map[] = {
+@@ -741,11 +742,29 @@ static int vbe_skl_cfg_hda(struct skl *sdev, int vm_id,
+ 	return 0;
+ }
+ 
++static const struct firmware *vbe_find_lib_fw(struct skl_sst *skl_sst,
++		const char *name)
++{
++	int idx, ret;
++	struct skl_lib_info *lib_info = skl_sst->lib_info;
++
++	/* library indices start from 1 to N. 0 represents base FW */
++	for (idx = 1; idx < skl_sst->lib_count; ++idx) {
++		ret = strncmp(lib_info[idx].name, name,
++				ARRAY_SIZE(lib_info[idx].name));
++		if (ret == 0)
++			return lib_info[idx].fw;
++	}
++
++	return NULL;
++}
++
+ static const struct firmware *vbe_find_res_hndl(struct snd_skl_vbe *vbe,
+ 		int type, const char *name)
+ {
+ 	struct snd_skl_vbe_client *client;
+ 	const struct firmware *fw;
++	struct skl_sst *skl_sst = vbe->sdev->skl_sst;
+ 
+ 	switch (type) {
+ 	case VFE_TOPOLOGY_RES:
+@@ -753,6 +772,12 @@ static const struct firmware *vbe_find_res_hndl(struct snd_skl_vbe *vbe,
+ 				struct snd_skl_vbe_client, list);
+ 		fw = client->tplg;
+ 		break;
++	case VFE_FIRMWARE_RES:
++		fw = skl_sst->dsp->fw;
++		break;
++	case VFE_LIBRARY_RES:
++		fw = vbe_find_lib_fw(skl_sst, name);
++		break;
+ 	default:
+ 		fw = NULL;
+ 	}
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 96c230972ed4..28ca02fa675a 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -1550,6 +1550,7 @@ static int vfe_init(struct virtio_device *vdev)
+ 	kctl_init_proxy(&vdev->dev, &vfe_kctl_ops);
+ 
+ 	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
++	vfe->request_ext_resource = vfe_request_ext_resource;
+ 
+ 	ret = vfe_register_domain(vfe);
+ 	if (ret < 0)
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index 4c05e3acc00b..ad1ca78dd493 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -65,6 +65,8 @@ struct snd_skl_vfe {
+ 
+ 	int (*send_dsp_ipc_msg)(struct snd_skl_vfe *vfe,
+ 		struct ipc_message *msg);
++	int (*request_ext_resource)(const struct firmware **fw,
++			const char *name, u32 type);
+ 	int (*notify_machine_probe)(struct snd_skl_vfe *vfe,
+ 		struct platform_device *pdev, struct snd_soc_card *card);
+ };
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-sst.c b/sound/soc/intel/skylake/virtio/skl-virtio-sst.c
+index c3b3b4d6cd02..6f2c2e110550 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-sst.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-sst.c
+@@ -31,16 +31,42 @@ static unsigned int vfe_get_errorcode(struct sst_dsp *ctx)
+ 	return 0;
+ }
+ 
++static int vfe_prepare_lib_load(struct skl_sst *skl,
++	struct skl_lib_info *linfo, unsigned int hdr_offset, int index)
++{
++	int ret;
++	struct sst_dsp *dsp = skl->dsp;
++	struct snd_skl_vfe *vfe = dev_get_drvdata(skl->dev);
++
++	if (linfo->fw == NULL) {
++		ret = vfe->request_ext_resource(&linfo->fw, linfo->name,
++				VFE_LIBRARY_RES);
++		if (ret < 0) {
++			dev_err(skl->dev, "Request lib %s failed:%d\n",
++				linfo->name, ret);
++			return ret;
++		}
++	}
++
++	if (skl->is_first_boot) {
++		ret = snd_skl_parse_uuids(dsp, linfo->fw, hdr_offset, index);
++		if (ret < 0)
++			return ret;
++	}
++
++	return 0;
++}
++
+ int
+ vfe_load_library(struct sst_dsp *ctx, struct skl_lib_info *linfo, int lib_count)
+ {
+-	struct firmware stripped_fw;
+ 	struct skl_sst *skl = ctx->thread_context;
+ 	int ret = 0, i;
++	struct snd_skl_vfe *vfe = dev_get_drvdata(skl->dev);
+ 
+ 	/* library indices start from 1 to N. 0 represents base FW */
+ 	for (i = 1; i < lib_count; i++) {
+-		ret = skl_prepare_lib_load(skl, &skl->lib_info[i], &stripped_fw,
++		ret = vfe_prepare_lib_load(skl, &skl->lib_info[i],
+ 					BXT_ADSP_FW_BIN_HDR_OFFSET, i);
+ 		if (ret < 0)
+ 			break;
+@@ -53,10 +79,13 @@ static int vfe_load_base_firmware(struct sst_dsp *ctx)
+ {
+ 	struct skl_sst *skl = ctx->thread_context;
+ 	int ret;
++	struct snd_skl_vfe *vfe = dev_get_drvdata(skl->dev);
++	struct firmware *fw;
+ 
+ 	dev_dbg(ctx->dev, "Request FW name:%s\n", ctx->fw_name);
+ 	if (ctx->fw == NULL) {
+-		ret = request_firmware(&ctx->fw, ctx->fw_name, ctx->dev);
++		ret = vfe->request_ext_resource(&ctx->fw,
++				ctx->fw_name, VFE_FIRMWARE_RES);
+ 		if (ret < 0) {
+ 			dev_err(ctx->dev, "Request firmware failed %d\n", ret);
+ 			return ret;
+@@ -74,8 +103,6 @@ static int vfe_load_base_firmware(struct sst_dsp *ctx)
+ 	return 0;
+ }
+ 
+-
+-
+ int vfe_schedule_dsp_D0i3(struct sst_dsp *ctx)
+ {
+ 	return 0;
+-- 
+2.17.1
+
