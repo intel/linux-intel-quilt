@@ -1,0 +1,78 @@
+From 94dee0495e075af782d4abae5482203d9f7fe3bd Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 17 Apr 2019 08:56:27 +0100
+Subject: [PATCH 001/185] drm/i915: Verify workarounds immediately after
+ application
+
+Immediately after writing the workaround, verify that it stuck in the
+register.
+
+References: https://bugs.freedesktop.org/show_bug.cgi?id=108954
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190417075657.19456-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/intel_workarounds.c | 32 +++++++++++++-----------
+ 1 file changed, 18 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_workarounds.c b/drivers/gpu/drm/i915/intel_workarounds.c
+index 841b8e515f4d..643086b9017f 100644
+--- a/drivers/gpu/drm/i915/intel_workarounds.c
++++ b/drivers/gpu/drm/i915/intel_workarounds.c
+@@ -915,6 +915,20 @@ wal_get_fw_for_rmw(struct intel_uncore *uncore, const struct i915_wa_list *wal)
+ 	return fw;
+ }
+ 
++static bool
++wa_verify(const struct i915_wa *wa, u32 cur, const char *name, const char *from)
++{
++	if ((cur ^ wa->val) & wa->mask) {
++		DRM_ERROR("%s workaround lost on %s! (%x=%x/%x, expected %x, mask=%x)\n",
++			  name, from, i915_mmio_reg_offset(wa->reg), cur,
++			  cur & wa->mask, wa->val, wa->mask);
++
++		return false;
++	}
++
++	return true;
++}
++
+ static void
+ wa_list_apply(struct intel_uncore *uncore, const struct i915_wa_list *wal)
+ {
+@@ -933,6 +947,10 @@ wa_list_apply(struct intel_uncore *uncore, const struct i915_wa_list *wal)
+ 
+ 	for (i = 0, wa = wal->list; i < wal->count; i++, wa++) {
+ 		intel_uncore_rmw_fw(uncore, wa->reg, wa->mask, wa->val);
++		if (IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM))
++			wa_verify(wa,
++				  intel_uncore_read_fw(uncore, wa->reg),
++				  wal->name, "application");
+ 	}
+ 
+ 	intel_uncore_forcewake_put__locked(uncore, fw);
+@@ -944,20 +962,6 @@ void intel_gt_apply_workarounds(struct drm_i915_private *i915)
+ 	wa_list_apply(&i915->uncore, &i915->gt_wa_list);
+ }
+ 
+-static bool
+-wa_verify(const struct i915_wa *wa, u32 cur, const char *name, const char *from)
+-{
+-	if ((cur ^ wa->val) & wa->mask) {
+-		DRM_ERROR("%s workaround lost on %s! (%x=%x/%x, expected %x, mask=%x)\n",
+-			  name, from, i915_mmio_reg_offset(wa->reg), cur,
+-			  cur & wa->mask, wa->val, wa->mask);
+-
+-		return false;
+-	}
+-
+-	return true;
+-}
+-
+ static bool wa_list_verify(struct intel_uncore *uncore,
+ 			   const struct i915_wa_list *wal,
+ 			   const char *from)
+-- 
+2.17.1
+

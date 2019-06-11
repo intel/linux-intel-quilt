@@ -1,0 +1,104 @@
+From 98a443033691486fbc1df6134d87a6d1bdf970f3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Fri, 12 Apr 2019 21:30:09 +0300
+Subject: [PATCH 077/185] drm/i915: Enable pipe HDR mode on ICL if only HDR
+ planes are used
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The pipe has a special HDR mode with higher precision when only
+HDR planes are active. Let's use it.
+
+Curiously this fixes the kms_color gamma/degamma tests when
+using a HDR plane, which is always the case unless one hacks
+the test to use an SDR plane. If one does hack the test to use
+an SDR plane it does pass already.
+
+I have no actual explanation how the output after the gamma
+LUT can be different between the two modes. The way the tests
+are written should mean that the output should be identical
+between the solid color vs. the gradient. But clearly that
+somehow doesn't hold true for the HDR planes in non-HDR pipe
+mode. Anyways, as long as we stick to one type of plane the
+test should produce sensible results now.
+
+v2: s/HDR_MODE/HDR_MODE_PRECISION/ (Shashank)
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190412183009.8237-2-ville.syrjala@linux.intel.com
+Reviewed-by: Uma Shankar <uma.shankar@intel.com>
+Tested-by: Uma Shankar <uma.shankar@intel.com>
+Reviewed-by: Shashank Sharma <shashank.sharma@intel.com>
+---
+ drivers/gpu/drm/i915/i915_reg.h      |  1 +
+ drivers/gpu/drm/i915/intel_display.c |  7 +++++++
+ drivers/gpu/drm/i915/intel_sprite.h  | 12 ++++++++----
+ 3 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 98c982a31919..2e6826d5e15a 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -5770,6 +5770,7 @@ enum {
+ #define _PIPE_MISC_B			0x71030
+ #define   PIPEMISC_YUV420_ENABLE	(1 << 27)
+ #define   PIPEMISC_YUV420_MODE_FULL_BLEND (1 << 26)
++#define   PIPEMISC_HDR_MODE_PRECISION	(1 << 23) /* icl+ */
+ #define   PIPEMISC_OUTPUT_COLORSPACE_YUV  (1 << 11)
+ #define   PIPEMISC_DITHER_BPC_MASK	(7 << 5)
+ #define   PIPEMISC_DITHER_8_BPC		(0 << 5)
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index db79b5893c31..a55602f10bc7 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4099,6 +4099,9 @@ static void intel_update_pipe_config(const struct intel_crtc_state *old_crtc_sta
+ 			ironlake_pfit_disable(old_crtc_state);
+ 	}
+ 
++	if (INTEL_GEN(dev_priv) >= 9 || IS_BROADWELL(dev_priv))
++		bdw_set_pipemisc(new_crtc_state);
++
+ 	if (INTEL_GEN(dev_priv) >= 11)
+ 		icl_set_pipe_chicken(crtc);
+ }
+@@ -8926,6 +8929,10 @@ static void bdw_set_pipemisc(const struct intel_crtc_state *crtc_state)
+ 		val |= PIPEMISC_YUV420_ENABLE |
+ 			PIPEMISC_YUV420_MODE_FULL_BLEND;
+ 
++	if (INTEL_GEN(dev_priv) >= 11 &&
++	    (crtc_state->active_planes & ~icl_hdr_plane_mask()) == 0)
++		val |= PIPEMISC_HDR_MODE_PRECISION;
++
+ 	I915_WRITE(PIPEMISC(crtc->pipe), val);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_sprite.h b/drivers/gpu/drm/i915/intel_sprite.h
+index 84be8686be16..500f6bffb139 100644
+--- a/drivers/gpu/drm/i915/intel_sprite.h
++++ b/drivers/gpu/drm/i915/intel_sprite.h
+@@ -43,13 +43,17 @@ static inline bool icl_is_nv12_y_plane(enum plane_id id)
+ 	return false;
+ }
+ 
++static inline u8 icl_hdr_plane_mask(void)
++{
++	return BIT(PLANE_PRIMARY) |
++		BIT(PLANE_SPRITE0) | BIT(PLANE_SPRITE1);
++}
++
+ static inline bool icl_is_hdr_plane(struct drm_i915_private *dev_priv,
+ 				    enum plane_id plane_id)
+ {
+-	if (INTEL_GEN(dev_priv) < 11)
+-		return false;
+-
+-	return plane_id < PLANE_SPRITE2;
++	return INTEL_GEN(dev_priv) >= 11 &&
++		icl_hdr_plane_mask() & BIT(plane_id);
+ }
+ 
+ #endif /* __INTEL_SPRITE_H__ */
+-- 
+2.17.1
+

@@ -1,0 +1,121 @@
+From 08c6430be807e884bb9ffa48df2757647bf811db Mon Sep 17 00:00:00 2001
+From: Omair M Abdullah <omair.m.abdullah@intel.com>
+Date: Tue, 15 Sep 2015 17:46:57 +0530
+Subject: [PATCH 055/154] ASoC: Intel: Skylake: add ssp blob override support
+ for capture
+
+Capture on SSP can have different blob, so add support for different blobs for
+PB/CAP on same SSP.
+
+Change-Id: I2bfc6aad78ba03bcc9ee05c9c4633314ada3dd69
+Signed-off-by: Omair M Abdullah <omair.m.abdullah@intel.com>
+---
+ sound/soc/intel/skylake/skl-debug.c    | 19 ++++++++++++++-----
+ sound/soc/intel/skylake/skl-topology.c |  3 ++-
+ sound/soc/intel/skylake/skl.h          |  7 ++++---
+ 3 files changed, 20 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-debug.c b/sound/soc/intel/skylake/skl-debug.c
+index 8b0fb4686765..b9c3ac9ed824 100644
+--- a/sound/soc/intel/skylake/skl-debug.c
++++ b/sound/soc/intel/skylake/skl-debug.c
+@@ -35,7 +35,7 @@ struct skl_debug {
+ 	struct dentry *modules;
+ 	struct dentry *nhlt;
+ 	u8 fw_read_buff[FW_REG_BUF];
+-	struct nhlt_blob ssp_blob[MAX_SSP];
++	struct nhlt_blob ssp_blob[2*MAX_SSP];
+ 	struct nhlt_blob dmic_blob;
+ };
+ 
+@@ -471,7 +471,8 @@ static int skl_debugfs_init_ipc(struct skl_debug *d)
+ }
+ 
+ struct nhlt_specific_cfg
+-*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance)
++*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance,
++		u8 stream)
+ {
+ 	switch (link_type) {
+ 	case NHLT_LINK_DMIC:
+@@ -481,7 +482,10 @@ struct nhlt_specific_cfg
+ 		if (instance >= MAX_SSP)
+ 			return NULL;
+ 
+-		return d->ssp_blob[instance].cfg;
++		if (stream == SNDRV_PCM_STREAM_PLAYBACK)
++			return d->ssp_blob[instance].cfg;
++		else
++			return d->ssp_blob[MAX_SSP + instance].cfg;
+ 
+ 	default:
+ 		break;
+@@ -555,7 +559,7 @@ static void skl_exit_nhlt(struct skl_debug *d)
+ 
+ 	/* free blob memory, if allocated */
+ 	for (i = 0; i < MAX_SSP; i++)
+-		kfree(d->ssp_blob[i].cfg);
++		kfree(d->ssp_blob[MAX_SSP + i].cfg);
+ }
+ 
+ static ssize_t nhlt_control_read(struct file *file,
+@@ -616,11 +620,16 @@ static int skl_init_nhlt(struct skl_debug *d)
+ 	}
+ 
+ 	for (i = 0; i < MAX_SSP; i++) {
+-		snprintf(name, (sizeof(name)-1), "ssp%d", i);
++		snprintf(name, (sizeof(name)-1), "ssp%dp", i);
+ 		if (!debugfs_create_file(name,
+ 					0644, d->nhlt,
+ 					&d->ssp_blob[i], &nhlt_fops))
+ 			dev_err(d->dev, "%s: debugfs init failed\n", name);
++		snprintf(name, (sizeof(name)-1), "ssp%dc", i);
++		if (!debugfs_create_file(name,
++					0644, d->nhlt,
++					&d->ssp_blob[MAX_SSP + i], &nhlt_fops))
++			dev_err(d->dev, "%s: debugfs init failed\n", name);
+ 	}
+ 
+ 	if (!debugfs_create_file("dmic", 0644,
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index 4765a0b09d1f..d11d8c890360 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -1743,7 +1743,8 @@ static int skl_tplg_be_fill_pipe_params(struct snd_soc_dai *dai,
+ 	} else {
+ 		dev_warn(dai->dev, "Querying NHLT blob from Debugfs!!!!\n");
+ 		cfg = skl_nhlt_get_debugfs_blob(skl->debugfs,
+-					link_type, mconfig->vbus_id);
++					link_type, mconfig->vbus_id,
++					params->stream);
+ 	}
+ 	if (cfg) {
+ 		mconfig->formats_config.caps_size = cfg->size;
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index e4a05aa7cf16..309b05f792cf 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -202,8 +202,8 @@ void skl_debug_init_module(struct skl_debug *d,
+ 			struct snd_soc_dapm_widget *w,
+ 			struct skl_module_cfg *mconfig);
+ struct nhlt_specific_cfg
+-*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance);
+-
++*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance,
++			u8 stream);
+ #else
+ static inline struct skl_debug *skl_debugfs_init(struct skl_dev *skl)
+ {
+@@ -214,7 +214,8 @@ static inline void skl_debug_init_module(struct skl_debug *d,
+ 					 struct skl_module_cfg *mconfig)
+ {}
+ static inline struct nhlt_specific_cfg
+-*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance)
++*skl_nhlt_get_debugfs_blob(struct skl_debug *d, u8 link_type, u32 instance,
++			u8 stream)
+ {
+ 	return NULL;
+ }
+-- 
+2.17.1
+

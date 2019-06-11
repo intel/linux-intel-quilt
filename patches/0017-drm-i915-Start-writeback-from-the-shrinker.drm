@@ -1,0 +1,263 @@
+From 4189d68fd7044a9b0dd0573554cf013e9dc83eab Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Sat, 20 Apr 2019 12:55:39 +0100
+Subject: [PATCH 017/185] drm/i915: Start writeback from the shrinker
+
+When we are called to relieve mempressue via the shrinker, the only way
+we can make progress is either by discarding unwanted pages (those
+objects that userspace has marked MADV_DONTNEED) or by reclaiming the
+dirty objects via swap. As we know that is the only way to make further
+progress, we can initiate the writeback as we invalidate the objects.
+This means the objects we put onto the inactive anon lru list are
+already marked for reclaim+writeback and so will trigger a wait upon the
+writeback inside direct reclaim, greatly improving the success rate of
+direct reclaim on i915 objects.
+
+The corollary is that we may start a slow swap on opportunistic
+mempressure from the likes of the compaction + migration kthreads. This
+is limited by those threads only being allowed to shrink idle pages, but
+also that if we reactivate the page before it is swapped out by gpu
+activity, we only page the cost of repinning the page. The cost is most
+felt when an object is reused after mempressure, which hopefully
+excludes the latency sensitive tasks (as we are just extending the
+impact of swap thrashing to them).
+
+Apparently this is not the first time we've had this idea. Back in
+commit 5537252b6b6d ("drm/i915: Invalidate our pages under memory
+pressure") we wanted to start writeback but settled on invalidate after
+Hugh Dickins warned us about a possibility of a deadlock within shmemfs
+if we started writeback from shrink_slab. Looking at the callchain,
+using writeback from i915_gem_shrink should be equivalent to the pageout
+also employed by shrink_slab, i.e. it should not be any riskier afaict.
+
+v2: Leave mmapings intact. At this point, the only mmapings of our
+objects will be via CPU mmaps on the shmemfs filp, which are
+out-of-scope for our LRU tracking. Instead leave those pages to the
+inactive anon LRU page list for aging and pageout as normal.
+
+v3: Be selective on which paths trigger writeback, in particular
+excluding paths shrinking just to reclaim vm space (e.g. mmap, vmap
+reapers) and avoid starting writeback on the entire process space from
+within the pm freezer.
+
+References: https://bugs.freedesktop.org/show_bug.cgi?id=108686
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Matthew Auld
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Cc: Michal Hocko <mhocko@suse.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com> #v1
+Link: https://patchwork.freedesktop.org/patch/msgid/20190420115539.29081-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_drv.h          | 13 ++--
+ drivers/gpu/drm/i915/i915_gem.c          | 27 +--------
+ drivers/gpu/drm/i915/i915_gem_shrinker.c | 75 ++++++++++++++++++++++--
+ 3 files changed, 79 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 71612e7fc8bc..dc74d33c20aa 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -3007,7 +3007,7 @@ enum i915_mm_subclass { /* lockdep subclass for obj->mm.lock/struct_mutex */
+ 
+ int __i915_gem_object_put_pages(struct drm_i915_gem_object *obj,
+ 				enum i915_mm_subclass subclass);
+-void __i915_gem_object_invalidate(struct drm_i915_gem_object *obj);
++void __i915_gem_object_truncate(struct drm_i915_gem_object *obj);
+ 
+ enum i915_map_type {
+ 	I915_MAP_WB = 0,
+@@ -3268,11 +3268,12 @@ unsigned long i915_gem_shrink(struct drm_i915_private *i915,
+ 			      unsigned long target,
+ 			      unsigned long *nr_scanned,
+ 			      unsigned flags);
+-#define I915_SHRINK_PURGEABLE 0x1
+-#define I915_SHRINK_UNBOUND 0x2
+-#define I915_SHRINK_BOUND 0x4
+-#define I915_SHRINK_ACTIVE 0x8
+-#define I915_SHRINK_VMAPS 0x10
++#define I915_SHRINK_PURGEABLE	BIT(0)
++#define I915_SHRINK_UNBOUND	BIT(1)
++#define I915_SHRINK_BOUND	BIT(2)
++#define I915_SHRINK_ACTIVE	BIT(3)
++#define I915_SHRINK_VMAPS	BIT(4)
++#define I915_SHRINK_WRITEBACK	BIT(5)
+ unsigned long i915_gem_shrink_all(struct drm_i915_private *i915);
+ void i915_gem_shrinker_register(struct drm_i915_private *i915);
+ void i915_gem_shrinker_unregister(struct drm_i915_private *i915);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 1cb0bf19095d..ee3226adec39 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2143,8 +2143,7 @@ i915_gem_mmap_gtt_ioctl(struct drm_device *dev, void *data,
+ }
+ 
+ /* Immediately discard the backing storage */
+-static void
+-i915_gem_object_truncate(struct drm_i915_gem_object *obj)
++void __i915_gem_object_truncate(struct drm_i915_gem_object *obj)
+ {
+ 	i915_gem_object_free_mmap_offset(obj);
+ 
+@@ -2161,28 +2160,6 @@ i915_gem_object_truncate(struct drm_i915_gem_object *obj)
+ 	obj->mm.pages = ERR_PTR(-EFAULT);
+ }
+ 
+-/* Try to discard unwanted pages */
+-void __i915_gem_object_invalidate(struct drm_i915_gem_object *obj)
+-{
+-	struct address_space *mapping;
+-
+-	lockdep_assert_held(&obj->mm.lock);
+-	GEM_BUG_ON(i915_gem_object_has_pages(obj));
+-
+-	switch (obj->mm.madv) {
+-	case I915_MADV_DONTNEED:
+-		i915_gem_object_truncate(obj);
+-	case __I915_MADV_PURGED:
+-		return;
+-	}
+-
+-	if (obj->base.filp == NULL)
+-		return;
+-
+-	mapping = obj->base.filp->f_mapping,
+-	invalidate_mapping_pages(mapping, 0, (loff_t)-1);
+-}
+-
+ /*
+  * Move pages to appropriate lru and release the pagevec, decrementing the
+  * ref count of those pages.
+@@ -4023,7 +4000,7 @@ i915_gem_madvise_ioctl(struct drm_device *dev, void *data,
+ 	/* if the object is no longer attached, discard its backing storage */
+ 	if (obj->mm.madv == I915_MADV_DONTNEED &&
+ 	    !i915_gem_object_has_pages(obj))
+-		i915_gem_object_truncate(obj);
++		__i915_gem_object_truncate(obj);
+ 
+ 	args->retained = obj->mm.madv != __I915_MADV_PURGED;
+ 	mutex_unlock(&obj->mm.lock);
+diff --git a/drivers/gpu/drm/i915/i915_gem_shrinker.c b/drivers/gpu/drm/i915/i915_gem_shrinker.c
+index 6da795c7e62e..588e3898b120 100644
+--- a/drivers/gpu/drm/i915/i915_gem_shrinker.c
++++ b/drivers/gpu/drm/i915/i915_gem_shrinker.c
+@@ -114,6 +114,67 @@ static bool unsafe_drop_pages(struct drm_i915_gem_object *obj)
+ 	return !i915_gem_object_has_pages(obj);
+ }
+ 
++static void __start_writeback(struct drm_i915_gem_object *obj,
++			      unsigned int flags)
++{
++	struct address_space *mapping;
++	struct writeback_control wbc = {
++		.sync_mode = WB_SYNC_NONE,
++		.nr_to_write = SWAP_CLUSTER_MAX,
++		.range_start = 0,
++		.range_end = LLONG_MAX,
++		.for_reclaim = 1,
++	};
++	unsigned long i;
++
++	lockdep_assert_held(&obj->mm.lock);
++	GEM_BUG_ON(i915_gem_object_has_pages(obj));
++
++	switch (obj->mm.madv) {
++	case I915_MADV_DONTNEED:
++		__i915_gem_object_truncate(obj);
++	case __I915_MADV_PURGED:
++		return;
++	}
++
++	if (!obj->base.filp)
++		return;
++
++	if (!(flags & I915_SHRINK_WRITEBACK))
++		return;
++
++	/*
++	 * Leave mmapings intact (GTT will have been revoked on unbinding,
++	 * leaving only CPU mmapings around) and add those pages to the LRU
++	 * instead of invoking writeback so they are aged and paged out
++	 * as normal.
++	 */
++	mapping = obj->base.filp->f_mapping;
++
++	/* Begin writeback on each dirty page */
++	for (i = 0; i < obj->base.size >> PAGE_SHIFT; i++) {
++		struct page *page;
++
++		page = find_lock_entry(mapping, i);
++		if (!page || xa_is_value(page))
++			continue;
++
++		if (!page_mapped(page) && clear_page_dirty_for_io(page)) {
++			int ret;
++
++			SetPageReclaim(page);
++			ret = mapping->a_ops->writepage(page, &wbc);
++			if (!PageWriteback(page))
++				ClearPageReclaim(page);
++			if (!ret)
++				goto put;
++		}
++		unlock_page(page);
++put:
++		put_page(page);
++	}
++}
++
+ /**
+  * i915_gem_shrink - Shrink buffer object caches
+  * @i915: i915 device
+@@ -254,7 +315,7 @@ i915_gem_shrink(struct drm_i915_private *i915,
+ 				mutex_lock_nested(&obj->mm.lock,
+ 						  I915_MM_SHRINKER);
+ 				if (!i915_gem_object_has_pages(obj)) {
+-					__i915_gem_object_invalidate(obj);
++					__start_writeback(obj, flags);
+ 					count += obj->base.size >> PAGE_SHIFT;
+ 				}
+ 				mutex_unlock(&obj->mm.lock);
+@@ -366,13 +427,15 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
+ 				&sc->nr_scanned,
+ 				I915_SHRINK_BOUND |
+ 				I915_SHRINK_UNBOUND |
+-				I915_SHRINK_PURGEABLE);
++				I915_SHRINK_PURGEABLE |
++				I915_SHRINK_WRITEBACK);
+ 	if (sc->nr_scanned < sc->nr_to_scan)
+ 		freed += i915_gem_shrink(i915,
+ 					 sc->nr_to_scan - sc->nr_scanned,
+ 					 &sc->nr_scanned,
+ 					 I915_SHRINK_BOUND |
+-					 I915_SHRINK_UNBOUND);
++					 I915_SHRINK_UNBOUND |
++					 I915_SHRINK_WRITEBACK);
+ 	if (sc->nr_scanned < sc->nr_to_scan && current_is_kswapd()) {
+ 		intel_wakeref_t wakeref;
+ 
+@@ -382,7 +445,8 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
+ 						 &sc->nr_scanned,
+ 						 I915_SHRINK_ACTIVE |
+ 						 I915_SHRINK_BOUND |
+-						 I915_SHRINK_UNBOUND);
++						 I915_SHRINK_UNBOUND |
++						 I915_SHRINK_WRITEBACK);
+ 		}
+ 	}
+ 
+@@ -404,7 +468,8 @@ i915_gem_shrinker_oom(struct notifier_block *nb, unsigned long event, void *ptr)
+ 	with_intel_runtime_pm(i915, wakeref)
+ 		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
+ 					       I915_SHRINK_BOUND |
+-					       I915_SHRINK_UNBOUND);
++					       I915_SHRINK_UNBOUND |
++					       I915_SHRINK_WRITEBACK);
+ 
+ 	/* Because we may be allocating inside our own driver, we cannot
+ 	 * assert that there are no objects with pinned pages that are not
+-- 
+2.17.1
+

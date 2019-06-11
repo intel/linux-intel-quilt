@@ -1,0 +1,105 @@
+From 0c1dc166c357cb6fabe9da2e160ee7abb9c399b0 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 21 May 2019 22:11:27 +0100
+Subject: [PATCH 169/185] drm/i915: Extend I915_CONTEXT_PARAM_SSEU to support
+ local ctx->engine[]
+
+Allow the user to specify a local engine index (as opposed to
+class:index) that they can use to refer to a preset engine inside the
+ctx->engine[] array defined by an earlier I915_CONTEXT_PARAM_ENGINES.
+This will be useful for setting SSEU parameters on virtual engines that
+are local to the context and do not have a valid global class:instance
+lookup.
+
+Note that due to the ambiguity in using class:instance with
+ctx->engines[], if a user supplied engine map is active the user must
+specify the engine to alter by its index into the ctx->engines[].
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190521211134.16117-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_gem_context.c | 24 ++++++++++++++++++++----
+ include/uapi/drm/i915_drm.h             |  3 ++-
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index c501e2848ca0..d38d8a45a5cf 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -1363,6 +1363,7 @@ static int set_sseu(struct i915_gem_context *ctx,
+ 	struct drm_i915_gem_context_param_sseu user_sseu;
+ 	struct intel_context *ce;
+ 	struct intel_sseu sseu;
++	unsigned long lookup;
+ 	int ret;
+ 
+ 	if (args->size < sizeof(user_sseu))
+@@ -1375,10 +1376,17 @@ static int set_sseu(struct i915_gem_context *ctx,
+ 			   sizeof(user_sseu)))
+ 		return -EFAULT;
+ 
+-	if (user_sseu.flags || user_sseu.rsvd)
++	if (user_sseu.rsvd)
+ 		return -EINVAL;
+ 
+-	ce = lookup_user_engine(ctx, 0, &user_sseu.engine);
++	if (user_sseu.flags & ~(I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX))
++		return -EINVAL;
++
++	lookup = 0;
++	if (user_sseu.flags & I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX)
++		lookup |= LOOKUP_USER_INDEX;
++
++	ce = lookup_user_engine(ctx, lookup, &user_sseu.engine);
+ 	if (IS_ERR(ce))
+ 		return PTR_ERR(ce);
+ 
+@@ -1821,6 +1829,7 @@ static int get_sseu(struct i915_gem_context *ctx,
+ {
+ 	struct drm_i915_gem_context_param_sseu user_sseu;
+ 	struct intel_context *ce;
++	unsigned long lookup;
+ 	int err;
+ 
+ 	if (args->size == 0)
+@@ -1832,10 +1841,17 @@ static int get_sseu(struct i915_gem_context *ctx,
+ 			   sizeof(user_sseu)))
+ 		return -EFAULT;
+ 
+-	if (user_sseu.flags || user_sseu.rsvd)
++	if (user_sseu.rsvd)
+ 		return -EINVAL;
+ 
+-	ce = lookup_user_engine(ctx, 0, &user_sseu.engine);
++	if (user_sseu.flags & ~(I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX))
++		return -EINVAL;
++
++	lookup = 0;
++	if (user_sseu.flags & I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX)
++		lookup |= LOOKUP_USER_INDEX;
++
++	ce = lookup_user_engine(ctx, lookup, &user_sseu.engine);
+ 	if (IS_ERR(ce))
+ 		return PTR_ERR(ce);
+ 
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index 8e1bb22926e4..82bd488ed0d1 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -1576,9 +1576,10 @@ struct drm_i915_gem_context_param_sseu {
+ 	struct i915_engine_class_instance engine;
+ 
+ 	/*
+-	 * Unused for now. Must be cleared to zero.
++	 * Unknown flags must be cleared to zero.
+ 	 */
+ 	__u32 flags;
++#define I915_CONTEXT_SSEU_FLAG_ENGINE_INDEX (1u << 0)
+ 
+ 	/*
+ 	 * Mask of slices to enable for the context. Valid values are a subset
+-- 
+2.17.1
+

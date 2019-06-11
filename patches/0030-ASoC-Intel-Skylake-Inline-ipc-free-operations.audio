@@ -1,0 +1,173 @@
+From cfeb287e06bd4f47e42777044ef8ba09a76f9730 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Sat, 23 Mar 2019 16:46:37 +0100
+Subject: [PATCH 030/154] ASoC: Intel: Skylake: Inline ipc free operations
+
+skl_ipc_free and its equivalents are simple wrappers. Let's inline them,
+making room for cleanup mechanism unification.
+
+Change-Id: I9ced81c137752c93f2bbeb6c07a2c82701ef8f3c
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c     |  3 ++-
+ sound/soc/intel/skylake/cnl-sst-dsp.c | 13 ++++++-------
+ sound/soc/intel/skylake/cnl-sst-dsp.h |  1 -
+ sound/soc/intel/skylake/cnl-sst.c     |  3 ++-
+ sound/soc/intel/skylake/skl-sst-dsp.c |  5 ++++-
+ sound/soc/intel/skylake/skl-sst-ipc.c | 13 -------------
+ sound/soc/intel/skylake/skl-sst-ipc.h |  1 -
+ sound/soc/intel/skylake/skl-sst.c     |  3 ++-
+ 8 files changed, 16 insertions(+), 26 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 9101ab9eca2b..fa6253de192e 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -600,7 +600,8 @@ void bxt_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 	if (skl->dsp->fw)
+ 		release_firmware(skl->dsp->fw);
+ 	list_del_init(&skl->module_list);
+-	skl_ipc_free(&skl->ipc);
++	skl_ipc_op_int_disable(skl->dsp);
++	sst_ipc_fini(&skl->ipc);
+ 	skl->dsp->ops->free(skl->dsp);
+ }
+ EXPORT_SYMBOL_GPL(bxt_sst_dsp_cleanup);
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.c b/sound/soc/intel/skylake/cnl-sst-dsp.c
+index 2f8326707c21..33020f9e3262 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.c
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.c
+@@ -22,9 +22,10 @@
+  */
+ #include <linux/device.h>
+ #include "../common/sst-dsp.h"
+-#include "../common/sst-ipc.h"
++#include "skl-sst-ipc.h"
+ #include "../common/sst-dsp-priv.h"
+ #include "cnl-sst-dsp.h"
++#include "skl.h"
+ 
+ /* various timeout values */
+ #define CNL_DSP_PU_TO		50
+@@ -217,10 +218,13 @@ irqreturn_t cnl_dsp_sst_interrupt(int irq, void *dev_id)
+ 
+ void cnl_dsp_free(struct sst_dsp *dsp)
+ {
++	struct skl_dev *skl = dsp->thread_context;
++
++	cnl_ipc_op_int_disable(dsp);
++	sst_ipc_fini(&skl->ipc);
+ 	cnl_ipc_int_disable(dsp);
+ 
+ 	free_irq(dsp->irq, dsp);
+-	cnl_ipc_op_int_disable(dsp);
+ 	cnl_dsp_disable_core(dsp, SKL_DSP_CORE0_MASK);
+ }
+ EXPORT_SYMBOL_GPL(cnl_dsp_free);
+@@ -267,8 +271,3 @@ bool cnl_ipc_int_status(struct sst_dsp *ctx)
+ 							CNL_ADSPIS_IPC;
+ }
+ 
+-void cnl_ipc_free(struct sst_generic_ipc *ipc)
+-{
+-	cnl_ipc_op_int_disable(ipc->dsp);
+-	sst_ipc_fini(ipc);
+-}
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.h b/sound/soc/intel/skylake/cnl-sst-dsp.h
+index 84e120aad6a0..afa9d6e98ccc 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.h
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.h
+@@ -100,7 +100,6 @@ void cnl_ipc_int_disable(struct sst_dsp *ctx);
+ void cnl_ipc_op_int_enable(struct sst_dsp *ctx);
+ void cnl_ipc_op_int_disable(struct sst_dsp *ctx);
+ bool cnl_ipc_int_status(struct sst_dsp *ctx);
+-void cnl_ipc_free(struct sst_generic_ipc *ipc);
+ 
+ int cnl_sst_dsp_init(struct device *dev, void __iomem *mmio_base, int irq,
+ 		     const char *fw_name, struct skl_dsp_loader_ops dsp_ops,
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index 02459bec790b..d182eebdf331 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -479,7 +479,8 @@ void cnl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 		release_firmware(skl->dsp->fw);
+ 
+ 	list_del_init(&skl->module_list);
+-	cnl_ipc_free(&skl->ipc);
++	cnl_ipc_op_int_disable(skl->dsp);
++	sst_ipc_fini(&skl->ipc);
+ 
+ 	skl->dsp->ops->free(skl->dsp);
+ }
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.c b/sound/soc/intel/skylake/skl-sst-dsp.c
+index e1a751fdf996..cc96e257cb53 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.c
++++ b/sound/soc/intel/skylake/skl-sst-dsp.c
+@@ -472,10 +472,13 @@ int skl_dsp_acquire_irq(struct sst_dsp *sst)
+ 
+ void skl_dsp_free(struct sst_dsp *dsp)
+ {
++	struct skl_dev *skl = dsp->thread_context;
++
++	skl_ipc_op_int_disable(dsp);
++	sst_ipc_fini(&skl->ipc);
+ 	skl_ipc_int_disable(dsp);
+ 
+ 	free_irq(dsp->irq, dsp);
+-	skl_ipc_op_int_disable(dsp);
+ 	skl_dsp_disable_core(dsp, SKL_DSP_CORE0_MASK);
+ }
+ EXPORT_SYMBOL_GPL(skl_dsp_free);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index a0a4a114ed7a..93170a146c65 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -627,19 +627,6 @@ int skl_ipc_init(struct device *dev, struct skl_dev *skl)
+ 	return 0;
+ }
+ 
+-void skl_ipc_free(struct sst_generic_ipc *ipc)
+-{
+-	/* Disable IPC DONE interrupt */
+-	sst_dsp_shim_update_bits(ipc->dsp, SKL_ADSP_REG_HIPCCTL,
+-		SKL_ADSP_REG_HIPCCTL_DONE, 0);
+-
+-	/* Disable IPC BUSY interrupt */
+-	sst_dsp_shim_update_bits(ipc->dsp, SKL_ADSP_REG_HIPCCTL,
+-		SKL_ADSP_REG_HIPCCTL_BUSY, 0);
+-
+-	sst_ipc_fini(ipc);
+-}
+-
+ int skl_ipc_tx_message_wait(struct sst_generic_ipc *ipc, u64 header,
+ 		void *tx_data, size_t tx_bytes, u64 *reply,
+ 		void *rx_data, size_t rx_bytes)
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 36049242674c..b72e93745b57 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -418,7 +418,6 @@ void skl_ipc_op_int_disable(struct sst_dsp *ctx);
+ void skl_ipc_int_disable(struct sst_dsp *dsp);
+ 
+ bool skl_ipc_int_status(struct sst_dsp *dsp);
+-void skl_ipc_free(struct sst_generic_ipc *ipc);
+ int skl_ipc_init(struct device *dev, struct skl_dev *skl);
+ void skl_clear_module_cnt(struct sst_dsp *ctx);
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst.c b/sound/soc/intel/skylake/skl-sst.c
+index f13a449f2c82..bb1b34e0ffcc 100644
+--- a/sound/soc/intel/skylake/skl-sst.c
++++ b/sound/soc/intel/skylake/skl-sst.c
+@@ -630,7 +630,8 @@ void skl_sst_dsp_cleanup(struct device *dev, struct skl_dev *skl)
+ 		release_firmware(skl->dsp->fw);
+ 	skl_clear_module_table(skl->dsp);
+ 	list_del_init(&skl->module_list);
+-	skl_ipc_free(&skl->ipc);
++	skl_ipc_op_int_disable(skl->dsp);
++	sst_ipc_fini(&skl->ipc);
+ 	skl->dsp->ops->free(skl->dsp);
+ 	if (skl->boot_complete) {
+ 		skl->dsp->cl_dev.ops.cl_cleanup_controller(skl->dsp);
+-- 
+2.17.1
+

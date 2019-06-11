@@ -1,0 +1,78 @@
+From 3e0f891207af26cdd23f2ec23a3459bd120a107e Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 7 May 2019 13:29:54 +0100
+Subject: [PATCH 125/185] drm/i915/execlists: Don't apply priority boost for
+ resets
+
+Do not treat reset as a normal preemption event and avoid giving the
+guilty request a priority boost for simply being active at the time of
+reset.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190507122954.6299-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index b1bed100997e..08641050ef91 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -371,11 +371,11 @@ static void unwind_wa_tail(struct i915_request *rq)
+ }
+ 
+ static struct i915_request *
+-__unwind_incomplete_requests(struct intel_engine_cs *engine)
++__unwind_incomplete_requests(struct intel_engine_cs *engine, int boost)
+ {
+ 	struct i915_request *rq, *rn, *active = NULL;
+ 	struct list_head *uninitialized_var(pl);
+-	int prio = I915_PRIORITY_INVALID | ACTIVE_PRIORITY;
++	int prio = I915_PRIORITY_INVALID | boost;
+ 
+ 	lockdep_assert_held(&engine->timeline.lock);
+ 
+@@ -419,8 +419,9 @@ __unwind_incomplete_requests(struct intel_engine_cs *engine)
+ 	 * in the priority queue, but they will not gain immediate access to
+ 	 * the GPU.
+ 	 */
+-	if (~prio & ACTIVE_PRIORITY && __i915_request_has_started(active)) {
+-		prio |= ACTIVE_PRIORITY;
++	if (~prio & boost && __i915_request_has_started(active)) {
++		prio |= boost;
++		GEM_BUG_ON(active->sched.attr.priority >= prio);
+ 		active->sched.attr.priority = prio;
+ 		list_move_tail(&active->sched.link,
+ 			       i915_sched_lookup_priolist(engine, prio));
+@@ -435,7 +436,7 @@ execlists_unwind_incomplete_requests(struct intel_engine_execlists *execlists)
+ 	struct intel_engine_cs *engine =
+ 		container_of(execlists, typeof(*engine), execlists);
+ 
+-	return __unwind_incomplete_requests(engine);
++	return __unwind_incomplete_requests(engine, 0);
+ }
+ 
+ static inline void
+@@ -656,7 +657,8 @@ static void complete_preempt_context(struct intel_engine_execlists *execlists)
+ 	execlists_cancel_port_requests(execlists);
+ 	__unwind_incomplete_requests(container_of(execlists,
+ 						  struct intel_engine_cs,
+-						  execlists));
++						  execlists),
++				     ACTIVE_PRIORITY);
+ }
+ 
+ static void execlists_dequeue(struct intel_engine_cs *engine)
+@@ -1909,7 +1911,7 @@ static void __execlists_reset(struct intel_engine_cs *engine, bool stalled)
+ 	execlists_cancel_port_requests(execlists);
+ 
+ 	/* Push back any incomplete requests for replay after the reset. */
+-	rq = __unwind_incomplete_requests(engine);
++	rq = __unwind_incomplete_requests(engine, 0);
+ 	if (!rq)
+ 		goto out_replay;
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,364 @@
+From 8b0db46f743e1ae97ac8c5bf5767a839b89d0531 Mon Sep 17 00:00:00 2001
+From: Mousumi Jana <mousumix.jana@intel.com>
+Date: Thu, 20 Jul 2017 16:39:00 +0530
+Subject: [PATCH 091/154] ASoC: Intel: Skylake: Notify topology changes
+
+Some events like pipeline start, pipeline delete, DSP D0/D3
+need to be notified to the user in order to convey a
+change in the topology. Support for notifying such events has
+been add using kcontrol. This kcontrol reports
+time at which the last change occurred in the topology.
+
+Change-Id: I3745a5a6d7034cb95bea13ba47f8d6eaf76f5a43
+Signed-off-by: Giribabu Gogineni <giribabux.gogineni@intel.com>
+Signed-off-by: Mousumi Jana <mousumix.jana@intel.com>
+Reviewed-on:
+Reviewed-by: Shaik, Kareem M <kareem.m.shaik@intel.com>
+Reviewed-by: Singh, Guneshwor O <guneshwor.o.singh@intel.com>
+Reviewed-by: Nc, Shreyas <shreyas.nc@intel.com>
+Reviewed-by: Kale, Sanyog R <sanyog.r.kale@intel.com>
+Reviewed-by: Koul, Vinod <vinod.koul@intel.com>
+Tested-by: Sm, Bhadur A <bhadur.a.sm@intel.com>
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ include/uapi/sound/snd_sst_tokens.h     | 16 ++++++
+ sound/soc/intel/skylake/bxt-sst.c       | 10 ++++
+ sound/soc/intel/skylake/skl-messages.c  |  8 +++
+ sound/soc/intel/skylake/skl-pcm.c       | 13 +++++
+ sound/soc/intel/skylake/skl-sst-dsp.h   | 16 ++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h   |  4 ++
+ sound/soc/intel/skylake/skl-sst-utils.c | 19 +++++++
+ sound/soc/intel/skylake/skl-topology.c  | 68 +++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-topology.h  |  3 ++
+ sound/soc/intel/skylake/skl.h           |  4 ++
+ 10 files changed, 161 insertions(+)
+
+diff --git a/include/uapi/sound/snd_sst_tokens.h b/include/uapi/sound/snd_sst_tokens.h
+index bdbf325c355b..2adf84b22e28 100644
+--- a/include/uapi/sound/snd_sst_tokens.h
++++ b/include/uapi/sound/snd_sst_tokens.h
+@@ -336,4 +336,20 @@ enum SKL_TKNS {
+ 	SKL_TKN_MAX = SKL_TKN_U32_DMACTRL_CFG_SIZE,
+ };
+ 
++/*
++ * Topology change notification events along with time at which
++ * the change occurred in topology.
++ */
++enum skl_event_type {
++	SKL_TPLG_CHG_NOTIFY_PIPELINE_START = 1,
++	SKL_TPLG_CHG_NOTIFY_PIPELINE_DELETE,
++	SKL_TPLG_CHG_NOTIFY_DSP_D0,
++	SKL_TPLG_CHG_NOTIFY_DSP_D3,
++};
++
++struct skl_tcn_events {
++	enum skl_event_type type;
++	struct timespec64 ts;
++};
++
+ #endif
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 073095b39649..a5b426e6e9ac 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -485,6 +485,11 @@ static int bxt_set_dsp_D0(struct sst_dsp *ctx, unsigned int core_id)
+ 	}
+ 
+ 	skl->cores.state[core_id] = SKL_DSP_RUNNING;
++	ret = skl_notify_tplg_change(skl, SKL_TPLG_CHG_NOTIFY_DSP_D0);
++	if (ret < 0)
++		dev_warn(ctx->dev,
++			"update of topology event D0 failed\n");
++
+ 	return 0;
+ err:
+ 	if (core_id == SKL_DSP_CORE0_ID)
+@@ -531,6 +536,11 @@ static int bxt_set_dsp_D3(struct sst_dsp *ctx, unsigned int core_id)
+ 		return ret;
+ 	}
+ 	skl->cores.state[core_id] = SKL_DSP_RESET;
++	ret = skl_notify_tplg_change(skl, SKL_TPLG_CHG_NOTIFY_DSP_D3);
++	if (ret < 0)
++		dev_warn(ctx->dev,
++			"update of topology event D3 failed\n");
++
+ 	return 0;
+ }
+ 
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index e46f6d5d3e6d..4c08de9e1443 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1399,6 +1399,10 @@ int skl_delete_pipe(struct skl_dev *skl, struct skl_pipe *pipe)
+ 
+ 	pipe->state = SKL_PIPE_INVALID;
+ 	skl_dbg_event(skl, pipe->state);
++	ret = skl_notify_tplg_change(skl, SKL_TPLG_CHG_NOTIFY_PIPELINE_DELETE);
++	if (ret < 0)
++		dev_warn(skl->dev,
++			"update of topology event delete pipe failed\n");
+ 
+ 	return ret;
+ }
+@@ -1434,6 +1438,10 @@ int skl_run_pipe(struct skl_dev *skl, struct skl_pipe *pipe)
+ 	}
+ 
+ 	pipe->state = SKL_PIPE_STARTED;
++	ret = skl_notify_tplg_change(skl, SKL_TPLG_CHG_NOTIFY_PIPELINE_START);
++	if (ret < 0)
++		dev_warn(skl->dev,
++			"update of topology event run pipe failed\n");
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index a3b70b662ed0..25c14e250a74 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -760,6 +760,10 @@ static const struct snd_soc_dai_ops skl_link_dai_ops = {
+ 	.trigger = skl_link_pcm_trigger,
+ };
+ 
++static struct skl_dsp_notify_ops cb_ops = {
++	.notify_cb = skl_dsp_cb_event,
++};
++
+ static struct snd_soc_dai_driver skl_fe_dai[] = {
+ {
+ 	.name = "System Pin",
+@@ -1525,6 +1529,7 @@ static int skl_platform_soc_probe(struct snd_soc_component *component)
+ 
+ 		skl_populate_modules(skl);
+ 		skl->update_d0i3c = skl_update_d0i3c;
++		skl->notify_ops = cb_ops;
+ 
+ 		if (skl->cfg.astate_cfg != NULL) {
+ 			skl_dsp_set_astate_cfg(skl,
+@@ -1547,6 +1552,12 @@ static void skl_pcm_remove(struct snd_soc_component *component)
+ 	snd_soc_tplg_component_remove(component, SND_SOC_TPLG_INDEX_ALL);
+ }
+ 
++static struct snd_kcontrol_new skl_controls[] = {
++	SND_SOC_BYTES_TLV("Topology Change Notification",
++		sizeof(struct skl_tcn_events),
++		skl_tplg_change_notification_get, NULL),
++};
++
+ static const struct snd_soc_component_driver skl_component  = {
+ 	.name		= "pcm",
+ 	.probe		= skl_platform_soc_probe,
+@@ -1555,6 +1566,8 @@ static const struct snd_soc_component_driver skl_component  = {
+ 	.compr_ops	= &skl_platform_compr_ops,
+ 	.pcm_new	= skl_pcm_new,
+ 	.pcm_free	= skl_pcm_free,
++	.controls	= skl_controls,
++	.num_controls	= ARRAY_SIZE(skl_controls),
+ 	.module_get_upon_open = 1, /* increment refcount when a pcm is opened */
+ };
+ 
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index ee5edf86fb45..894484d3a037 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -20,6 +20,7 @@
+ #include <linux/uuid.h>
+ #include <linux/firmware.h>
+ #include <sound/memalloc.h>
++#include <uapi/sound/snd_sst_tokens.h>
+ #include "skl-sst-cldma.h"
+ 
+ struct sst_dsp;
+@@ -204,6 +205,17 @@ struct uuid_module {
+ 	u8 hash[DEFAULT_HASH_SHA256_LEN];
+ };
+ 
++struct skl_notify_data {
++	u32 type;
++	u32 length;
++	struct skl_tcn_events tcn_data;
++};
++
++struct skl_dsp_notify_ops {
++	int (*notify_cb)(struct skl_dev *skl, unsigned int event,
++				 struct skl_notify_data *notify_data);
++};
++
+ struct skl_load_module_info {
+ 	u16 mod_id;
+ 	const struct firmware *fw;
+@@ -286,4 +298,8 @@ void bxt_set_dsp_D0i3(struct work_struct *work);
+ int skl_module_sysfs_init(struct skl_dev *skl, struct kobject *fw_modules_kobj);
+ 
+ void skl_module_sysfs_exit(struct skl_dev *skl);
++
++int skl_dsp_cb_event(struct skl_dev *skl, unsigned int event,
++				struct skl_notify_data *notify_data);
++
+ #endif /*__SKL_SST_DSP_H__*/
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index b88d4cb7c208..6284f3a255e7 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -21,6 +21,8 @@
+ #include "skl-sst-dsp.h"
+ #include <uapi/sound/skl-tplg-interface.h>
+ 
++#define	SKL_TPLG_CHG_NOTIFY	3
++
+ struct sst_dsp;
+ struct sst_generic_ipc;
+ 
+@@ -513,4 +515,6 @@ int skl_probe_points_connect(struct skl_dev *skl,
+ int skl_probe_points_disconnect(struct skl_dev *skl,
+ 		union skl_probe_point_id *id, size_t num_id);
+ 
++int skl_notify_tplg_change(struct skl_dev *skl, int type);
++
+ #endif /* __SKL_IPC_H */
+diff --git a/sound/soc/intel/skylake/skl-sst-utils.c b/sound/soc/intel/skylake/skl-sst-utils.c
+index 4e15ca018a9b..fbffde74af5a 100644
+--- a/sound/soc/intel/skylake/skl-sst-utils.c
++++ b/sound/soc/intel/skylake/skl-sst-utils.c
+@@ -504,6 +504,25 @@ void skl_release_library(struct skl_lib_info *linfo, int lib_count)
+ 	}
+ }
+ 
++int skl_notify_tplg_change(struct skl_dev *skl, int type)
++{
++	struct skl_notify_data *notify_data;
++
++	notify_data = kzalloc(sizeof(*notify_data), GFP_KERNEL);
++	if (!notify_data)
++		return -ENOMEM;
++
++	notify_data->type = 0xFF;
++	notify_data->length = sizeof(struct skl_tcn_events);
++	notify_data->tcn_data.type = type;
++	ktime_get_real_ts64(&(notify_data->tcn_data.ts));
++	skl->notify_ops.notify_cb(skl, SKL_TPLG_CHG_NOTIFY, notify_data);
++	kfree(notify_data);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(skl_notify_tplg_change);
++
+ static ssize_t uuid_attr_show(struct kobject *kobj, struct attribute *attr,
+ 				char *buf)
+ {
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index fabcf7dc648c..44df62066ac9 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -2025,6 +2025,74 @@ int skl_tplg_be_update_params(struct snd_soc_dai *dai,
+ 	return 0;
+ }
+ 
++/*
++ * Get the events along with data stored in notify_data and pass
++ * to kcontrol private data.
++ */
++int skl_dsp_cb_event(struct skl_dev *skl, unsigned int event,
++				struct skl_notify_data *notify_data)
++{
++	struct snd_soc_card *card;
++	struct soc_bytes_ext *sb;
++	struct snd_soc_component *component = skl->component;
++
++	switch (event) {
++	case SKL_TPLG_CHG_NOTIFY:
++		card = component->card;
++
++		if (!skl->kcontrol) {
++			skl->kcontrol = snd_soc_card_get_kcontrol(card,
++					"Topology Change Notification");
++			if (!skl->kcontrol) {
++				dev_dbg(skl->dev,
++					"NOTIFICATION Controls not found\n");
++				return -EINVAL;
++			}
++		}
++
++		sb = (struct soc_bytes_ext *)skl->kcontrol->private_value;
++		if (!sb->dobj.private) {
++			sb->dobj.private = devm_kzalloc(skl->dev,
++				sizeof(*notify_data), GFP_KERNEL);
++			if (!sb->dobj.private)
++				return -ENOMEM;
++		}
++
++		memcpy(sb->dobj.private, notify_data, sizeof(*notify_data));
++		snd_ctl_notify(card->snd_card, SNDRV_CTL_EVENT_MASK_VALUE,
++							&skl->kcontrol->id);
++		break;
++
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++/*
++ * Get last topology change events like pipeline start, pipeline delete,
++ * DSP D0/D3 and notify to user along with time at which last change occurred
++ * in topology.
++ */
++int skl_tplg_change_notification_get(struct snd_kcontrol *kcontrol,
++			unsigned int __user *data, unsigned int size)
++{
++	struct skl_notify_data *notify_data;
++	struct soc_bytes_ext *sb =
++			(struct soc_bytes_ext *)kcontrol->private_value;
++
++	if (sb->dobj.private) {
++		notify_data = (struct skl_notify_data *)sb->dobj.private;
++		if (copy_to_user(data, notify_data, sizeof(*notify_data)))
++			return -EFAULT;
++		/* Clear the data after copy to user as per requirement */
++		memset(notify_data, 0, sizeof(*notify_data));
++	}
++
++	return 0;
++}
++
+ static const struct snd_soc_tplg_widget_events skl_tplg_widget_ops[] = {
+ 	{SKL_MIXER_EVENT, skl_tplg_mixer_event},
+ 	{SKL_VMIXER_EVENT, skl_tplg_mixer_event},
+diff --git a/sound/soc/intel/skylake/skl-topology.h b/sound/soc/intel/skylake/skl-topology.h
+index 2a087ff56a5e..ee15c450026d 100644
+--- a/sound/soc/intel/skylake/skl-topology.h
++++ b/sound/soc/intel/skylake/skl-topology.h
+@@ -417,4 +417,7 @@ int skl_dai_load(struct snd_soc_component *cmp, int index,
+ 		struct snd_soc_tplg_pcm *pcm, struct snd_soc_dai *dai);
+ void skl_tplg_add_moduleid_in_bind_params(struct skl_dev *skl,
+ 				struct snd_soc_dapm_widget *w);
++
++int skl_tplg_change_notification_get(struct snd_kcontrol *kcontrol,
++			unsigned int __user *data, unsigned int size);
+ #endif
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index f998ad53b63f..9c52dbb59fe5 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -159,6 +159,8 @@ struct skl_dev {
+ 	/* Callback to update D0i3C register */
+ 	void (*update_d0i3c)(struct device *dev, bool enable);
+ 
++	struct skl_dsp_notify_ops notify_ops;
++
+ 	struct skl_d0i3_data d0i3;
+ 
+ 	const struct skl_dsp_ops *dsp_ops;
+@@ -171,6 +173,8 @@ struct skl_dev {
+ 
+ 	struct ep_group_cnt grp_cnt;
+ 
++	struct snd_kcontrol *kcontrol;
++
+ 	/* probe stream management */
+ 	struct hdac_ext_stream *extractor;
+ 	unsigned int num_probe_streams;
+-- 
+2.17.1
+

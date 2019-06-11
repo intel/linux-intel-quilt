@@ -1,0 +1,160 @@
+From d9d527a35e7e378c718f5f709002bb4a9a11ad3d Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Sat, 4 May 2019 08:07:07 +0100
+Subject: [PATCH 109/185] drm/i915: Disable semaphore busywaits on saturated
+ systems
+
+Asking the GPU to busywait on a memory address, perhaps not unexpectedly
+in hindsight for a shared system, leads to bus contention that affects
+CPU programs trying to concurrently access memory. This can manifest as
+a drop in transcode throughput on highly over-saturated workloads.
+
+The only clue offered by perf, is that the bus-cycles (perf stat -e
+bus-cycles) jumped by 50% when enabling semaphores. This corresponds
+with extra CPU active cycles being attributed to intel_idle's mwait.
+
+This patch introduces a heuristic to try and detect when more than one
+client is submitting to the GPU pushing it into an oversaturated state.
+As we already keep track of when the semaphores are signaled, we can
+inspect their state on submitting the busywait batch and if we planned
+to use a semaphore but were too late, conclude that the GPU is
+overloaded and not try to use semaphores in future requests. In
+practice, this means we optimistically try to use semaphores for the
+first frame of a transcode job split over multiple engines, and fail if
+there are multiple clients active and continue not to use semaphores for
+the subsequent frames in the sequence. Periodically, we try to
+optimistically switch semaphores back on whenever the client waits to
+catch up with the transcode results.
+
+With 1 client, on Broxton J3455, with the relative fps normalized by %cpu:
+
+x no semaphores
++ drm-tip
+* patched
++------------------------------------------------------------------------+
+|                                                    *                   |
+|                                                    *+                  |
+|                                                    **+                 |
+|                                                    **+  x              |
+|                                x               *  +**+  x              |
+|                                x  x       *    *  +***x xx             |
+|                                x  x       *    * *+***x *x             |
+|                                x  x*   +  *    * *****x *x x           |
+|                         +    x xx+x*   + ***   * ********* x   *       |
+|                         +    x xx+x*   * *** +** ********* xx  *       |
+|    *   +         ++++*  +    x*x****+*+* ***+*************+x*  *       |
+|*+ +** *+ + +* + *++****** *xxx**********x***+*****************+*++    *|
+|                                   |__________A_____M_____|             |
+|                           |_______________A____M_________|             |
+|                                 |____________A___M________|            |
++------------------------------------------------------------------------+
+    N           Min           Max        Median           Avg        Stddev
+x 120       2.60475       3.50941       3.31123     3.2143953    0.21117399
++ 120        2.3826       3.57077       3.25101     3.1414161    0.28146407
+Difference at 95.0% confidence
+	-0.0729792 +/- 0.0629585
+	-2.27039% +/- 1.95864%
+	(Student's t, pooled s = 0.248814)
+* 120       2.35536       3.66713        3.2849     3.2059917    0.24618565
+No difference proven at 95.0% confidence
+
+With 10 clients over-saturating the pipeline:
+
+x no semaphores
++ drm-tip
+* patched
++------------------------------------------------------------------------+
+|                     ++                                        **       |
+|                     ++                                        **       |
+|                     ++                                        **       |
+|                     ++                                        **       |
+|                     ++                                    xx ***       |
+|                     ++                                    xx ***       |
+|                     ++                                    xxx***       |
+|                     ++                                    xxx***       |
+|                    +++                                    xxx***       |
+|                    +++                                    xx****       |
+|                    +++                                    xx****       |
+|                    +++                                    xx****       |
+|                    +++                                    xx****       |
+|                    ++++                                   xx****       |
+|                   +++++                                   xx****       |
+|                   +++++                                 x x******      |
+|                  ++++++                                 xxx*******     |
+|                  ++++++                                 xxx*******     |
+|                  ++++++                                 xxx*******     |
+|                  ++++++                                 xx********     |
+|                  ++++++                               xxxx********     |
+|                  ++++++                               xxxx********     |
+|                ++++++++                             xxxxx*********     |
+|+ +  +        + ++++++++                           xxx*xx**********x*  *|
+|                                                         |__A__|        |
+|                 |__AM__|                                               |
+|                                                            |__A_|      |
++------------------------------------------------------------------------+
+    N           Min           Max        Median           Avg        Stddev
+x 120       2.47855        2.8972       2.72376     2.7193402   0.074604933
++ 120       1.17367       1.77459       1.71977     1.6966782   0.085850697
+Difference at 95.0% confidence
+	-1.02266 +/- 0.0203502
+	-37.607% +/- 0.748352%
+	(Student's t, pooled s = 0.0804246)
+* 120       2.57868       3.00821       2.80142     2.7923878   0.058646477
+Difference at 95.0% confidence
+	0.0730476 +/- 0.0169791
+	2.68622% +/- 0.624383%
+	(Student's t, pooled s = 0.0671018)
+
+Indicating that we've recovered the regression from enabling semaphores
+on this saturated setup, with a hint towards an overall improvement.
+
+Very similar, but of smaller magnitude, results are observed on both
+Skylake(gt2) and Kabylake(gt4). This may be due to the reduced impact of
+bus-cycles, where we see a 50% hit on Broxton, it is only 10% on the big
+core, in this particular test.
+
+One observation to make here is that for a greedy client trying to
+maximise its own throughput, using semaphores is the right choice. It is
+only the holistic system-wide view that semaphores of one client
+impacts another and reduces the overall throughput where we would choose
+to disable semaphores.
+
+The most noticeable negactive impact this has is on the no-op
+microbenchmarks, which are also very notable for having no cpu bus load.
+In particular, this increases the runtime and energy consumption of
+gem_exec_whisper.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Dmitry Rogozhkin <dmitry.v.rogozhkin@intel.com>
+Cc: Dmitry Ermilov <dmitry.ermilov@intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190504070707.30902-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_context.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index a6f4d860279c..2581bd3ee153 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -117,6 +117,7 @@ intel_context_init(struct intel_context *ce,
+ 	ce->ops = engine->cops;
+ 	ce->saturated = 0;
+ 	ce->sseu = engine->sseu;
++	ce->saturated = 0;
+ 
+ 	INIT_LIST_HEAD(&ce->signal_link);
+ 	INIT_LIST_HEAD(&ce->signals);
+@@ -159,6 +160,7 @@ void intel_context_enter_engine(struct intel_context *ce)
+ 
+ void intel_context_exit_engine(struct intel_context *ce)
+ {
++	ce->saturated = 0;
+ 	intel_engine_pm_put(ce->engine);
+ }
+ 
+-- 
+2.17.1
+

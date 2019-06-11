@@ -1,0 +1,187 @@
+From 2ca90430c5a503c83f938c66c357bcde973d63ee Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 3 May 2019 09:09:42 +0100
+Subject: [PATCH 103/185] drm/i915/execlists: Flush the tasklet on parking
+
+Tidy up the cleanup sequence by always ensure that the tasklet is
+flushed on parking (before we cleanup). The parking provides a
+convenient point to ensure that the backend is truly idle.
+
+v2: Do the full check for idleness before parking, to be sure we flush
+any residual interrupt.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190503080942.30151-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c   |  2 ++
+ drivers/gpu/drm/i915/gt/intel_engine_pm.c   | 27 +++++++++++++++++----
+ drivers/gpu/drm/i915/gt/intel_engine_pm.h   |  2 ++
+ drivers/gpu/drm/i915/gt/intel_lrc.c         | 16 ++++++------
+ drivers/gpu/drm/i915/intel_guc_submission.c |  2 ++
+ 5 files changed, 35 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index e63bf5032a1d..5907a9613641 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -1094,6 +1094,8 @@ bool intel_engine_is_idle(struct intel_engine_cs *engine)
+ 	if (READ_ONCE(engine->execlists.active)) {
+ 		struct tasklet_struct *t = &engine->execlists.tasklet;
+ 
++		synchronize_hardirq(engine->i915->drm.irq);
++
+ 		local_bh_disable();
+ 		if (tasklet_trylock(t)) {
+ 			/* Must wait for any GPU reset in progress. */
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.c b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+index 3976aea3c1d1..ccf034764741 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+@@ -10,7 +10,7 @@
+ #include "intel_engine_pm.h"
+ #include "intel_gt_pm.h"
+ 
+-static int intel_engine_unpark(struct intel_wakeref *wf)
++static int __engine_unpark(struct intel_wakeref *wf)
+ {
+ 	struct intel_engine_cs *engine =
+ 		container_of(wf, typeof(*engine), wakeref);
+@@ -37,7 +37,24 @@ static int intel_engine_unpark(struct intel_wakeref *wf)
+ 
+ void intel_engine_pm_get(struct intel_engine_cs *engine)
+ {
+-	intel_wakeref_get(engine->i915, &engine->wakeref, intel_engine_unpark);
++	intel_wakeref_get(engine->i915, &engine->wakeref, __engine_unpark);
++}
++
++void intel_engine_park(struct intel_engine_cs *engine)
++{
++	/*
++	 * We are committed now to parking this engine, make sure there
++	 * will be no more interrupts arriving later and the engine
++	 * is truly idle.
++	 */
++	if (wait_for(intel_engine_is_idle(engine), 10)) {
++		struct drm_printer p = drm_debug_printer(__func__);
++
++		dev_err(engine->i915->drm.dev,
++			"%s is not idle before parking\n",
++			engine->name);
++		intel_engine_dump(engine, &p, NULL);
++	}
+ }
+ 
+ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+@@ -56,7 +73,7 @@ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+ 	 * Note, we do this without taking the timeline->mutex. We cannot
+ 	 * as we may be called while retiring the kernel context and so
+ 	 * already underneath the timeline->mutex. Instead we rely on the
+-	 * exclusive property of the intel_engine_park that prevents anyone
++	 * exclusive property of the __engine_park that prevents anyone
+ 	 * else from creating a request on this engine. This also requires
+ 	 * that the ring is empty and we avoid any waits while constructing
+ 	 * the context, as they assume protection by the timeline->mutex.
+@@ -76,7 +93,7 @@ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+ 	return false;
+ }
+ 
+-static int intel_engine_park(struct intel_wakeref *wf)
++static int __engine_park(struct intel_wakeref *wf)
+ {
+ 	struct intel_engine_cs *engine =
+ 		container_of(wf, typeof(*engine), wakeref);
+@@ -114,7 +131,7 @@ static int intel_engine_park(struct intel_wakeref *wf)
+ 
+ void intel_engine_pm_put(struct intel_engine_cs *engine)
+ {
+-	intel_wakeref_put(engine->i915, &engine->wakeref, intel_engine_park);
++	intel_wakeref_put(engine->i915, &engine->wakeref, __engine_park);
+ }
+ 
+ void intel_engine_init__pm(struct intel_engine_cs *engine)
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.h b/drivers/gpu/drm/i915/gt/intel_engine_pm.h
+index 143ac90ba117..b326cd993d60 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.h
+@@ -13,6 +13,8 @@ struct intel_engine_cs;
+ void intel_engine_pm_get(struct intel_engine_cs *engine);
+ void intel_engine_pm_put(struct intel_engine_cs *engine);
+ 
++void intel_engine_park(struct intel_engine_cs *engine);
++
+ void intel_engine_init__pm(struct intel_engine_cs *engine);
+ 
+ int intel_engines_resume(struct drm_i915_private *i915);
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 5aa700043bd4..82af1ab7fbbe 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -136,6 +136,7 @@
+ #include "i915_drv.h"
+ #include "i915_gem_render_state.h"
+ #include "i915_vgpu.h"
++#include "intel_engine_pm.h"
+ #include "intel_lrc_reg.h"
+ #include "intel_mocs.h"
+ #include "intel_reset.h"
+@@ -2331,6 +2332,11 @@ static int gen8_init_rcs_context(struct i915_request *rq)
+ 	return i915_gem_render_state_emit(rq);
+ }
+ 
++static void execlists_park(struct intel_engine_cs *engine)
++{
++	intel_engine_park(engine);
++}
++
+ void intel_execlists_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = execlists_submit_request;
+@@ -2342,7 +2348,7 @@ void intel_execlists_set_default_submission(struct intel_engine_cs *engine)
+ 	engine->reset.reset = execlists_reset;
+ 	engine->reset.finish = execlists_reset_finish;
+ 
+-	engine->park = NULL;
++	engine->park = execlists_park;
+ 	engine->unpark = NULL;
+ 
+ 	engine->flags |= I915_ENGINE_SUPPORTS_STATS;
+@@ -2355,14 +2361,6 @@ void intel_execlists_set_default_submission(struct intel_engine_cs *engine)
+ 
+ static void execlists_destroy(struct intel_engine_cs *engine)
+ {
+-	/*
+-	 * Tasklet cannot be active at this point due intel_mark_active/idle
+-	 * so this is just for documentation.
+-	 */
+-	if (GEM_DEBUG_WARN_ON(test_bit(TASKLET_STATE_SCHED,
+-				       &engine->execlists.tasklet.state)))
+-		tasklet_kill(&engine->execlists.tasklet);
+-
+ 	intel_engine_cleanup_common(engine);
+ 	lrc_destroy_wa_ctx(engine);
+ 	kfree(engine);
+diff --git a/drivers/gpu/drm/i915/intel_guc_submission.c b/drivers/gpu/drm/i915/intel_guc_submission.c
+index 7e443973b806..d10f9534d1b1 100644
+--- a/drivers/gpu/drm/i915/intel_guc_submission.c
++++ b/drivers/gpu/drm/i915/intel_guc_submission.c
+@@ -24,6 +24,7 @@
+ 
+ #include <linux/circ_buf.h>
+ 
++#include "gt/intel_engine_pm.h"
+ #include "gt/intel_lrc_reg.h"
+ 
+ #include "intel_guc_submission.h"
+@@ -1362,6 +1363,7 @@ static void guc_interrupts_release(struct drm_i915_private *dev_priv)
+ 
+ static void guc_submission_park(struct intel_engine_cs *engine)
+ {
++	intel_engine_park(engine);
+ 	intel_engine_unpin_breadcrumbs_irq(engine);
+ 	engine->flags &= ~I915_ENGINE_NEEDS_BREADCRUMB_TASKLET;
+ }
+-- 
+2.17.1
+

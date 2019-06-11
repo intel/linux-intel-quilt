@@ -1,0 +1,142 @@
+From 0c1b03dd00fcbfd349aa2ae0a1aebf8fc2aa0192 Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Wed, 2 Nov 2016 18:18:36 -0400
+Subject: [PATCH 18/43] mei: dma ring: implement transmit flow
+
+Implement a circular buffer on allocated system memory. Read and write
+indices are stored on the control block which is also shared between the
+device and the host.
+Two new functions are exported from the DMA module: mei_dma_ring_write,
+and mei_dma_ring_empty_slots. The former simply copy a packet on the TX
+DMA circular buffer and later, returns the number of empty slots on the
+TX DMA circular buffer.
+
+Change-Id: I47885e4b989b1425253211c86b5931dc30c5bde6
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+Signed-off-by: Alexander Usyskin <alexander.usyskin@intel.com>
+---
+ drivers/misc/mei/dma-ring.c | 91 +++++++++++++++++++++++++++++++++++++
+ drivers/misc/mei/mei_dev.h  |  1 -
+ 2 files changed, 91 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/mei/dma-ring.c b/drivers/misc/mei/dma-ring.c
+index 510027b62539..fa2a4820bdfd 100644
+--- a/drivers/misc/mei/dma-ring.c
++++ b/drivers/misc/mei/dma-ring.c
+@@ -144,6 +144,27 @@ static size_t mei_dma_copy_from(struct mei_device *dev, unsigned char *buf,
+ 	return b_n;
+ }
+ 
++/**
++ * mei_dma_copy_to - copy to a buffer to the dma ring
++ *
++ * @dev: mei device
++ * @buf: data buffer
++ * @offset: offset in slots.
++ * @n: number of slots to copy.
++ */
++static size_t mei_dma_copy_to(struct mei_device *dev, unsigned char *buf,
++			      u32 offset, u32 n)
++{
++	unsigned char *hbuf = dev->dr_dscr[DMA_DSCR_HOST].vaddr;
++
++	size_t b_offset = offset << 2;
++	size_t b_n = n << 2;
++
++	memcpy(hbuf + b_offset, buf, b_n);
++
++	return b_n;
++}
++
+ /**
+  * mei_dma_ring_read - read data from the ring
+  *
+@@ -186,3 +207,73 @@ void mei_dma_ring_read(struct mei_device *dev, unsigned char *buf, u32 len)
+ 	WRITE_ONCE(ctrl->dbuf_rd_idx, ctrl->dbuf_rd_idx + slots);
+ }
+ 
++static inline u32 mei_dma_ring_hbuf_depth(struct mei_device *dev)
++{
++	return dev->dr_dscr[DMA_DSCR_HOST].size >> 2;
++}
++
++/**
++ * mei_dma_ring_empty_slots - calaculate number of empty slots in dma ring
++ *
++ * @dev: mei_device
++ *
++ * Return: number of empty slots
++ */
++u32 mei_dma_ring_empty_slots(struct mei_device *dev)
++{
++	struct hbm_dma_ring_ctrl *ctrl = mei_dma_ring_ctrl(dev);
++	u32 wr_idx, rd_idx, hbuf_depth, empty;
++
++	if (!mei_dma_ring_is_allocated(dev))
++		return 0;
++
++	if (WARN_ON(!ctrl))
++		return 0;
++
++	/* easier to work in slots */
++	hbuf_depth = mei_dma_ring_hbuf_depth(dev);
++	rd_idx = READ_ONCE(ctrl->hbuf_rd_idx);
++	wr_idx = READ_ONCE(ctrl->hbuf_wr_idx);
++
++	if (rd_idx > wr_idx)
++		empty = rd_idx - wr_idx;
++	else
++		empty = hbuf_depth - (wr_idx - rd_idx);
++
++	return empty;
++}
++
++/**
++ * mei_dma_ring_write - write data to dma ring host buffer
++ *
++ * @dev: mei_device
++ * @buf: data will be written
++ * @len: data length
++ */
++void mei_dma_ring_write(struct mei_device *dev, unsigned char *buf, u32 len)
++{
++	struct hbm_dma_ring_ctrl *ctrl = mei_dma_ring_ctrl(dev);
++	u32 hbuf_depth;
++	u32 wr_idx, rem, slots;
++
++	if (WARN_ON(!ctrl))
++		return;
++
++	dev_dbg(dev->dev, "writing to dma %u bytes\n", len);
++	hbuf_depth = mei_dma_ring_hbuf_depth(dev);
++	wr_idx = READ_ONCE(ctrl->hbuf_wr_idx) & (hbuf_depth - 1);
++	slots = mei_data2slots(len);
++
++	if (wr_idx + slots > hbuf_depth) {
++		buf += mei_dma_copy_to(dev, buf, wr_idx, hbuf_depth - wr_idx);
++		rem = slots - (hbuf_depth - wr_idx);
++		wr_idx = 0;
++	} else {
++		rem = slots;
++	}
++
++	mei_dma_copy_to(dev, buf, wr_idx, rem);
++
++	WRITE_ONCE(ctrl->hbuf_wr_idx, ctrl->hbuf_wr_idx + slots);
++}
++
+diff --git a/drivers/misc/mei/mei_dev.h b/drivers/misc/mei/mei_dev.h
+index ba793dfb49f0..fca832fcac57 100644
+--- a/drivers/misc/mei/mei_dev.h
++++ b/drivers/misc/mei/mei_dev.h
+@@ -593,7 +593,6 @@ void mei_dma_ring_read(struct mei_device *dev, unsigned char *buf, u32 len);
+ void mei_dma_ring_write(struct mei_device *dev, unsigned char *buf, u32 len);
+ u32 mei_dma_ring_empty_slots(struct mei_device *dev);
+ 
+-
+ /*
+  *  MEI interrupt functions prototype
+  */
+-- 
+2.17.1
+

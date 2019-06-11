@@ -1,0 +1,547 @@
+From c8645674832cbab0482f55200da4281d34f7a9b0 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 17:33:36 +0100
+Subject: [PATCH 050/185] drm/i915: Move i915_request_alloc into selftests/
+
+Having transitioned GEM over to using intel_context as its primary means
+of tracking the GEM context and engine combined and using
+i915_request_create(), we can move the older i915_request_alloc()
+helper function into selftests/ where the remaining users are confined.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426163336.15906-9-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Makefile                 |  1 +
+ drivers/gpu/drm/i915/gt/selftest_hangcheck.c  |  9 +++--
+ drivers/gpu/drm/i915/gt/selftest_lrc.c        | 13 ++++---
+ .../gpu/drm/i915/gt/selftest_workarounds.c    | 15 +++-----
+ drivers/gpu/drm/i915/i915_request.c           | 38 -------------------
+ drivers/gpu/drm/i915/i915_request.h           |  3 --
+ drivers/gpu/drm/i915/selftests/huge_pages.c   |  3 +-
+ drivers/gpu/drm/i915/selftests/i915_gem.c     |  5 ++-
+ .../gpu/drm/i915/selftests/i915_gem_context.c | 13 ++++---
+ .../gpu/drm/i915/selftests/i915_gem_evict.c   |  3 +-
+ drivers/gpu/drm/i915/selftests/i915_request.c |  4 +-
+ .../gpu/drm/i915/selftests/igt_gem_utils.c    | 34 +++++++++++++++++
+ .../gpu/drm/i915/selftests/igt_gem_utils.h    | 17 +++++++++
+ drivers/gpu/drm/i915/selftests/igt_spinner.c  |  3 +-
+ drivers/gpu/drm/i915/selftests/mock_request.c |  3 +-
+ 15 files changed, 89 insertions(+), 75 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/selftests/igt_gem_utils.c
+ create mode 100644 drivers/gpu/drm/i915/selftests/igt_gem_utils.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index dd8d923aa1c6..58643373495c 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -193,6 +193,7 @@ i915-$(CONFIG_DRM_I915_SELFTEST) += \
+ 	selftests/i915_random.o \
+ 	selftests/i915_selftest.o \
+ 	selftests/igt_flush_test.o \
++	selftests/igt_gem_utils.o \
+ 	selftests/igt_live_test.o \
+ 	selftests/igt_reset.o \
+ 	selftests/igt_spinner.o
+diff --git a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+index 9dece55a091c..dab3d30c9c73 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
++++ b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+@@ -29,6 +29,7 @@
+ #include "i915_selftest.h"
+ #include "selftests/i915_random.h"
+ #include "selftests/igt_flush_test.h"
++#include "selftests/igt_gem_utils.h"
+ #include "selftests/igt_reset.h"
+ #include "selftests/igt_wedge_me.h"
+ 
+@@ -175,7 +176,7 @@ hang_create_request(struct hang *h, struct intel_engine_cs *engine)
+ 	if (err)
+ 		goto unpin_vma;
+ 
+-	rq = i915_request_alloc(engine, h->ctx);
++	rq = igt_request_alloc(h->ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto unpin_hws;
+@@ -455,7 +456,7 @@ static int igt_reset_nop(void *arg)
+ 			for (i = 0; i < 16; i++) {
+ 				struct i915_request *rq;
+ 
+-				rq = i915_request_alloc(engine, ctx);
++				rq = igt_request_alloc(ctx, engine);
+ 				if (IS_ERR(rq)) {
+ 					err = PTR_ERR(rq);
+ 					break;
+@@ -554,7 +555,7 @@ static int igt_reset_nop_engine(void *arg)
+ 			for (i = 0; i < 16; i++) {
+ 				struct i915_request *rq;
+ 
+-				rq = i915_request_alloc(engine, ctx);
++				rq = igt_request_alloc(ctx, engine);
+ 				if (IS_ERR(rq)) {
+ 					err = PTR_ERR(rq);
+ 					break;
+@@ -800,7 +801,7 @@ static int active_engine(void *data)
+ 		struct i915_request *new;
+ 
+ 		mutex_lock(&engine->i915->drm.struct_mutex);
+-		new = i915_request_alloc(engine, ctx[idx]);
++		new = igt_request_alloc(ctx[idx], engine);
+ 		if (IS_ERR(new)) {
+ 			mutex_unlock(&engine->i915->drm.struct_mutex);
+ 			err = PTR_ERR(new);
+diff --git a/drivers/gpu/drm/i915/gt/selftest_lrc.c b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+index f91410bcd78d..0610cb6e9713 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_lrc.c
++++ b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+@@ -10,6 +10,7 @@
+ #include "i915_selftest.h"
+ #include "selftests/i915_random.h"
+ #include "selftests/igt_flush_test.h"
++#include "selftests/igt_gem_utils.h"
+ #include "selftests/igt_live_test.h"
+ #include "selftests/igt_spinner.h"
+ #include "selftests/mock_context.h"
+@@ -150,7 +151,7 @@ static int live_busywait_preempt(void *arg)
+ 		 * fails, we hang instead.
+ 		 */
+ 
+-		lo = i915_request_alloc(engine, ctx_lo);
++		lo = igt_request_alloc(ctx_lo, engine);
+ 		if (IS_ERR(lo)) {
+ 			err = PTR_ERR(lo);
+ 			goto err_vma;
+@@ -194,7 +195,7 @@ static int live_busywait_preempt(void *arg)
+ 			goto err_vma;
+ 		}
+ 
+-		hi = i915_request_alloc(engine, ctx_hi);
++		hi = igt_request_alloc(ctx_hi, engine);
+ 		if (IS_ERR(hi)) {
+ 			err = PTR_ERR(hi);
+ 			goto err_vma;
+@@ -859,13 +860,13 @@ static int live_chain_preempt(void *arg)
+ 			i915_request_add(rq);
+ 
+ 			for (i = 0; i < count; i++) {
+-				rq = i915_request_alloc(engine, lo.ctx);
++				rq = igt_request_alloc(lo.ctx, engine);
+ 				if (IS_ERR(rq))
+ 					goto err_wedged;
+ 				i915_request_add(rq);
+ 			}
+ 
+-			rq = i915_request_alloc(engine, hi.ctx);
++			rq = igt_request_alloc(hi.ctx, engine);
+ 			if (IS_ERR(rq))
+ 				goto err_wedged;
+ 			i915_request_add(rq);
+@@ -884,7 +885,7 @@ static int live_chain_preempt(void *arg)
+ 			}
+ 			igt_spinner_end(&lo.spin);
+ 
+-			rq = i915_request_alloc(engine, lo.ctx);
++			rq = igt_request_alloc(lo.ctx, engine);
+ 			if (IS_ERR(rq))
+ 				goto err_wedged;
+ 			i915_request_add(rq);
+@@ -1091,7 +1092,7 @@ static int smoke_submit(struct preempt_smoke *smoke,
+ 
+ 	ctx->sched.priority = prio;
+ 
+-	rq = i915_request_alloc(smoke->engine, ctx);
++	rq = igt_request_alloc(ctx, smoke->engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto unpin;
+diff --git a/drivers/gpu/drm/i915/gt/selftest_workarounds.c b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+index 6b9e9b6d82f7..9f7680b9984b 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+@@ -8,6 +8,7 @@
+ #include "intel_reset.h"
+ 
+ #include "selftests/igt_flush_test.h"
++#include "selftests/igt_gem_utils.h"
+ #include "selftests/igt_reset.h"
+ #include "selftests/igt_spinner.h"
+ #include "selftests/igt_wedge_me.h"
+@@ -102,7 +103,7 @@ read_nonprivs(struct i915_gem_context *ctx, struct intel_engine_cs *engine)
+ 	if (err)
+ 		goto err_obj;
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_pin;
+@@ -511,7 +512,7 @@ static int check_dirty_whitelist(struct i915_gem_context *ctx,
+ 		i915_gem_object_unpin_map(batch->obj);
+ 		i915_gem_chipset_flush(ctx->i915);
+ 
+-		rq = i915_request_alloc(engine, ctx);
++		rq = igt_request_alloc(ctx, engine);
+ 		if (IS_ERR(rq)) {
+ 			err = PTR_ERR(rq);
+ 			goto out_batch;
+@@ -701,14 +702,11 @@ static int read_whitelisted_registers(struct i915_gem_context *ctx,
+ 				      struct intel_engine_cs *engine,
+ 				      struct i915_vma *results)
+ {
+-	intel_wakeref_t wakeref;
+ 	struct i915_request *rq;
+ 	int i, err = 0;
+ 	u32 srm, *cs;
+ 
+-	rq = ERR_PTR(-ENODEV);
+-	with_intel_runtime_pm(engine->i915, wakeref)
+-		rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq))
+ 		return PTR_ERR(rq);
+ 
+@@ -744,7 +742,6 @@ static int read_whitelisted_registers(struct i915_gem_context *ctx,
+ static int scrub_whitelisted_registers(struct i915_gem_context *ctx,
+ 				       struct intel_engine_cs *engine)
+ {
+-	intel_wakeref_t wakeref;
+ 	struct i915_request *rq;
+ 	struct i915_vma *batch;
+ 	int i, err = 0;
+@@ -770,9 +767,7 @@ static int scrub_whitelisted_registers(struct i915_gem_context *ctx,
+ 	i915_gem_object_flush_map(batch->obj);
+ 	i915_gem_chipset_flush(ctx->i915);
+ 
+-	rq = ERR_PTR(-ENODEV);
+-	with_intel_runtime_pm(engine->i915, wakeref)
+-		rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_unpin;
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 5e0568b58df7..e0b491a1198c 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -771,44 +771,6 @@ i915_request_create(struct intel_context *ce)
+ 	return rq;
+ }
+ 
+-/**
+- * i915_request_alloc - allocate a request structure
+- *
+- * @engine: engine that we wish to issue the request on.
+- * @ctx: context that the request will be associated with.
+- *
+- * Returns a pointer to the allocated request if successful,
+- * or an error code if not.
+- */
+-struct i915_request *
+-i915_request_alloc(struct intel_engine_cs *engine, struct i915_gem_context *ctx)
+-{
+-	struct drm_i915_private *i915 = engine->i915;
+-	struct intel_context *ce;
+-	struct i915_request *rq;
+-
+-	/*
+-	 * Preempt contexts are reserved for exclusive use to inject a
+-	 * preemption context switch. They are never to be used for any trivial
+-	 * request!
+-	 */
+-	GEM_BUG_ON(ctx == i915->preempt_context);
+-
+-	/*
+-	 * Pinning the contexts may generate requests in order to acquire
+-	 * GGTT space, so do this first before we reserve a seqno for
+-	 * ourselves.
+-	 */
+-	ce = i915_gem_context_get_engine(ctx, engine->id);
+-	if (IS_ERR(ce))
+-		return ERR_CAST(ce);
+-
+-	rq = intel_context_create_request(ce);
+-	intel_context_put(ce);
+-
+-	return rq;
+-}
+-
+ static int
+ i915_request_await_start(struct i915_request *rq, struct i915_request *signal)
+ {
+diff --git a/drivers/gpu/drm/i915/i915_request.h b/drivers/gpu/drm/i915/i915_request.h
+index 1eee7416af31..8025a89b5999 100644
+--- a/drivers/gpu/drm/i915/i915_request.h
++++ b/drivers/gpu/drm/i915/i915_request.h
+@@ -246,9 +246,6 @@ i915_request_create(struct intel_context *ce);
+ 
+ struct i915_request *__i915_request_commit(struct i915_request *request);
+ 
+-struct i915_request * __must_check
+-i915_request_alloc(struct intel_engine_cs *engine,
+-		   struct i915_gem_context *ctx);
+ void i915_request_retire_upto(struct i915_request *rq);
+ 
+ static inline struct i915_request *
+diff --git a/drivers/gpu/drm/i915/selftests/huge_pages.c b/drivers/gpu/drm/i915/selftests/huge_pages.c
+index 90721b54e7ae..1e1f83326a96 100644
+--- a/drivers/gpu/drm/i915/selftests/huge_pages.c
++++ b/drivers/gpu/drm/i915/selftests/huge_pages.c
+@@ -26,6 +26,7 @@
+ 
+ #include <linux/prime_numbers.h>
+ 
++#include "igt_gem_utils.h"
+ #include "mock_drm.h"
+ #include "i915_random.h"
+ 
+@@ -980,7 +981,7 @@ static int gpu_write(struct i915_vma *vma,
+ 	if (IS_ERR(batch))
+ 		return PTR_ERR(batch);
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_batch;
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem.c b/drivers/gpu/drm/i915/selftests/i915_gem.c
+index 0342de369d3e..c6a9bff85311 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem.c
+@@ -8,8 +8,9 @@
+ 
+ #include "../i915_selftest.h"
+ 
+-#include "mock_context.h"
++#include "igt_gem_utils.h"
+ #include "igt_flush_test.h"
++#include "mock_context.h"
+ 
+ static int switch_to_context(struct drm_i915_private *i915,
+ 			     struct i915_gem_context *ctx)
+@@ -20,7 +21,7 @@ static int switch_to_context(struct drm_i915_private *i915,
+ 	for_each_engine(engine, i915, id) {
+ 		struct i915_request *rq;
+ 
+-		rq = i915_request_alloc(engine, ctx);
++		rq = igt_request_alloc(ctx, engine);
+ 		if (IS_ERR(rq))
+ 			return PTR_ERR(rq);
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+index deedd1898fe5..b62f005e4d50 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+@@ -29,6 +29,7 @@
+ 
+ #include "i915_random.h"
+ #include "igt_flush_test.h"
++#include "igt_gem_utils.h"
+ #include "igt_live_test.h"
+ #include "igt_reset.h"
+ #include "igt_spinner.h"
+@@ -91,7 +92,7 @@ static int live_nop_switch(void *arg)
+ 
+ 		times[0] = ktime_get_raw();
+ 		for (n = 0; n < nctx; n++) {
+-			rq = i915_request_alloc(engine, ctx[n]);
++			rq = igt_request_alloc(ctx[n], engine);
+ 			if (IS_ERR(rq)) {
+ 				err = PTR_ERR(rq);
+ 				goto out_unlock;
+@@ -121,7 +122,7 @@ static int live_nop_switch(void *arg)
+ 			times[1] = ktime_get_raw();
+ 
+ 			for (n = 0; n < prime; n++) {
+-				rq = i915_request_alloc(engine, ctx[n % nctx]);
++				rq = igt_request_alloc(ctx[n % nctx], engine);
+ 				if (IS_ERR(rq)) {
+ 					err = PTR_ERR(rq);
+ 					goto out_unlock;
+@@ -301,7 +302,7 @@ static int gpu_fill(struct drm_i915_gem_object *obj,
+ 		goto err_vma;
+ 	}
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_batch;
+@@ -1350,7 +1351,7 @@ static int write_to_scratch(struct i915_gem_context *ctx,
+ 	if (err)
+ 		goto err_unpin;
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_unpin;
+@@ -1445,7 +1446,7 @@ static int read_from_scratch(struct i915_gem_context *ctx,
+ 	if (err)
+ 		goto err_unpin;
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_unpin;
+@@ -1669,7 +1670,7 @@ static int mock_context_barrier(void *arg)
+ 		goto out;
+ 	}
+ 
+-	rq = i915_request_alloc(i915->engine[RCS0], ctx);
++	rq = igt_request_alloc(ctx, i915->engine[RCS0]);
+ 	if (IS_ERR(rq)) {
+ 		pr_err("Request allocation failed!\n");
+ 		goto out;
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_evict.c b/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
+index 89766688e420..4fc6e5445dd1 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
+@@ -24,6 +24,7 @@
+ 
+ #include "../i915_selftest.h"
+ 
++#include "igt_gem_utils.h"
+ #include "lib_sw_fence.h"
+ #include "mock_context.h"
+ #include "mock_drm.h"
+@@ -460,7 +461,7 @@ static int igt_evict_contexts(void *arg)
+ 
+ 			/* We will need some GGTT space for the rq's context */
+ 			igt_evict_ctl.fail_if_busy = true;
+-			rq = i915_request_alloc(engine, ctx);
++			rq = igt_request_alloc(ctx, engine);
+ 			igt_evict_ctl.fail_if_busy = false;
+ 
+ 			if (IS_ERR(rq)) {
+diff --git a/drivers/gpu/drm/i915/selftests/i915_request.c b/drivers/gpu/drm/i915/selftests/i915_request.c
+index 098d7b3aa131..b60591531e4a 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_request.c
++++ b/drivers/gpu/drm/i915/selftests/i915_request.c
+@@ -267,7 +267,7 @@ static struct i915_request *
+ __live_request_alloc(struct i915_gem_context *ctx,
+ 		     struct intel_engine_cs *engine)
+ {
+-	return i915_request_alloc(engine, ctx);
++	return igt_request_alloc(ctx, engine);
+ }
+ 
+ static int __igt_breadcrumbs_smoketest(void *arg)
+@@ -1074,7 +1074,7 @@ max_batches(struct i915_gem_context *ctx, struct intel_engine_cs *engine)
+ 	if (HAS_EXECLISTS(ctx->i915))
+ 		return INT_MAX;
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		ret = PTR_ERR(rq);
+ 	} else {
+diff --git a/drivers/gpu/drm/i915/selftests/igt_gem_utils.c b/drivers/gpu/drm/i915/selftests/igt_gem_utils.c
+new file mode 100644
+index 000000000000..16891b1a3e50
+--- /dev/null
++++ b/drivers/gpu/drm/i915/selftests/igt_gem_utils.c
+@@ -0,0 +1,34 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2018 Intel Corporation
++ */
++
++#include "igt_gem_utils.h"
++
++#include "gt/intel_context.h"
++
++#include "../i915_gem_context.h"
++#include "../i915_gem_pm.h"
++#include "../i915_request.h"
++
++struct i915_request *
++igt_request_alloc(struct i915_gem_context *ctx, struct intel_engine_cs *engine)
++{
++	struct intel_context *ce;
++	struct i915_request *rq;
++
++	/*
++	 * Pinning the contexts may generate requests in order to acquire
++	 * GGTT space, so do this first before we reserve a seqno for
++	 * ourselves.
++	 */
++	ce = i915_gem_context_get_engine(ctx, engine->id);
++	if (IS_ERR(ce))
++		return ERR_CAST(ce);
++
++	rq = intel_context_create_request(ce);
++	intel_context_put(ce);
++
++	return rq;
++}
+diff --git a/drivers/gpu/drm/i915/selftests/igt_gem_utils.h b/drivers/gpu/drm/i915/selftests/igt_gem_utils.h
+new file mode 100644
+index 000000000000..0f17251cf75d
+--- /dev/null
++++ b/drivers/gpu/drm/i915/selftests/igt_gem_utils.h
+@@ -0,0 +1,17 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2018 Intel Corporation
++ */
++
++#ifndef __IGT_GEM_UTILS_H__
++#define __IGT_GEM_UTILS_H__
++
++struct i915_request;
++struct i915_gem_context;
++struct intel_engine_cs;
++
++struct i915_request *
++igt_request_alloc(struct i915_gem_context *ctx, struct intel_engine_cs *engine);
++
++#endif /* __IGT_GEM_UTILS_H__ */
+diff --git a/drivers/gpu/drm/i915/selftests/igt_spinner.c b/drivers/gpu/drm/i915/selftests/igt_spinner.c
+index 16890dfe74c0..ece8a8a0d3b0 100644
+--- a/drivers/gpu/drm/i915/selftests/igt_spinner.c
++++ b/drivers/gpu/drm/i915/selftests/igt_spinner.c
+@@ -4,6 +4,7 @@
+  * Copyright © 2018 Intel Corporation
+  */
+ 
++#include "igt_gem_utils.h"
+ #include "igt_spinner.h"
+ 
+ int igt_spinner_init(struct igt_spinner *spin, struct drm_i915_private *i915)
+@@ -114,7 +115,7 @@ igt_spinner_create_request(struct igt_spinner *spin,
+ 	if (err)
+ 		goto unpin_vma;
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = igt_request_alloc(ctx, engine);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto unpin_hws;
+diff --git a/drivers/gpu/drm/i915/selftests/mock_request.c b/drivers/gpu/drm/i915/selftests/mock_request.c
+index f739ba63057f..b99f7576153c 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_request.c
++++ b/drivers/gpu/drm/i915/selftests/mock_request.c
+@@ -24,6 +24,7 @@
+ 
+ #include "gt/mock_engine.h"
+ 
++#include "igt_gem_utils.h"
+ #include "mock_request.h"
+ 
+ struct i915_request *
+@@ -34,7 +35,7 @@ mock_request(struct intel_engine_cs *engine,
+ 	struct i915_request *request;
+ 
+ 	/* NB the i915->requests slab cache is enlarged to fit mock_request */
+-	request = i915_request_alloc(engine, context);
++	request = igt_request_alloc(context, engine);
+ 	if (IS_ERR(request))
+ 		return NULL;
+ 
+-- 
+2.17.1
+

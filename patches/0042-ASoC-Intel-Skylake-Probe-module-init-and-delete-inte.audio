@@ -1,0 +1,144 @@
+From f12fd092ceb4cdcdf2ccf6c58d42527ddc2e043a Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 6 Mar 2019 18:38:49 +0100
+Subject: [PATCH 042/154] ASoC: Intel: Skylake: Probe module init and delete
+ interface
+
+Probe is a loadable, standalone module. Being designed as standalone, it
+has no parent pipeline assigned, thus its instance must be explicity
+deleted by sending Delete Instance IPC request.
+
+Change-Id: I15c45e282d051b2320cdce32c843b7e1e4383b52
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c | 43 ++++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h  | 15 +++++++++
+ sound/soc/intel/skylake/skl.h          |  4 +++
+ 3 files changed, 62 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index a0dc148f3bd4..f12566bdff87 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -21,6 +21,7 @@
+ #include <linux/pci.h>
+ #include <sound/core.h>
+ #include <sound/pcm.h>
++#include <uapi/linux/kernel.h>
+ #include <uapi/sound/skl-tplg-interface.h>
+ #include "skl-sst-dsp.h"
+ #include "cnl-sst-dsp.h"
+@@ -30,6 +31,8 @@
+ #include "../common/sst-dsp-priv.h"
+ #include "skl-topology.h"
+ 
++#define INVALID_PIPELINE_ID	0xFF
++
+ static int skl_alloc_dma_buf(struct device *dev,
+ 		struct snd_dma_buffer *dmab, size_t size)
+ {
+@@ -1350,6 +1353,46 @@ int skl_get_module_params(struct skl_dev *skl, u32 *params, int size,
+ 	return ret;
+ }
+ 
++int skl_probe_init_module(struct skl_dev *skl, size_t buffer_size)
++{
++	struct skl_ipc_init_instance_msg msg = {0};
++	struct skl_probe_mod_cfg cfg = {0};
++	union skl_connector_node_id node_id = {0};
++	struct uuid_module *m = skl_find_module(skl, &skl_probe_mod_uuid);
++
++	if (skl->extractor) {
++		node_id.node.vindex = skl->extractor->hstream.stream_tag - 1;
++		node_id.node.dma_type = SKL_DMA_HDA_HOST_INPUT_CLASS;
++	} else {
++		node_id = INVALID_NODE_ID;
++	}
++
++	/*
++	 * Probe module uses no cycles, audio data format
++	 * and input and output frame sizes are unused.
++	 */
++	cfg.base_cfg.ibs = 1;
++	cfg.base_cfg.is_pages = DIV_ROUND_UP(m->configs[0].is_bytes, PAGE_SIZE);
++	cfg.gtw_cfg.node_id = node_id;
++	cfg.gtw_cfg.dma_buffer_size = buffer_size;
++
++	msg.module_id = m->id;
++	msg.instance_id = 0;
++	msg.param_data_size = sizeof(cfg);
++	msg.ppl_instance_id = INVALID_PIPELINE_ID;
++	msg.core_id = 0;
++	msg.domain = 0;
++
++	return skl_ipc_init_instance(&skl->ipc, &msg, &cfg);
++}
++
++int skl_probe_delete_module(struct skl_dev *skl)
++{
++	unsigned int module_id = skl_get_module_id(skl, &skl_probe_mod_uuid);
++
++	return skl_ipc_delete_instance(&skl->ipc, module_id, 0);
++}
++
+ int skl_probe_get_dma(struct skl_dev *skl,
+ 		struct skl_probe_dma **dma, size_t *num_dma)
+ {
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index d22ce9b3dfcd..b88d4cb7c208 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -39,6 +39,9 @@ union skl_connector_node_id {
+ 	} node;
+ };
+ 
++#define INVALID_NODE_ID \
++	((union skl_connector_node_id) { UINT_MAX })
++
+ enum skl_channel_index {
+ 	SKL_CHANNEL_LEFT = 0,
+ 	SKL_CHANNEL_RIGHT = 1,
+@@ -154,6 +157,16 @@ static const guid_t skl_probe_mod_uuid =
+ 	GUID_INIT(0x7CAD0808, 0xAB10, 0xCD23, 0xEF, 0x45,
+ 		0x12, 0xAB, 0x34, 0xCD, 0x56, 0xEF);
+ 
++struct skl_probe_gtw_cfg {
++	union skl_connector_node_id node_id;
++	u32 dma_buffer_size;
++} __packed;
++
++struct skl_probe_mod_cfg {
++	struct skl_base_cfg base_cfg;
++	struct skl_probe_gtw_cfg gtw_cfg;
++} __packed;
++
+ enum skl_probe_runtime_param {
+ 	SKL_PROBE_INJECTION_DMA = 1,
+ 	SKL_PROBE_INJECTION_DMA_DETACH,
+@@ -485,6 +498,8 @@ void skl_ipc_tx_data_copy(struct ipc_message *msg, char *tx_data,
+ int skl_ipc_fw_cfg_get(struct sst_generic_ipc *ipc, struct skl_fw_cfg *cfg);
+ int skl_ipc_hw_cfg_get(struct sst_generic_ipc *ipc, struct skl_hw_cfg *cfg);
+ 
++int skl_probe_init_module(struct skl_dev *skl, size_t buffer_size);
++int skl_probe_delete_module(struct skl_dev *skl);
+ int skl_probe_get_dma(struct skl_dev *skl,
+ 		struct skl_probe_dma **dma, size_t *num_dma);
+ int skl_probe_dma_attach(struct skl_dev *skl,
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index 57b9896879e4..c04b03611fd4 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -136,6 +136,10 @@ struct skl_dev {
+ 
+ 	/* Callback to update dynamic clock and power gating registers */
+ 	void (*clock_power_gating)(struct device *dev, bool enable);
++
++	/* probe stream management */
++	struct hdac_ext_stream *extractor;
++	unsigned int num_probe_streams;
+ };
+ 
+ #define skl_to_bus(s)  (&(s)->hbus.core)
+-- 
+2.17.1
+

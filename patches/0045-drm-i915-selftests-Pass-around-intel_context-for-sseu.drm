@@ -1,0 +1,237 @@
+From def80d94a91bf0f179f979a4647b0266688fe770 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 17:33:31 +0100
+Subject: [PATCH 045/185] drm/i915/selftests: Pass around intel_context for
+ sseu
+
+Combine the (i915_gem_context, intel_engine) into a single parameter,
+the intel_context for convenience and later simplification.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426163336.15906-4-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/selftests/i915_gem_context.c | 74 +++++++++++--------
+ 1 file changed, 44 insertions(+), 30 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+index 807644ae6877..8e2a94333559 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+@@ -755,8 +755,7 @@ static struct i915_vma *rpcs_query_batch(struct i915_vma *vma)
+ 
+ static int
+ emit_rpcs_query(struct drm_i915_gem_object *obj,
+-		struct i915_gem_context *ctx,
+-		struct intel_engine_cs *engine,
++		struct intel_context *ce,
+ 		struct i915_request **rq_out)
+ {
+ 	struct i915_request *rq;
+@@ -764,9 +763,9 @@ emit_rpcs_query(struct drm_i915_gem_object *obj,
+ 	struct i915_vma *vma;
+ 	int err;
+ 
+-	GEM_BUG_ON(!intel_engine_can_store_dword(engine));
++	GEM_BUG_ON(!intel_engine_can_store_dword(ce->engine));
+ 
+-	vma = i915_vma_instance(obj, &ctx->ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, &ce->gem_context->ppgtt->vm, NULL);
+ 	if (IS_ERR(vma))
+ 		return PTR_ERR(vma);
+ 
+@@ -784,13 +783,15 @@ emit_rpcs_query(struct drm_i915_gem_object *obj,
+ 		goto err_vma;
+ 	}
+ 
+-	rq = i915_request_alloc(engine, ctx);
++	rq = i915_request_create(ce);
+ 	if (IS_ERR(rq)) {
+ 		err = PTR_ERR(rq);
+ 		goto err_batch;
+ 	}
+ 
+-	err = engine->emit_bb_start(rq, batch->node.start, batch->node.size, 0);
++	err = rq->engine->emit_bb_start(rq,
++					batch->node.start, batch->node.size,
++					0);
+ 	if (err)
+ 		goto err_request;
+ 
+@@ -834,8 +835,7 @@ static int
+ __sseu_prepare(struct drm_i915_private *i915,
+ 	       const char *name,
+ 	       unsigned int flags,
+-	       struct i915_gem_context *ctx,
+-	       struct intel_engine_cs *engine,
++	       struct intel_context *ce,
+ 	       struct igt_spinner **spin)
+ {
+ 	struct i915_request *rq;
+@@ -853,7 +853,10 @@ __sseu_prepare(struct drm_i915_private *i915,
+ 	if (ret)
+ 		goto err_free;
+ 
+-	rq = igt_spinner_create_request(*spin, ctx, engine, MI_NOOP);
++	rq = igt_spinner_create_request(*spin,
++					ce->gem_context,
++					ce->engine,
++					MI_NOOP);
+ 	if (IS_ERR(rq)) {
+ 		ret = PTR_ERR(rq);
+ 		goto err_fini;
+@@ -880,8 +883,7 @@ __sseu_prepare(struct drm_i915_private *i915,
+ 
+ static int
+ __read_slice_count(struct drm_i915_private *i915,
+-		   struct i915_gem_context *ctx,
+-		   struct intel_engine_cs *engine,
++		   struct intel_context *ce,
+ 		   struct drm_i915_gem_object *obj,
+ 		   struct igt_spinner *spin,
+ 		   u32 *rpcs)
+@@ -892,7 +894,7 @@ __read_slice_count(struct drm_i915_private *i915,
+ 	u32 *buf, val;
+ 	long ret;
+ 
+-	ret = emit_rpcs_query(obj, ctx, engine, &rq);
++	ret = emit_rpcs_query(obj, ce, &rq);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -956,29 +958,28 @@ static int
+ __sseu_finish(struct drm_i915_private *i915,
+ 	      const char *name,
+ 	      unsigned int flags,
+-	      struct i915_gem_context *ctx,
+-	      struct intel_engine_cs *engine,
++	      struct intel_context *ce,
+ 	      struct drm_i915_gem_object *obj,
+ 	      unsigned int expected,
+ 	      struct igt_spinner *spin)
+ {
+-	unsigned int slices = hweight32(engine->sseu.slice_mask);
++	unsigned int slices = hweight32(ce->engine->sseu.slice_mask);
+ 	u32 rpcs = 0;
+ 	int ret = 0;
+ 
+ 	if (flags & TEST_RESET) {
+-		ret = i915_reset_engine(engine, "sseu");
++		ret = i915_reset_engine(ce->engine, "sseu");
+ 		if (ret)
+ 			goto out;
+ 	}
+ 
+-	ret = __read_slice_count(i915, ctx, engine, obj,
++	ret = __read_slice_count(i915, ce, obj,
+ 				 flags & TEST_RESET ? NULL : spin, &rpcs);
+ 	ret = __check_rpcs(name, rpcs, ret, expected, "Context", "!");
+ 	if (ret)
+ 		goto out;
+ 
+-	ret = __read_slice_count(i915, i915->kernel_context, engine, obj,
++	ret = __read_slice_count(i915, ce->engine->kernel_context, obj,
+ 				 NULL, &rpcs);
+ 	ret = __check_rpcs(name, rpcs, ret, slices, "Kernel context", "!");
+ 
+@@ -993,7 +994,7 @@ __sseu_finish(struct drm_i915_private *i915,
+ 		if (ret)
+ 			return ret;
+ 
+-		ret = __read_slice_count(i915, ctx, engine, obj, NULL, &rpcs);
++		ret = __read_slice_count(i915, ce, obj, NULL, &rpcs);
+ 		ret = __check_rpcs(name, rpcs, ret, expected,
+ 				   "Context", " after idle!");
+ 	}
+@@ -1005,23 +1006,22 @@ static int
+ __sseu_test(struct drm_i915_private *i915,
+ 	    const char *name,
+ 	    unsigned int flags,
+-	    struct i915_gem_context *ctx,
+-	    struct intel_engine_cs *engine,
++	    struct intel_context *ce,
+ 	    struct drm_i915_gem_object *obj,
+ 	    struct intel_sseu sseu)
+ {
+ 	struct igt_spinner *spin = NULL;
+ 	int ret;
+ 
+-	ret = __sseu_prepare(i915, name, flags, ctx, engine, &spin);
++	ret = __sseu_prepare(i915, name, flags, ce, &spin);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = __i915_gem_context_reconfigure_sseu(ctx, engine, sseu);
++	ret = __i915_gem_context_reconfigure_sseu(ce->gem_context, ce->engine, sseu);
+ 	if (ret)
+ 		goto out_spin;
+ 
+-	ret = __sseu_finish(i915, name, flags, ctx, engine, obj,
++	ret = __sseu_finish(i915, name, flags, ce, obj,
+ 			    hweight32(sseu.slice_mask), spin);
+ 
+ out_spin:
+@@ -1042,6 +1042,7 @@ __igt_ctx_sseu(struct drm_i915_private *i915,
+ 	struct intel_sseu default_sseu = engine->sseu;
+ 	struct drm_i915_gem_object *obj;
+ 	struct i915_gem_context *ctx;
++	struct intel_context *ce;
+ 	struct intel_sseu pg_sseu;
+ 	intel_wakeref_t wakeref;
+ 	struct drm_file *file;
+@@ -1093,23 +1094,33 @@ __igt_ctx_sseu(struct drm_i915_private *i915,
+ 
+ 	wakeref = intel_runtime_pm_get(i915);
+ 
++	ce = intel_context_instance(ctx, i915->engine[RCS0]);
++	if (IS_ERR(ce)) {
++		ret = PTR_ERR(ce);
++		goto out_rpm;
++	}
++
++	ret = intel_context_pin(ce);
++	if (ret)
++		goto out_context;
++
+ 	/* First set the default mask. */
+-	ret = __sseu_test(i915, name, flags, ctx, engine, obj, default_sseu);
++	ret = __sseu_test(i915, name, flags, ce, obj, default_sseu);
+ 	if (ret)
+ 		goto out_fail;
+ 
+ 	/* Then set a power-gated configuration. */
+-	ret = __sseu_test(i915, name, flags, ctx, engine, obj, pg_sseu);
++	ret = __sseu_test(i915, name, flags, ce, obj, pg_sseu);
+ 	if (ret)
+ 		goto out_fail;
+ 
+ 	/* Back to defaults. */
+-	ret = __sseu_test(i915, name, flags, ctx, engine, obj, default_sseu);
++	ret = __sseu_test(i915, name, flags, ce, obj, default_sseu);
+ 	if (ret)
+ 		goto out_fail;
+ 
+ 	/* One last power-gated configuration for the road. */
+-	ret = __sseu_test(i915, name, flags, ctx, engine, obj, pg_sseu);
++	ret = __sseu_test(i915, name, flags, ce, obj, pg_sseu);
+ 	if (ret)
+ 		goto out_fail;
+ 
+@@ -1117,9 +1128,12 @@ __igt_ctx_sseu(struct drm_i915_private *i915,
+ 	if (igt_flush_test(i915, I915_WAIT_LOCKED))
+ 		ret = -EIO;
+ 
+-	i915_gem_object_put(obj);
+-
++	intel_context_unpin(ce);
++out_context:
++	intel_context_put(ce);
++out_rpm:
+ 	intel_runtime_pm_put(i915, wakeref);
++	i915_gem_object_put(obj);
+ 
+ out_unlock:
+ 	mutex_unlock(&i915->drm.struct_mutex);
+-- 
+2.17.1
+
