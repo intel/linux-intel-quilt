@@ -1,0 +1,206 @@
+From 18a0d0fb4b7cbe5a283087123ec9f99e8881184e Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 28 May 2019 10:29:54 +0100
+Subject: [PATCH 390/530] drm/i915: Move GEM client throttling to its own file
+
+Continuing the decluttering of i915_gem.c by moving the client self
+throttling into its own file.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190528092956.14910-13-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Makefile                |  1 +
+ drivers/gpu/drm/i915/gem/i915_gem_throttle.c | 73 ++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_drv.h              |  6 --
+ drivers/gpu/drm/i915/i915_gem.c              | 58 ----------------
+ 4 files changed, 74 insertions(+), 64 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/gem/i915_gem_throttle.c
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index e1ed526b96bf..83588e9840f8 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -104,6 +104,7 @@ gem-y += \
+ 	gem/i915_gem_shmem.o \
+ 	gem/i915_gem_shrinker.o \
+ 	gem/i915_gem_stolen.o \
++	gem/i915_gem_throttle.o \
+ 	gem/i915_gem_tiling.o \
+ 	gem/i915_gem_userptr.o \
+ 	gem/i915_gem_wait.o \
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_throttle.c b/drivers/gpu/drm/i915/gem/i915_gem_throttle.c
+new file mode 100644
+index 000000000000..adb3074d9ce2
+--- /dev/null
++++ b/drivers/gpu/drm/i915/gem/i915_gem_throttle.c
+@@ -0,0 +1,73 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2014-2016 Intel Corporation
++ */
++
++#include <linux/jiffies.h>
++
++#include <drm/drm_file.h>
++
++#include "i915_drv.h"
++#include "i915_gem_ioctls.h"
++#include "i915_gem_object.h"
++
++/*
++ * 20ms is a fairly arbitrary limit (greater than the average frame time)
++ * chosen to prevent the CPU getting more than a frame ahead of the GPU
++ * (when using lax throttling for the frontbuffer). We also use it to
++ * offer free GPU waitboosts for severely congested workloads.
++ */
++#define DRM_I915_THROTTLE_JIFFIES msecs_to_jiffies(20)
++
++/*
++ * Throttle our rendering by waiting until the ring has completed our requests
++ * emitted over 20 msec ago.
++ *
++ * Note that if we were to use the current jiffies each time around the loop,
++ * we wouldn't escape the function with any frames outstanding if the time to
++ * render a frame was over 20ms.
++ *
++ * This should get us reasonable parallelism between CPU and GPU but also
++ * relatively low latency when blocking on a particular request to finish.
++ */
++int
++i915_gem_throttle_ioctl(struct drm_device *dev, void *data,
++			struct drm_file *file)
++{
++	struct drm_i915_file_private *file_priv = file->driver_priv;
++	unsigned long recent_enough = jiffies - DRM_I915_THROTTLE_JIFFIES;
++	struct i915_request *request, *target = NULL;
++	long ret;
++
++	/* ABI: return -EIO if already wedged */
++	ret = i915_terminally_wedged(to_i915(dev));
++	if (ret)
++		return ret;
++
++	spin_lock(&file_priv->mm.lock);
++	list_for_each_entry(request, &file_priv->mm.request_list, client_link) {
++		if (time_after_eq(request->emitted_jiffies, recent_enough))
++			break;
++
++		if (target) {
++			list_del(&target->client_link);
++			target->file_priv = NULL;
++		}
++
++		target = request;
++	}
++	if (target)
++		i915_request_get(target);
++	spin_unlock(&file_priv->mm.lock);
++
++	if (!target)
++		return 0;
++
++	ret = i915_request_wait(target,
++				I915_WAIT_INTERRUPTIBLE,
++				MAX_SCHEDULE_TIMEOUT);
++	i915_request_put(target);
++
++	return ret < 0 ? ret : 0;
++}
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 652b5edefaae..4eb8f6a181c1 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -213,12 +213,6 @@ struct drm_i915_file_private {
+ 	struct {
+ 		spinlock_t lock;
+ 		struct list_head request_list;
+-/* 20ms is a fairly arbitrary limit (greater than the average frame time)
+- * chosen to prevent the CPU getting more than a frame ahead of the GPU
+- * (when using lax throttling for the frontbuffer). We also use it to
+- * offer free GPU waitboosts for severely congested workloads.
+- */
+-#define DRM_I915_THROTTLE_JIFFIES msecs_to_jiffies(20)
+ 	} mm;
+ 
+ 	struct idr context_idr;
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 6af448736030..e5aafbeb1d19 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1012,57 +1012,6 @@ int i915_gem_wait_for_idle(struct drm_i915_private *i915,
+ 	return 0;
+ }
+ 
+-/* Throttle our rendering by waiting until the ring has completed our requests
+- * emitted over 20 msec ago.
+- *
+- * Note that if we were to use the current jiffies each time around the loop,
+- * we wouldn't escape the function with any frames outstanding if the time to
+- * render a frame was over 20ms.
+- *
+- * This should get us reasonable parallelism between CPU and GPU but also
+- * relatively low latency when blocking on a particular request to finish.
+- */
+-static int
+-i915_gem_ring_throttle(struct drm_device *dev, struct drm_file *file)
+-{
+-	struct drm_i915_private *dev_priv = to_i915(dev);
+-	struct drm_i915_file_private *file_priv = file->driver_priv;
+-	unsigned long recent_enough = jiffies - DRM_I915_THROTTLE_JIFFIES;
+-	struct i915_request *request, *target = NULL;
+-	long ret;
+-
+-	/* ABI: return -EIO if already wedged */
+-	ret = i915_terminally_wedged(dev_priv);
+-	if (ret)
+-		return ret;
+-
+-	spin_lock(&file_priv->mm.lock);
+-	list_for_each_entry(request, &file_priv->mm.request_list, client_link) {
+-		if (time_after_eq(request->emitted_jiffies, recent_enough))
+-			break;
+-
+-		if (target) {
+-			list_del(&target->client_link);
+-			target->file_priv = NULL;
+-		}
+-
+-		target = request;
+-	}
+-	if (target)
+-		i915_request_get(target);
+-	spin_unlock(&file_priv->mm.lock);
+-
+-	if (target == NULL)
+-		return 0;
+-
+-	ret = i915_request_wait(target,
+-				I915_WAIT_INTERRUPTIBLE,
+-				MAX_SCHEDULE_TIMEOUT);
+-	i915_request_put(target);
+-
+-	return ret < 0 ? ret : 0;
+-}
+-
+ struct i915_vma *
+ i915_gem_object_ggtt_pin(struct drm_i915_gem_object *obj,
+ 			 const struct i915_ggtt_view *view,
+@@ -1142,13 +1091,6 @@ i915_gem_object_ggtt_pin(struct drm_i915_gem_object *obj,
+ 	return vma;
+ }
+ 
+-int
+-i915_gem_throttle_ioctl(struct drm_device *dev, void *data,
+-			struct drm_file *file_priv)
+-{
+-	return i915_gem_ring_throttle(dev, file_priv);
+-}
+-
+ int
+ i915_gem_madvise_ioctl(struct drm_device *dev, void *data,
+ 		       struct drm_file *file_priv)
+-- 
+2.17.1
+

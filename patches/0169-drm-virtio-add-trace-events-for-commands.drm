@@ -1,0 +1,146 @@
+From e5219e3734e1766ac76a90341b460fc6e7d09b96 Mon Sep 17 00:00:00 2001
+From: Chia-I Wu <olvaffe@gmail.com>
+Date: Mon, 29 Apr 2019 15:08:25 -0700
+Subject: [PATCH 169/530] drm/virtio: add trace events for commands
+
+Trace when commands are queued for both ctrlq and cursorq.  Trace
+when responses are received for ctrlq.
+
+Signed-off-by: Chia-I Wu <olvaffe@gmail.com>
+Link: http://patchwork.freedesktop.org/patch/msgid/20190429220825.156644-3-olvaffe@gmail.com
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+---
+ drivers/gpu/drm/virtio/Makefile               |  2 +-
+ drivers/gpu/drm/virtio/virtgpu_trace.h        | 52 +++++++++++++++++++
+ drivers/gpu/drm/virtio/virtgpu_trace_points.c |  5 ++
+ drivers/gpu/drm/virtio/virtgpu_vq.c           | 10 ++++
+ 4 files changed, 68 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/gpu/drm/virtio/virtgpu_trace.h
+ create mode 100644 drivers/gpu/drm/virtio/virtgpu_trace_points.c
+
+diff --git a/drivers/gpu/drm/virtio/Makefile b/drivers/gpu/drm/virtio/Makefile
+index 4e90cc8fa651..42949a17ff70 100644
+--- a/drivers/gpu/drm/virtio/Makefile
++++ b/drivers/gpu/drm/virtio/Makefile
+@@ -6,6 +6,6 @@
+ virtio-gpu-y := virtgpu_drv.o virtgpu_kms.o virtgpu_gem.o \
+ 	virtgpu_fb.o virtgpu_display.o virtgpu_vq.o virtgpu_ttm.o \
+ 	virtgpu_fence.o virtgpu_object.o virtgpu_debugfs.o virtgpu_plane.o \
+-	virtgpu_ioctl.o virtgpu_prime.o
++	virtgpu_ioctl.o virtgpu_prime.o virtgpu_trace_points.o
+ 
+ obj-$(CONFIG_DRM_VIRTIO_GPU) += virtio-gpu.o
+diff --git a/drivers/gpu/drm/virtio/virtgpu_trace.h b/drivers/gpu/drm/virtio/virtgpu_trace.h
+new file mode 100644
+index 000000000000..711ecc2bd241
+--- /dev/null
++++ b/drivers/gpu/drm/virtio/virtgpu_trace.h
+@@ -0,0 +1,52 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#if !defined(_VIRTGPU_TRACE_H_) || defined(TRACE_HEADER_MULTI_READ)
++#define _VIRTGPU_TRACE_H_
++
++#include <linux/tracepoint.h>
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM virtio_gpu
++#define TRACE_INCLUDE_FILE virtgpu_trace
++
++DECLARE_EVENT_CLASS(virtio_gpu_cmd,
++	TP_PROTO(struct virtqueue *vq, struct virtio_gpu_ctrl_hdr *hdr),
++	TP_ARGS(vq, hdr),
++	TP_STRUCT__entry(
++			 __field(int, dev)
++			 __field(unsigned int, vq)
++			 __field(const char *, name)
++			 __field(u32, type)
++			 __field(u32, flags)
++			 __field(u64, fence_id)
++			 __field(u32, ctx_id)
++			 ),
++	TP_fast_assign(
++		       __entry->dev = vq->vdev->index;
++		       __entry->vq = vq->index;
++		       __entry->name = vq->name;
++		       __entry->type = le32_to_cpu(hdr->type);
++		       __entry->flags = le32_to_cpu(hdr->flags);
++		       __entry->fence_id = le64_to_cpu(hdr->fence_id);
++		       __entry->ctx_id = le32_to_cpu(hdr->ctx_id);
++		       ),
++	TP_printk("vdev=%d vq=%u name=%s type=0x%x flags=0x%x fence_id=%llu ctx_id=%u",
++		  __entry->dev, __entry->vq, __entry->name,
++		  __entry->type, __entry->flags, __entry->fence_id,
++		  __entry->ctx_id)
++);
++
++DEFINE_EVENT(virtio_gpu_cmd, virtio_gpu_cmd_queue,
++	TP_PROTO(struct virtqueue *vq, struct virtio_gpu_ctrl_hdr *hdr),
++	TP_ARGS(vq, hdr)
++);
++
++DEFINE_EVENT(virtio_gpu_cmd, virtio_gpu_cmd_response,
++	TP_PROTO(struct virtqueue *vq, struct virtio_gpu_ctrl_hdr *hdr),
++	TP_ARGS(vq, hdr)
++);
++
++#endif
++
++#undef TRACE_INCLUDE_PATH
++#define TRACE_INCLUDE_PATH ../../drivers/gpu/drm/virtio
++#include <trace/define_trace.h>
+diff --git a/drivers/gpu/drm/virtio/virtgpu_trace_points.c b/drivers/gpu/drm/virtio/virtgpu_trace_points.c
+new file mode 100644
+index 000000000000..1970cb6f24ef
+--- /dev/null
++++ b/drivers/gpu/drm/virtio/virtgpu_trace_points.c
+@@ -0,0 +1,5 @@
++// SPDX-License-Identifier: GPL-2.0
++#include "virtgpu_drv.h"
++
++#define CREATE_TRACE_POINTS
++#include "virtgpu_trace.h"
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index e62fe24b1a2e..2c5eeccb88c0 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -28,6 +28,7 @@
+ 
+ #include <drm/drmP.h>
+ #include "virtgpu_drv.h"
++#include "virtgpu_trace.h"
+ #include <linux/virtio.h>
+ #include <linux/virtio_config.h>
+ #include <linux/virtio_ring.h>
+@@ -192,6 +193,9 @@ void virtio_gpu_dequeue_ctrl_func(struct work_struct *work)
+ 
+ 	list_for_each_entry_safe(entry, tmp, &reclaim_list, list) {
+ 		resp = (struct virtio_gpu_ctrl_hdr *)entry->resp_buf;
++
++		trace_virtio_gpu_cmd_response(vgdev->ctrlq.vq, resp);
++
+ 		if (resp->type != cpu_to_le32(VIRTIO_GPU_RESP_OK_NODATA)) {
+ 			if (resp->type >= cpu_to_le32(VIRTIO_GPU_RESP_ERR_UNSPEC)) {
+ 				struct virtio_gpu_ctrl_hdr *cmd;
+@@ -284,6 +288,9 @@ static int virtio_gpu_queue_ctrl_buffer_locked(struct virtio_gpu_device *vgdev,
+ 		spin_lock(&vgdev->ctrlq.qlock);
+ 		goto retry;
+ 	} else {
++		trace_virtio_gpu_cmd_queue(vq,
++			(struct virtio_gpu_ctrl_hdr *)vbuf->buf);
++
+ 		virtqueue_kick(vq);
+ 	}
+ 
+@@ -359,6 +366,9 @@ static int virtio_gpu_queue_cursor(struct virtio_gpu_device *vgdev,
+ 		spin_lock(&vgdev->cursorq.qlock);
+ 		goto retry;
+ 	} else {
++		trace_virtio_gpu_cmd_queue(vq,
++			(struct virtio_gpu_ctrl_hdr *)vbuf->buf);
++
+ 		virtqueue_kick(vq);
+ 	}
+ 
+-- 
+2.17.1
+

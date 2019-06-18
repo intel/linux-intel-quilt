@@ -1,0 +1,210 @@
+From e4a8b77b3fb19138b28444ffa0e5aa0d57cad6cd Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 7 May 2019 13:25:44 +0100
+Subject: [PATCH 190/530] drm/i915: Only reschedule the submission tasklet if
+ preemption is possible
+
+If we couple the scheduler more tightly with the execlists policy, we
+can apply the preemption policy to the question of whether we need to
+kick the tasklet at all for this priority bump.
+
+v2: Rephrase it as a core i915 policy and not an execlists foible.
+v3: Pull the kick together.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190507122544.12698-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine.h      | 18 -----------
+ drivers/gpu/drm/i915/gt/intel_lrc.c         |  4 +--
+ drivers/gpu/drm/i915/gt/selftest_lrc.c      |  7 ++++-
+ drivers/gpu/drm/i915/i915_request.c         |  2 --
+ drivers/gpu/drm/i915/i915_scheduler.c       | 34 ++++++++++++---------
+ drivers/gpu/drm/i915/i915_scheduler.h       | 18 +++++++++++
+ drivers/gpu/drm/i915/intel_guc_submission.c |  3 +-
+ 7 files changed, 47 insertions(+), 39 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine.h b/drivers/gpu/drm/i915/gt/intel_engine.h
+index f5b0f27cecb6..06d785533502 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine.h
+@@ -106,24 +106,6 @@ hangcheck_action_to_str(const enum intel_engine_hangcheck_action a)
+ 
+ void intel_engines_set_scheduler_caps(struct drm_i915_private *i915);
+ 
+-static inline bool __execlists_need_preempt(int prio, int last)
+-{
+-	/*
+-	 * Allow preemption of low -> normal -> high, but we do
+-	 * not allow low priority tasks to preempt other low priority
+-	 * tasks under the impression that latency for low priority
+-	 * tasks does not matter (as much as background throughput),
+-	 * so kiss.
+-	 *
+-	 * More naturally we would write
+-	 *	prio >= max(0, last);
+-	 * except that we wish to prevent triggering preemption at the same
+-	 * priority level: the task that is running should remain running
+-	 * to preserve FIFO ordering of dependencies.
+-	 */
+-	return prio > max(I915_PRIORITY_NORMAL - 1, last);
+-}
+-
+ static inline void
+ execlists_set_active(struct intel_engine_execlists *execlists,
+ 		     unsigned int bit)
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 3e06caf90d40..b1bed100997e 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -252,8 +252,8 @@ static inline bool need_preempt(const struct intel_engine_cs *engine,
+ 	 * ourselves, ignore the request.
+ 	 */
+ 	last_prio = effective_prio(rq);
+-	if (!__execlists_need_preempt(engine->execlists.queue_priority_hint,
+-				      last_prio))
++	if (!i915_scheduler_need_preempt(engine->execlists.queue_priority_hint,
++					 last_prio))
+ 		return false;
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/i915/gt/selftest_lrc.c b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+index 0610cb6e9713..5b3d8e33f1cf 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_lrc.c
++++ b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+@@ -640,14 +640,19 @@ static struct i915_request *dummy_request(struct intel_engine_cs *engine)
+ 	GEM_BUG_ON(i915_request_completed(rq));
+ 
+ 	i915_sw_fence_init(&rq->submit, dummy_notify);
+-	i915_sw_fence_commit(&rq->submit);
++	set_bit(I915_FENCE_FLAG_ACTIVE, &rq->fence.flags);
+ 
+ 	return rq;
+ }
+ 
+ static void dummy_request_free(struct i915_request *dummy)
+ {
++	/* We have to fake the CS interrupt to kick the next request */
++	i915_sw_fence_commit(&dummy->submit);
++
+ 	i915_request_mark_complete(dummy);
++	dma_fence_signal(&dummy->fence);
++
+ 	i915_sched_node_fini(&dummy->sched);
+ 	i915_sw_fence_fini(&dummy->submit);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 6b88a6860489..c441cd1b6ef3 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -1406,9 +1406,7 @@ long i915_request_wait(struct i915_request *rq,
+ 	if (flags & I915_WAIT_PRIORITY) {
+ 		if (!i915_request_started(rq) && INTEL_GEN(rq->i915) >= 6)
+ 			gen6_rps_boost(rq);
+-		local_bh_disable(); /* suspend tasklets for reprioritisation */
+ 		i915_schedule_bump_priority(rq, I915_PRIORITY_WAIT);
+-		local_bh_enable(); /* kick tasklets en masse */
+ 	}
+ 
+ 	wait.tsk = current;
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index 108f52e1bf35..8e41137c013c 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -163,16 +163,27 @@ sched_lock_engine(const struct i915_sched_node *node,
+ 	return engine;
+ }
+ 
+-static bool inflight(const struct i915_request *rq,
+-		     const struct intel_engine_cs *engine)
++static inline int rq_prio(const struct i915_request *rq)
+ {
+-	const struct i915_request *active;
++	return rq->sched.attr.priority | __NO_PREEMPTION;
++}
++
++static void kick_submission(struct intel_engine_cs *engine, int prio)
++{
++	const struct i915_request *inflight =
++		port_request(engine->execlists.port);
+ 
+-	if (!i915_request_is_active(rq))
+-		return false;
++	/*
++	 * If we are already the currently executing context, don't
++	 * bother evaluating if we should preempt ourselves, or if
++	 * we expect nothing to change as a result of running the
++	 * tasklet, i.e. we have not change the priority queue
++	 * sufficiently to oust the running context.
++	 */
++	if (inflight && !i915_scheduler_need_preempt(prio, rq_prio(inflight)))
++		return;
+ 
+-	active = port_request(engine->execlists.port);
+-	return active->hw_context == rq->hw_context;
++	tasklet_hi_schedule(&engine->execlists.tasklet);
+ }
+ 
+ static void __i915_schedule(struct i915_sched_node *node,
+@@ -297,15 +308,8 @@ static void __i915_schedule(struct i915_sched_node *node,
+ 
+ 		engine->execlists.queue_priority_hint = prio;
+ 
+-		/*
+-		 * If we are already the currently executing context, don't
+-		 * bother evaluating if we should preempt ourselves.
+-		 */
+-		if (inflight(node_to_request(node), engine))
+-			continue;
+-
+ 		/* Defer (tasklet) submission until after all of our updates. */
+-		tasklet_hi_schedule(&engine->execlists.tasklet);
++		kick_submission(engine, prio);
+ 	}
+ 
+ 	spin_unlock(&engine->timeline.lock);
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.h b/drivers/gpu/drm/i915/i915_scheduler.h
+index 07d243acf553..7eefccff39bf 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.h
++++ b/drivers/gpu/drm/i915/i915_scheduler.h
+@@ -52,4 +52,22 @@ static inline void i915_priolist_free(struct i915_priolist *p)
+ 		__i915_priolist_free(p);
+ }
+ 
++static inline bool i915_scheduler_need_preempt(int prio, int active)
++{
++	/*
++	 * Allow preemption of low -> normal -> high, but we do
++	 * not allow low priority tasks to preempt other low priority
++	 * tasks under the impression that latency for low priority
++	 * tasks does not matter (as much as background throughput),
++	 * so kiss.
++	 *
++	 * More naturally we would write
++	 *	prio >= max(0, last);
++	 * except that we wish to prevent triggering preemption at the same
++	 * priority level: the task that is running should remain running
++	 * to preserve FIFO ordering of dependencies.
++	 */
++	return prio > max(I915_PRIORITY_NORMAL - 1, active);
++}
++
+ #endif /* _I915_SCHEDULER_H_ */
+diff --git a/drivers/gpu/drm/i915/intel_guc_submission.c b/drivers/gpu/drm/i915/intel_guc_submission.c
+index d10f9534d1b1..ea0e3734d37c 100644
+--- a/drivers/gpu/drm/i915/intel_guc_submission.c
++++ b/drivers/gpu/drm/i915/intel_guc_submission.c
+@@ -746,7 +746,8 @@ static bool __guc_dequeue(struct intel_engine_cs *engine)
+ 				&engine->i915->guc.preempt_work[engine->id];
+ 			int prio = execlists->queue_priority_hint;
+ 
+-			if (__execlists_need_preempt(prio, port_prio(port))) {
++			if (i915_scheduler_need_preempt(prio,
++							port_prio(port))) {
+ 				execlists_set_active(execlists,
+ 						     EXECLISTS_ACTIVE_PREEMPT);
+ 				queue_work(engine->i915->guc.preempt_wq,
+-- 
+2.17.1
+

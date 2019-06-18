@@ -1,0 +1,427 @@
+From 72bb4f41d1163e6803b9ead567cd564f1ca14f2a Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 1 May 2019 11:32:04 +0100
+Subject: [PATCH 128/530] drm/i915: Move the engine->destroy() vfunc onto the
+ engine
+
+Make the engine responsible for cleaning itself up!
+
+This removes the i915->gt.cleanup vfunc that has been annoying the
+casual reader and myself for the last several years, and helps keep a
+future patch to add more cleanup tidy.
+
+v2: Assert that engine->destroy is set after the backend starts
+allocating its own state.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190501103204.18632-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine.h       |  4 ++
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c    | 68 +++++++++++---------
+ drivers/gpu/drm/i915/gt/intel_engine_types.h |  2 +-
+ drivers/gpu/drm/i915/gt/intel_lrc.c          | 51 +++++----------
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c   | 35 +++++-----
+ drivers/gpu/drm/i915/i915_drv.h              |  6 --
+ drivers/gpu/drm/i915/i915_gem.c              | 19 +-----
+ 7 files changed, 77 insertions(+), 108 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine.h b/drivers/gpu/drm/i915/gt/intel_engine.h
+index 3e53f53bc52b..f5b0f27cecb6 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine.h
+@@ -362,7 +362,11 @@ __intel_ring_space(unsigned int head, unsigned int tail, unsigned int size)
+ 	return (head - tail - CACHELINE_BYTES) & (size - 1);
+ }
+ 
++int intel_engines_init_mmio(struct drm_i915_private *i915);
+ int intel_engines_setup(struct drm_i915_private *i915);
++int intel_engines_init(struct drm_i915_private *i915);
++void intel_engines_cleanup(struct drm_i915_private *i915);
++
+ int intel_engine_init_common(struct intel_engine_cs *engine);
+ void intel_engine_cleanup_common(struct intel_engine_cs *engine);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index f7308479d511..6e40f8ea9a6a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -319,6 +319,12 @@ intel_engine_setup(struct drm_i915_private *dev_priv,
+ 	engine->class = info->class;
+ 	engine->instance = info->instance;
+ 
++	/*
++	 * To be overridden by the backend on setup. However to facilitate
++	 * cleanup on error during setup, we always provide the destroy vfunc.
++	 */
++	engine->destroy = (typeof(engine->destroy))kfree;
++
+ 	engine->uabi_class = intel_engine_classes[info->class].uabi_class;
+ 
+ 	engine->context_size = __intel_engine_context_size(dev_priv,
+@@ -343,18 +349,31 @@ intel_engine_setup(struct drm_i915_private *dev_priv,
+ 	return 0;
+ }
+ 
++/**
++ * intel_engines_cleanup() - free the resources allocated for Command Streamers
++ * @i915: the i915 devic
++ */
++void intel_engines_cleanup(struct drm_i915_private *i915)
++{
++	struct intel_engine_cs *engine;
++	enum intel_engine_id id;
++
++	for_each_engine(engine, i915, id) {
++		engine->destroy(engine);
++		i915->engine[id] = NULL;
++	}
++}
++
+ /**
+  * intel_engines_init_mmio() - allocate and prepare the Engine Command Streamers
+- * @dev_priv: i915 device private
++ * @i915: the i915 device
+  *
+  * Return: non-zero if the initialization failed.
+  */
+-int intel_engines_init_mmio(struct drm_i915_private *dev_priv)
++int intel_engines_init_mmio(struct drm_i915_private *i915)
+ {
+-	struct intel_device_info *device_info = mkwrite_device_info(dev_priv);
+-	const unsigned int engine_mask = INTEL_INFO(dev_priv)->engine_mask;
+-	struct intel_engine_cs *engine;
+-	enum intel_engine_id id;
++	struct intel_device_info *device_info = mkwrite_device_info(i915);
++	const unsigned int engine_mask = INTEL_INFO(i915)->engine_mask;
+ 	unsigned int mask = 0;
+ 	unsigned int i;
+ 	int err;
+@@ -367,10 +386,10 @@ int intel_engines_init_mmio(struct drm_i915_private *dev_priv)
+ 		return -ENODEV;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(intel_engines); i++) {
+-		if (!HAS_ENGINE(dev_priv, i))
++		if (!HAS_ENGINE(i915, i))
+ 			continue;
+ 
+-		err = intel_engine_setup(dev_priv, i);
++		err = intel_engine_setup(i915, i);
+ 		if (err)
+ 			goto cleanup;
+ 
+@@ -386,20 +405,19 @@ int intel_engines_init_mmio(struct drm_i915_private *dev_priv)
+ 		device_info->engine_mask = mask;
+ 
+ 	/* We always presume we have at least RCS available for later probing */
+-	if (WARN_ON(!HAS_ENGINE(dev_priv, RCS0))) {
++	if (WARN_ON(!HAS_ENGINE(i915, RCS0))) {
+ 		err = -ENODEV;
+ 		goto cleanup;
+ 	}
+ 
+-	RUNTIME_INFO(dev_priv)->num_engines = hweight32(mask);
++	RUNTIME_INFO(i915)->num_engines = hweight32(mask);
+ 
+-	i915_check_and_clear_faults(dev_priv);
++	i915_check_and_clear_faults(i915);
+ 
+ 	return 0;
+ 
+ cleanup:
+-	for_each_engine(engine, dev_priv, id)
+-		kfree(engine);
++	intel_engines_cleanup(i915);
+ 	return err;
+ }
+ 
+@@ -413,7 +431,7 @@ int intel_engines_init(struct drm_i915_private *i915)
+ {
+ 	int (*init)(struct intel_engine_cs *engine);
+ 	struct intel_engine_cs *engine;
+-	enum intel_engine_id id, err_id;
++	enum intel_engine_id id;
+ 	int err;
+ 
+ 	if (HAS_EXECLISTS(i915))
+@@ -422,8 +440,6 @@ int intel_engines_init(struct drm_i915_private *i915)
+ 		init = intel_ring_submission_init;
+ 
+ 	for_each_engine(engine, i915, id) {
+-		err_id = id;
+-
+ 		err = init(engine);
+ 		if (err)
+ 			goto cleanup;
+@@ -432,14 +448,7 @@ int intel_engines_init(struct drm_i915_private *i915)
+ 	return 0;
+ 
+ cleanup:
+-	for_each_engine(engine, i915, id) {
+-		if (id >= err_id) {
+-			kfree(engine);
+-			i915->engine[id] = NULL;
+-		} else {
+-			i915->gt.cleanup_engine(engine);
+-		}
+-	}
++	intel_engines_cleanup(i915);
+ 	return err;
+ }
+ 
+@@ -619,19 +628,16 @@ int intel_engines_setup(struct drm_i915_private *i915)
+ 		if (err)
+ 			goto cleanup;
+ 
++		/* We expect the backend to take control over its state */
++		GEM_BUG_ON(engine->destroy == (typeof(engine->destroy))kfree);
++
+ 		GEM_BUG_ON(!engine->cops);
+ 	}
+ 
+ 	return 0;
+ 
+ cleanup:
+-	for_each_engine(engine, i915, id) {
+-		if (engine->cops)
+-			i915->gt.cleanup_engine(engine);
+-		else
+-			kfree(engine);
+-		i915->engine[id] = NULL;
+-	}
++	intel_engines_cleanup(i915);
+ 	return err;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_types.h b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+index d972c339309c..9d64e33f8427 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+@@ -420,7 +420,7 @@ struct intel_engine_cs {
+ 	 */
+ 	void		(*cancel_requests)(struct intel_engine_cs *engine);
+ 
+-	void		(*cleanup)(struct intel_engine_cs *engine);
++	void		(*destroy)(struct intel_engine_cs *engine);
+ 
+ 	struct intel_engine_execlists execlists;
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 7f35cded366f..5aa700043bd4 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -2331,40 +2331,6 @@ static int gen8_init_rcs_context(struct i915_request *rq)
+ 	return i915_gem_render_state_emit(rq);
+ }
+ 
+-/**
+- * intel_logical_ring_cleanup() - deallocate the Engine Command Streamer
+- * @engine: Engine Command Streamer.
+- */
+-void intel_logical_ring_cleanup(struct intel_engine_cs *engine)
+-{
+-	struct drm_i915_private *dev_priv;
+-
+-	/*
+-	 * Tasklet cannot be active at this point due intel_mark_active/idle
+-	 * so this is just for documentation.
+-	 */
+-	if (WARN_ON(test_bit(TASKLET_STATE_SCHED,
+-			     &engine->execlists.tasklet.state)))
+-		tasklet_kill(&engine->execlists.tasklet);
+-
+-	dev_priv = engine->i915;
+-
+-	if (engine->buffer) {
+-		WARN_ON((ENGINE_READ(engine, RING_MI_MODE) & MODE_IDLE) == 0);
+-	}
+-
+-	if (engine->cleanup)
+-		engine->cleanup(engine);
+-
+-	intel_engine_cleanup_common(engine);
+-
+-	lrc_destroy_wa_ctx(engine);
+-
+-	engine->i915 = NULL;
+-	dev_priv->engine[engine->id] = NULL;
+-	kfree(engine);
+-}
+-
+ void intel_execlists_set_default_submission(struct intel_engine_cs *engine)
+ {
+ 	engine->submit_request = execlists_submit_request;
+@@ -2387,10 +2353,27 @@ void intel_execlists_set_default_submission(struct intel_engine_cs *engine)
+ 		engine->flags |= I915_ENGINE_HAS_PREEMPTION;
+ }
+ 
++static void execlists_destroy(struct intel_engine_cs *engine)
++{
++	/*
++	 * Tasklet cannot be active at this point due intel_mark_active/idle
++	 * so this is just for documentation.
++	 */
++	if (GEM_DEBUG_WARN_ON(test_bit(TASKLET_STATE_SCHED,
++				       &engine->execlists.tasklet.state)))
++		tasklet_kill(&engine->execlists.tasklet);
++
++	intel_engine_cleanup_common(engine);
++	lrc_destroy_wa_ctx(engine);
++	kfree(engine);
++}
++
+ static void
+ logical_ring_default_vfuncs(struct intel_engine_cs *engine)
+ {
+ 	/* Default vfuncs which can be overriden by each engine. */
++
++	engine->destroy = execlists_destroy;
+ 	engine->resume = execlists_resume;
+ 
+ 	engine->reset.prepare = execlists_reset_prepare;
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index 5e342727eab3..6fbc5ddbc896 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1534,25 +1534,6 @@ static const struct intel_context_ops ring_context_ops = {
+ 	.destroy = ring_context_destroy,
+ };
+ 
+-void intel_engine_cleanup(struct intel_engine_cs *engine)
+-{
+-	struct drm_i915_private *dev_priv = engine->i915;
+-
+-	WARN_ON(INTEL_GEN(dev_priv) > 2 &&
+-		(ENGINE_READ(engine, RING_MI_MODE) & MODE_IDLE) == 0);
+-
+-	intel_ring_unpin(engine->buffer);
+-	intel_ring_put(engine->buffer);
+-
+-	if (engine->cleanup)
+-		engine->cleanup(engine);
+-
+-	intel_engine_cleanup_common(engine);
+-
+-	dev_priv->engine[engine->id] = NULL;
+-	kfree(engine);
+-}
+-
+ static int load_pd_dir(struct i915_request *rq,
+ 		       const struct i915_hw_ppgtt *ppgtt)
+ {
+@@ -2157,6 +2138,20 @@ static void gen6_bsd_set_default_submission(struct intel_engine_cs *engine)
+ 	engine->submit_request = gen6_bsd_submit_request;
+ }
+ 
++static void ring_destroy(struct intel_engine_cs *engine)
++{
++	struct drm_i915_private *dev_priv = engine->i915;
++
++	WARN_ON(INTEL_GEN(dev_priv) > 2 &&
++		(ENGINE_READ(engine, RING_MI_MODE) & MODE_IDLE) == 0);
++
++	intel_ring_unpin(engine->buffer);
++	intel_ring_put(engine->buffer);
++
++	intel_engine_cleanup_common(engine);
++	kfree(engine);
++}
++
+ static void setup_irq(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *i915 = engine->i915;
+@@ -2185,6 +2180,8 @@ static void setup_common(struct intel_engine_cs *engine)
+ 
+ 	setup_irq(engine);
+ 
++	engine->destroy = ring_destroy;
++
+ 	engine->resume = xcs_resume;
+ 	engine->reset.prepare = reset_prepare;
+ 	engine->reset.reset = reset_ring;
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 886a30243fe3..13270e19eb87 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1986,8 +1986,6 @@ struct drm_i915_private {
+ 
+ 	/* Abstract the submission mechanism (legacy ringbuffer or execlists) away */
+ 	struct {
+-		void (*cleanup_engine)(struct intel_engine_cs *engine);
+-
+ 		struct i915_gt_timelines {
+ 			struct mutex mutex; /* protects list, tainted by GPU */
+ 			struct list_head active_list;
+@@ -2713,9 +2711,6 @@ extern unsigned long i915_gfx_val(struct drm_i915_private *dev_priv);
+ extern void i915_update_gfx_val(struct drm_i915_private *dev_priv);
+ int vlv_force_gfx_clock(struct drm_i915_private *dev_priv, bool on);
+ 
+-int intel_engines_init_mmio(struct drm_i915_private *dev_priv);
+-int intel_engines_init(struct drm_i915_private *dev_priv);
+-
+ u32 intel_calculate_mcr_s_ss_select(struct drm_i915_private *dev_priv);
+ 
+ static inline void i915_queue_hangcheck(struct drm_i915_private *dev_priv)
+@@ -3050,7 +3045,6 @@ int __must_check i915_gem_init(struct drm_i915_private *dev_priv);
+ int __must_check i915_gem_init_hw(struct drm_i915_private *dev_priv);
+ void i915_gem_init_swizzling(struct drm_i915_private *dev_priv);
+ void i915_gem_fini(struct drm_i915_private *dev_priv);
+-void i915_gem_cleanup_engines(struct drm_i915_private *dev_priv);
+ int i915_gem_wait_for_idle(struct drm_i915_private *dev_priv,
+ 			   unsigned int flags, long timeout);
+ void i915_gem_suspend(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 8f42e44425a6..d168691bbbdd 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -4476,11 +4476,6 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ 
+ 	dev_priv->mm.unordered_timeline = dma_fence_context_alloc(1);
+ 
+-	if (HAS_LOGICAL_RING_CONTEXTS(dev_priv))
+-		dev_priv->gt.cleanup_engine = intel_logical_ring_cleanup;
+-	else
+-		dev_priv->gt.cleanup_engine = intel_engine_cleanup;
+-
+ 	i915_timelines_init(dev_priv);
+ 
+ 	ret = i915_gem_init_userptr(dev_priv);
+@@ -4601,7 +4596,7 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ err_pm:
+ 	if (ret != -EIO) {
+ 		intel_cleanup_gt_powersave(dev_priv);
+-		i915_gem_cleanup_engines(dev_priv);
++		intel_engines_cleanup(dev_priv);
+ 	}
+ err_context:
+ 	if (ret != -EIO)
+@@ -4661,7 +4656,7 @@ void i915_gem_fini(struct drm_i915_private *dev_priv)
+ 	mutex_lock(&dev_priv->drm.struct_mutex);
+ 	intel_uc_fini_hw(dev_priv);
+ 	intel_uc_fini(dev_priv);
+-	i915_gem_cleanup_engines(dev_priv);
++	intel_engines_cleanup(dev_priv);
+ 	i915_gem_contexts_fini(dev_priv);
+ 	i915_gem_fini_scratch(dev_priv);
+ 	mutex_unlock(&dev_priv->drm.struct_mutex);
+@@ -4684,16 +4679,6 @@ void i915_gem_init_mmio(struct drm_i915_private *i915)
+ 	i915_gem_sanitize(i915);
+ }
+ 
+-void
+-i915_gem_cleanup_engines(struct drm_i915_private *dev_priv)
+-{
+-	struct intel_engine_cs *engine;
+-	enum intel_engine_id id;
+-
+-	for_each_engine(engine, dev_priv, id)
+-		dev_priv->gt.cleanup_engine(engine);
+-}
+-
+ void
+ i915_gem_load_init_fences(struct drm_i915_private *dev_priv)
+ {
+-- 
+2.17.1
+

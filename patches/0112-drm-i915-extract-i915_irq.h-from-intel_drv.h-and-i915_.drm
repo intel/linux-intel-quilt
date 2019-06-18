@@ -1,0 +1,390 @@
+From 972391c45b3838f63201e19dc8c63143e908fc88 Mon Sep 17 00:00:00 2001
+From: Jani Nikula <jani.nikula@intel.com>
+Date: Mon, 29 Apr 2019 15:29:27 +0300
+Subject: [PATCH 112/530] drm/i915: extract i915_irq.h from intel_drv.h and
+ i915_drv.h
+
+It used to be handy that we only had a couple of headers, but over time
+intel_drv.h has become unwieldy. Extract declarations to a separate
+header file corresponding to the implementation module, clarifying the
+modularity of the driver.
+
+Ensure the new header is self-contained, and do so with minimal further
+includes, using forward declarations as needed. Include the new header
+only where needed, and sort the modified include directives while at it
+and as needed.
+
+No functional changes.
+
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/64e46278dc8dccc9c548ef453cb2ceece5367bb2.1556540890.git.jani.nikula@intel.com
+---
+ drivers/gpu/drm/i915/Makefile.header-test |   1 +
+ drivers/gpu/drm/i915/gt/intel_reset.c     |   1 +
+ drivers/gpu/drm/i915/i915_debugfs.c       |   1 +
+ drivers/gpu/drm/i915/i915_drv.c           |   1 +
+ drivers/gpu/drm/i915/i915_drv.h           |  62 ------------
+ drivers/gpu/drm/i915/i915_irq.c           |   1 +
+ drivers/gpu/drm/i915/i915_irq.h           | 114 ++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_trace.h         |   1 +
+ drivers/gpu/drm/i915/intel_drv.h          |  37 -------
+ drivers/gpu/drm/i915/intel_pm.c           |   1 +
+ drivers/gpu/drm/i915/intel_runtime_pm.c   |   1 +
+ 11 files changed, 122 insertions(+), 99 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/i915_irq.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile.header-test b/drivers/gpu/drm/i915/Makefile.header-test
+index 7ca4fb41704f..beda60ea8dbf 100644
+--- a/drivers/gpu/drm/i915/Makefile.header-test
++++ b/drivers/gpu/drm/i915/Makefile.header-test
+@@ -7,6 +7,7 @@ header_test := \
+ 	i915_drv.h \
+ 	i915_gem_context_types.h \
+ 	i915_gem_pm.h \
++	i915_irq.h \
+ 	i915_params.h \
+ 	i915_priolist_types.h \
+ 	i915_reg.h \
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index 3424d28650af..7605516c837a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -9,6 +9,7 @@
+ 
+ #include "i915_drv.h"
+ #include "i915_gpu_error.h"
++#include "i915_irq.h"
+ #include "intel_engine_pm.h"
+ #include "intel_gt_pm.h"
+ #include "intel_reset.h"
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index ffbf5d920429..0e4dffcd4da4 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -35,6 +35,7 @@
+ #include "gt/intel_reset.h"
+ 
+ #include "i915_gem_context.h"
++#include "i915_irq.h"
+ #include "intel_dp.h"
+ #include "intel_drv.h"
+ #include "intel_fbc.h"
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index aacc8dd6ecfd..4cfdc2741ef5 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -52,6 +52,7 @@
+ #include "gt/intel_workarounds.h"
+ 
+ #include "i915_drv.h"
++#include "i915_irq.h"
+ #include "i915_pmu.h"
+ #include "i915_query.h"
+ #include "i915_trace.h"
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 1cea98f8b85c..df9ac3943993 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2728,7 +2728,6 @@ enum hpd_pin intel_hpd_pin_default(struct drm_i915_private *dev_priv,
+ bool intel_hpd_disable(struct drm_i915_private *dev_priv, enum hpd_pin pin);
+ void intel_hpd_enable(struct drm_i915_private *dev_priv, enum hpd_pin pin);
+ 
+-/* i915_irq.c */
+ static inline void i915_queue_hangcheck(struct drm_i915_private *dev_priv)
+ {
+ 	unsigned long delay;
+@@ -2746,11 +2745,6 @@ static inline void i915_queue_hangcheck(struct drm_i915_private *dev_priv)
+ 			   &dev_priv->gpu_error.hangcheck_work, delay);
+ }
+ 
+-extern void intel_irq_init(struct drm_i915_private *dev_priv);
+-extern void intel_irq_fini(struct drm_i915_private *dev_priv);
+-int intel_irq_install(struct drm_i915_private *dev_priv);
+-void intel_irq_uninstall(struct drm_i915_private *dev_priv);
+-
+ static inline bool intel_gvt_active(struct drm_i915_private *dev_priv)
+ {
+ 	return dev_priv->gvt;
+@@ -2761,62 +2755,6 @@ static inline bool intel_vgpu_active(struct drm_i915_private *dev_priv)
+ 	return dev_priv->vgpu.active;
+ }
+ 
+-u32 i915_pipestat_enable_mask(struct drm_i915_private *dev_priv,
+-			      enum pipe pipe);
+-void
+-i915_enable_pipestat(struct drm_i915_private *dev_priv, enum pipe pipe,
+-		     u32 status_mask);
+-
+-void
+-i915_disable_pipestat(struct drm_i915_private *dev_priv, enum pipe pipe,
+-		      u32 status_mask);
+-
+-void valleyview_enable_display_irqs(struct drm_i915_private *dev_priv);
+-void valleyview_disable_display_irqs(struct drm_i915_private *dev_priv);
+-void i915_hotplug_interrupt_update(struct drm_i915_private *dev_priv,
+-				   u32 mask,
+-				   u32 bits);
+-void ilk_update_display_irq(struct drm_i915_private *dev_priv,
+-			    u32 interrupt_mask,
+-			    u32 enabled_irq_mask);
+-static inline void
+-ilk_enable_display_irq(struct drm_i915_private *dev_priv, u32 bits)
+-{
+-	ilk_update_display_irq(dev_priv, bits, bits);
+-}
+-static inline void
+-ilk_disable_display_irq(struct drm_i915_private *dev_priv, u32 bits)
+-{
+-	ilk_update_display_irq(dev_priv, bits, 0);
+-}
+-void bdw_update_pipe_irq(struct drm_i915_private *dev_priv,
+-			 enum pipe pipe,
+-			 u32 interrupt_mask,
+-			 u32 enabled_irq_mask);
+-static inline void bdw_enable_pipe_irq(struct drm_i915_private *dev_priv,
+-				       enum pipe pipe, u32 bits)
+-{
+-	bdw_update_pipe_irq(dev_priv, pipe, bits, bits);
+-}
+-static inline void bdw_disable_pipe_irq(struct drm_i915_private *dev_priv,
+-					enum pipe pipe, u32 bits)
+-{
+-	bdw_update_pipe_irq(dev_priv, pipe, bits, 0);
+-}
+-void ibx_display_interrupt_update(struct drm_i915_private *dev_priv,
+-				  u32 interrupt_mask,
+-				  u32 enabled_irq_mask);
+-static inline void
+-ibx_enable_display_interrupt(struct drm_i915_private *dev_priv, u32 bits)
+-{
+-	ibx_display_interrupt_update(dev_priv, bits, bits);
+-}
+-static inline void
+-ibx_disable_display_interrupt(struct drm_i915_private *dev_priv, u32 bits)
+-{
+-	ibx_display_interrupt_update(dev_priv, bits, 0);
+-}
+-
+ /* i915_gem.c */
+ int i915_gem_create_ioctl(struct drm_device *dev, void *data,
+ 			  struct drm_file *file_priv);
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index ed21f7edc768..4a6a374aa487 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -38,6 +38,7 @@
+ #include <drm/i915_drm.h>
+ 
+ #include "i915_drv.h"
++#include "i915_irq.h"
+ #include "i915_trace.h"
+ #include "intel_drv.h"
+ #include "intel_fifo_underrun.h"
+diff --git a/drivers/gpu/drm/i915/i915_irq.h b/drivers/gpu/drm/i915/i915_irq.h
+new file mode 100644
+index 000000000000..0ccd0d90919d
+--- /dev/null
++++ b/drivers/gpu/drm/i915/i915_irq.h
+@@ -0,0 +1,114 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright © 2019 Intel Corporation
++ */
++
++#ifndef __I915_IRQ_H__
++#define __I915_IRQ_H__
++
++#include <linux/types.h>
++
++#include "i915_drv.h"
++
++struct drm_i915_private;
++struct intel_crtc;
++
++extern void intel_irq_init(struct drm_i915_private *dev_priv);
++extern void intel_irq_fini(struct drm_i915_private *dev_priv);
++int intel_irq_install(struct drm_i915_private *dev_priv);
++void intel_irq_uninstall(struct drm_i915_private *dev_priv);
++
++u32 i915_pipestat_enable_mask(struct drm_i915_private *dev_priv,
++			      enum pipe pipe);
++void
++i915_enable_pipestat(struct drm_i915_private *dev_priv, enum pipe pipe,
++		     u32 status_mask);
++
++void
++i915_disable_pipestat(struct drm_i915_private *dev_priv, enum pipe pipe,
++		      u32 status_mask);
++
++void valleyview_enable_display_irqs(struct drm_i915_private *dev_priv);
++void valleyview_disable_display_irqs(struct drm_i915_private *dev_priv);
++
++void i915_hotplug_interrupt_update(struct drm_i915_private *dev_priv,
++				   u32 mask,
++				   u32 bits);
++void ilk_update_display_irq(struct drm_i915_private *dev_priv,
++			    u32 interrupt_mask,
++			    u32 enabled_irq_mask);
++static inline void
++ilk_enable_display_irq(struct drm_i915_private *dev_priv, u32 bits)
++{
++	ilk_update_display_irq(dev_priv, bits, bits);
++}
++static inline void
++ilk_disable_display_irq(struct drm_i915_private *dev_priv, u32 bits)
++{
++	ilk_update_display_irq(dev_priv, bits, 0);
++}
++void bdw_update_pipe_irq(struct drm_i915_private *dev_priv,
++			 enum pipe pipe,
++			 u32 interrupt_mask,
++			 u32 enabled_irq_mask);
++static inline void bdw_enable_pipe_irq(struct drm_i915_private *dev_priv,
++				       enum pipe pipe, u32 bits)
++{
++	bdw_update_pipe_irq(dev_priv, pipe, bits, bits);
++}
++static inline void bdw_disable_pipe_irq(struct drm_i915_private *dev_priv,
++					enum pipe pipe, u32 bits)
++{
++	bdw_update_pipe_irq(dev_priv, pipe, bits, 0);
++}
++void ibx_display_interrupt_update(struct drm_i915_private *dev_priv,
++				  u32 interrupt_mask,
++				  u32 enabled_irq_mask);
++static inline void
++ibx_enable_display_interrupt(struct drm_i915_private *dev_priv, u32 bits)
++{
++	ibx_display_interrupt_update(dev_priv, bits, bits);
++}
++static inline void
++ibx_disable_display_interrupt(struct drm_i915_private *dev_priv, u32 bits)
++{
++	ibx_display_interrupt_update(dev_priv, bits, 0);
++}
++
++void gen5_enable_gt_irq(struct drm_i915_private *dev_priv, u32 mask);
++void gen5_disable_gt_irq(struct drm_i915_private *dev_priv, u32 mask);
++void gen6_mask_pm_irq(struct drm_i915_private *dev_priv, u32 mask);
++void gen6_unmask_pm_irq(struct drm_i915_private *dev_priv, u32 mask);
++void gen11_reset_rps_interrupts(struct drm_i915_private *dev_priv);
++void gen6_reset_rps_interrupts(struct drm_i915_private *dev_priv);
++void gen6_enable_rps_interrupts(struct drm_i915_private *dev_priv);
++void gen6_disable_rps_interrupts(struct drm_i915_private *dev_priv);
++void gen6_rps_reset_ei(struct drm_i915_private *dev_priv);
++
++static inline u32 gen6_sanitize_rps_pm_mask(const struct drm_i915_private *i915,
++					    u32 mask)
++{
++	return mask & ~i915->gt_pm.rps.pm_intrmsk_mbz;
++}
++
++void intel_runtime_pm_disable_interrupts(struct drm_i915_private *dev_priv);
++void intel_runtime_pm_enable_interrupts(struct drm_i915_private *dev_priv);
++static inline bool intel_irqs_enabled(struct drm_i915_private *dev_priv)
++{
++	/*
++	 * We only use drm_irq_uninstall() at unload and VT switch, so
++	 * this is the only thing we need to check.
++	 */
++	return dev_priv->runtime_pm.irqs_enabled;
++}
++
++int intel_get_crtc_scanline(struct intel_crtc *crtc);
++void gen8_irq_power_well_post_enable(struct drm_i915_private *dev_priv,
++				     u8 pipe_mask);
++void gen8_irq_power_well_pre_disable(struct drm_i915_private *dev_priv,
++				     u8 pipe_mask);
++void gen9_reset_guc_interrupts(struct drm_i915_private *dev_priv);
++void gen9_enable_guc_interrupts(struct drm_i915_private *dev_priv);
++void gen9_disable_guc_interrupts(struct drm_i915_private *dev_priv);
++
++#endif /* __I915_IRQ_H__ */
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index b5286f3d8146..83b389e34b50 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -11,6 +11,7 @@
+ #include "gt/intel_engine.h"
+ 
+ #include "i915_drv.h"
++#include "i915_irq.h"
+ #include "intel_drv.h"
+ 
+ #undef TRACE_SYSTEM
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 781db6e18e8a..835f1f72c89a 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -1581,43 +1581,6 @@ intel_atomic_get_new_crtc_state(struct intel_atomic_state *state,
+ 								 &crtc->base));
+ }
+ 
+-/* i915_irq.c */
+-void gen5_enable_gt_irq(struct drm_i915_private *dev_priv, u32 mask);
+-void gen5_disable_gt_irq(struct drm_i915_private *dev_priv, u32 mask);
+-void gen6_mask_pm_irq(struct drm_i915_private *dev_priv, u32 mask);
+-void gen6_unmask_pm_irq(struct drm_i915_private *dev_priv, u32 mask);
+-void gen11_reset_rps_interrupts(struct drm_i915_private *dev_priv);
+-void gen6_reset_rps_interrupts(struct drm_i915_private *dev_priv);
+-void gen6_enable_rps_interrupts(struct drm_i915_private *dev_priv);
+-void gen6_disable_rps_interrupts(struct drm_i915_private *dev_priv);
+-void gen6_rps_reset_ei(struct drm_i915_private *dev_priv);
+-
+-static inline u32 gen6_sanitize_rps_pm_mask(const struct drm_i915_private *i915,
+-					    u32 mask)
+-{
+-	return mask & ~i915->gt_pm.rps.pm_intrmsk_mbz;
+-}
+-
+-void intel_runtime_pm_disable_interrupts(struct drm_i915_private *dev_priv);
+-void intel_runtime_pm_enable_interrupts(struct drm_i915_private *dev_priv);
+-static inline bool intel_irqs_enabled(struct drm_i915_private *dev_priv)
+-{
+-	/*
+-	 * We only use drm_irq_uninstall() at unload and VT switch, so
+-	 * this is the only thing we need to check.
+-	 */
+-	return dev_priv->runtime_pm.irqs_enabled;
+-}
+-
+-int intel_get_crtc_scanline(struct intel_crtc *crtc);
+-void gen8_irq_power_well_post_enable(struct drm_i915_private *dev_priv,
+-				     u8 pipe_mask);
+-void gen8_irq_power_well_pre_disable(struct drm_i915_private *dev_priv,
+-				     u8 pipe_mask);
+-void gen9_reset_guc_interrupts(struct drm_i915_private *dev_priv);
+-void gen9_enable_guc_interrupts(struct drm_i915_private *dev_priv);
+-void gen9_disable_guc_interrupts(struct drm_i915_private *dev_priv);
+-
+ /* intel_display.c */
+ void intel_plane_destroy(struct drm_plane *plane);
+ void i830_enable_pipe(struct drm_i915_private *dev_priv, enum pipe pipe);
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 6fe04e12c8f2..3ba31a71ff97 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -34,6 +34,7 @@
+ #include <drm/drm_plane_helper.h>
+ 
+ #include "i915_drv.h"
++#include "i915_irq.h"
+ #include "intel_drv.h"
+ #include "intel_fbc.h"
+ #include "intel_pm.h"
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index 0bba301d2727..36ac167d4a1d 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -32,6 +32,7 @@
+ #include <drm/drm_print.h>
+ 
+ #include "i915_drv.h"
++#include "i915_irq.h"
+ #include "intel_cdclk.h"
+ #include "intel_crt.h"
+ #include "intel_csr.h"
+-- 
+2.17.1
+

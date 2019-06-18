@@ -1,0 +1,113 @@
+From 0d9e770f232e54a03c9de28583ecfd9229cd6150 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 21 May 2019 22:11:25 +0100
+Subject: [PATCH 287/530] drm/i915: Restore control over ppgtt for context
+ creation ABI
+
+Having hid the partially exposed new ABI from the PR, put it back again
+for completion of context recovery. A significant part of context
+recovery is the ability to reuse as much of the old context as is
+feasible (to avoid expensive reconstruction). The biggest chunk kept
+hidden at the moment is fine-control over the ctx->ppgtt (the GPU page
+tables and associated translation tables and kernel maps), so make
+control over the ctx->ppgtt explicit.
+
+This allows userspace to create and share virtual memory address spaces
+(within the limits of a single fd) between contexts they own, along with
+the ability to query the contexts for the vm state.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190521211134.16117-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_drv.c         |  2 ++
+ drivers/gpu/drm/i915/i915_gem_context.c |  5 -----
+ include/uapi/drm/i915_drm.h             | 15 +++++++++++++++
+ 3 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 2c7a4318d13c..5061cb32856b 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -3164,6 +3164,8 @@ static const struct drm_ioctl_desc i915_ioctls[] = {
+ 	DRM_IOCTL_DEF_DRV(I915_PERF_ADD_CONFIG, i915_perf_add_config_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(I915_PERF_REMOVE_CONFIG, i915_perf_remove_config_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
+ 	DRM_IOCTL_DEF_DRV(I915_QUERY, i915_query_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(I915_GEM_VM_CREATE, i915_gem_vm_create_ioctl, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(I915_GEM_VM_DESTROY, i915_gem_vm_destroy_ioctl, DRM_RENDER_ALLOW),
+ };
+ 
+ static struct drm_driver driver = {
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 65cefc520e79..413c4529191d 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -98,7 +98,6 @@
+ #include "i915_user_extensions.h"
+ 
+ #define I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE (1 << 1)
+-#define I915_CONTEXT_PARAM_VM 0x9
+ 
+ #define ALL_L3_SLICES(dev) (1 << NUM_L3_SLICES(dev)) - 1
+ 
+@@ -966,8 +965,6 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
+ 	struct i915_hw_ppgtt *ppgtt;
+ 	int ret;
+ 
+-	return -EINVAL; /* nothing to see here; please move along */
+-
+ 	if (!ctx->ppgtt)
+ 		return -ENODEV;
+ 
+@@ -1066,8 +1063,6 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 	struct i915_hw_ppgtt *ppgtt, *old;
+ 	int err;
+ 
+-	return -EINVAL; /* nothing to see here; please move along */
+-
+ 	if (args->size)
+ 		return -EINVAL;
+ 
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index 3a73f5316766..d6ad4a15b2b9 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -355,6 +355,8 @@ typedef struct _drm_i915_sarea {
+ #define DRM_I915_PERF_ADD_CONFIG	0x37
+ #define DRM_I915_PERF_REMOVE_CONFIG	0x38
+ #define DRM_I915_QUERY			0x39
++#define DRM_I915_GEM_VM_CREATE		0x3a
++#define DRM_I915_GEM_VM_DESTROY		0x3b
+ /* Must be kept compact -- no holes */
+ 
+ #define DRM_IOCTL_I915_INIT		DRM_IOW( DRM_COMMAND_BASE + DRM_I915_INIT, drm_i915_init_t)
+@@ -415,6 +417,8 @@ typedef struct _drm_i915_sarea {
+ #define DRM_IOCTL_I915_PERF_ADD_CONFIG	DRM_IOW(DRM_COMMAND_BASE + DRM_I915_PERF_ADD_CONFIG, struct drm_i915_perf_oa_config)
+ #define DRM_IOCTL_I915_PERF_REMOVE_CONFIG	DRM_IOW(DRM_COMMAND_BASE + DRM_I915_PERF_REMOVE_CONFIG, __u64)
+ #define DRM_IOCTL_I915_QUERY			DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_QUERY, struct drm_i915_query)
++#define DRM_IOCTL_I915_GEM_VM_CREATE	DRM_IOWR(DRM_COMMAND_BASE + DRM_I915_GEM_VM_CREATE, struct drm_i915_gem_vm_control)
++#define DRM_IOCTL_I915_GEM_VM_DESTROY	DRM_IOW (DRM_COMMAND_BASE + DRM_I915_GEM_VM_DESTROY, struct drm_i915_gem_vm_control)
+ 
+ /* Allow drivers to submit batchbuffers directly to hardware, relying
+  * on the security mechanisms provided by hardware.
+@@ -1507,6 +1511,17 @@ struct drm_i915_gem_context_param {
+  * On creation, all new contexts are marked as recoverable.
+  */
+ #define I915_CONTEXT_PARAM_RECOVERABLE	0x8
++
++	/*
++	 * The id of the associated virtual memory address space (ppGTT) of
++	 * this context. Can be retrieved and passed to another context
++	 * (on the same fd) for both to use the same ppGTT and so share
++	 * address layouts, and avoid reloading the page tables on context
++	 * switches between themselves.
++	 *
++	 * See DRM_I915_GEM_VM_CREATE and DRM_I915_GEM_VM_DESTROY.
++	 */
++#define I915_CONTEXT_PARAM_VM		0x9
+ /* Must be kept compact -- no holes and well documented */
+ 
+ 	__u64 value;
+-- 
+2.17.1
+

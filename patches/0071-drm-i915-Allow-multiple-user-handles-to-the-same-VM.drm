@@ -1,0 +1,99 @@
+From 8016e51645b7818695b514e664129de94df26149 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 25 Apr 2019 06:43:33 +0100
+Subject: [PATCH 071/530] drm/i915: Allow multiple user handles to the same VM
+
+It was noted that we made the same mistake for VM_ID as for object
+handles, whereby we ensured that we only allocated a single handle for
+one ppgtt. This has the unfortunate consequence for userspace that they
+need to reference count the handles to avoid destroying an active ID. If
+we allow multiple handles to the same ppgtt, userspace can freely
+unreference any handle they own without fear of destroying the same
+handle in use elsewhere.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190425054333.27299-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_gem_context.c | 26 ++++++++-----------------
+ drivers/gpu/drm/i915/i915_gem_gtt.h     |  2 --
+ 2 files changed, 8 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 76ed74e75d82..05496ea7a123 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -772,8 +772,7 @@ int i915_gem_vm_create_ioctl(struct drm_device *dev, void *data,
+ 	if (err < 0)
+ 		goto err_unlock;
+ 
+-	GEM_BUG_ON(err == 0); /* reserved for default/unassigned ppgtt */
+-	ppgtt->user_handle = err;
++	GEM_BUG_ON(err == 0); /* reserved for invalid/unassigned ppgtt */
+ 
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+ 
+@@ -811,10 +810,6 @@ int i915_gem_vm_destroy_ioctl(struct drm_device *dev, void *data,
+ 		return err;
+ 
+ 	ppgtt = idr_remove(&file_priv->vm_idr, id);
+-	if (ppgtt) {
+-		GEM_BUG_ON(ppgtt->user_handle != id);
+-		ppgtt->user_handle = 0;
+-	}
+ 
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+ 	if (!ppgtt)
+@@ -925,18 +920,15 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
+ 	if (ret)
+ 		goto err_put;
+ 
+-	if (!ppgtt->user_handle) {
+-		ret = idr_alloc(&file_priv->vm_idr, ppgtt, 0, 0, GFP_KERNEL);
+-		GEM_BUG_ON(!ret);
+-		if (ret < 0)
+-			goto err_unlock;
++	ret = idr_alloc(&file_priv->vm_idr, ppgtt, 0, 0, GFP_KERNEL);
++	GEM_BUG_ON(!ret);
++	if (ret < 0)
++		goto err_unlock;
+ 
+-		ppgtt->user_handle = ret;
+-		i915_ppgtt_get(ppgtt);
+-	}
++	i915_ppgtt_get(ppgtt);
+ 
+ 	args->size = 0;
+-	args->value = ppgtt->user_handle;
++	args->value = ret;
+ 
+ 	ret = 0;
+ err_unlock:
+@@ -1027,10 +1019,8 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 		return err;
+ 
+ 	ppgtt = idr_find(&file_priv->vm_idr, args->value);
+-	if (ppgtt) {
+-		GEM_BUG_ON(ppgtt->user_handle != args->value);
++	if (ppgtt)
+ 		i915_ppgtt_get(ppgtt);
+-	}
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+ 	if (!ppgtt)
+ 		return -ENOENT;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index f85b75db1f98..2fafa04c45ec 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -397,8 +397,6 @@ struct i915_hw_ppgtt {
+ 		struct i915_page_directory_pointer pdp;	/* GEN8+ */
+ 		struct i915_page_directory pd;		/* GEN6-7 */
+ 	};
+-
+-	u32 user_handle;
+ };
+ 
+ struct gen6_hw_ppgtt {
+-- 
+2.17.1
+

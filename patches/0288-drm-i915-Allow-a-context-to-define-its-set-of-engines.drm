@@ -1,0 +1,539 @@
+From 255e730a87873e2171122d3e3fcdccc906c5f3a9 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 21 May 2019 22:11:26 +0100
+Subject: [PATCH 288/530] drm/i915: Allow a context to define its set of
+ engines
+
+Over the last few years, we have debated how to extend the user API to
+support an increase in the number of engines, that may be sparse and
+even be heterogeneous within a class (not all video decoders created
+equal). We settled on using (class, instance) tuples to identify a
+specific engine, with an API for the user to construct a map of engines
+to capabilities. Into this picture, we then add a challenge of virtual
+engines; one user engine that maps behind the scenes to any number of
+physical engines. To keep it general, we want the user to have full
+control over that mapping. To that end, we allow the user to constrain a
+context to define the set of engines that it can access, order fully
+controlled by the user via (class, instance). With such precise control
+in context setup, we can continue to use the existing execbuf uABI of
+specifying a single index; only now it doesn't automagically map onto
+the engines, it uses the user defined engine map from the context.
+
+v2: Fixup freeing of local on success of get_engines()
+v3: Allow empty engines[]
+v4: s/nengine/num_engines/
+v5: Replace 64 limit on num_engines with a note that execbuf is
+currently limited to only using the first 64 engines.
+v6: Actually use the engines_mutex to guard the ctx->engines.
+
+Testcase: igt/gem_ctx_engines
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190521211134.16117-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_gem_context.c       | 265 +++++++++++++++++-
+ drivers/gpu/drm/i915/i915_gem_context.h       |  18 ++
+ drivers/gpu/drm/i915/i915_gem_context_types.h |   1 +
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c    |   5 +-
+ drivers/gpu/drm/i915/i915_utils.h             |  34 +++
+ include/uapi/drm/i915_drm.h                   |  31 ++
+ 6 files changed, 341 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 413c4529191d..c501e2848ca0 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -90,7 +90,6 @@
+ #include <drm/i915_drm.h>
+ 
+ #include "gt/intel_lrc_reg.h"
+-#include "gt/intel_workarounds.h"
+ 
+ #include "i915_drv.h"
+ #include "i915_globals.h"
+@@ -141,15 +140,31 @@ static void lut_close(struct i915_gem_context *ctx)
+ }
+ 
+ static struct intel_context *
+-lookup_user_engine(struct i915_gem_context *ctx, u16 class, u16 instance)
++lookup_user_engine(struct i915_gem_context *ctx,
++		   unsigned long flags,
++		   const struct i915_engine_class_instance *ci)
++#define LOOKUP_USER_INDEX BIT(0)
+ {
+-	struct intel_engine_cs *engine;
++	int idx;
+ 
+-	engine = intel_engine_lookup_user(ctx->i915, class, instance);
+-	if (!engine)
++	if (!!(flags & LOOKUP_USER_INDEX) != i915_gem_context_user_engines(ctx))
+ 		return ERR_PTR(-EINVAL);
+ 
+-	return i915_gem_context_get_engine(ctx, engine->id);
++	if (!i915_gem_context_user_engines(ctx)) {
++		struct intel_engine_cs *engine;
++
++		engine = intel_engine_lookup_user(ctx->i915,
++						  ci->engine_class,
++						  ci->engine_instance);
++		if (!engine)
++			return ERR_PTR(-EINVAL);
++
++		idx = engine->id;
++	} else {
++		idx = ci->engine_instance;
++	}
++
++	return i915_gem_context_get_engine(ctx, idx);
+ }
+ 
+ static inline int new_hw_id(struct drm_i915_private *i915, gfp_t gfp)
+@@ -257,6 +272,17 @@ static void free_engines(struct i915_gem_engines *e)
+ 	__free_engines(e, e->num_engines);
+ }
+ 
++static void free_engines_rcu(struct work_struct *wrk)
++{
++	struct i915_gem_engines *e =
++		container_of(wrk, struct i915_gem_engines, rcu.work);
++	struct drm_i915_private *i915 = e->i915;
++
++	mutex_lock(&i915->drm.struct_mutex);
++	free_engines(e);
++	mutex_unlock(&i915->drm.struct_mutex);
++}
++
+ static struct i915_gem_engines *default_engines(struct i915_gem_context *ctx)
+ {
+ 	struct intel_engine_cs *engine;
+@@ -1352,9 +1378,7 @@ static int set_sseu(struct i915_gem_context *ctx,
+ 	if (user_sseu.flags || user_sseu.rsvd)
+ 		return -EINVAL;
+ 
+-	ce = lookup_user_engine(ctx,
+-				user_sseu.engine.engine_class,
+-				user_sseu.engine.engine_instance);
++	ce = lookup_user_engine(ctx, 0, &user_sseu.engine);
+ 	if (IS_ERR(ce))
+ 		return PTR_ERR(ce);
+ 
+@@ -1379,6 +1403,217 @@ static int set_sseu(struct i915_gem_context *ctx,
+ 	return ret;
+ }
+ 
++struct set_engines {
++	struct i915_gem_context *ctx;
++	struct i915_gem_engines *engines;
++};
++
++static const i915_user_extension_fn set_engines__extensions[] = {
++};
++
++static int
++set_engines(struct i915_gem_context *ctx,
++	    const struct drm_i915_gem_context_param *args)
++{
++	struct i915_context_param_engines __user *user =
++		u64_to_user_ptr(args->value);
++	struct set_engines set = { .ctx = ctx };
++	unsigned int num_engines, n;
++	u64 extensions;
++	int err;
++
++	if (!args->size) { /* switch back to legacy user_ring_map */
++		if (!i915_gem_context_user_engines(ctx))
++			return 0;
++
++		set.engines = default_engines(ctx);
++		if (IS_ERR(set.engines))
++			return PTR_ERR(set.engines);
++
++		goto replace;
++	}
++
++	BUILD_BUG_ON(!IS_ALIGNED(sizeof(*user), sizeof(*user->engines)));
++	if (args->size < sizeof(*user) ||
++	    !IS_ALIGNED(args->size, sizeof(*user->engines))) {
++		DRM_DEBUG("Invalid size for engine array: %d\n",
++			  args->size);
++		return -EINVAL;
++	}
++
++	/*
++	 * Note that I915_EXEC_RING_MASK limits execbuf to only using the
++	 * first 64 engines defined here.
++	 */
++	num_engines = (args->size - sizeof(*user)) / sizeof(*user->engines);
++
++	set.engines = kmalloc(struct_size(set.engines, engines, num_engines),
++			      GFP_KERNEL);
++	if (!set.engines)
++		return -ENOMEM;
++
++	set.engines->i915 = ctx->i915;
++	for (n = 0; n < num_engines; n++) {
++		struct i915_engine_class_instance ci;
++		struct intel_engine_cs *engine;
++
++		if (copy_from_user(&ci, &user->engines[n], sizeof(ci))) {
++			__free_engines(set.engines, n);
++			return -EFAULT;
++		}
++
++		if (ci.engine_class == (u16)I915_ENGINE_CLASS_INVALID &&
++		    ci.engine_instance == (u16)I915_ENGINE_CLASS_INVALID_NONE) {
++			set.engines->engines[n] = NULL;
++			continue;
++		}
++
++		engine = intel_engine_lookup_user(ctx->i915,
++						  ci.engine_class,
++						  ci.engine_instance);
++		if (!engine) {
++			DRM_DEBUG("Invalid engine[%d]: { class:%d, instance:%d }\n",
++				  n, ci.engine_class, ci.engine_instance);
++			__free_engines(set.engines, n);
++			return -ENOENT;
++		}
++
++		set.engines->engines[n] = intel_context_create(ctx, engine);
++		if (!set.engines->engines[n]) {
++			__free_engines(set.engines, n);
++			return -ENOMEM;
++		}
++	}
++	set.engines->num_engines = num_engines;
++
++	err = -EFAULT;
++	if (!get_user(extensions, &user->extensions))
++		err = i915_user_extensions(u64_to_user_ptr(extensions),
++					   set_engines__extensions,
++					   ARRAY_SIZE(set_engines__extensions),
++					   &set);
++	if (err) {
++		free_engines(set.engines);
++		return err;
++	}
++
++replace:
++	mutex_lock(&ctx->engines_mutex);
++	if (args->size)
++		i915_gem_context_set_user_engines(ctx);
++	else
++		i915_gem_context_clear_user_engines(ctx);
++	rcu_swap_protected(ctx->engines, set.engines, 1);
++	mutex_unlock(&ctx->engines_mutex);
++
++	INIT_RCU_WORK(&set.engines->rcu, free_engines_rcu);
++	queue_rcu_work(system_wq, &set.engines->rcu);
++
++	return 0;
++}
++
++static struct i915_gem_engines *
++__copy_engines(struct i915_gem_engines *e)
++{
++	struct i915_gem_engines *copy;
++	unsigned int n;
++
++	copy = kmalloc(struct_size(e, engines, e->num_engines), GFP_KERNEL);
++	if (!copy)
++		return ERR_PTR(-ENOMEM);
++
++	copy->i915 = e->i915;
++	for (n = 0; n < e->num_engines; n++) {
++		if (e->engines[n])
++			copy->engines[n] = intel_context_get(e->engines[n]);
++		else
++			copy->engines[n] = NULL;
++	}
++	copy->num_engines = n;
++
++	return copy;
++}
++
++static int
++get_engines(struct i915_gem_context *ctx,
++	    struct drm_i915_gem_context_param *args)
++{
++	struct i915_context_param_engines __user *user;
++	struct i915_gem_engines *e;
++	size_t n, count, size;
++	int err = 0;
++
++	err = mutex_lock_interruptible(&ctx->engines_mutex);
++	if (err)
++		return err;
++
++	e = NULL;
++	if (i915_gem_context_user_engines(ctx))
++		e = __copy_engines(i915_gem_context_engines(ctx));
++	mutex_unlock(&ctx->engines_mutex);
++	if (IS_ERR_OR_NULL(e)) {
++		args->size = 0;
++		return PTR_ERR_OR_ZERO(e);
++	}
++
++	count = e->num_engines;
++
++	/* Be paranoid in case we have an impedance mismatch */
++	if (!check_struct_size(user, engines, count, &size)) {
++		err = -EINVAL;
++		goto err_free;
++	}
++	if (overflows_type(size, args->size)) {
++		err = -EINVAL;
++		goto err_free;
++	}
++
++	if (!args->size) {
++		args->size = size;
++		goto err_free;
++	}
++
++	if (args->size < size) {
++		err = -EINVAL;
++		goto err_free;
++	}
++
++	user = u64_to_user_ptr(args->value);
++	if (!access_ok(user, size)) {
++		err = -EFAULT;
++		goto err_free;
++	}
++
++	if (put_user(0, &user->extensions)) {
++		err = -EFAULT;
++		goto err_free;
++	}
++
++	for (n = 0; n < count; n++) {
++		struct i915_engine_class_instance ci = {
++			.engine_class = I915_ENGINE_CLASS_INVALID,
++			.engine_instance = I915_ENGINE_CLASS_INVALID_NONE,
++		};
++
++		if (e->engines[n]) {
++			ci.engine_class = e->engines[n]->engine->uabi_class;
++			ci.engine_instance = e->engines[n]->engine->instance;
++		}
++
++		if (copy_to_user(&user->engines[n], &ci, sizeof(ci))) {
++			err = -EFAULT;
++			goto err_free;
++		}
++	}
++
++	args->size = size;
++
++err_free:
++	INIT_RCU_WORK(&e->rcu, free_engines_rcu);
++	queue_rcu_work(system_wq, &e->rcu);
++	return err;
++}
++
+ static int ctx_setparam(struct drm_i915_file_private *fpriv,
+ 			struct i915_gem_context *ctx,
+ 			struct drm_i915_gem_context_param *args)
+@@ -1452,6 +1687,10 @@ static int ctx_setparam(struct drm_i915_file_private *fpriv,
+ 		ret = set_ppgtt(fpriv, ctx, args);
+ 		break;
+ 
++	case I915_CONTEXT_PARAM_ENGINES:
++		ret = set_engines(ctx, args);
++		break;
++
+ 	case I915_CONTEXT_PARAM_BAN_PERIOD:
+ 	default:
+ 		ret = -EINVAL;
+@@ -1596,9 +1835,7 @@ static int get_sseu(struct i915_gem_context *ctx,
+ 	if (user_sseu.flags || user_sseu.rsvd)
+ 		return -EINVAL;
+ 
+-	ce = lookup_user_engine(ctx,
+-				user_sseu.engine.engine_class,
+-				user_sseu.engine.engine_instance);
++	ce = lookup_user_engine(ctx, 0, &user_sseu.engine);
+ 	if (IS_ERR(ce))
+ 		return PTR_ERR(ce);
+ 
+@@ -1682,6 +1919,10 @@ int i915_gem_context_getparam_ioctl(struct drm_device *dev, void *data,
+ 		ret = get_ppgtt(file_priv, ctx, args);
+ 		break;
+ 
++	case I915_CONTEXT_PARAM_ENGINES:
++		ret = get_engines(ctx, args);
++		break;
++
+ 	case I915_CONTEXT_PARAM_BAN_PERIOD:
+ 	default:
+ 		ret = -EINVAL;
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.h b/drivers/gpu/drm/i915/i915_gem_context.h
+index 272e183ebc0c..9ad4a6362438 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.h
++++ b/drivers/gpu/drm/i915/i915_gem_context.h
+@@ -112,6 +112,24 @@ static inline void i915_gem_context_set_force_single_submission(struct i915_gem_
+ 	__set_bit(CONTEXT_FORCE_SINGLE_SUBMISSION, &ctx->flags);
+ }
+ 
++static inline bool
++i915_gem_context_user_engines(const struct i915_gem_context *ctx)
++{
++	return test_bit(CONTEXT_USER_ENGINES, &ctx->flags);
++}
++
++static inline void
++i915_gem_context_set_user_engines(struct i915_gem_context *ctx)
++{
++	set_bit(CONTEXT_USER_ENGINES, &ctx->flags);
++}
++
++static inline void
++i915_gem_context_clear_user_engines(struct i915_gem_context *ctx)
++{
++	clear_bit(CONTEXT_USER_ENGINES, &ctx->flags);
++}
++
+ int __i915_gem_context_pin_hw_id(struct i915_gem_context *ctx);
+ static inline int i915_gem_context_pin_hw_id(struct i915_gem_context *ctx)
+ {
+diff --git a/drivers/gpu/drm/i915/i915_gem_context_types.h b/drivers/gpu/drm/i915/i915_gem_context_types.h
+index d5cb4f121aad..fb965ded2508 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context_types.h
++++ b/drivers/gpu/drm/i915/i915_gem_context_types.h
+@@ -146,6 +146,7 @@ struct i915_gem_context {
+ #define CONTEXT_BANNED			0
+ #define CONTEXT_CLOSED			1
+ #define CONTEXT_FORCE_SINGLE_SUBMISSION	2
++#define CONTEXT_USER_ENGINES		3
+ 
+ 	/**
+ 	 * @hw_id: - unique identifier for the context
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 361c232dde83..729860188c1a 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -2166,7 +2166,10 @@ eb_select_engine(struct i915_execbuffer *eb,
+ 	unsigned int idx;
+ 	int err;
+ 
+-	idx = eb_select_legacy_ring(eb, file, args);
++	if (i915_gem_context_user_engines(eb->gem_context))
++		idx = args->flags & I915_EXEC_RING_MASK;
++	else
++		idx = eb_select_legacy_ring(eb, file, args);
+ 
+ 	ce = i915_gem_context_get_engine(eb->gem_context, idx);
+ 	if (IS_ERR(ce))
+diff --git a/drivers/gpu/drm/i915/i915_utils.h b/drivers/gpu/drm/i915/i915_utils.h
+index 5c94c7ab4607..e52866084891 100644
+--- a/drivers/gpu/drm/i915/i915_utils.h
++++ b/drivers/gpu/drm/i915/i915_utils.h
+@@ -26,6 +26,7 @@
+ #define __I915_UTILS_H
+ 
+ #include <linux/list.h>
++#include <linux/overflow.h>
+ #include <linux/sched.h>
+ #include <linux/types.h>
+ #include <linux/workqueue.h>
+@@ -78,6 +79,39 @@
+ #define overflows_type(x, T) \
+ 	(sizeof(x) > sizeof(T) && (x) >> BITS_PER_TYPE(T))
+ 
++static inline bool
++__check_struct_size(size_t base, size_t arr, size_t count, size_t *size)
++{
++	size_t sz;
++
++	if (check_mul_overflow(count, arr, &sz))
++		return false;
++
++	if (check_add_overflow(sz, base, &sz))
++		return false;
++
++	*size = sz;
++	return true;
++}
++
++/**
++ * check_struct_size() - Calculate size of structure with trailing array.
++ * @p: Pointer to the structure.
++ * @member: Name of the array member.
++ * @n: Number of elements in the array.
++ * @sz: Total size of structure and array
++ *
++ * Calculates size of memory needed for structure @p followed by an
++ * array of @n @member elements, like struct_size() but reports
++ * whether it overflowed, and the resultant size in @sz
++ *
++ * Return: false if the calculation overflowed.
++ */
++#define check_struct_size(p, member, n, sz) \
++	likely(__check_struct_size(sizeof(*(p)), \
++				   sizeof(*(p)->member) + __must_be_array((p)->member), \
++				   n, sz))
++
+ #define ptr_mask_bits(ptr, n) ({					\
+ 	unsigned long __v = (unsigned long)(ptr);			\
+ 	(typeof(ptr))(__v & -BIT(n));					\
+diff --git a/include/uapi/drm/i915_drm.h b/include/uapi/drm/i915_drm.h
+index d6ad4a15b2b9..8e1bb22926e4 100644
+--- a/include/uapi/drm/i915_drm.h
++++ b/include/uapi/drm/i915_drm.h
+@@ -136,6 +136,7 @@ enum drm_i915_gem_engine_class {
+ struct i915_engine_class_instance {
+ 	__u16 engine_class; /* see enum drm_i915_gem_engine_class */
+ 	__u16 engine_instance;
++#define I915_ENGINE_CLASS_INVALID_NONE -1
+ };
+ 
+ /**
+@@ -1522,6 +1523,26 @@ struct drm_i915_gem_context_param {
+ 	 * See DRM_I915_GEM_VM_CREATE and DRM_I915_GEM_VM_DESTROY.
+ 	 */
+ #define I915_CONTEXT_PARAM_VM		0x9
++
++/*
++ * I915_CONTEXT_PARAM_ENGINES:
++ *
++ * Bind this context to operate on this subset of available engines. Henceforth,
++ * the I915_EXEC_RING selector for DRM_IOCTL_I915_GEM_EXECBUFFER2 operates as
++ * an index into this array of engines; I915_EXEC_DEFAULT selecting engine[0]
++ * and upwards. Slots 0...N are filled in using the specified (class, instance).
++ * Use
++ *	engine_class: I915_ENGINE_CLASS_INVALID,
++ *	engine_instance: I915_ENGINE_CLASS_INVALID_NONE
++ * to specify a gap in the array that can be filled in later, e.g. by a
++ * virtual engine used for load balancing.
++ *
++ * Setting the number of engines bound to the context to 0, by passing a zero
++ * sized argument, will revert back to default settings.
++ *
++ * See struct i915_context_param_engines.
++ */
++#define I915_CONTEXT_PARAM_ENGINES	0xa
+ /* Must be kept compact -- no holes and well documented */
+ 
+ 	__u64 value;
+@@ -1585,6 +1606,16 @@ struct drm_i915_gem_context_param_sseu {
+ 	__u32 rsvd;
+ };
+ 
++struct i915_context_param_engines {
++	__u64 extensions; /* linked chain of extension blocks, 0 terminates */
++	struct i915_engine_class_instance engines[0];
++} __attribute__((packed));
++
++#define I915_DEFINE_CONTEXT_PARAM_ENGINES(name__, N__) struct { \
++	__u64 extensions; \
++	struct i915_engine_class_instance engines[N__]; \
++} __attribute__((packed)) name__
++
+ struct drm_i915_gem_context_create_ext_setparam {
+ #define I915_CONTEXT_CREATE_EXT_SETPARAM 0
+ 	struct i915_user_extension base;
+-- 
+2.17.1
+

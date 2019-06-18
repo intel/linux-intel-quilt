@@ -1,0 +1,60 @@
+From d11cdb4bef1004dea4eb181cd31f2f918ae6957b Mon Sep 17 00:00:00 2001
+From: Stanislav Lisovskiy <stanislav.lisovskiy@intel.com>
+Date: Tue, 30 Apr 2019 15:51:19 +0300
+Subject: [PATCH 130/530] drm/i915: Corrupt DSI picture fix for GeminiLake
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently due to regression CI machine displays show corrupt picture.
+Problem is when CDCLK is as low as 79200, picture gets unstable, while
+DSI and DE pll values were confirmed to be correct.  Limiting to 158400
+as agreed with Ville.
+
+We could not come up with any better solution yet, as PLL divider values
+both for MIPI(DSI PLL) and CDCLK(DE PLL) are correct, however seems that
+due to some boundary conditions, when clocking is too low we get wrong
+timings for DSI display.  Similar workaround exists for VLV though, so
+just took similar condition into use. At least that way GLK platform
+will start to be usable again, with current drm-tip.
+
+v2: Fixed commit subject as suggested.
+
+v3: Added generic bugs(crc failures, screen not init
+for GLK DSI which might be affected).
+
+v4: Added references tag for bugs affected.
+
+Signed-off-by: Stanislav Lisovskiy <stanislav.lisovskiy@intel.com>
+Acked-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+References: https://bugs.freedesktop.org/show_bug.cgi?id=109267
+References: https://bugs.freedesktop.org/show_bug.cgi?id=103184
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190430125119.7478-1-stanislav.lisovskiy@intel.com
+---
+ drivers/gpu/drm/i915/intel_cdclk.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/intel_cdclk.c b/drivers/gpu/drm/i915/intel_cdclk.c
+index cf9c916e8d49..78d9f619956c 100644
+--- a/drivers/gpu/drm/i915/intel_cdclk.c
++++ b/drivers/gpu/drm/i915/intel_cdclk.c
+@@ -2265,6 +2265,15 @@ int intel_crtc_compute_min_cdclk(const struct intel_crtc_state *crtc_state)
+ 	    IS_VALLEYVIEW(dev_priv))
+ 		min_cdclk = max(320000, min_cdclk);
+ 
++	/*
++	 * On Geminilake once the CDCLK gets as low as 79200
++	 * picture gets unstable, despite that values are
++	 * correct for DSI PLL and DE PLL.
++	 */
++	if (intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DSI) &&
++	    IS_GEMINILAKE(dev_priv))
++		min_cdclk = max(158400, min_cdclk);
++
+ 	if (min_cdclk > dev_priv->max_cdclk_freq) {
+ 		DRM_DEBUG_KMS("required cdclk (%d kHz) exceeds max (%d kHz)\n",
+ 			      min_cdclk, dev_priv->max_cdclk_freq);
+-- 
+2.17.1
+
