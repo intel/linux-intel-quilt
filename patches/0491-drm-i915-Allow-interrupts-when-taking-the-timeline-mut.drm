@@ -1,0 +1,57 @@
+From 8aa47f84b29caf74b300638c1a54c9b19ae6cb9d Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 10 Jun 2019 11:36:10 +0100
+Subject: [PATCH 491/530] drm/i915: Allow interrupts when taking the
+ timeline->mutex
+
+Before we commit ourselves to writing commands into the
+ringbuffer and submitting the request, allow signals to interrupt
+acquisition of the timeline mutex. We allow ourselves to be interrupted
+at any time later if we need to block for space in the ring, anyway.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190610103610.19883-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_context.h | 5 +++--
+ drivers/gpu/drm/i915/i915_request.c     | 5 ++++-
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.h b/drivers/gpu/drm/i915/gt/intel_context.h
+index 63392c88cd98..6d5453ba2c1e 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.h
++++ b/drivers/gpu/drm/i915/gt/intel_context.h
+@@ -113,10 +113,11 @@ static inline void intel_context_put(struct intel_context *ce)
+ 	kref_put(&ce->ref, ce->ops->destroy);
+ }
+ 
+-static inline void intel_context_timeline_lock(struct intel_context *ce)
++static inline int __must_check
++intel_context_timeline_lock(struct intel_context *ce)
+ 	__acquires(&ce->ring->timeline->mutex)
+ {
+-	mutex_lock(&ce->ring->timeline->mutex);
++	return mutex_lock_interruptible(&ce->ring->timeline->mutex);
+ }
+ 
+ static inline void intel_context_timeline_unlock(struct intel_context *ce)
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index da1e6984a8cc..e9b59eea4f10 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -784,8 +784,11 @@ struct i915_request *
+ i915_request_create(struct intel_context *ce)
+ {
+ 	struct i915_request *rq;
++	int err;
+ 
+-	intel_context_timeline_lock(ce);
++	err = intel_context_timeline_lock(ce);
++	if (err)
++		return ERR_PTR(err);
+ 
+ 	/* Move our oldest request to the slab-cache (if not in use!) */
+ 	rq = list_first_entry(&ce->ring->request_list, typeof(*rq), ring_link);
+-- 
+2.17.1
+

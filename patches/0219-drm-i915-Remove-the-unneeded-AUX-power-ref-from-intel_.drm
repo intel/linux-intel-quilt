@@ -1,0 +1,192 @@
+From 26bc7dc40baf0ce8b01a518f8b3aa6be33f0d396 Mon Sep 17 00:00:00 2001
+From: Imre Deak <imre.deak@intel.com>
+Date: Thu, 9 May 2019 20:34:42 +0300
+Subject: [PATCH 219/530] drm/i915: Remove the unneeded AUX power ref from
+ intel_dp_detect()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+We don't need the AUX power for the whole duration of the detect, only
+when we're doing AUX transfers. The AUX transfer function takes its own
+reference on the AUX power domain already. The two places during detect
+which access display core registers (not specific to a
+pipe/port/transcoder) only need the power domain that is required for
+that access. That power domain is equivalent to the device global power
+domain on most platforms (enabled whenever we hold a runtime PM
+reference) except on CHV/VLV where it's equivalent to the display power
+well.
+
+Add a new power domain that reflects the above, and use this at the two
+spots accessing registers. With that we can avoid taking the AUX
+reference for the whole duration of the detect function.
+
+Put the domains asynchronously to avoid the unneeded on-off-on toggling.
+
+Also adapt the idea from with_intel_runtime_pm et al. for making it easy
+to write short sequences where a display power ref is needed.
+
+v2: (Ville)
+- Add with_intel_display_power() helper to simplify things.
+- s/bool res/bool is_connected/
+
+Cc: Ville Syrjala <ville.syrjala@linux.intel.com>
+Signed-off-by: Imre Deak <imre.deak@intel.com>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190509173446.31095-8-imre.deak@intel.com
+---
+ drivers/gpu/drm/i915/intel_display.h    |  1 +
+ drivers/gpu/drm/i915/intel_dp.c         | 32 +++++++++++++++----------
+ drivers/gpu/drm/i915/intel_runtime_pm.c |  4 ++++
+ drivers/gpu/drm/i915/intel_runtime_pm.h |  5 ++++
+ 4 files changed, 29 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.h b/drivers/gpu/drm/i915/intel_display.h
+index 1b6f5a71184d..7f3fafdfbd5f 100644
+--- a/drivers/gpu/drm/i915/intel_display.h
++++ b/drivers/gpu/drm/i915/intel_display.h
+@@ -220,6 +220,7 @@ enum aux_ch {
+ #define aux_ch_name(a) ((a) + 'A')
+ 
+ enum intel_display_power_domain {
++	POWER_DOMAIN_DISPLAY_CORE,
+ 	POWER_DOMAIN_PIPE_A,
+ 	POWER_DOMAIN_PIPE_B,
+ 	POWER_DOMAIN_PIPE_C,
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 1e011998e9d5..553071812f69 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -216,14 +216,16 @@ static int intel_dp_get_fia_supported_lane_count(struct intel_dp *intel_dp)
+ 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
+ 	struct drm_i915_private *dev_priv = to_i915(dig_port->base.base.dev);
+ 	enum tc_port tc_port = intel_port_to_tc(dev_priv, dig_port->base.port);
++	intel_wakeref_t wakeref;
+ 	u32 lane_info;
+ 
+ 	if (tc_port == PORT_TC_NONE || dig_port->tc_type != TC_PORT_TYPEC)
+ 		return 4;
+ 
+-	lane_info = (I915_READ(PORT_TX_DFLEXDPSP) &
+-		     DP_LANE_ASSIGNMENT_MASK(tc_port)) >>
+-		    DP_LANE_ASSIGNMENT_SHIFT(tc_port);
++	with_intel_display_power(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref)
++		lane_info = (I915_READ(PORT_TX_DFLEXDPSP) &
++			     DP_LANE_ASSIGNMENT_MASK(tc_port)) >>
++				DP_LANE_ASSIGNMENT_SHIFT(tc_port);
+ 
+ 	switch (lane_info) {
+ 	default:
+@@ -5294,7 +5296,7 @@ static bool icl_digital_port_connected(struct intel_encoder *encoder)
+  *
+  * Return %true if port is connected, %false otherwise.
+  */
+-bool intel_digital_port_connected(struct intel_encoder *encoder)
++static bool __intel_digital_port_connected(struct intel_encoder *encoder)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+ 
+@@ -5324,6 +5326,18 @@ bool intel_digital_port_connected(struct intel_encoder *encoder)
+ 	return false;
+ }
+ 
++bool intel_digital_port_connected(struct intel_encoder *encoder)
++{
++	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
++	intel_wakeref_t wakeref;
++	bool is_connected;
++
++	with_intel_display_power(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref)
++		is_connected = __intel_digital_port_connected(encoder);
++
++	return is_connected;
++}
++
+ static struct edid *
+ intel_dp_get_edid(struct intel_dp *intel_dp)
+ {
+@@ -5377,16 +5391,11 @@ intel_dp_detect(struct drm_connector *connector,
+ 	struct intel_digital_port *dig_port = dp_to_dig_port(intel_dp);
+ 	struct intel_encoder *encoder = &dig_port->base;
+ 	enum drm_connector_status status;
+-	enum intel_display_power_domain aux_domain =
+-		intel_aux_power_domain(dig_port);
+-	intel_wakeref_t wakeref;
+ 
+ 	DRM_DEBUG_KMS("[CONNECTOR:%d:%s]\n",
+ 		      connector->base.id, connector->name);
+ 	WARN_ON(!drm_modeset_is_locked(&dev_priv->drm.mode_config.connection_mutex));
+ 
+-	wakeref = intel_display_power_get(dev_priv, aux_domain);
+-
+ 	/* Can't disconnect eDP */
+ 	if (intel_dp_is_edp(intel_dp))
+ 		status = edp_detect(intel_dp);
+@@ -5450,10 +5459,8 @@ intel_dp_detect(struct drm_connector *connector,
+ 		int ret;
+ 
+ 		ret = intel_dp_retrain_link(encoder, ctx);
+-		if (ret) {
+-			intel_display_power_put(dev_priv, aux_domain, wakeref);
++		if (ret)
+ 			return ret;
+-		}
+ 	}
+ 
+ 	/*
+@@ -5475,7 +5482,6 @@ intel_dp_detect(struct drm_connector *connector,
+ 	if (status != connector_status_connected && !intel_dp->is_mst)
+ 		intel_dp_unset_edid(intel_dp);
+ 
+-	intel_display_power_put(dev_priv, aux_domain, wakeref);
+ 	return status;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index 96467eb7442d..34d8e45dac3e 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -398,6 +398,8 @@ const char *
+ intel_display_power_domain_str(enum intel_display_power_domain domain)
+ {
+ 	switch (domain) {
++	case POWER_DOMAIN_DISPLAY_CORE:
++		return "DISPLAY_CORE";
+ 	case POWER_DOMAIN_PIPE_A:
+ 		return "PIPE_A";
+ 	case POWER_DOMAIN_PIPE_B:
+@@ -2376,6 +2378,7 @@ void intel_display_power_put(struct drm_i915_private *dev_priv,
+ 	BIT_ULL(POWER_DOMAIN_INIT))
+ 
+ #define VLV_DISPLAY_POWER_DOMAINS (		\
++	BIT_ULL(POWER_DOMAIN_DISPLAY_CORE) |	\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_A) |		\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_B) |		\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_A_PANEL_FITTER) |	\
+@@ -2422,6 +2425,7 @@ void intel_display_power_put(struct drm_i915_private *dev_priv,
+ 	BIT_ULL(POWER_DOMAIN_INIT))
+ 
+ #define CHV_DISPLAY_POWER_DOMAINS (		\
++	BIT_ULL(POWER_DOMAIN_DISPLAY_CORE) |	\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_A) |		\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_B) |		\
+ 	BIT_ULL(POWER_DOMAIN_PIPE_C) |		\
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.h b/drivers/gpu/drm/i915/intel_runtime_pm.h
+index 56ad79ef0806..b964ca7af9c8 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.h
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.h
+@@ -91,6 +91,11 @@ intel_display_power_put_async(struct drm_i915_private *i915,
+ 	__intel_display_power_put_async(i915, domain, -1);
+ }
+ #endif
++
++#define with_intel_display_power(i915, domain, wf) \
++	for ((wf) = intel_display_power_get((i915), (domain)); (wf); \
++	     intel_display_power_put_async((i915), (domain), (wf)), (wf) = 0)
++
+ void icl_dbuf_slices_update(struct drm_i915_private *dev_priv,
+ 			    u8 req_slices);
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,80 @@
+From e335da966d44f3cf10a2ed6b59dc97fe1790ebc5 Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Fri, 7 Jun 2019 09:25:53 +0100
+Subject: [PATCH 458/530] drm/i915: Reset only affected engines when handling
+ error capture
+
+Pass down the engine mask to i915_clear_error_registers so only affected
+engines can be reset on the Gen6/7 path.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190607082557.31670-1-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/gt/intel_reset.c | 7 ++++---
+ drivers/gpu/drm/i915/gt/intel_reset.h | 3 ++-
+ drivers/gpu/drm/i915/i915_gem_gtt.c   | 2 +-
+ 3 files changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index 377bc546a68f..7bfb76eb0291 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -1160,7 +1160,8 @@ static void clear_register(struct intel_uncore *uncore, i915_reg_t reg)
+ 	intel_uncore_rmw(uncore, reg, 0, 0);
+ }
+ 
+-void i915_clear_error_registers(struct drm_i915_private *i915)
++void i915_clear_error_registers(struct drm_i915_private *i915,
++				intel_engine_mask_t engine_mask)
+ {
+ 	struct intel_uncore *uncore = &i915->uncore;
+ 	u32 eir;
+@@ -1193,7 +1194,7 @@ void i915_clear_error_registers(struct drm_i915_private *i915)
+ 		struct intel_engine_cs *engine;
+ 		enum intel_engine_id id;
+ 
+-		for_each_engine(engine, i915, id) {
++		for_each_engine_masked(engine, i915, engine_mask, id) {
+ 			rmw_clear(uncore,
+ 				  RING_FAULT_REG(engine), RING_FAULT_VALID);
+ 			intel_uncore_posting_read(uncore,
+@@ -1250,7 +1251,7 @@ void i915_handle_error(struct drm_i915_private *i915,
+ 
+ 	if (flags & I915_ERROR_CAPTURE) {
+ 		i915_capture_error_state(i915, engine_mask, msg);
+-		i915_clear_error_registers(i915);
++		i915_clear_error_registers(i915, engine_mask);
+ 	}
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.h b/drivers/gpu/drm/i915/gt/intel_reset.h
+index b52efaab4941..4f3c1acac1a3 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.h
++++ b/drivers/gpu/drm/i915/gt/intel_reset.h
+@@ -25,7 +25,8 @@ void i915_handle_error(struct drm_i915_private *i915,
+ 		       const char *fmt, ...);
+ #define I915_ERROR_CAPTURE BIT(0)
+ 
+-void i915_clear_error_registers(struct drm_i915_private *i915);
++void i915_clear_error_registers(struct drm_i915_private *i915,
++				intel_engine_mask_t engine_mask);
+ 
+ void i915_reset(struct drm_i915_private *i915,
+ 		intel_engine_mask_t stalled_mask,
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 6fcf702d7ec1..c5a94396024f 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -2359,7 +2359,7 @@ void i915_check_and_clear_faults(struct drm_i915_private *dev_priv)
+ 	else
+ 		return;
+ 
+-	i915_clear_error_registers(dev_priv);
++	i915_clear_error_registers(dev_priv, ALL_ENGINES);
+ }
+ 
+ void i915_gem_suspend_gtt_mappings(struct drm_i915_private *dev_priv)
+-- 
+2.17.1
+

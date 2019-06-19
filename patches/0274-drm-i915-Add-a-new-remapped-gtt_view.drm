@@ -1,0 +1,386 @@
+From 50b1bea775d317d707a7bdd428283d010868fed2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Thu, 9 May 2019 15:21:52 +0300
+Subject: [PATCH 274/530] drm/i915: Add a new "remapped" gtt_view
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+To overcome display engine stride limits we'll want to remap the
+pages in the GTT. To that end we need a new gtt_view type which
+is just like the "rotated" type except not rotated.
+
+v2: Use intel_remapped_plane_info base type
+    s/unused/unused_mbz/ (Chris)
+    Separate BUILD_BUG_ON()s (Chris)
+    Use I915_GTT_PAGE_SIZE (Chris)
+v3: Use i915_gem_object_get_dma_address() (Chris)
+    Trim the sg (Tvrtko)
+v4: Actually trim this time. Limit the max length
+    to one row of pages to keep things simple
+
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>
+Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190509122159.24376-2-ville.syrjala@linux.intel.com
+Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+---
+ drivers/gpu/drm/i915/i915_debugfs.c       | 12 ++++
+ drivers/gpu/drm/i915/i915_drv.h           |  4 ++
+ drivers/gpu/drm/i915/i915_gem.c           | 17 ++++-
+ drivers/gpu/drm/i915/i915_gem_gtt.c       | 88 +++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_gem_gtt.h       | 25 +++++--
+ drivers/gpu/drm/i915/i915_vma.c           |  6 +-
+ drivers/gpu/drm/i915/i915_vma.h           |  3 +
+ drivers/gpu/drm/i915/intel_display.c      | 11 +++
+ drivers/gpu/drm/i915/intel_drv.h          |  1 +
+ drivers/gpu/drm/i915/selftests/i915_vma.c |  6 +-
+ 10 files changed, 163 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 072464a18050..633a08c0f907 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -212,6 +212,18 @@ describe_obj(struct seq_file *m, struct drm_i915_gem_object *obj)
+ 					   vma->ggtt_view.rotated.plane[1].offset);
+ 				break;
+ 
++			case I915_GGTT_VIEW_REMAPPED:
++				seq_printf(m, ", remapped [(%ux%u, stride=%u, offset=%u), (%ux%u, stride=%u, offset=%u)]",
++					   vma->ggtt_view.remapped.plane[0].width,
++					   vma->ggtt_view.remapped.plane[0].height,
++					   vma->ggtt_view.remapped.plane[0].stride,
++					   vma->ggtt_view.remapped.plane[0].offset,
++					   vma->ggtt_view.remapped.plane[1].width,
++					   vma->ggtt_view.remapped.plane[1].height,
++					   vma->ggtt_view.remapped.plane[1].stride,
++					   vma->ggtt_view.remapped.plane[1].offset);
++				break;
++
+ 			default:
+ 				MISSING_CASE(vma->ggtt_view.type);
+ 				break;
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 5801f5407589..1ad3818d2676 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2864,6 +2864,10 @@ i915_gem_object_get_dirty_page(struct drm_i915_gem_object *obj,
+ 			       unsigned int n);
+ 
+ dma_addr_t
++i915_gem_object_get_dma_address_len(struct drm_i915_gem_object *obj,
++				    unsigned long n,
++				    unsigned int *len);
++dma_addr_t
+ i915_gem_object_get_dma_address(struct drm_i915_gem_object *obj,
+ 				unsigned long n);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index d168691bbbdd..1c535ccc1f84 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -5081,16 +5081,29 @@ i915_gem_object_get_dirty_page(struct drm_i915_gem_object *obj,
+ }
+ 
+ dma_addr_t
+-i915_gem_object_get_dma_address(struct drm_i915_gem_object *obj,
+-				unsigned long n)
++i915_gem_object_get_dma_address_len(struct drm_i915_gem_object *obj,
++				    unsigned long n,
++				    unsigned int *len)
+ {
+ 	struct scatterlist *sg;
+ 	unsigned int offset;
+ 
+ 	sg = i915_gem_object_get_sg(obj, n, &offset);
++
++	if (len)
++		*len = sg_dma_len(sg) - (offset << PAGE_SHIFT);
++
+ 	return sg_dma_address(sg) + (offset << PAGE_SHIFT);
+ }
+ 
++dma_addr_t
++i915_gem_object_get_dma_address(struct drm_i915_gem_object *obj,
++				unsigned long n)
++{
++	return i915_gem_object_get_dma_address_len(obj, n, NULL);
++}
++
++
+ int i915_gem_object_attach_phys(struct drm_i915_gem_object *obj, int align)
+ {
+ 	struct sg_table *pages;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 8f5db787b7f2..9ed41aefb456 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -3608,6 +3608,89 @@ intel_rotate_pages(struct intel_rotation_info *rot_info,
+ 	return ERR_PTR(ret);
+ }
+ 
++static struct scatterlist *
++remap_pages(struct drm_i915_gem_object *obj, unsigned int offset,
++	    unsigned int width, unsigned int height,
++	    unsigned int stride,
++	    struct sg_table *st, struct scatterlist *sg)
++{
++	unsigned int row;
++
++	for (row = 0; row < height; row++) {
++		unsigned int left = width * I915_GTT_PAGE_SIZE;
++
++		while (left) {
++			dma_addr_t addr;
++			unsigned int length;
++
++			/* We don't need the pages, but need to initialize
++			 * the entries so the sg list can be happily traversed.
++			 * The only thing we need are DMA addresses.
++			 */
++
++			addr = i915_gem_object_get_dma_address_len(obj, offset, &length);
++
++			length = min(left, length);
++
++			st->nents++;
++
++			sg_set_page(sg, NULL, length, 0);
++			sg_dma_address(sg) = addr;
++			sg_dma_len(sg) = length;
++			sg = sg_next(sg);
++
++			offset += length / I915_GTT_PAGE_SIZE;
++			left -= length;
++		}
++
++		offset += stride - width;
++	}
++
++	return sg;
++}
++
++static noinline struct sg_table *
++intel_remap_pages(struct intel_remapped_info *rem_info,
++		  struct drm_i915_gem_object *obj)
++{
++	unsigned int size = intel_remapped_info_size(rem_info);
++	struct sg_table *st;
++	struct scatterlist *sg;
++	int ret = -ENOMEM;
++	int i;
++
++	/* Allocate target SG list. */
++	st = kmalloc(sizeof(*st), GFP_KERNEL);
++	if (!st)
++		goto err_st_alloc;
++
++	ret = sg_alloc_table(st, size, GFP_KERNEL);
++	if (ret)
++		goto err_sg_alloc;
++
++	st->nents = 0;
++	sg = st->sgl;
++
++	for (i = 0 ; i < ARRAY_SIZE(rem_info->plane); i++) {
++		sg = remap_pages(obj, rem_info->plane[i].offset,
++				 rem_info->plane[i].width, rem_info->plane[i].height,
++				 rem_info->plane[i].stride, st, sg);
++	}
++
++	i915_sg_trim(st);
++
++	return st;
++
++err_sg_alloc:
++	kfree(st);
++err_st_alloc:
++
++	DRM_DEBUG_DRIVER("Failed to create remapped mapping for object size %zu! (%ux%u tiles, %u pages)\n",
++			 obj->base.size, rem_info->plane[0].width, rem_info->plane[0].height, size);
++
++	return ERR_PTR(ret);
++}
++
+ static noinline struct sg_table *
+ intel_partial_pages(const struct i915_ggtt_view *view,
+ 		    struct drm_i915_gem_object *obj)
+@@ -3686,6 +3769,11 @@ i915_get_ggtt_vma_pages(struct i915_vma *vma)
+ 			intel_rotate_pages(&vma->ggtt_view.rotated, vma->obj);
+ 		break;
+ 
++	case I915_GGTT_VIEW_REMAPPED:
++		vma->pages =
++			intel_remap_pages(&vma->ggtt_view.remapped, vma->obj);
++		break;
++
+ 	case I915_GGTT_VIEW_PARTIAL:
+ 		vma->pages = intel_partial_pages(&vma->ggtt_view, vma->obj);
+ 		break;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index 2fafa04c45ec..98fc71053f7c 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -163,11 +163,18 @@ typedef u64 gen8_ppgtt_pml4e_t;
+ 
+ struct sg_table;
+ 
++struct intel_remapped_plane_info {
++	/* in gtt pages */
++	unsigned int width, height, stride, offset;
++} __packed;
++
++struct intel_remapped_info {
++	struct intel_remapped_plane_info plane[2];
++	unsigned int unused_mbz;
++} __packed;
++
+ struct intel_rotation_info {
+-	struct intel_rotation_plane_info {
+-		/* tiles */
+-		unsigned int width, height, stride, offset;
+-	} plane[2];
++	struct intel_remapped_plane_info plane[2];
+ } __packed;
+ 
+ struct intel_partial_info {
+@@ -179,12 +186,20 @@ enum i915_ggtt_view_type {
+ 	I915_GGTT_VIEW_NORMAL = 0,
+ 	I915_GGTT_VIEW_ROTATED = sizeof(struct intel_rotation_info),
+ 	I915_GGTT_VIEW_PARTIAL = sizeof(struct intel_partial_info),
++	I915_GGTT_VIEW_REMAPPED = sizeof(struct intel_remapped_info),
+ };
+ 
+ static inline void assert_i915_gem_gtt_types(void)
+ {
+ 	BUILD_BUG_ON(sizeof(struct intel_rotation_info) != 8*sizeof(unsigned int));
+ 	BUILD_BUG_ON(sizeof(struct intel_partial_info) != sizeof(u64) + sizeof(unsigned int));
++	BUILD_BUG_ON(sizeof(struct intel_remapped_info) != 9*sizeof(unsigned int));
++
++	/* Check that rotation/remapped shares offsets for simplicity */
++	BUILD_BUG_ON(offsetof(struct intel_remapped_info, plane[0]) !=
++		     offsetof(struct intel_rotation_info, plane[0]));
++	BUILD_BUG_ON(offsetofend(struct intel_remapped_info, plane[1]) !=
++		     offsetofend(struct intel_rotation_info, plane[1]));
+ 
+ 	/* As we encode the size of each branch inside the union into its type,
+ 	 * we have to be careful that each branch has a unique size.
+@@ -193,6 +208,7 @@ static inline void assert_i915_gem_gtt_types(void)
+ 	case I915_GGTT_VIEW_NORMAL:
+ 	case I915_GGTT_VIEW_PARTIAL:
+ 	case I915_GGTT_VIEW_ROTATED:
++	case I915_GGTT_VIEW_REMAPPED:
+ 		/* gcc complains if these are identical cases */
+ 		break;
+ 	}
+@@ -204,6 +220,7 @@ struct i915_ggtt_view {
+ 		/* Members need to contain no holes/padding */
+ 		struct intel_partial_info partial;
+ 		struct intel_rotation_info rotated;
++		struct intel_remapped_info remapped;
+ 	};
+ };
+ 
+diff --git a/drivers/gpu/drm/i915/i915_vma.c b/drivers/gpu/drm/i915/i915_vma.c
+index 1471c63d4605..3dc9fa6d73b2 100644
+--- a/drivers/gpu/drm/i915/i915_vma.c
++++ b/drivers/gpu/drm/i915/i915_vma.c
+@@ -156,6 +156,9 @@ vma_create(struct drm_i915_gem_object *obj,
+ 		} else if (view->type == I915_GGTT_VIEW_ROTATED) {
+ 			vma->size = intel_rotation_info_size(&view->rotated);
+ 			vma->size <<= PAGE_SHIFT;
++		} else if (view->type == I915_GGTT_VIEW_REMAPPED) {
++			vma->size = intel_remapped_info_size(&view->remapped);
++			vma->size <<= PAGE_SHIFT;
+ 		}
+ 	}
+ 
+@@ -481,7 +484,8 @@ void __i915_vma_set_map_and_fenceable(struct i915_vma *vma)
+ 	 * Explicitly disable for rotated VMA since the display does not
+ 	 * need the fence and the VMA is not accessible to other users.
+ 	 */
+-	if (vma->ggtt_view.type == I915_GGTT_VIEW_ROTATED)
++	if (vma->ggtt_view.type == I915_GGTT_VIEW_ROTATED ||
++	    vma->ggtt_view.type == I915_GGTT_VIEW_REMAPPED)
+ 		return;
+ 
+ 	fenceable = (vma->node.size >= vma->fence_size &&
+diff --git a/drivers/gpu/drm/i915/i915_vma.h b/drivers/gpu/drm/i915/i915_vma.h
+index 6eab70953a57..8543d2953cd1 100644
+--- a/drivers/gpu/drm/i915/i915_vma.h
++++ b/drivers/gpu/drm/i915/i915_vma.h
+@@ -277,8 +277,11 @@ i915_vma_compare(struct i915_vma *vma,
+ 	 */
+ 	BUILD_BUG_ON(I915_GGTT_VIEW_NORMAL >= I915_GGTT_VIEW_PARTIAL);
+ 	BUILD_BUG_ON(I915_GGTT_VIEW_PARTIAL >= I915_GGTT_VIEW_ROTATED);
++	BUILD_BUG_ON(I915_GGTT_VIEW_ROTATED >= I915_GGTT_VIEW_REMAPPED);
+ 	BUILD_BUG_ON(offsetof(typeof(*view), rotated) !=
+ 		     offsetof(typeof(*view), partial));
++	BUILD_BUG_ON(offsetof(typeof(*view), rotated) !=
++		     offsetof(typeof(*view), remapped));
+ 	return memcmp(&vma->ggtt_view.partial, &view->partial, view->type);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 94f65dc4592a..54da4ea0c4c2 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -1997,6 +1997,17 @@ unsigned int intel_rotation_info_size(const struct intel_rotation_info *rot_info
+ 	return size;
+ }
+ 
++unsigned int intel_remapped_info_size(const struct intel_remapped_info *rem_info)
++{
++	unsigned int size = 0;
++	int i;
++
++	for (i = 0 ; i < ARRAY_SIZE(rem_info->plane); i++)
++		size += rem_info->plane[i].width * rem_info->plane[i].height;
++
++	return size;
++}
++
+ static void
+ intel_fill_fb_ggtt_view(struct i915_ggtt_view *view,
+ 			const struct drm_framebuffer *fb,
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 2853e51c1c6a..45952f8ff8c4 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -1461,6 +1461,7 @@ unsigned int intel_fb_align_height(const struct drm_framebuffer *fb,
+ void intel_add_fb_offsets(int *x, int *y,
+ 			  const struct intel_plane_state *state, int plane);
+ unsigned int intel_rotation_info_size(const struct intel_rotation_info *rot_info);
++unsigned int intel_remapped_info_size(const struct intel_remapped_info *rem_info);
+ bool intel_has_pending_fb_unpin(struct drm_i915_private *dev_priv);
+ void intel_mark_busy(struct drm_i915_private *dev_priv);
+ void intel_mark_idle(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_vma.c b/drivers/gpu/drm/i915/selftests/i915_vma.c
+index fc594b030f5a..18dc221cb22b 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_vma.c
++++ b/drivers/gpu/drm/i915/selftests/i915_vma.c
+@@ -397,8 +397,8 @@ assert_rotated(struct drm_i915_gem_object *obj,
+ 	return sg;
+ }
+ 
+-static unsigned int rotated_size(const struct intel_rotation_plane_info *a,
+-				 const struct intel_rotation_plane_info *b)
++static unsigned int rotated_size(const struct intel_remapped_plane_info *a,
++				 const struct intel_remapped_plane_info *b)
+ {
+ 	return a->width * a->height + b->width * b->height;
+ }
+@@ -408,7 +408,7 @@ static int igt_vma_rotate(void *arg)
+ 	struct i915_ggtt *ggtt = arg;
+ 	struct i915_address_space *vm = &ggtt->vm;
+ 	struct drm_i915_gem_object *obj;
+-	const struct intel_rotation_plane_info planes[] = {
++	const struct intel_remapped_plane_info planes[] = {
+ 		{ .width = 1, .height = 1, .stride = 1 },
+ 		{ .width = 2, .height = 2, .stride = 2 },
+ 		{ .width = 4, .height = 4, .stride = 4 },
+-- 
+2.17.1
+

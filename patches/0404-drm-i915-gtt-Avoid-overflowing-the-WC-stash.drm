@@ -1,0 +1,68 @@
+From 46ea4e12148563f276180d0c60fb70029c475bda Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 29 May 2019 10:34:07 +0100
+Subject: [PATCH 404/530] drm/i915/gtt: Avoid overflowing the WC stash
+
+An interesting issue cropped with making the pagetables be allocated and
+freed concurrently (i.e. removing their grandeous struct_mutex guard)
+was that we would overflow the page stash. This happens when we have
+multiple allocators grabbing WC pages such that we fill the vm's local
+page stash and then when we free another page, the page stash is already
+full and we overflow.
+
+The fix is quite simple: to check for a full page stash before adding
+another. This results in us keeping a vm local page stash around for
+much longer, which is both a blessing and a curse.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Matthew Auld
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Matthew Auld
+Link: https://patchwork.freedesktop.org/patch/msgid/20190529093407.31697-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_gem_gtt.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 7496cce0d798..5b1a501c4159 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -341,11 +341,11 @@ static struct page *stash_pop_page(struct pagestash *stash)
+ 
+ static void stash_push_pagevec(struct pagestash *stash, struct pagevec *pvec)
+ {
+-	int nr;
++	unsigned int nr;
+ 
+ 	spin_lock_nested(&stash->lock, SINGLE_DEPTH_NESTING);
+ 
+-	nr = min_t(int, pvec->nr, pagevec_space(&stash->pvec));
++	nr = min_t(typeof(nr), pvec->nr, pagevec_space(&stash->pvec));
+ 	memcpy(stash->pvec.pages + stash->pvec.nr,
+ 	       pvec->pages + pvec->nr - nr,
+ 	       sizeof(pvec->pages[0]) * nr);
+@@ -399,7 +399,8 @@ static struct page *vm_alloc_page(struct i915_address_space *vm, gfp_t gfp)
+ 		page = stack.pages[--stack.nr];
+ 
+ 		/* Merge spare WC pages to the global stash */
+-		stash_push_pagevec(&vm->i915->mm.wc_stash, &stack);
++		if (stack.nr)
++			stash_push_pagevec(&vm->i915->mm.wc_stash, &stack);
+ 
+ 		/* Push any surplus WC pages onto the local VM stash */
+ 		if (stack.nr)
+@@ -469,8 +470,10 @@ static void vm_free_page(struct i915_address_space *vm, struct page *page)
+ 	 */
+ 	might_sleep();
+ 	spin_lock(&vm->free_pages.lock);
+-	if (!pagevec_add(&vm->free_pages.pvec, page))
++	while (!pagevec_space(&vm->free_pages.pvec))
+ 		vm_free_pages_release(vm, false);
++	GEM_BUG_ON(pagevec_count(&vm->free_pages.pvec) >= PAGEVEC_SIZE);
++	pagevec_add(&vm->free_pages.pvec, page);
+ 	spin_unlock(&vm->free_pages.lock);
+ }
+ 
+-- 
+2.17.1
+

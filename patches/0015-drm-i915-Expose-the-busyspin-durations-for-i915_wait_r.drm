@@ -1,0 +1,127 @@
+From 7d36d8691ffc3495503ad2228940c9f9b9ef59e0 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 19 Apr 2019 19:26:25 +0100
+Subject: [PATCH 015/530] drm/i915: Expose the busyspin durations for
+ i915_wait_request
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+An interesting discussion regarding "hybrid interrupt polling" for NVMe
+came to the conclusion that the ideal busyspin before sleeping was half
+of the expected request latency (and better if it was already halfway
+through that request). This suggested that we too should look again at
+our tradeoff between spinning and waiting. Currently, our spin simply
+tries to hide the cost of enabling the interrupt, which is good to avoid
+penalising nop requests (i.e. test throughput) and not much else.
+Studying real world workloads suggests that a spin of upto 500us can
+dramatically boost performance, but the suggestion is that this is not
+from avoiding interrupt latency per-se, but from secondary effects of
+sleeping such as allowing the CPU reduce cstate and context switch away.
+
+In a truly hybrid interrupt polling scheme, we would aim to sleep until
+just before the request completed and then wake up in advance of the
+interrupt and do a quick poll to handle completion. This is tricky for
+ourselves at the moment as we are not recording request times, and since
+we allow preemption, our requests are not on as a nicely ordered
+timeline as IO. However, the idea is interesting, for it will certainly
+help us decide when busyspinning is worthwhile.
+
+v2: Expose the spin setting via Kconfig options for easier adjustment
+and testing.
+v3: Don't get caught sneaking in a change to the busyspin parameters.
+v4: Explain more about the "hybrid interrupt polling" scheme that we
+want to migrate towards.
+
+Suggested-by: Sagar Kamble <sagar.a.kamble@intel.com>
+References: http://events.linuxfoundation.org/sites/events/files/slides/lemoal-nvme-polling-vault-2017-final_0.pdf
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Sagar Kamble <sagar.a.kamble@intel.com>
+Cc: Eero Tamminen <eero.t.tamminen@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Ben Widawsky <ben@bwidawsk.net>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+Reviewed-by: Sagar Kamble <sagar.a.kamble@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190419182625.11186-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Kconfig         |  6 ++++++
+ drivers/gpu/drm/i915/Kconfig.profile | 13 +++++++++++++
+ drivers/gpu/drm/i915/i915_request.c  | 27 +++++++++++++++++++++++++--
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/Kconfig.profile
+
+diff --git a/drivers/gpu/drm/i915/Kconfig b/drivers/gpu/drm/i915/Kconfig
+index 255f224db64b..978cb39a47a8 100644
+--- a/drivers/gpu/drm/i915/Kconfig
++++ b/drivers/gpu/drm/i915/Kconfig
+@@ -133,3 +133,9 @@ depends on DRM_I915
+ depends on EXPERT
+ source "drivers/gpu/drm/i915/Kconfig.debug"
+ endmenu
++
++menu "drm/i915 Profile Guided Optimisation"
++	visible if EXPERT
++	depends on DRM_I915
++	source "drivers/gpu/drm/i915/Kconfig.profile"
++endmenu
+diff --git a/drivers/gpu/drm/i915/Kconfig.profile b/drivers/gpu/drm/i915/Kconfig.profile
+new file mode 100644
+index 000000000000..0e5db98da8f3
+--- /dev/null
++++ b/drivers/gpu/drm/i915/Kconfig.profile
+@@ -0,0 +1,13 @@
++config DRM_I915_SPIN_REQUEST
++	int
++	default 5 # microseconds
++	help
++	  Before sleeping waiting for a request (GPU operation) to complete,
++	  we may spend some time polling for its completion. As the IRQ may
++	  take a non-negligible time to setup, we do a short spin first to
++	  check if the request will complete in the time it would have taken
++	  us to enable the interrupt.
++
++	  May be 0 to disable the initial spin. In practice, we estimate
++	  the cost of enabling the interrupt (if currently disabled) to be
++	  a few microseconds.
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index c88e538b2ef4..cda9a71ca3c2 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -1382,8 +1382,31 @@ long i915_request_wait(struct i915_request *rq,
+ 
+ 	trace_i915_request_wait_begin(rq, flags);
+ 
+-	/* Optimistic short spin before touching IRQs */
+-	if (__i915_spin_request(rq, state, 5))
++	/*
++	 * Optimistic spin before touching IRQs.
++	 *
++	 * We may use a rather large value here to offset the penalty of
++	 * switching away from the active task. Frequently, the client will
++	 * wait upon an old swapbuffer to throttle itself to remain within a
++	 * frame of the gpu. If the client is running in lockstep with the gpu,
++	 * then it should not be waiting long at all, and a sleep now will incur
++	 * extra scheduler latency in producing the next frame. To try to
++	 * avoid adding the cost of enabling/disabling the interrupt to the
++	 * short wait, we first spin to see if the request would have completed
++	 * in the time taken to setup the interrupt.
++	 *
++	 * We need upto 5us to enable the irq, and upto 20us to hide the
++	 * scheduler latency of a context switch, ignoring the secondary
++	 * impacts from a context switch such as cache eviction.
++	 *
++	 * The scheme used for low-latency IO is called "hybrid interrupt
++	 * polling". The suggestion there is to sleep until just before you
++	 * expect to be woken by the device interrupt and then poll for its
++	 * completion. That requires having a good predictor for the request
++	 * duration, which we currently lack.
++	 */
++	if (CONFIG_DRM_I915_SPIN_REQUEST &&
++	    __i915_spin_request(rq, state, CONFIG_DRM_I915_SPIN_REQUEST))
+ 		goto out;
+ 
+ 	/*
+-- 
+2.17.1
+

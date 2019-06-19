@@ -1,0 +1,121 @@
+From 5c90391adcd6ad0b177f1393f36bd8e35a0e1aa4 Mon Sep 17 00:00:00 2001
+From: Stuart Summers <stuart.summers@intel.com>
+Date: Fri, 24 May 2019 08:40:19 -0700
+Subject: [PATCH 396/530] drm/i915: Add macro for SSEU stride calculation
+
+Subslice stride and EU stride are calculated multiple times in
+i915_query. Move this calculation to a macro to reduce code duplication.
+
+v2: update headers in intel_sseu.h
+v3: use GEN_SSEU_STRIDE for stride calculations in intel_sseu.h
+    apply s/bits/max_entries/ to GEN_SSEU_STRIDE parameter
+
+Cc: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Reviewed-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Signed-off-by: Stuart Summers <stuart.summers@intel.com>
+Signed-off-by: Manasi Navare <manasi.d.navare@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190524154022.13575-3-stuart.summers@intel.com
+---
+ drivers/gpu/drm/i915/gt/intel_sseu.h     |  2 ++
+ drivers/gpu/drm/i915/i915_query.c        | 17 ++++++++---------
+ drivers/gpu/drm/i915/intel_device_info.h |  9 +++------
+ 3 files changed, 13 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_sseu.h b/drivers/gpu/drm/i915/gt/intel_sseu.h
+index 73bc824094e8..d20b7f96907d 100644
+--- a/drivers/gpu/drm/i915/gt/intel_sseu.h
++++ b/drivers/gpu/drm/i915/gt/intel_sseu.h
+@@ -8,11 +8,13 @@
+ #define __INTEL_SSEU_H__
+ 
+ #include <linux/types.h>
++#include <linux/kernel.h>
+ 
+ struct drm_i915_private;
+ 
+ #define GEN_MAX_SLICES		(6) /* CNL upper bound */
+ #define GEN_MAX_SUBSLICES	(8) /* ICL upper bound */
++#define GEN_SSEU_STRIDE(max_entries) DIV_ROUND_UP(max_entries, BITS_PER_BYTE)
+ 
+ struct sseu_dev_info {
+ 	u8 slice_mask;
+diff --git a/drivers/gpu/drm/i915/i915_query.c b/drivers/gpu/drm/i915/i915_query.c
+index 414d0a6d1f70..7b7016171057 100644
+--- a/drivers/gpu/drm/i915/i915_query.c
++++ b/drivers/gpu/drm/i915/i915_query.c
+@@ -37,6 +37,8 @@ static int query_topology_info(struct drm_i915_private *dev_priv,
+ 	const struct sseu_dev_info *sseu = &RUNTIME_INFO(dev_priv)->sseu;
+ 	struct drm_i915_query_topology_info topo;
+ 	u32 slice_length, subslice_length, eu_length, total_length;
++	u8 subslice_stride = GEN_SSEU_STRIDE(sseu->max_subslices);
++	u8 eu_stride = GEN_SSEU_STRIDE(sseu->max_eus_per_subslice);
+ 	int ret;
+ 
+ 	if (query_item->flags != 0)
+@@ -48,12 +50,10 @@ static int query_topology_info(struct drm_i915_private *dev_priv,
+ 	BUILD_BUG_ON(sizeof(u8) != sizeof(sseu->slice_mask));
+ 
+ 	slice_length = sizeof(sseu->slice_mask);
+-	subslice_length = sseu->max_slices *
+-		DIV_ROUND_UP(sseu->max_subslices, BITS_PER_BYTE);
+-	eu_length = sseu->max_slices * sseu->max_subslices *
+-		DIV_ROUND_UP(sseu->max_eus_per_subslice, BITS_PER_BYTE);
+-
+-	total_length = sizeof(topo) + slice_length + subslice_length + eu_length;
++	subslice_length = sseu->max_slices * subslice_stride;
++	eu_length = sseu->max_slices * sseu->max_subslices * eu_stride;
++	total_length = sizeof(topo) + slice_length + subslice_length +
++		       eu_length;
+ 
+ 	ret = copy_query_item(&topo, sizeof(topo), total_length,
+ 			      query_item);
+@@ -69,10 +69,9 @@ static int query_topology_info(struct drm_i915_private *dev_priv,
+ 	topo.max_eus_per_subslice = sseu->max_eus_per_subslice;
+ 
+ 	topo.subslice_offset = slice_length;
+-	topo.subslice_stride = DIV_ROUND_UP(sseu->max_subslices, BITS_PER_BYTE);
++	topo.subslice_stride = subslice_stride;
+ 	topo.eu_offset = slice_length + subslice_length;
+-	topo.eu_stride =
+-		DIV_ROUND_UP(sseu->max_eus_per_subslice, BITS_PER_BYTE);
++	topo.eu_stride = eu_stride;
+ 
+ 	if (__copy_to_user(u64_to_user_ptr(query_item->data_ptr),
+ 			   &topo, sizeof(topo)))
+diff --git a/drivers/gpu/drm/i915/intel_device_info.h b/drivers/gpu/drm/i915/intel_device_info.h
+index 5a2e17d6146b..9d43f7edfd63 100644
+--- a/drivers/gpu/drm/i915/intel_device_info.h
++++ b/drivers/gpu/drm/i915/intel_device_info.h
+@@ -231,8 +231,7 @@ static inline unsigned int sseu_subslice_total(const struct sseu_dev_info *sseu)
+ static inline int sseu_eu_idx(const struct sseu_dev_info *sseu,
+ 			      int slice, int subslice)
+ {
+-	int subslice_stride = DIV_ROUND_UP(sseu->max_eus_per_subslice,
+-					   BITS_PER_BYTE);
++	int subslice_stride = GEN_SSEU_STRIDE(sseu->max_eus_per_subslice);
+ 	int slice_stride = sseu->max_subslices * subslice_stride;
+ 
+ 	return slice * slice_stride + subslice * subslice_stride;
+@@ -244,8 +243,7 @@ static inline u16 sseu_get_eus(const struct sseu_dev_info *sseu,
+ 	int i, offset = sseu_eu_idx(sseu, slice, subslice);
+ 	u16 eu_mask = 0;
+ 
+-	for (i = 0;
+-	     i < DIV_ROUND_UP(sseu->max_eus_per_subslice, BITS_PER_BYTE); i++) {
++	for (i = 0; i < GEN_SSEU_STRIDE(sseu->max_eus_per_subslice); i++) {
+ 		eu_mask |= ((u16) sseu->eu_mask[offset + i]) <<
+ 			(i * BITS_PER_BYTE);
+ 	}
+@@ -258,8 +256,7 @@ static inline void sseu_set_eus(struct sseu_dev_info *sseu,
+ {
+ 	int i, offset = sseu_eu_idx(sseu, slice, subslice);
+ 
+-	for (i = 0;
+-	     i < DIV_ROUND_UP(sseu->max_eus_per_subslice, BITS_PER_BYTE); i++) {
++	for (i = 0; i < GEN_SSEU_STRIDE(sseu->max_eus_per_subslice); i++) {
+ 		sseu->eu_mask[offset + i] =
+ 			(eu_mask >> (BITS_PER_BYTE * i)) & 0xff;
+ 	}
+-- 
+2.17.1
+

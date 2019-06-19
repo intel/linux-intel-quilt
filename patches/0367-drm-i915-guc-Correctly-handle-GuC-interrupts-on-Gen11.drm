@@ -1,0 +1,212 @@
+From ec226d84a5ab484edf12da9265d40f481727562f Mon Sep 17 00:00:00 2001
+From: Oscar Mateo <oscar.mateo@intel.com>
+Date: Mon, 27 May 2019 18:36:08 +0000
+Subject: [PATCH 367/530] drm/i915/guc: Correctly handle GuC interrupts on
+ Gen11
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Starting Gen11 GuC shares interrupt registers with SG unit
+instead of PM. But for now we don't care about SG interrupts.
+
+v2: (Chris)
+v3: rebased (Michal)
+v4: more bspec pages, use macros, update commit msg (Michal Wi)
+
+Bspec: 19820, 19840, 19841, 20176
+
+Signed-off-by: Oscar Mateo <oscar.mateo@intel.com>
+Signed-off-by: Michal Wajdeczko <michal.wajdeczko@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Michał Winiarski <michal.winiarski@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190527183613.17076-13-michal.wajdeczko@intel.com
+---
+ drivers/gpu/drm/i915/i915_irq.c      | 53 +++++++++++++++++++++++++++-
+ drivers/gpu/drm/i915/i915_irq.h      |  3 ++
+ drivers/gpu/drm/i915/i915_reg.h      |  4 +++
+ drivers/gpu/drm/i915/intel_guc.c     |  3 ++
+ drivers/gpu/drm/i915/intel_guc_reg.h | 18 ++++++++++
+ 5 files changed, 80 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 607709a8c229..ca8f4226e598 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -624,6 +624,42 @@ void gen9_disable_guc_interrupts(struct drm_i915_private *dev_priv)
+ 	gen9_reset_guc_interrupts(dev_priv);
+ }
+ 
++void gen11_reset_guc_interrupts(struct drm_i915_private *i915)
++{
++	spin_lock_irq(&i915->irq_lock);
++	gen11_reset_one_iir(i915, 0, GEN11_GUC);
++	spin_unlock_irq(&i915->irq_lock);
++}
++
++void gen11_enable_guc_interrupts(struct drm_i915_private *dev_priv)
++{
++	spin_lock_irq(&dev_priv->irq_lock);
++	if (!dev_priv->guc.interrupts.enabled) {
++		u32 events = REG_FIELD_PREP(ENGINE1_MASK,
++					    GEN11_GUC_INTR_GUC2HOST);
++
++		WARN_ON_ONCE(gen11_reset_one_iir(dev_priv, 0, GEN11_GUC));
++		I915_WRITE(GEN11_GUC_SG_INTR_ENABLE, events);
++		I915_WRITE(GEN11_GUC_SG_INTR_MASK, ~events);
++		dev_priv->guc.interrupts.enabled = true;
++	}
++	spin_unlock_irq(&dev_priv->irq_lock);
++}
++
++void gen11_disable_guc_interrupts(struct drm_i915_private *dev_priv)
++{
++	spin_lock_irq(&dev_priv->irq_lock);
++	dev_priv->guc.interrupts.enabled = false;
++
++	I915_WRITE(GEN11_GUC_SG_INTR_MASK, ~0);
++	I915_WRITE(GEN11_GUC_SG_INTR_ENABLE, 0);
++
++	spin_unlock_irq(&dev_priv->irq_lock);
++	synchronize_irq(dev_priv->drm.irq);
++
++	gen11_reset_guc_interrupts(dev_priv);
++}
++
+ /**
+  * bdw_update_port_irq - update DE port interrupt
+  * @dev_priv: driver private
+@@ -1893,6 +1929,12 @@ static void gen9_guc_irq_handler(struct drm_i915_private *dev_priv, u32 gt_iir)
+ 		intel_guc_to_host_event_handler(&dev_priv->guc);
+ }
+ 
++static void gen11_guc_irq_handler(struct drm_i915_private *i915, u16 iir)
++{
++	if (iir & GEN11_GUC_INTR_GUC2HOST)
++		intel_guc_to_host_event_handler(&i915->guc);
++}
++
+ static void i9xx_pipestat_irq_reset(struct drm_i915_private *dev_priv)
+ {
+ 	enum pipe pipe;
+@@ -3015,6 +3057,9 @@ static void
+ gen11_other_irq_handler(struct drm_i915_private * const i915,
+ 			const u8 instance, const u16 iir)
+ {
++	if (instance == OTHER_GUC_INSTANCE)
++		return gen11_guc_irq_handler(i915, iir);
++
+ 	if (instance == OTHER_GTPM_INSTANCE)
+ 		return gen11_rps_irq_handler(i915, iir);
+ 
+@@ -3545,6 +3590,8 @@ static void gen11_gt_irq_reset(struct drm_i915_private *dev_priv)
+ 
+ 	I915_WRITE(GEN11_GPM_WGBOXPERF_INTR_ENABLE, 0);
+ 	I915_WRITE(GEN11_GPM_WGBOXPERF_INTR_MASK,  ~0);
++	I915_WRITE(GEN11_GUC_SG_INTR_ENABLE, 0);
++	I915_WRITE(GEN11_GUC_SG_INTR_MASK,  ~0);
+ }
+ 
+ static void gen11_irq_reset(struct drm_device *dev)
+@@ -4200,6 +4247,10 @@ static void gen11_gt_irq_postinstall(struct drm_i915_private *dev_priv)
+ 	dev_priv->pm_imr = ~dev_priv->pm_ier;
+ 	I915_WRITE(GEN11_GPM_WGBOXPERF_INTR_ENABLE, 0);
+ 	I915_WRITE(GEN11_GPM_WGBOXPERF_INTR_MASK,  ~0);
++
++	/* Same thing for GuC interrupts */
++	I915_WRITE(GEN11_GUC_SG_INTR_ENABLE, 0);
++	I915_WRITE(GEN11_GUC_SG_INTR_MASK,  ~0);
+ }
+ 
+ static void icp_irq_postinstall(struct drm_device *dev)
+@@ -4707,7 +4758,7 @@ void intel_irq_init(struct drm_i915_private *dev_priv)
+ 	for (i = 0; i < MAX_L3_SLICES; ++i)
+ 		dev_priv->l3_parity.remap_info[i] = NULL;
+ 
+-	if (HAS_GUC_SCHED(dev_priv))
++	if (HAS_GUC_SCHED(dev_priv) && INTEL_GEN(dev_priv) < 11)
+ 		dev_priv->pm_guc_events = GEN9_GUC_TO_HOST_INT_EVENT;
+ 
+ 	/* Let's track the enabled rps events */
+diff --git a/drivers/gpu/drm/i915/i915_irq.h b/drivers/gpu/drm/i915/i915_irq.h
+index 0ccd0d90919d..cb25dd213308 100644
+--- a/drivers/gpu/drm/i915/i915_irq.h
++++ b/drivers/gpu/drm/i915/i915_irq.h
+@@ -110,5 +110,8 @@ void gen8_irq_power_well_pre_disable(struct drm_i915_private *dev_priv,
+ void gen9_reset_guc_interrupts(struct drm_i915_private *dev_priv);
+ void gen9_enable_guc_interrupts(struct drm_i915_private *dev_priv);
+ void gen9_disable_guc_interrupts(struct drm_i915_private *dev_priv);
++void gen11_reset_guc_interrupts(struct drm_i915_private *i915);
++void gen11_enable_guc_interrupts(struct drm_i915_private *i915);
++void gen11_disable_guc_interrupts(struct drm_i915_private *i915);
+ 
+ #endif /* __I915_IRQ_H__ */
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 663964757ba0..3c9106d008ad 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -290,6 +290,7 @@ static inline bool i915_mmio_reg_valid(i915_reg_t reg)
+ #define OTHER_CLASS		4
+ #define MAX_ENGINE_CLASS	4
+ 
++#define OTHER_GUC_INSTANCE	0
+ #define OTHER_GTPM_INSTANCE	1
+ #define MAX_ENGINE_INSTANCE    3
+ 
+@@ -7494,6 +7495,9 @@ enum {
+ #define GEN11_CRYPTO_RSVD_INTR_MASK	_MMIO(0x1900f0)
+ #define GEN11_GUNIT_CSME_INTR_MASK	_MMIO(0x1900f4)
+ 
++#define   ENGINE1_MASK			REG_GENMASK(31, 16)
++#define   ENGINE0_MASK			REG_GENMASK(15, 0)
++
+ #define ILK_DISPLAY_CHICKEN2	_MMIO(0x42004)
+ /* Required on all Ironlake and Sandybridge according to the B-Spec. */
+ #define  ILK_ELPIN_409_SELECT	(1 << 25)
+diff --git a/drivers/gpu/drm/i915/intel_guc.c b/drivers/gpu/drm/i915/intel_guc.c
+index 28642bf977bd..cbe4b8df15fd 100644
+--- a/drivers/gpu/drm/i915/intel_guc.c
++++ b/drivers/gpu/drm/i915/intel_guc.c
+@@ -88,6 +88,9 @@ void intel_guc_init_early(struct intel_guc *guc)
+ 	guc->handler = intel_guc_to_host_event_handler_nop;
+ 	if (INTEL_GEN(i915) >= 11) {
+ 		guc->notify = gen11_guc_raise_irq;
++		guc->interrupts.reset = gen11_reset_guc_interrupts;
++		guc->interrupts.enable = gen11_enable_guc_interrupts;
++		guc->interrupts.disable = gen11_disable_guc_interrupts;
+ 	} else {
+ 		guc->notify = gen8_guc_raise_irq;
+ 		guc->interrupts.reset = gen9_reset_guc_interrupts;
+diff --git a/drivers/gpu/drm/i915/intel_guc_reg.h b/drivers/gpu/drm/i915/intel_guc_reg.h
+index 7eba65795b58..a214f8b71929 100644
+--- a/drivers/gpu/drm/i915/intel_guc_reg.h
++++ b/drivers/gpu/drm/i915/intel_guc_reg.h
+@@ -134,4 +134,22 @@ struct guc_doorbell_info {
+ #define GUC_WD_VECS_IER			_MMIO(0xC558)
+ #define GUC_PM_P24C_IER			_MMIO(0xC55C)
+ 
++/* GuC Interrupt Vector */
++#define GEN11_GUC_INTR_GUC2HOST		(1 << 15)
++#define GEN11_GUC_INTR_EXEC_ERROR	(1 << 14)
++#define GEN11_GUC_INTR_DISPLAY_EVENT	(1 << 13)
++#define GEN11_GUC_INTR_SEM_SIG		(1 << 12)
++#define GEN11_GUC_INTR_IOMMU2GUC	(1 << 11)
++#define GEN11_GUC_INTR_DOORBELL_RANG	(1 << 10)
++#define GEN11_GUC_INTR_DMA_DONE		(1 <<  9)
++#define GEN11_GUC_INTR_FATAL_ERROR	(1 <<  8)
++#define GEN11_GUC_INTR_NOTIF_ERROR	(1 <<  7)
++#define GEN11_GUC_INTR_SW_INT_6		(1 <<  6)
++#define GEN11_GUC_INTR_SW_INT_5		(1 <<  5)
++#define GEN11_GUC_INTR_SW_INT_4		(1 <<  4)
++#define GEN11_GUC_INTR_SW_INT_3		(1 <<  3)
++#define GEN11_GUC_INTR_SW_INT_2		(1 <<  2)
++#define GEN11_GUC_INTR_SW_INT_1		(1 <<  1)
++#define GEN11_GUC_INTR_SW_INT_0		(1 <<  0)
++
+ #endif
+-- 
+2.17.1
+

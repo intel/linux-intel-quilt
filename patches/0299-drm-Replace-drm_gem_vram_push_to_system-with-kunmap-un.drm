@@ -1,0 +1,210 @@
+From b7420148acfeddedaa4823ead24b33bb9afca75e Mon Sep 17 00:00:00 2001
+From: Thomas Zimmermann <tzimmermann@suse.de>
+Date: Tue, 21 May 2019 13:08:29 +0200
+Subject: [PATCH 299/530] drm: Replace drm_gem_vram_push_to_system() with
+ kunmap + unpin
+
+The push-to-system function forces a buffer out of video RAM. This decision
+should rather be made by the memory manager. By replacing the function with
+calls to the kunmap and unpin functions, the buffer's memory becomes available,
+but the buffer remains in VRAM until it's evicted by a pin operation.
+
+This patch replaces the remaining instances of drm_gem_vram_push_to_system()
+in ast and mgag200, and removes the function from DRM.
+
+Signed-off-by: Thomas Zimmermann <tzimmermann@suse.de>
+Acked-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Link: http://patchwork.freedesktop.org/patch/msgid/20190521110831.20200-2-tzimmermann@suse.de
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+---
+ drivers/gpu/drm/ast/ast_mode.c           | 14 +++++--
+ drivers/gpu/drm/drm_gem_vram_helper.c    | 50 ------------------------
+ drivers/gpu/drm/drm_vram_helper_common.c |  2 -
+ drivers/gpu/drm/mgag200/mgag200_mode.c   | 15 ++++---
+ include/drm/drm_gem_vram_helper.h        |  1 -
+ 5 files changed, 20 insertions(+), 62 deletions(-)
+
+diff --git a/drivers/gpu/drm/ast/ast_mode.c b/drivers/gpu/drm/ast/ast_mode.c
+index 9aca9135a5cc..fbafe3994654 100644
+--- a/drivers/gpu/drm/ast/ast_mode.c
++++ b/drivers/gpu/drm/ast/ast_mode.c
+@@ -521,7 +521,6 @@ static void ast_crtc_dpms(struct drm_crtc *crtc, int mode)
+ 	}
+ }
+ 
+-/* ast is different - we will force move buffers out of VRAM */
+ static int ast_crtc_do_set_base(struct drm_crtc *crtc,
+ 				struct drm_framebuffer *fb,
+ 				int x, int y, int atomic)
+@@ -534,12 +533,15 @@ static int ast_crtc_do_set_base(struct drm_crtc *crtc,
+ 	s64 gpu_addr;
+ 	void *base;
+ 
+-	/* push the previous fb to system ram */
+ 	if (!atomic && fb) {
+ 		ast_fb = to_ast_framebuffer(fb);
+ 		obj = ast_fb->obj;
+ 		gbo = drm_gem_vram_of_gem(obj);
+-		drm_gem_vram_push_to_system(gbo);
++
++		/* unmap if console */
++		if (&ast->fbdev->afb == ast_fb)
++			drm_gem_vram_kunmap(gbo);
++		drm_gem_vram_unpin(gbo);
+ 	}
+ 
+ 	ast_fb = to_ast_framebuffer(crtc->primary->fb);
+@@ -622,11 +624,15 @@ static void ast_crtc_disable(struct drm_crtc *crtc)
+ 	DRM_DEBUG_KMS("\n");
+ 	ast_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
+ 	if (crtc->primary->fb) {
++		struct ast_private *ast = crtc->dev->dev_private;
+ 		struct ast_framebuffer *ast_fb = to_ast_framebuffer(crtc->primary->fb);
+ 		struct drm_gem_object *obj = ast_fb->obj;
+ 		struct drm_gem_vram_object *gbo = drm_gem_vram_of_gem(obj);
+ 
+-		drm_gem_vram_push_to_system(gbo);
++		/* unmap if console */
++		if (&ast->fbdev->afb == ast_fb)
++			drm_gem_vram_kunmap(gbo);
++		drm_gem_vram_unpin(gbo);
+ 	}
+ 	crtc->primary->fb = NULL;
+ }
+diff --git a/drivers/gpu/drm/drm_gem_vram_helper.c b/drivers/gpu/drm/drm_gem_vram_helper.c
+index bde8237e8021..b341b70832be 100644
+--- a/drivers/gpu/drm/drm_gem_vram_helper.c
++++ b/drivers/gpu/drm/drm_gem_vram_helper.c
+@@ -379,56 +379,6 @@ int drm_gem_vram_unpin_reserved(struct drm_gem_vram_object *gbo)
+ }
+ EXPORT_SYMBOL(drm_gem_vram_unpin_reserved);
+ 
+-/**
+- * drm_gem_vram_push_to_system() - \
+-	Unpins a GEM VRAM object and moves it to system memory
+- * @gbo:	the GEM VRAM object
+- *
+- * This operation only works if the caller holds the final pin on the
+- * buffer object.
+- *
+- * Returns:
+- * 0 on success, or
+- * a negative error code otherwise.
+- */
+-int drm_gem_vram_push_to_system(struct drm_gem_vram_object *gbo)
+-{
+-	int i, ret;
+-	struct ttm_operation_ctx ctx = { false, false };
+-
+-	ret = ttm_bo_reserve(&gbo->bo, true, false, NULL);
+-	if (ret < 0)
+-		return ret;
+-
+-	if (WARN_ON_ONCE(!gbo->pin_count))
+-		goto out;
+-
+-	--gbo->pin_count;
+-	if (gbo->pin_count)
+-		goto out;
+-
+-	if (gbo->kmap.virtual)
+-		ttm_bo_kunmap(&gbo->kmap);
+-
+-	drm_gem_vram_placement(gbo, TTM_PL_FLAG_SYSTEM);
+-	for (i = 0; i < gbo->placement.num_placement ; ++i)
+-		gbo->placements[i].flags |= TTM_PL_FLAG_NO_EVICT;
+-
+-	ret = ttm_bo_validate(&gbo->bo, &gbo->placement, &ctx);
+-	if (ret)
+-		goto err_ttm_bo_unreserve;
+-
+-out:
+-	ttm_bo_unreserve(&gbo->bo);
+-
+-	return 0;
+-
+-err_ttm_bo_unreserve:
+-	ttm_bo_unreserve(&gbo->bo);
+-	return ret;
+-}
+-EXPORT_SYMBOL(drm_gem_vram_push_to_system);
+-
+ /**
+  * drm_gem_vram_kmap_at() - Maps a GEM VRAM object into kernel address space
+  * @gbo:	the GEM VRAM object
+diff --git a/drivers/gpu/drm/drm_vram_helper_common.c b/drivers/gpu/drm/drm_vram_helper_common.c
+index 3b47f7002115..e9c9f9a80ba3 100644
+--- a/drivers/gpu/drm/drm_vram_helper_common.c
++++ b/drivers/gpu/drm/drm_vram_helper_common.c
+@@ -79,8 +79,6 @@
+  * RAM. Call drm_gem_vram_pin() with &DRM_GEM_VRAM_PL_FLAG_VRAM or
+  * &DRM_GEM_VRAM_PL_FLAG_SYSTEM to pin a buffer object in video RAM or system
+  * memory. Call drm_gem_vram_unpin() to release the pinned object afterwards.
+- * If you have to evict a buffer object from video RAM (e.g., for freeing up
+- * memory), unpin the buffer and call drm_gem_vram_push_to_system().
+  *
+  * A buffer object that is pinned in video RAM has a fixed address within that
+  * memory region. Call drm_gem_vram_offset() to retrieve this value. Typically
+diff --git a/drivers/gpu/drm/mgag200/mgag200_mode.c b/drivers/gpu/drm/mgag200/mgag200_mode.c
+index 6c5b9e79e012..a25054015e8c 100644
+--- a/drivers/gpu/drm/mgag200/mgag200_mode.c
++++ b/drivers/gpu/drm/mgag200/mgag200_mode.c
+@@ -855,8 +855,6 @@ static void mga_set_start_address(struct drm_crtc *crtc, unsigned offset)
+ 	WREG_ECRT(0x0, ((u8)(addr >> 16) & 0xf) | crtcext0);
+ }
+ 
+-
+-/* ast is different - we will force move buffers out of VRAM */
+ static int mga_crtc_do_set_base(struct drm_crtc *crtc,
+ 				struct drm_framebuffer *fb,
+ 				int x, int y, int atomic)
+@@ -869,12 +867,15 @@ static int mga_crtc_do_set_base(struct drm_crtc *crtc,
+ 	s64 gpu_addr;
+ 	void *base;
+ 
+-	/* push the previous fb to system ram */
+ 	if (!atomic && fb) {
+ 		mga_fb = to_mga_framebuffer(fb);
+ 		obj = mga_fb->obj;
+ 		gbo = drm_gem_vram_of_gem(obj);
+-		drm_gem_vram_push_to_system(gbo);
++
++		/* unmap if console */
++		if (&mdev->mfbdev->mfb == mga_fb)
++			drm_gem_vram_kunmap(gbo);
++		drm_gem_vram_unpin(gbo);
+ 	}
+ 
+ 	mga_fb = to_mga_framebuffer(crtc->primary->fb);
+@@ -1422,11 +1423,15 @@ static void mga_crtc_disable(struct drm_crtc *crtc)
+ 	DRM_DEBUG_KMS("\n");
+ 	mga_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
+ 	if (crtc->primary->fb) {
++		struct mga_device *mdev = crtc->dev->dev_private;
+ 		struct mga_framebuffer *mga_fb = to_mga_framebuffer(crtc->primary->fb);
+ 		struct drm_gem_object *obj = mga_fb->obj;
+ 		struct drm_gem_vram_object *gbo = drm_gem_vram_of_gem(obj);
+ 
+-		drm_gem_vram_push_to_system(gbo);
++		/* unmap if console */
++		if (&mdev->mfbdev->mfb == mga_fb)
++			drm_gem_vram_kunmap(gbo);
++		drm_gem_vram_unpin(gbo);
+ 	}
+ 	crtc->primary->fb = NULL;
+ }
+diff --git a/include/drm/drm_gem_vram_helper.h b/include/drm/drm_gem_vram_helper.h
+index ff1a81761543..22e52d7dfbb7 100644
+--- a/include/drm/drm_gem_vram_helper.h
++++ b/include/drm/drm_gem_vram_helper.h
+@@ -86,7 +86,6 @@ int drm_gem_vram_pin_reserved(struct drm_gem_vram_object *gbo,
+ 			      unsigned long pl_flag);
+ int drm_gem_vram_unpin(struct drm_gem_vram_object *gbo);
+ int drm_gem_vram_unpin_reserved(struct drm_gem_vram_object *gbo);
+-int drm_gem_vram_push_to_system(struct drm_gem_vram_object *gbo);
+ void *drm_gem_vram_kmap_at(struct drm_gem_vram_object *gbo, bool map,
+ 			   bool *is_iomem, struct ttm_bo_kmap_obj *kmap);
+ void *drm_gem_vram_kmap(struct drm_gem_vram_object *gbo, bool map,
+-- 
+2.17.1
+

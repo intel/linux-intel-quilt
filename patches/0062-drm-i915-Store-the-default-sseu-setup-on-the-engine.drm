@@ -1,0 +1,653 @@
+From 67faee77f50bef46b0692b5aebed53c1b16c0483 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 24 Apr 2019 10:51:34 +0100
+Subject: [PATCH 062/530] drm/i915: Store the default sseu setup on the engine
+
+As we push for better compartmentalisation, it is more convenient to
+copy the default sseu configuration from the engine into the derived
+logical context, than it is to dig it out from i915->runtime_info.
+
+v2: Use intel_sseu_from_device_info() to describe the converter
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190424095134.30249-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Makefile                 |   1 +
+ drivers/gpu/drm/i915/Makefile.header-test     |   1 +
+ drivers/gpu/drm/i915/i915_drv.h               |  14 --
+ drivers/gpu/drm/i915/i915_gem_context.c       |   2 +-
+ drivers/gpu/drm/i915/i915_perf.c              |   2 +-
+ drivers/gpu/drm/i915/intel_context.c          |   4 +-
+ drivers/gpu/drm/i915/intel_context_types.h    |  11 +-
+ drivers/gpu/drm/i915/intel_device_info.h      |  28 +---
+ drivers/gpu/drm/i915/intel_engine_cs.c        |   4 +
+ drivers/gpu/drm/i915/intel_engine_types.h     |   3 +
+ drivers/gpu/drm/i915/intel_lrc.c              | 134 +----------------
+ drivers/gpu/drm/i915/intel_lrc.h              |   2 -
+ drivers/gpu/drm/i915/intel_sseu.c             | 142 ++++++++++++++++++
+ drivers/gpu/drm/i915/intel_sseu.h             |  67 +++++++++
+ .../gpu/drm/i915/selftests/i915_gem_context.c |   5 +-
+ 15 files changed, 226 insertions(+), 194 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/intel_sseu.c
+ create mode 100644 drivers/gpu/drm/i915/intel_sseu.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index fbcb0904f4a8..53ff209b91bb 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -95,6 +95,7 @@ i915-y += \
+ 	  intel_lrc.o \
+ 	  intel_mocs.o \
+ 	  intel_ringbuffer.o \
++	  intel_sseu.o \
+ 	  intel_uncore.o \
+ 	  intel_wopcm.o
+ 
+diff --git a/drivers/gpu/drm/i915/Makefile.header-test b/drivers/gpu/drm/i915/Makefile.header-test
+index c1c391816fa7..5bcc78d7ac96 100644
+--- a/drivers/gpu/drm/i915/Makefile.header-test
++++ b/drivers/gpu/drm/i915/Makefile.header-test
+@@ -33,6 +33,7 @@ header_test := \
+ 	intel_psr.h \
+ 	intel_sdvo.h \
+ 	intel_sprite.h \
++	intel_sseu.h \
+ 	intel_tv.h \
+ 	intel_workarounds_types.h
+ 
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index dc74d33c20aa..e6f9a5ddac3d 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -3390,20 +3390,6 @@ mkwrite_device_info(struct drm_i915_private *dev_priv)
+ 	return (struct intel_device_info *)INTEL_INFO(dev_priv);
+ }
+ 
+-static inline struct intel_sseu
+-intel_device_default_sseu(struct drm_i915_private *i915)
+-{
+-	const struct sseu_dev_info *sseu = &RUNTIME_INFO(i915)->sseu;
+-	struct intel_sseu value = {
+-		.slice_mask = sseu->slice_mask,
+-		.subslice_mask = sseu->subslice_mask[0],
+-		.min_eus_per_subslice = sseu->max_eus_per_subslice,
+-		.max_eus_per_subslice = sseu->max_eus_per_subslice,
+-	};
+-
+-	return value;
+-}
+-
+ /* modesetting */
+ extern void intel_modeset_init_hw(struct drm_device *dev);
+ extern int intel_modeset_init(struct drm_device *dev);
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index dd728b26b5aa..c02a30612df9 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -1156,7 +1156,7 @@ static int gen8_emit_rpcs_config(struct i915_request *rq,
+ 	*cs++ = MI_STORE_DWORD_IMM_GEN4 | MI_USE_GGTT;
+ 	*cs++ = lower_32_bits(offset);
+ 	*cs++ = upper_32_bits(offset);
+-	*cs++ = gen8_make_rpcs(rq->i915, &sseu);
++	*cs++ = intel_sseu_make_rpcs(rq->i915, &sseu);
+ 
+ 	intel_ring_advance(rq, cs);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_perf.c b/drivers/gpu/drm/i915/i915_perf.c
+index dc4ce694c06a..8fe49f78e197 100644
+--- a/drivers/gpu/drm/i915/i915_perf.c
++++ b/drivers/gpu/drm/i915/i915_perf.c
+@@ -1679,7 +1679,7 @@ gen8_update_reg_state_unlocked(struct intel_context *ce,
+ 
+ 	CTX_REG(reg_state,
+ 		CTX_R_PWR_CLK_STATE, GEN8_R_PWR_CLK_STATE,
+-		gen8_make_rpcs(i915, &ce->sseu));
++		intel_sseu_make_rpcs(i915, &ce->sseu));
+ }
+ 
+ /*
+diff --git a/drivers/gpu/drm/i915/intel_context.c b/drivers/gpu/drm/i915/intel_context.c
+index 924cc556223a..df3e8ff4fb33 100644
+--- a/drivers/gpu/drm/i915/intel_context.c
++++ b/drivers/gpu/drm/i915/intel_context.c
+@@ -231,15 +231,13 @@ intel_context_init(struct intel_context *ce,
+ 	ce->engine = engine;
+ 	ce->ops = engine->cops;
+ 	ce->saturated = 0;
++	ce->sseu = engine->sseu;
+ 
+ 	INIT_LIST_HEAD(&ce->signal_link);
+ 	INIT_LIST_HEAD(&ce->signals);
+ 
+ 	mutex_init(&ce->pin_mutex);
+ 
+-	/* Use the whole device by default */
+-	ce->sseu = intel_device_default_sseu(ctx->i915);
+-
+ 	i915_active_request_init(&ce->active_tracker,
+ 				 NULL, intel_context_retire);
+ }
+diff --git a/drivers/gpu/drm/i915/intel_context_types.h b/drivers/gpu/drm/i915/intel_context_types.h
+index 339c7437fe82..9b9e3b7f5af8 100644
+--- a/drivers/gpu/drm/i915/intel_context_types.h
++++ b/drivers/gpu/drm/i915/intel_context_types.h
+@@ -15,6 +15,7 @@
+ 
+ #include "i915_active_types.h"
+ #include "intel_engine_types.h"
++#include "intel_sseu.h"
+ 
+ struct i915_gem_context;
+ struct i915_vma;
+@@ -29,16 +30,6 @@ struct intel_context_ops {
+ 	void (*destroy)(struct kref *kref);
+ };
+ 
+-/*
+- * Powergating configuration for a particular (context,engine).
+- */
+-struct intel_sseu {
+-	u8 slice_mask;
+-	u8 subslice_mask;
+-	u8 min_eus_per_subslice;
+-	u8 max_eus_per_subslice;
+-};
+-
+ struct intel_context {
+ 	struct kref ref;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_device_info.h b/drivers/gpu/drm/i915/intel_device_info.h
+index 7a2f14eff699..1598c7079ffd 100644
+--- a/drivers/gpu/drm/i915/intel_device_info.h
++++ b/drivers/gpu/drm/i915/intel_device_info.h
+@@ -29,6 +29,7 @@
+ 
+ #include "intel_engine_types.h"
+ #include "intel_display.h"
++#include "intel_sseu.h"
+ 
+ struct drm_printer;
+ struct drm_i915_private;
+@@ -140,33 +141,6 @@ enum intel_ppgtt_type {
+ 	func(overlay_needs_physical); \
+ 	func(supports_tv);
+ 
+-#define GEN_MAX_SLICES		(6) /* CNL upper bound */
+-#define GEN_MAX_SUBSLICES	(8) /* ICL upper bound */
+-
+-struct sseu_dev_info {
+-	u8 slice_mask;
+-	u8 subslice_mask[GEN_MAX_SLICES];
+-	u16 eu_total;
+-	u8 eu_per_subslice;
+-	u8 min_eu_in_pool;
+-	/* For each slice, which subslice(s) has(have) 7 EUs (bitfield)? */
+-	u8 subslice_7eu[3];
+-	u8 has_slice_pg:1;
+-	u8 has_subslice_pg:1;
+-	u8 has_eu_pg:1;
+-
+-	/* Topology fields */
+-	u8 max_slices;
+-	u8 max_subslices;
+-	u8 max_eus_per_subslice;
+-
+-	/* We don't have more than 8 eus per subslice at the moment and as we
+-	 * store eus enabled using bits, no need to multiply by eus per
+-	 * subslice.
+-	 */
+-	u8 eu_mask[GEN_MAX_SLICES * GEN_MAX_SUBSLICES];
+-};
+-
+ struct intel_device_info {
+ 	u16 gen_mask;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_engine_cs.c b/drivers/gpu/drm/i915/intel_engine_cs.c
+index eea9bec04f1b..202b4b7a24f1 100644
+--- a/drivers/gpu/drm/i915/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/intel_engine_cs.c
+@@ -588,6 +588,10 @@ int intel_engine_setup_common(struct intel_engine_cs *engine)
+ 	intel_engine_init_batch_pool(engine);
+ 	intel_engine_init_cmd_parser(engine);
+ 
++	/* Use the whole device by default */
++	engine->sseu =
++		intel_sseu_from_device_info(&RUNTIME_INFO(engine->i915)->sseu);
++
+ 	return 0;
+ 
+ err_hwsp:
+diff --git a/drivers/gpu/drm/i915/intel_engine_types.h b/drivers/gpu/drm/i915/intel_engine_types.h
+index 1f970c76b6a6..d07a01b3ed0b 100644
+--- a/drivers/gpu/drm/i915/intel_engine_types.h
++++ b/drivers/gpu/drm/i915/intel_engine_types.h
+@@ -17,6 +17,7 @@
+ #include "i915_priolist_types.h"
+ #include "i915_selftest.h"
+ #include "i915_timeline_types.h"
++#include "intel_sseu.h"
+ #include "intel_workarounds_types.h"
+ 
+ #include "i915_gem_batch_pool.h"
+@@ -278,6 +279,8 @@ struct intel_engine_cs {
+ 	u32 context_size;
+ 	u32 mmio_base;
+ 
++	struct intel_sseu sseu;
++
+ 	struct intel_ring *buffer;
+ 
+ 	struct i915_timeline timeline;
+diff --git a/drivers/gpu/drm/i915/intel_lrc.c b/drivers/gpu/drm/i915/intel_lrc.c
+index 11e5a86610bf..d7d4d8b54e65 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.c
++++ b/drivers/gpu/drm/i915/intel_lrc.c
+@@ -1232,7 +1232,7 @@ __execlists_update_reg_state(struct intel_context *ce,
+ 	/* RPCS */
+ 	if (engine->class == RENDER_CLASS)
+ 		regs[CTX_R_PWR_CLK_STATE + 1] =
+-			gen8_make_rpcs(engine->i915, &ce->sseu);
++			intel_sseu_make_rpcs(engine->i915, &ce->sseu);
+ }
+ 
+ static int
+@@ -2551,138 +2551,6 @@ int logical_xcs_ring_init(struct intel_engine_cs *engine)
+ 	return logical_ring_init(engine);
+ }
+ 
+-u32 gen8_make_rpcs(struct drm_i915_private *i915, struct intel_sseu *req_sseu)
+-{
+-	const struct sseu_dev_info *sseu = &RUNTIME_INFO(i915)->sseu;
+-	bool subslice_pg = sseu->has_subslice_pg;
+-	struct intel_sseu ctx_sseu;
+-	u8 slices, subslices;
+-	u32 rpcs = 0;
+-
+-	/*
+-	 * No explicit RPCS request is needed to ensure full
+-	 * slice/subslice/EU enablement prior to Gen9.
+-	*/
+-	if (INTEL_GEN(i915) < 9)
+-		return 0;
+-
+-	/*
+-	 * If i915/perf is active, we want a stable powergating configuration
+-	 * on the system.
+-	 *
+-	 * We could choose full enablement, but on ICL we know there are use
+-	 * cases which disable slices for functional, apart for performance
+-	 * reasons. So in this case we select a known stable subset.
+-	 */
+-	if (!i915->perf.oa.exclusive_stream) {
+-		ctx_sseu = *req_sseu;
+-	} else {
+-		ctx_sseu = intel_device_default_sseu(i915);
+-
+-		if (IS_GEN(i915, 11)) {
+-			/*
+-			 * We only need subslice count so it doesn't matter
+-			 * which ones we select - just turn off low bits in the
+-			 * amount of half of all available subslices per slice.
+-			 */
+-			ctx_sseu.subslice_mask =
+-				~(~0 << (hweight8(ctx_sseu.subslice_mask) / 2));
+-			ctx_sseu.slice_mask = 0x1;
+-		}
+-	}
+-
+-	slices = hweight8(ctx_sseu.slice_mask);
+-	subslices = hweight8(ctx_sseu.subslice_mask);
+-
+-	/*
+-	 * Since the SScount bitfield in GEN8_R_PWR_CLK_STATE is only three bits
+-	 * wide and Icelake has up to eight subslices, specfial programming is
+-	 * needed in order to correctly enable all subslices.
+-	 *
+-	 * According to documentation software must consider the configuration
+-	 * as 2x4x8 and hardware will translate this to 1x8x8.
+-	 *
+-	 * Furthemore, even though SScount is three bits, maximum documented
+-	 * value for it is four. From this some rules/restrictions follow:
+-	 *
+-	 * 1.
+-	 * If enabled subslice count is greater than four, two whole slices must
+-	 * be enabled instead.
+-	 *
+-	 * 2.
+-	 * When more than one slice is enabled, hardware ignores the subslice
+-	 * count altogether.
+-	 *
+-	 * From these restrictions it follows that it is not possible to enable
+-	 * a count of subslices between the SScount maximum of four restriction,
+-	 * and the maximum available number on a particular SKU. Either all
+-	 * subslices are enabled, or a count between one and four on the first
+-	 * slice.
+-	 */
+-	if (IS_GEN(i915, 11) &&
+-	    slices == 1 &&
+-	    subslices > min_t(u8, 4, hweight8(sseu->subslice_mask[0]) / 2)) {
+-		GEM_BUG_ON(subslices & 1);
+-
+-		subslice_pg = false;
+-		slices *= 2;
+-	}
+-
+-	/*
+-	 * Starting in Gen9, render power gating can leave
+-	 * slice/subslice/EU in a partially enabled state. We
+-	 * must make an explicit request through RPCS for full
+-	 * enablement.
+-	*/
+-	if (sseu->has_slice_pg) {
+-		u32 mask, val = slices;
+-
+-		if (INTEL_GEN(i915) >= 11) {
+-			mask = GEN11_RPCS_S_CNT_MASK;
+-			val <<= GEN11_RPCS_S_CNT_SHIFT;
+-		} else {
+-			mask = GEN8_RPCS_S_CNT_MASK;
+-			val <<= GEN8_RPCS_S_CNT_SHIFT;
+-		}
+-
+-		GEM_BUG_ON(val & ~mask);
+-		val &= mask;
+-
+-		rpcs |= GEN8_RPCS_ENABLE | GEN8_RPCS_S_CNT_ENABLE | val;
+-	}
+-
+-	if (subslice_pg) {
+-		u32 val = subslices;
+-
+-		val <<= GEN8_RPCS_SS_CNT_SHIFT;
+-
+-		GEM_BUG_ON(val & ~GEN8_RPCS_SS_CNT_MASK);
+-		val &= GEN8_RPCS_SS_CNT_MASK;
+-
+-		rpcs |= GEN8_RPCS_ENABLE | GEN8_RPCS_SS_CNT_ENABLE | val;
+-	}
+-
+-	if (sseu->has_eu_pg) {
+-		u32 val;
+-
+-		val = ctx_sseu.min_eus_per_subslice << GEN8_RPCS_EU_MIN_SHIFT;
+-		GEM_BUG_ON(val & ~GEN8_RPCS_EU_MIN_MASK);
+-		val &= GEN8_RPCS_EU_MIN_MASK;
+-
+-		rpcs |= val;
+-
+-		val = ctx_sseu.max_eus_per_subslice << GEN8_RPCS_EU_MAX_SHIFT;
+-		GEM_BUG_ON(val & ~GEN8_RPCS_EU_MAX_MASK);
+-		val &= GEN8_RPCS_EU_MAX_MASK;
+-
+-		rpcs |= val;
+-
+-		rpcs |= GEN8_RPCS_ENABLE;
+-	}
+-
+-	return rpcs;
+-}
+-
+ static u32 intel_lr_indirect_ctx_offset(struct intel_engine_cs *engine)
+ {
+ 	u32 indirect_ctx_offset;
+diff --git a/drivers/gpu/drm/i915/intel_lrc.h b/drivers/gpu/drm/i915/intel_lrc.h
+index 84aa230ea27b..99f75ee9d087 100644
+--- a/drivers/gpu/drm/i915/intel_lrc.h
++++ b/drivers/gpu/drm/i915/intel_lrc.h
+@@ -115,6 +115,4 @@ void intel_execlists_show_requests(struct intel_engine_cs *engine,
+ 							const char *prefix),
+ 				   unsigned int max);
+ 
+-u32 gen8_make_rpcs(struct drm_i915_private *i915, struct intel_sseu *ctx_sseu);
+-
+ #endif /* _INTEL_LRC_H_ */
+diff --git a/drivers/gpu/drm/i915/intel_sseu.c b/drivers/gpu/drm/i915/intel_sseu.c
+new file mode 100644
+index 000000000000..7f448f3bea0b
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_sseu.c
+@@ -0,0 +1,142 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2019 Intel Corporation
++ */
++
++#include "i915_drv.h"
++#include "intel_lrc_reg.h"
++#include "intel_sseu.h"
++
++u32 intel_sseu_make_rpcs(struct drm_i915_private *i915,
++			 const struct intel_sseu *req_sseu)
++{
++	const struct sseu_dev_info *sseu = &RUNTIME_INFO(i915)->sseu;
++	bool subslice_pg = sseu->has_subslice_pg;
++	struct intel_sseu ctx_sseu;
++	u8 slices, subslices;
++	u32 rpcs = 0;
++
++	/*
++	 * No explicit RPCS request is needed to ensure full
++	 * slice/subslice/EU enablement prior to Gen9.
++	 */
++	if (INTEL_GEN(i915) < 9)
++		return 0;
++
++	/*
++	 * If i915/perf is active, we want a stable powergating configuration
++	 * on the system.
++	 *
++	 * We could choose full enablement, but on ICL we know there are use
++	 * cases which disable slices for functional, apart for performance
++	 * reasons. So in this case we select a known stable subset.
++	 */
++	if (!i915->perf.oa.exclusive_stream) {
++		ctx_sseu = *req_sseu;
++	} else {
++		ctx_sseu = intel_sseu_from_device_info(sseu);
++
++		if (IS_GEN(i915, 11)) {
++			/*
++			 * We only need subslice count so it doesn't matter
++			 * which ones we select - just turn off low bits in the
++			 * amount of half of all available subslices per slice.
++			 */
++			ctx_sseu.subslice_mask =
++				~(~0 << (hweight8(ctx_sseu.subslice_mask) / 2));
++			ctx_sseu.slice_mask = 0x1;
++		}
++	}
++
++	slices = hweight8(ctx_sseu.slice_mask);
++	subslices = hweight8(ctx_sseu.subslice_mask);
++
++	/*
++	 * Since the SScount bitfield in GEN8_R_PWR_CLK_STATE is only three bits
++	 * wide and Icelake has up to eight subslices, specfial programming is
++	 * needed in order to correctly enable all subslices.
++	 *
++	 * According to documentation software must consider the configuration
++	 * as 2x4x8 and hardware will translate this to 1x8x8.
++	 *
++	 * Furthemore, even though SScount is three bits, maximum documented
++	 * value for it is four. From this some rules/restrictions follow:
++	 *
++	 * 1.
++	 * If enabled subslice count is greater than four, two whole slices must
++	 * be enabled instead.
++	 *
++	 * 2.
++	 * When more than one slice is enabled, hardware ignores the subslice
++	 * count altogether.
++	 *
++	 * From these restrictions it follows that it is not possible to enable
++	 * a count of subslices between the SScount maximum of four restriction,
++	 * and the maximum available number on a particular SKU. Either all
++	 * subslices are enabled, or a count between one and four on the first
++	 * slice.
++	 */
++	if (IS_GEN(i915, 11) &&
++	    slices == 1 &&
++	    subslices > min_t(u8, 4, hweight8(sseu->subslice_mask[0]) / 2)) {
++		GEM_BUG_ON(subslices & 1);
++
++		subslice_pg = false;
++		slices *= 2;
++	}
++
++	/*
++	 * Starting in Gen9, render power gating can leave
++	 * slice/subslice/EU in a partially enabled state. We
++	 * must make an explicit request through RPCS for full
++	 * enablement.
++	 */
++	if (sseu->has_slice_pg) {
++		u32 mask, val = slices;
++
++		if (INTEL_GEN(i915) >= 11) {
++			mask = GEN11_RPCS_S_CNT_MASK;
++			val <<= GEN11_RPCS_S_CNT_SHIFT;
++		} else {
++			mask = GEN8_RPCS_S_CNT_MASK;
++			val <<= GEN8_RPCS_S_CNT_SHIFT;
++		}
++
++		GEM_BUG_ON(val & ~mask);
++		val &= mask;
++
++		rpcs |= GEN8_RPCS_ENABLE | GEN8_RPCS_S_CNT_ENABLE | val;
++	}
++
++	if (subslice_pg) {
++		u32 val = subslices;
++
++		val <<= GEN8_RPCS_SS_CNT_SHIFT;
++
++		GEM_BUG_ON(val & ~GEN8_RPCS_SS_CNT_MASK);
++		val &= GEN8_RPCS_SS_CNT_MASK;
++
++		rpcs |= GEN8_RPCS_ENABLE | GEN8_RPCS_SS_CNT_ENABLE | val;
++	}
++
++	if (sseu->has_eu_pg) {
++		u32 val;
++
++		val = ctx_sseu.min_eus_per_subslice << GEN8_RPCS_EU_MIN_SHIFT;
++		GEM_BUG_ON(val & ~GEN8_RPCS_EU_MIN_MASK);
++		val &= GEN8_RPCS_EU_MIN_MASK;
++
++		rpcs |= val;
++
++		val = ctx_sseu.max_eus_per_subslice << GEN8_RPCS_EU_MAX_SHIFT;
++		GEM_BUG_ON(val & ~GEN8_RPCS_EU_MAX_MASK);
++		val &= GEN8_RPCS_EU_MAX_MASK;
++
++		rpcs |= val;
++
++		rpcs |= GEN8_RPCS_ENABLE;
++	}
++
++	return rpcs;
++}
+diff --git a/drivers/gpu/drm/i915/intel_sseu.h b/drivers/gpu/drm/i915/intel_sseu.h
+new file mode 100644
+index 000000000000..73bc824094e8
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_sseu.h
+@@ -0,0 +1,67 @@
++/*
++ * SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2019 Intel Corporation
++ */
++
++#ifndef __INTEL_SSEU_H__
++#define __INTEL_SSEU_H__
++
++#include <linux/types.h>
++
++struct drm_i915_private;
++
++#define GEN_MAX_SLICES		(6) /* CNL upper bound */
++#define GEN_MAX_SUBSLICES	(8) /* ICL upper bound */
++
++struct sseu_dev_info {
++	u8 slice_mask;
++	u8 subslice_mask[GEN_MAX_SLICES];
++	u16 eu_total;
++	u8 eu_per_subslice;
++	u8 min_eu_in_pool;
++	/* For each slice, which subslice(s) has(have) 7 EUs (bitfield)? */
++	u8 subslice_7eu[3];
++	u8 has_slice_pg:1;
++	u8 has_subslice_pg:1;
++	u8 has_eu_pg:1;
++
++	/* Topology fields */
++	u8 max_slices;
++	u8 max_subslices;
++	u8 max_eus_per_subslice;
++
++	/* We don't have more than 8 eus per subslice at the moment and as we
++	 * store eus enabled using bits, no need to multiply by eus per
++	 * subslice.
++	 */
++	u8 eu_mask[GEN_MAX_SLICES * GEN_MAX_SUBSLICES];
++};
++
++/*
++ * Powergating configuration for a particular (context,engine).
++ */
++struct intel_sseu {
++	u8 slice_mask;
++	u8 subslice_mask;
++	u8 min_eus_per_subslice;
++	u8 max_eus_per_subslice;
++};
++
++static inline struct intel_sseu
++intel_sseu_from_device_info(const struct sseu_dev_info *sseu)
++{
++	struct intel_sseu value = {
++		.slice_mask = sseu->slice_mask,
++		.subslice_mask = sseu->subslice_mask[0],
++		.min_eus_per_subslice = sseu->max_eus_per_subslice,
++		.max_eus_per_subslice = sseu->max_eus_per_subslice,
++	};
++
++	return value;
++}
++
++u32 intel_sseu_make_rpcs(struct drm_i915_private *i915,
++			 const struct intel_sseu *req_sseu);
++
++#endif /* __INTEL_SSEU_H__ */
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+index 4e1b6efc6b22..e1cb22f03e8e 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+@@ -962,8 +962,7 @@ __sseu_finish(struct drm_i915_private *i915,
+ 	      unsigned int expected,
+ 	      struct igt_spinner *spin)
+ {
+-	unsigned int slices =
+-		hweight32(intel_device_default_sseu(i915).slice_mask);
++	unsigned int slices = hweight32(engine->sseu.slice_mask);
+ 	u32 rpcs = 0;
+ 	int ret = 0;
+ 
+@@ -1047,8 +1046,8 @@ __igt_ctx_sseu(struct drm_i915_private *i915,
+ 	       const char *name,
+ 	       unsigned int flags)
+ {
+-	struct intel_sseu default_sseu = intel_device_default_sseu(i915);
+ 	struct intel_engine_cs *engine = i915->engine[RCS0];
++	struct intel_sseu default_sseu = engine->sseu;
+ 	struct drm_i915_gem_object *obj;
+ 	struct i915_gem_context *ctx;
+ 	struct intel_sseu pg_sseu;
+-- 
+2.17.1
+

@@ -1,0 +1,236 @@
+From 23c6c411a73529660f2d8fa63467d59474fbc23a Mon Sep 17 00:00:00 2001
+From: Uma Shankar <uma.shankar@intel.com>
+Date: Thu, 16 May 2019 19:40:06 +0530
+Subject: [PATCH 312/530] drm: Add HDR source metadata property
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This patch adds a blob property to get HDR metadata
+information from userspace. This will be send as part
+of AVI Infoframe to panel.
+
+It also implements get() and set() functions for HDR output
+metadata property.The blob data is received from userspace and
+saved in connector state, the same is returned as blob in get
+property call to userspace.
+
+v2: Rebase and modified the metadata structure elements
+as per Ville's POC changes.
+
+v3: No Change
+
+v4: Addressed Shashank's review comments
+
+v5: Rebase.
+
+v6: Addressed Brian Starkey's review comments, defined
+new structure with header for dynamic metadata scalability.
+Merge get/set property functions for metadata in this patch.
+
+v7: Addressed Jonas Karlman review comments and defined separate
+structure for infoframe to better align with CTA 861.G spec. Added
+Shashank's RB.
+
+v8: Addressed Ville's review comments. Moved sink metadata structure
+out of uapi headers as suggested by Jonas Karlman.
+
+v9: Rebase and addressed Jonas Karlman review comments.
+
+v10: Addressed Ville's review comments, dropped the metdata_changed
+state variable as its not needed anymore.
+
+Signed-off-by: Uma Shankar <uma.shankar@intel.com>
+Reviewed-by: Shashank Sharma <shashank.sharma@intel.com>
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/1558015817-12025-2-git-send-email-uma.shankar@intel.com
+---
+ drivers/gpu/drm/drm_atomic_uapi.c | 12 ++++++++++++
+ drivers/gpu/drm/drm_connector.c   |  6 ++++++
+ include/drm/drm_connector.h       | 10 ++++++++++
+ include/drm/drm_mode_config.h     |  7 +++++++
+ include/linux/hdmi.h              | 26 ++++++++++++++++++++++++++
+ include/uapi/drm/drm_mode.h       | 23 +++++++++++++++++++++++
+ 6 files changed, 84 insertions(+)
+
+diff --git a/drivers/gpu/drm/drm_atomic_uapi.c b/drivers/gpu/drm/drm_atomic_uapi.c
+index 4131e669785a..eb22e8bdd853 100644
+--- a/drivers/gpu/drm/drm_atomic_uapi.c
++++ b/drivers/gpu/drm/drm_atomic_uapi.c
+@@ -676,6 +676,8 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
+ {
+ 	struct drm_device *dev = connector->dev;
+ 	struct drm_mode_config *config = &dev->mode_config;
++	bool replaced = false;
++	int ret;
+ 
+ 	if (property == config->prop_crtc_id) {
+ 		struct drm_crtc *crtc = drm_crtc_find(dev, file_priv, val);
+@@ -726,6 +728,13 @@ static int drm_atomic_connector_set_property(struct drm_connector *connector,
+ 		 */
+ 		if (state->link_status != DRM_LINK_STATUS_GOOD)
+ 			state->link_status = val;
++	} else if (property == config->hdr_output_metadata_property) {
++		ret = drm_atomic_replace_property_blob_from_id(dev,
++				&state->hdr_output_metadata,
++				val,
++				sizeof(struct hdr_output_metadata), -1,
++				&replaced);
++		return ret;
+ 	} else if (property == config->aspect_ratio_property) {
+ 		state->picture_aspect_ratio = val;
+ 	} else if (property == config->content_type_property) {
+@@ -814,6 +823,9 @@ drm_atomic_connector_get_property(struct drm_connector *connector,
+ 		*val = state->colorspace;
+ 	} else if (property == connector->scaling_mode_property) {
+ 		*val = state->scaling_mode;
++	} else if (property == config->hdr_output_metadata_property) {
++		*val = state->hdr_output_metadata ?
++			state->hdr_output_metadata->base.id : 0;
+ 	} else if (property == config->content_protection_property) {
+ 		*val = state->content_protection;
+ 	} else if (property == config->writeback_fb_id_property) {
+diff --git a/drivers/gpu/drm/drm_connector.c b/drivers/gpu/drm/drm_connector.c
+index 11fcd25bc640..c9ac8b9e83ea 100644
+--- a/drivers/gpu/drm/drm_connector.c
++++ b/drivers/gpu/drm/drm_connector.c
+@@ -1051,6 +1051,12 @@ int drm_connector_create_standard_properties(struct drm_device *dev)
+ 		return -ENOMEM;
+ 	dev->mode_config.non_desktop_property = prop;
+ 
++	prop = drm_property_create(dev, DRM_MODE_PROP_BLOB,
++				   "HDR_OUTPUT_METADATA", 0);
++	if (!prop)
++		return -ENOMEM;
++	dev->mode_config.hdr_output_metadata_property = prop;
++
+ 	return 0;
+ }
+ 
+diff --git a/include/drm/drm_connector.h b/include/drm/drm_connector.h
+index e257b879b72c..f8f4003e2758 100644
+--- a/include/drm/drm_connector.h
++++ b/include/drm/drm_connector.h
+@@ -603,6 +603,12 @@ struct drm_connector_state {
+ 	 * and the connector bpc limitations obtained from edid.
+ 	 */
+ 	u8 max_bpc;
++
++	/**
++	 * @hdr_output_metadata:
++	 * DRM blob property for HDR output metadata
++	 */
++	struct drm_property_blob *hdr_output_metadata;
+ };
+ 
+ /**
+@@ -1237,6 +1243,10 @@ struct drm_connector {
+ 	 * &drm_mode_config.connector_free_work.
+ 	 */
+ 	struct llist_node free_node;
++
++	/* HDR metdata */
++	struct hdr_output_metadata hdr_output_metadata;
++	struct hdr_sink_metadata hdr_sink_metadata;
+ };
+ 
+ #define obj_to_connector(x) container_of(x, struct drm_connector, base)
+diff --git a/include/drm/drm_mode_config.h b/include/drm/drm_mode_config.h
+index 5764ee3c7453..58278cc3ceb2 100644
+--- a/include/drm/drm_mode_config.h
++++ b/include/drm/drm_mode_config.h
+@@ -842,6 +842,13 @@ struct drm_mode_config {
+ 	 */
+ 	struct drm_property *content_protection_property;
+ 
++	/**
++	 * hdr_output_metadata_property: Connector property containing hdr
++	 * metatda. This will be provided by userspace compositors based
++	 * on HDR content
++	 */
++	struct drm_property *hdr_output_metadata_property;
++
+ 	/* dumb ioctl parameters */
+ 	uint32_t preferred_depth, prefer_shadow;
+ 
+diff --git a/include/linux/hdmi.h b/include/linux/hdmi.h
+index 927ad6451105..6780476dcbff 100644
+--- a/include/linux/hdmi.h
++++ b/include/linux/hdmi.h
+@@ -152,6 +152,16 @@ enum hdmi_content_type {
+ 	HDMI_CONTENT_TYPE_GAME,
+ };
+ 
++enum hdmi_metadata_type {
++	HDMI_STATIC_METADATA_TYPE1 = 1,
++};
++
++enum hdmi_eotf {
++	HDMI_EOTF_TRADITIONAL_GAMMA_SDR,
++	HDMI_EOTF_TRADITIONAL_GAMMA_HDR,
++	HDMI_EOTF_SMPTE_ST2084,
++};
++
+ struct hdmi_avi_infoframe {
+ 	enum hdmi_infoframe_type type;
+ 	unsigned char version;
+@@ -320,6 +330,22 @@ struct hdmi_vendor_infoframe {
+ 	unsigned int s3d_ext_data;
+ };
+ 
++/* HDR Metadata as per 861.G spec */
++struct hdr_static_metadata {
++	__u8 eotf;
++	__u8 metadata_type;
++	__u16 max_cll;
++	__u16 max_fall;
++	__u16 min_cll;
++};
++
++struct hdr_sink_metadata {
++	__u32 metadata_type;
++	union {
++		struct hdr_static_metadata hdmi_type1;
++	};
++};
++
+ int hdmi_vendor_infoframe_init(struct hdmi_vendor_infoframe *frame);
+ ssize_t hdmi_vendor_infoframe_pack(struct hdmi_vendor_infoframe *frame,
+ 				   void *buffer, size_t size);
+diff --git a/include/uapi/drm/drm_mode.h b/include/uapi/drm/drm_mode.h
+index 83cd1636b9be..997a7e05c0c6 100644
+--- a/include/uapi/drm/drm_mode.h
++++ b/include/uapi/drm/drm_mode.h
+@@ -630,6 +630,29 @@ struct drm_color_lut {
+ 	__u16 reserved;
+ };
+ 
++/* HDR Metadata Infoframe as per 861.G spec */
++struct hdr_metadata_infoframe {
++	__u8 eotf;
++	__u8 metadata_type;
++	struct {
++		__u16 x, y;
++		} display_primaries[3];
++	struct {
++		__u16 x, y;
++		} white_point;
++	__u16 max_display_mastering_luminance;
++	__u16 min_display_mastering_luminance;
++	__u16 max_cll;
++	__u16 max_fall;
++};
++
++struct hdr_output_metadata {
++	__u32 metadata_type;
++	union {
++		struct hdr_metadata_infoframe hdmi_metadata_type1;
++	};
++};
++
+ #define DRM_MODE_PAGE_FLIP_EVENT 0x01
+ #define DRM_MODE_PAGE_FLIP_ASYNC 0x02
+ #define DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE 0x4
+-- 
+2.17.1
+
