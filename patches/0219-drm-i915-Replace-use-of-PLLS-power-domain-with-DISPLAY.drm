@@ -1,0 +1,232 @@
+From ccf6ef5be3e99a367be95c11d42efa2892a38c77 Mon Sep 17 00:00:00 2001
+From: Imre Deak <imre.deak@intel.com>
+Date: Thu, 9 May 2019 20:34:44 +0300
+Subject: [PATCH 219/529] drm/i915: Replace use of PLLS power domain with
+ DISPLAY_CORE domain
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+There isn't a separate power domain specific to PLLs. When programming
+them we require the same power domain to be enabled which is needed when
+accessing other display core parts (not specific to any
+pipe/port/transcoder). This corresponds to the DISPLAY_CORE domain added
+previously in this patchset, so use that instead to save bits in the
+power domain mask.
+
+Cc: Ville Syrjala <ville.syrjala@linux.intel.com>
+Signed-off-by: Imre Deak <imre.deak@intel.com>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190509173446.31095-10-imre.deak@intel.com
+---
+ drivers/gpu/drm/i915/intel_display.c    |  2 +-
+ drivers/gpu/drm/i915/intel_display.h    |  1 -
+ drivers/gpu/drm/i915/intel_dpll_mgr.c   | 36 ++++++++++++-------------
+ drivers/gpu/drm/i915/intel_runtime_pm.c |  2 --
+ 4 files changed, 19 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 67743f5de1e8..8e554c88e9fb 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -6367,7 +6367,7 @@ static u64 get_crtc_power_domains(struct drm_crtc *crtc,
+ 		mask |= BIT_ULL(POWER_DOMAIN_AUDIO);
+ 
+ 	if (crtc_state->shared_dpll)
+-		mask |= BIT_ULL(POWER_DOMAIN_PLLS);
++		mask |= BIT_ULL(POWER_DOMAIN_DISPLAY_CORE);
+ 
+ 	return mask;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_display.h b/drivers/gpu/drm/i915/intel_display.h
+index 7f3fafdfbd5f..41f2aa966abc 100644
+--- a/drivers/gpu/drm/i915/intel_display.h
++++ b/drivers/gpu/drm/i915/intel_display.h
+@@ -251,7 +251,6 @@ enum intel_display_power_domain {
+ 	POWER_DOMAIN_PORT_OTHER,
+ 	POWER_DOMAIN_VGA,
+ 	POWER_DOMAIN_AUDIO,
+-	POWER_DOMAIN_PLLS,
+ 	POWER_DOMAIN_AUX_A,
+ 	POWER_DOMAIN_AUX_B,
+ 	POWER_DOMAIN_AUX_C,
+diff --git a/drivers/gpu/drm/i915/intel_dpll_mgr.c b/drivers/gpu/drm/i915/intel_dpll_mgr.c
+index bf5e2541c35e..897d93537414 100644
+--- a/drivers/gpu/drm/i915/intel_dpll_mgr.c
++++ b/drivers/gpu/drm/i915/intel_dpll_mgr.c
+@@ -351,7 +351,7 @@ static bool ibx_pch_dpll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -360,7 +360,7 @@ static bool ibx_pch_dpll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	hw_state->fp0 = I915_READ(PCH_FP0(id));
+ 	hw_state->fp1 = I915_READ(PCH_FP1(id));
+ 
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return val & DPLL_VCO_ENABLE;
+ }
+@@ -519,14 +519,14 @@ static bool hsw_ddi_wrpll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+ 	val = I915_READ(WRPLL_CTL(id));
+ 	hw_state->wrpll = val;
+ 
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return val & WRPLL_PLL_ENABLE;
+ }
+@@ -539,14 +539,14 @@ static bool hsw_ddi_spll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+ 	val = I915_READ(SPLL_CTL);
+ 	hw_state->spll = val;
+ 
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return val & SPLL_PLL_ENABLE;
+ }
+@@ -1004,7 +1004,7 @@ static bool skl_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	bool ret;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -1025,7 +1025,7 @@ static bool skl_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	ret = true;
+ 
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return ret;
+ }
+@@ -1041,7 +1041,7 @@ static bool skl_ddi_dpll0_get_hw_state(struct drm_i915_private *dev_priv,
+ 	bool ret;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -1058,7 +1058,7 @@ static bool skl_ddi_dpll0_get_hw_state(struct drm_i915_private *dev_priv,
+ 	ret = true;
+ 
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return ret;
+ }
+@@ -1602,7 +1602,7 @@ static bool bxt_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	bxt_port_to_phy_channel(dev_priv, port, &phy, &ch);
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -1660,7 +1660,7 @@ static bool bxt_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	ret = true;
+ 
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return ret;
+ }
+@@ -2087,7 +2087,7 @@ static bool cnl_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	bool ret;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -2107,7 +2107,7 @@ static bool cnl_ddi_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	ret = true;
+ 
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 
+ 	return ret;
+ }
+@@ -2862,7 +2862,7 @@ static bool mg_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -2909,7 +2909,7 @@ static bool mg_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 
+ 	ret = true;
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 	return ret;
+ }
+ 
+@@ -2924,7 +2924,7 @@ static bool icl_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 	u32 val;
+ 
+ 	wakeref = intel_display_power_get_if_enabled(dev_priv,
+-						     POWER_DOMAIN_PLLS);
++						     POWER_DOMAIN_DISPLAY_CORE);
+ 	if (!wakeref)
+ 		return false;
+ 
+@@ -2937,7 +2937,7 @@ static bool icl_pll_get_hw_state(struct drm_i915_private *dev_priv,
+ 
+ 	ret = true;
+ out:
+-	intel_display_power_put(dev_priv, POWER_DOMAIN_PLLS, wakeref);
++	intel_display_power_put(dev_priv, POWER_DOMAIN_DISPLAY_CORE, wakeref);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.c b/drivers/gpu/drm/i915/intel_runtime_pm.c
+index 34d8e45dac3e..12f5b669f20e 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.c
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.c
+@@ -460,8 +460,6 @@ intel_display_power_domain_str(enum intel_display_power_domain domain)
+ 		return "VGA";
+ 	case POWER_DOMAIN_AUDIO:
+ 		return "AUDIO";
+-	case POWER_DOMAIN_PLLS:
+-		return "PLLS";
+ 	case POWER_DOMAIN_AUX_A:
+ 		return "AUX_A";
+ 	case POWER_DOMAIN_AUX_B:
+-- 
+2.17.1
+

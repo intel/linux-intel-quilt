@@ -1,0 +1,316 @@
+From 458c4ec1e8d880cd2177980df5dc5f9eced89f61 Mon Sep 17 00:00:00 2001
+From: Jani Nikula <jani.nikula@intel.com>
+Date: Mon, 29 Apr 2019 15:53:31 +0300
+Subject: [PATCH 118/529] drm/i915: extract intel_atomic.h from intel_drv.h
+
+It used to be handy that we only had a couple of headers, but over time
+intel_drv.h has become unwieldy. Extract declarations to a separate
+header file corresponding to the implementation module, clarifying the
+modularity of the driver.
+
+Ensure the new header is self-contained, and do so with minimal further
+includes, using forward declarations as needed. Include the new header
+only where needed, and sort the modified include directives while at it
+and as needed.
+
+No functional changes.
+
+v2: fix sparse warnings on undeclared global functions
+
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190429125331.32499-1-jani.nikula@intel.com
+---
+ drivers/gpu/drm/i915/Makefile.header-test |  1 +
+ drivers/gpu/drm/i915/i915_gpu_error.c     |  1 +
+ drivers/gpu/drm/i915/icl_dsi.c            |  1 +
+ drivers/gpu/drm/i915/intel_atomic.c       | 13 ++++++
+ drivers/gpu/drm/i915/intel_atomic.h       | 49 +++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_display.c      |  1 +
+ drivers/gpu/drm/i915/intel_dp.c           |  1 +
+ drivers/gpu/drm/i915/intel_dp_mst.c       |  1 +
+ drivers/gpu/drm/i915/intel_drv.h          | 36 -----------------
+ drivers/gpu/drm/i915/intel_hdmi.c         |  1 +
+ drivers/gpu/drm/i915/intel_lvds.c         |  1 +
+ drivers/gpu/drm/i915/intel_pipe_crc.c     |  1 +
+ drivers/gpu/drm/i915/intel_pm.c           |  1 +
+ drivers/gpu/drm/i915/intel_sdvo.c         |  1 +
+ drivers/gpu/drm/i915/vlv_dsi.c            |  1 +
+ 15 files changed, 74 insertions(+), 36 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/intel_atomic.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile.header-test b/drivers/gpu/drm/i915/Makefile.header-test
+index fa7542a6b262..bff153be3d04 100644
+--- a/drivers/gpu/drm/i915/Makefile.header-test
++++ b/drivers/gpu/drm/i915/Makefile.header-test
+@@ -13,6 +13,7 @@ header_test := \
+ 	i915_reg.h \
+ 	i915_scheduler_types.h \
+ 	i915_timeline_types.h \
++	intel_atomic.h \
+ 	intel_atomic_plane.h \
+ 	intel_audio.h \
+ 	intel_bios.h \
+diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
+index e3263608d0d3..e1b858bd1d32 100644
+--- a/drivers/gpu/drm/i915/i915_gpu_error.c
++++ b/drivers/gpu/drm/i915/i915_gpu_error.c
+@@ -38,6 +38,7 @@
+ 
+ #include "i915_drv.h"
+ #include "i915_gpu_error.h"
++#include "intel_atomic.h"
+ #include "intel_overlay.h"
+ 
+ static inline const struct intel_engine_cs *
+diff --git a/drivers/gpu/drm/i915/icl_dsi.c b/drivers/gpu/drm/i915/icl_dsi.c
+index 9d962ea1e635..c6ecc0087608 100644
+--- a/drivers/gpu/drm/i915/icl_dsi.c
++++ b/drivers/gpu/drm/i915/icl_dsi.c
+@@ -28,6 +28,7 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_mipi_dsi.h>
+ 
++#include "intel_atomic.h"
+ #include "intel_connector.h"
+ #include "intel_ddi.h"
+ #include "intel_dsi.h"
+diff --git a/drivers/gpu/drm/i915/intel_atomic.c b/drivers/gpu/drm/i915/intel_atomic.c
+index 8c8fae32ec50..58b8049649a0 100644
+--- a/drivers/gpu/drm/i915/intel_atomic.c
++++ b/drivers/gpu/drm/i915/intel_atomic.c
+@@ -34,6 +34,7 @@
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_plane_helper.h>
+ 
++#include "intel_atomic.h"
+ #include "intel_drv.h"
+ #include "intel_hdcp.h"
+ #include "intel_sprite.h"
+@@ -411,3 +412,15 @@ void intel_atomic_state_clear(struct drm_atomic_state *s)
+ 	drm_atomic_state_default_clear(&state->base);
+ 	state->dpll_set = state->modeset = false;
+ }
++
++struct intel_crtc_state *
++intel_atomic_get_crtc_state(struct drm_atomic_state *state,
++			    struct intel_crtc *crtc)
++{
++	struct drm_crtc_state *crtc_state;
++	crtc_state = drm_atomic_get_crtc_state(state, &crtc->base);
++	if (IS_ERR(crtc_state))
++		return ERR_CAST(crtc_state);
++
++	return to_intel_crtc_state(crtc_state);
++}
+diff --git a/drivers/gpu/drm/i915/intel_atomic.h b/drivers/gpu/drm/i915/intel_atomic.h
+new file mode 100644
+index 000000000000..1c8507da1a69
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_atomic.h
+@@ -0,0 +1,49 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright © 2019 Intel Corporation
++ */
++
++#ifndef __INTEL_ATOMIC_H__
++#define __INTEL_ATOMIC_H__
++
++#include <linux/types.h>
++
++struct drm_atomic_state;
++struct drm_connector;
++struct drm_connector_state;
++struct drm_crtc;
++struct drm_crtc_state;
++struct drm_device;
++struct drm_i915_private;
++struct drm_property;
++struct intel_crtc;
++struct intel_crtc_state;
++
++int intel_digital_connector_atomic_get_property(struct drm_connector *connector,
++						const struct drm_connector_state *state,
++						struct drm_property *property,
++						u64 *val);
++int intel_digital_connector_atomic_set_property(struct drm_connector *connector,
++						struct drm_connector_state *state,
++						struct drm_property *property,
++						u64 val);
++int intel_digital_connector_atomic_check(struct drm_connector *conn,
++					 struct drm_connector_state *new_state);
++struct drm_connector_state *
++intel_digital_connector_duplicate_state(struct drm_connector *connector);
++
++struct drm_crtc_state *intel_crtc_duplicate_state(struct drm_crtc *crtc);
++void intel_crtc_destroy_state(struct drm_crtc *crtc,
++			       struct drm_crtc_state *state);
++struct drm_atomic_state *intel_atomic_state_alloc(struct drm_device *dev);
++void intel_atomic_state_clear(struct drm_atomic_state *state);
++
++struct intel_crtc_state *
++intel_atomic_get_crtc_state(struct drm_atomic_state *state,
++			    struct intel_crtc *crtc);
++
++int intel_atomic_setup_scalers(struct drm_i915_private *dev_priv,
++			       struct intel_crtc *intel_crtc,
++			       struct intel_crtc_state *crtc_state);
++
++#endif /* __INTEL_ATOMIC_H__ */
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index c0b25bd1bea5..da382f27f064 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -47,6 +47,7 @@
+ #include "i915_drv.h"
+ #include "i915_gem_clflush.h"
+ #include "i915_trace.h"
++#include "intel_atomic.h"
+ #include "intel_atomic_plane.h"
+ #include "intel_color.h"
+ #include "intel_cdclk.h"
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 58f6d0e953ad..4e7b8d29d733 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -43,6 +43,7 @@
+ #include <drm/i915_drm.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_audio.h"
+ #include "intel_connector.h"
+ #include "intel_ddi.h"
+diff --git a/drivers/gpu/drm/i915/intel_dp_mst.c b/drivers/gpu/drm/i915/intel_dp_mst.c
+index 46e88311add4..725518e8bfaa 100644
+--- a/drivers/gpu/drm/i915/intel_dp_mst.c
++++ b/drivers/gpu/drm/i915/intel_dp_mst.c
+@@ -28,6 +28,7 @@
+ #include <drm/drm_probe_helper.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_audio.h"
+ #include "intel_connector.h"
+ #include "intel_ddi.h"
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 358b7b6472a9..6b5c366ae8e1 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -1913,40 +1913,4 @@ void chv_phy_powergate_lanes(struct intel_encoder *encoder,
+ bool chv_phy_powergate_ch(struct drm_i915_private *dev_priv, enum dpio_phy phy,
+ 			  enum dpio_channel ch, bool override);
+ 
+-/* intel_atomic.c */
+-int intel_digital_connector_atomic_get_property(struct drm_connector *connector,
+-						const struct drm_connector_state *state,
+-						struct drm_property *property,
+-						u64 *val);
+-int intel_digital_connector_atomic_set_property(struct drm_connector *connector,
+-						struct drm_connector_state *state,
+-						struct drm_property *property,
+-						u64 val);
+-int intel_digital_connector_atomic_check(struct drm_connector *conn,
+-					 struct drm_connector_state *new_state);
+-struct drm_connector_state *
+-intel_digital_connector_duplicate_state(struct drm_connector *connector);
+-
+-struct drm_crtc_state *intel_crtc_duplicate_state(struct drm_crtc *crtc);
+-void intel_crtc_destroy_state(struct drm_crtc *crtc,
+-			       struct drm_crtc_state *state);
+-struct drm_atomic_state *intel_atomic_state_alloc(struct drm_device *dev);
+-void intel_atomic_state_clear(struct drm_atomic_state *);
+-
+-static inline struct intel_crtc_state *
+-intel_atomic_get_crtc_state(struct drm_atomic_state *state,
+-			    struct intel_crtc *crtc)
+-{
+-	struct drm_crtc_state *crtc_state;
+-	crtc_state = drm_atomic_get_crtc_state(state, &crtc->base);
+-	if (IS_ERR(crtc_state))
+-		return ERR_CAST(crtc_state);
+-
+-	return to_intel_crtc_state(crtc_state);
+-}
+-
+-int intel_atomic_setup_scalers(struct drm_i915_private *dev_priv,
+-			       struct intel_crtc *intel_crtc,
+-			       struct intel_crtc_state *crtc_state);
+-
+ #endif /* __INTEL_DRV_H__ */
+diff --git a/drivers/gpu/drm/i915/intel_hdmi.c b/drivers/gpu/drm/i915/intel_hdmi.c
+index 5982658b1ba7..114394652c7f 100644
+--- a/drivers/gpu/drm/i915/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/intel_hdmi.c
+@@ -40,6 +40,7 @@
+ #include <drm/intel_lpe_audio.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_audio.h"
+ #include "intel_connector.h"
+ #include "intel_ddi.h"
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index 51d1d59c1619..dcfca443f479 100644
+--- a/drivers/gpu/drm/i915/intel_lvds.c
++++ b/drivers/gpu/drm/i915/intel_lvds.c
+@@ -40,6 +40,7 @@
+ #include <drm/i915_drm.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_connector.h"
+ #include "intel_drv.h"
+ #include "intel_lvds.h"
+diff --git a/drivers/gpu/drm/i915/intel_pipe_crc.c b/drivers/gpu/drm/i915/intel_pipe_crc.c
+index e7c7be4911c1..40f978ac07ca 100644
+--- a/drivers/gpu/drm/i915/intel_pipe_crc.c
++++ b/drivers/gpu/drm/i915/intel_pipe_crc.c
+@@ -29,6 +29,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/seq_file.h>
+ 
++#include "intel_atomic.h"
+ #include "intel_drv.h"
+ #include "intel_pipe_crc.h"
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 3ba31a71ff97..efae44d7f68b 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -35,6 +35,7 @@
+ 
+ #include "i915_drv.h"
+ #include "i915_irq.h"
++#include "intel_atomic.h"
+ #include "intel_drv.h"
+ #include "intel_fbc.h"
+ #include "intel_pm.h"
+diff --git a/drivers/gpu/drm/i915/intel_sdvo.c b/drivers/gpu/drm/i915/intel_sdvo.c
+index 894f5909c3f7..20a1ea31d880 100644
+--- a/drivers/gpu/drm/i915/intel_sdvo.c
++++ b/drivers/gpu/drm/i915/intel_sdvo.c
+@@ -37,6 +37,7 @@
+ #include <drm/i915_drm.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_connector.h"
+ #include "intel_drv.h"
+ #include "intel_fifo_underrun.h"
+diff --git a/drivers/gpu/drm/i915/vlv_dsi.c b/drivers/gpu/drm/i915/vlv_dsi.c
+index 5d343a09d530..bc5b782b053c 100644
+--- a/drivers/gpu/drm/i915/vlv_dsi.c
++++ b/drivers/gpu/drm/i915/vlv_dsi.c
+@@ -32,6 +32,7 @@
+ #include <drm/drm_mipi_dsi.h>
+ 
+ #include "i915_drv.h"
++#include "intel_atomic.h"
+ #include "intel_connector.h"
+ #include "intel_drv.h"
+ #include "intel_dsi.h"
+-- 
+2.17.1
+

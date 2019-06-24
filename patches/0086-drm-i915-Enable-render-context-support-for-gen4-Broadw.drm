@@ -1,0 +1,113 @@
+From 68224ad278876dc8df478fd7fe8c9c08ae6e9c03 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 19 Apr 2019 18:27:20 +0100
+Subject: [PATCH 086/529] drm/i915: Enable render context support for gen4
+ (Broadwater to Cantiga)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Broadwater and the rest of gen4  do support being able to saving and
+reloading context specific registers between contexts, providing isolation
+of the basic GPU state (as programmable by userspace). This allows
+userspace to assume that the GPU retains their state from one batch to the
+next, minimising the amount of state it needs to reload and manually save
+across batches.
+
+v2: CONSTANT_BUFFER woes
+
+Running through piglit turned up an interesting issue, a GPU hang inside
+the context load. The context image includes the CONSTANT_BUFFER command
+that loads an address into a on-gpu buffer, and the context load was
+executing that immediately. However, since it was reading from the GTT
+there is no guarantee that the GTT retains the same configuration as
+when the context was saved, resulting in stray reads and a GPU hang.
+
+Having tried issuing a CONSTANT_BUFFER (to disable the command) from the
+ring before saving the context to no avail, we resort to patching out
+the instruction inside the context image before loading.
+
+This does impose that gen4 always reissues CONSTANT_BUFFER commands on
+each batch, but due to the use of a shared GTT that was and will remain
+a requirement.
+
+v3: ECOSKPD to the rescue
+
+Ville found the magic bit in the ECOSKPD to disable saving and restoring
+the CONSTANT_BUFFER from the context image, thereby completely avoiding
+the GPU hangs from chasing invalid pointers. This appears to be the
+default behaviour for gen5, and so we just need to tweak gen4 to match.
+
+v4: Fix spelling of ECOSKPD and discover it already exists
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Cc: Kenneth Graunke <kenneth@whitecape.org>
+Reviewed-by: Kenneth Graunke <kenneth@whitecape.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190419172720.5462-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c  |  2 +-
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c | 14 ++++++++++++++
+ drivers/gpu/drm/i915/i915_reg.h            |  1 +
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index ce52030bf71d..7c899984b0d4 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -213,6 +213,7 @@ __intel_engine_context_size(struct drm_i915_private *dev_priv, u8 class)
+ 			return round_up(GEN6_CXT_TOTAL_SIZE(cxt_size) * 64,
+ 					PAGE_SIZE);
+ 		case 5:
++		case 4:
+ 			/*
+ 			 * There is a discrepancy here between the size reported
+ 			 * by the register and the size of the context layout
+@@ -229,7 +230,6 @@ __intel_engine_context_size(struct drm_i915_private *dev_priv, u8 class)
+ 					 cxt_size * 64,
+ 					 cxt_size - 1);
+ 			return round_up(cxt_size * 64, PAGE_SIZE);
+-		case 4:
+ 		case 3:
+ 		case 2:
+ 		/* For the special day when i810 gets merged. */
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index 875dd458c447..4afb19e7c647 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -834,6 +834,20 @@ static int rcs_resume(struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *dev_priv = engine->i915;
+ 
++	/*
++	 * Disable CONSTANT_BUFFER before it is loaded from the context
++	 * image. For as it is loaded, it is executed and the stored
++	 * address may no longer be valid, leading to a GPU hang.
++	 *
++	 * This imposes the requirement that userspace reload their
++	 * CONSTANT_BUFFER on every batch, fortunately a requirement
++	 * they are already accustomed to from before contexts were
++	 * enabled.
++	 */
++	if (IS_GEN(dev_priv, 4))
++		I915_WRITE(ECOSKPD,
++			   _MASKED_BIT_ENABLE(ECO_CONSTANT_BUFFER_SR_DISABLE));
++
+ 	/* WaTimedSingleVertexDispatch:cl,bw,ctg,elk,ilk,snb */
+ 	if (IS_GEN_RANGE(dev_priv, 4, 6))
+ 		I915_WRITE(MI_MODE, _MASKED_BIT_ENABLE(VS_TIMER_DISPATCH));
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 13d6bd4e17b2..8e302e0da406 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -2871,6 +2871,7 @@ enum i915_power_well_id {
+ #define GFX_FLSH_CNTL_GEN6	_MMIO(0x101008)
+ #define   GFX_FLSH_CNTL_EN	(1 << 0)
+ #define ECOSKPD		_MMIO(0x21d0)
++#define   ECO_CONSTANT_BUFFER_SR_DISABLE REG_BIT(4)
+ #define   ECO_GATING_CX_ONLY	(1 << 3)
+ #define   ECO_FLIP_DONE		(1 << 0)
+ 
+-- 
+2.17.1
+

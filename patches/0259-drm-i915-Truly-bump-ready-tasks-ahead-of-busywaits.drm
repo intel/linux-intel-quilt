@@ -1,0 +1,120 @@
+From 23199f64bf98e412e65859f1bdc9d9a38acfdb19 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 15 May 2019 14:00:49 +0100
+Subject: [PATCH 259/529] drm/i915: Truly bump ready tasks ahead of busywaits
+
+In commit b7404c7ecb38 ("drm/i915: Bump ready tasks ahead of
+busywaits"), I tried cutting a corner in order to not install a signal
+for each of our dependencies, and only listened to requests on which we
+were intending to busywait. The compromise that was made was that
+instead of then being able to promote the request with a full
+NOSEMAPHORE like its non-busywaiting brethren, as we had not ensured we
+had cleared the semaphore chain, we settled for only using the NEWCLIENT
+boost. With an over saturated system with multiple NEWCLIENTS in flight
+at any time, this was found to be an inadequate promotion and left us
+with a much poorer scheduling order than prior to using semaphores.
+
+The outcome of this patch, is that all requests have NOSEMAPHORE
+priority when they have no dependencies and are ready to run and not
+busywait, restoring the pre-semaphore ordering on saturated systems.
+
+We can demonstrate the effect of poor scheduling order by oversaturating
+the system using gem_wsim on a system with multiple vcs engines
+(i.e running the same workloads across more clients than required for
+peak throughput, e.g. media_load_balance_17i7.wsim -c4 -b context):
+
+x v5.1 (normalized)
++ tip
+* fix
++------------------------------------------------------------------------+
+|                                                                    x   |
+|                                                                    x   |
+|                                                                    x   |
+|                                                                    x   |
+|                                                                   %x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %%x   |
+|                                                                  %#x   |
+|                                                                  %#x   |
+|                                                                  %#x   |
+|                                                                  %#x   |
+|                                                                  %#x   |
+|         +                                                        %#xx  |
+|         +                                                        %#xx  |
+|         +                                                       %%#xx  |
+|         +                                                       %%#xx  |
+|         +                                                       %%#xx  |
+|         +                                                       %%#xx  |
+|         +                                                       %%##x  |
+|         +++                                                     %%##x  |
+|         +++                                                     %%##x  |
+|         +++                                                     %%##x  |
+|        ++++                                                     %%##x  |
+|        ++++                                                     %%##x  |
+|        ++++                                                     %%##xx |
+|        ++++                                                     %###xx |
+|        ++++                                                     %###xx |
+|        ++++                                                     %###xx |
+|        ++++                                                     %###xx |
+|        ++++ +                                                   %#O#xx |
+|        ++++ +                                                   %#O#xx |
+|        ++++++ +                                                 %#O#xx |
+|       ++++++++++                                                %OOOxxx|
+|       ++++++++++       +                                       %#OOO#xx|
+|     + ++++++++++++ ++ +++++    +                        ++    @@OOOO#xx|
+|                                                                   |A_| |
+||__________M_______A____________________|                               |
+|                                                                 |A_|   |
++------------------------------------------------------------------------+
+    N           Min           Max        Median           Avg        Stddev
+x 120       0.99456       1.00628      0.999985     1.0001545  0.0024387139
++ 120      0.873021       1.00037      0.884134    0.90148752   0.039190862
+Difference at 99.5% confidence
+	-0.098667 +/- 0.0110762
+	-9.86517% +/- 1.10745%
+	(Student's t, pooled s = 0.0277657)
+% 120      0.990207       1.00165     0.9970265    0.99699748     0.0021024
+Difference at 99.5% confidence
+	-0.003157 +/- 0.000908245
+	-0.315651% +/- 0.0908105%
+	(Student's t, pooled s = 0.00227678)
+
+Fixes: b7404c7ecb38 ("drm/i915: Bump ready tasks ahead of busywaits")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Dmitry Rogozhkin <dmitry.v.rogozhkin@intel.com>
+Cc: Dmitry Ermilov <dmitry.ermilov@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190515130052.4475-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_request.c | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 3fe06b9d7e71..2fca0b59578d 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -832,12 +832,6 @@ emit_semaphore_wait(struct i915_request *to,
+ 	if (err < 0)
+ 		return err;
+ 
+-	err = i915_sw_fence_await_dma_fence(&to->semaphore,
+-					    &from->fence, 0,
+-					    I915_FENCE_GFP);
+-	if (err < 0)
+-		return err;
+-
+ 	/* Only submit our spinner after the signaler is running! */
+ 	err = i915_request_await_execution(to, from, gfp);
+ 	if (err)
+-- 
+2.17.1
+

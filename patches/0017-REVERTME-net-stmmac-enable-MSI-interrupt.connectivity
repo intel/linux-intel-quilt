@@ -1,0 +1,74 @@
+From 25b12e583c449e201ac496ff48a055c05e7068b8 Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Sat, 8 Jun 2019 07:05:05 +0800
+Subject: [PATCH 17/23] REVERTME: net: stmmac: enable MSI interrupt
+
+Although the driver requested for multi-MSI vector, but currently
+it will only use the common single MSI which is MAC_IRQ map to
+vector number 29.
+
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c  | 24 +++++++++++++++----
+ include/linux/stmmac.h                        |  1 +
+ 2 files changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 2cd880b331ce..705c29950ef1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -436,12 +436,27 @@ static int stmmac_pci_probe(struct pci_dev *pdev,
+ 	if (ret)
+ 		return ret;
+ 
+-	pci_enable_msi(pdev);
+-
+ 	memset(&res, 0, sizeof(res));
+ 	res.addr = pcim_iomap_table(pdev)[i];
+-	res.wol_irq = pdev->irq;
+-	res.irq = pdev->irq;
++
++	ret = pci_alloc_irq_vectors(pdev, 1, STMMAC_MAX_MSI_COUNT, PCI_IRQ_MSI);
++
++	if (ret > 1) {
++		dev_info(&pdev->dev, "%s: Multi-MSI with %d vectors\n",
++			 __func__, ret);
++		/* MAC MSI vector offset at 29 */
++		res.irq = pci_irq_vector(pdev, 29);
++	} else if (ret == 1) {
++		dev_info(&pdev->dev, "%s: Single MSI\n",
++			 __func__);
++		res.irq = pci_irq_vector(pdev, 0);
++	} else {
++		dev_info(&pdev->dev, "%s: Fall back to legacy IRQ\n",
++			 __func__);
++		res.irq = pdev->irq;
++	}
++
++	res.wol_irq = res.irq;
+ 	res.xpcs_irq = 0;
+ 
+ 	return stmmac_dvr_probe(&pdev->dev, plat, &res);
+@@ -459,6 +474,7 @@ static void stmmac_pci_remove(struct pci_dev *pdev)
+ 	int i;
+ 
+ 	stmmac_dvr_remove(&pdev->dev);
++	pci_free_irq_vectors(pdev);
+ 
+ 	for (i = 0; i <= PCI_STD_RESOURCE_END; i++) {
+ 		if (pci_resource_len(pdev, i) == 0)
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index 51aef8d0e325..8dab99fc91f8 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -17,6 +17,7 @@
+ #define MTL_MAX_RX_QUEUES	8
+ #define MTL_MAX_TX_QUEUES	8
+ #define STMMAC_CH_MAX		8
++#define STMMAC_MAX_MSI_COUNT	32
+ 
+ #define STMMAC_RX_COE_NONE	0
+ #define STMMAC_RX_COE_TYPE1	1
+-- 
+2.17.1
+

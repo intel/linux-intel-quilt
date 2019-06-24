@@ -1,0 +1,133 @@
+From b845c8112eb453bfa40c5b0006d30e6ceefccb0b Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 4 Jun 2019 16:24:08 +0100
+Subject: [PATCH 455/529] drm/i915: Skip context_barrier emission for unused
+ contexts
+
+The intent was to skip unused HW contexts by checking ce->state.
+However, this only works for execlists where the ppGTT pointers is
+stored inside the HW context. For gen7, the ppGTT is alongside the
+logical state and must be updated on all active engines but, crucially,
+only on active engines. As we need different checks, and to keep
+context_barrier_task() agnostic, pass in the predicate.
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=110836
+Fixes: 62c8e423450d ("drm/i915: Skip unused contexts for context_barrier_task()")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190604152408.24468-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gem/i915_gem_context.c   | 15 ++++++++++++++-
+ .../drm/i915/gem/selftests/i915_gem_context.c | 19 +++++++++++++++----
+ 2 files changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context.c b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+index 6cac1c144c79..dd9aa77e38ae 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+@@ -915,6 +915,7 @@ static void cb_retire(struct i915_active *base)
+ I915_SELFTEST_DECLARE(static intel_engine_mask_t context_barrier_inject_fault);
+ static int context_barrier_task(struct i915_gem_context *ctx,
+ 				intel_engine_mask_t engines,
++				bool (*skip)(struct intel_context *ce, void *data),
+ 				int (*emit)(struct i915_request *rq, void *data),
+ 				void (*task)(void *data),
+ 				void *data)
+@@ -944,7 +945,10 @@ static int context_barrier_task(struct i915_gem_context *ctx,
+ 			break;
+ 		}
+ 
+-		if (!(ce->engine->mask & engines) || !ce->state)
++		if (!(ce->engine->mask & engines))
++			continue;
++
++		if (skip && skip(ce, data))
+ 			continue;
+ 
+ 		rq = intel_context_create_request(ce);
+@@ -1071,6 +1075,14 @@ static int emit_ppgtt_update(struct i915_request *rq, void *data)
+ 	return 0;
+ }
+ 
++static bool skip_ppgtt_update(struct intel_context *ce, void *data)
++{
++	if (HAS_LOGICAL_RING_CONTEXTS(ce->engine->i915))
++		return !ce->state;
++	else
++		return !atomic_read(&ce->pin_count);
++}
++
+ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 		     struct i915_gem_context *ctx,
+ 		     struct drm_i915_gem_context_param *args)
+@@ -1118,6 +1130,7 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 	 * only indirectly through the context.
+ 	 */
+ 	err = context_barrier_task(ctx, ALL_ENGINES,
++				   skip_ppgtt_update,
+ 				   emit_ppgtt_update,
+ 				   set_ppgtt_barrier,
+ 				   old);
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+index 1bc3b8026400..41105f6ed206 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+@@ -1619,6 +1619,11 @@ __engine_name(struct drm_i915_private *i915, intel_engine_mask_t engines)
+ 	return "none";
+ }
+ 
++static bool skip_unused_engines(struct intel_context *ce, void *data)
++{
++	return !ce->state;
++}
++
+ static void mock_barrier_task(void *data)
+ {
+ 	unsigned int *counter = data;
+@@ -1651,7 +1656,7 @@ static int mock_context_barrier(void *arg)
+ 
+ 	counter = 0;
+ 	err = context_barrier_task(ctx, 0,
+-				   NULL, mock_barrier_task, &counter);
++				   NULL, NULL, mock_barrier_task, &counter);
+ 	if (err) {
+ 		pr_err("Failed at line %d, err=%d\n", __LINE__, err);
+ 		goto out;
+@@ -1664,7 +1669,10 @@ static int mock_context_barrier(void *arg)
+ 
+ 	counter = 0;
+ 	err = context_barrier_task(ctx, ALL_ENGINES,
+-				   NULL, mock_barrier_task, &counter);
++				   skip_unused_engines,
++				   NULL,
++				   mock_barrier_task,
++				   &counter);
+ 	if (err) {
+ 		pr_err("Failed at line %d, err=%d\n", __LINE__, err);
+ 		goto out;
+@@ -1685,7 +1693,7 @@ static int mock_context_barrier(void *arg)
+ 	counter = 0;
+ 	context_barrier_inject_fault = BIT(RCS0);
+ 	err = context_barrier_task(ctx, ALL_ENGINES,
+-				   NULL, mock_barrier_task, &counter);
++				   NULL, NULL, mock_barrier_task, &counter);
+ 	context_barrier_inject_fault = 0;
+ 	if (err == -ENXIO)
+ 		err = 0;
+@@ -1700,7 +1708,10 @@ static int mock_context_barrier(void *arg)
+ 
+ 	counter = 0;
+ 	err = context_barrier_task(ctx, ALL_ENGINES,
+-				   NULL, mock_barrier_task, &counter);
++				   skip_unused_engines,
++				   NULL,
++				   mock_barrier_task,
++				   &counter);
+ 	if (err) {
+ 		pr_err("Failed at line %d, err=%d\n", __LINE__, err);
+ 		goto out;
+-- 
+2.17.1
+
