@@ -1,0 +1,70 @@
+From 30f103722c3d44eb9ddc232d2094eb619b78aa07 Mon Sep 17 00:00:00 2001
+From: Roland Hii <roland.king.guan.hii@intel.com>
+Date: Wed, 27 Jun 2018 03:00:13 +0800
+Subject: [PATCH 07/23] net: stmmac: set IC bit when transmitting frames with
+ HW timestamp
+
+When transmitting certain PTP frames, e.g. SYNC and DELAY_REQ, the
+PTP daemon, e.g. ptp4l, is polling the driver for the frame transmit
+hardware timestamp. The polling will most likely timeout if the tx
+coalesce is enabled due to the Interrupt-on-Completion (IC) bit is
+not set in tx descriptor for those frames.
+
+This patch will ignore the tx coalesce parameter and set the IC bit
+when transmitting PTP frames which need to report out the frame
+transmit hardware timestamp to user space.
+
+Reviewed-by: Zhang, Baoli <baoli.zhang@intel.com>
+Signed-off-by: Roland Hii <roland.king.guan.hii@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 22 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 75d8b3d967aa..bba27199fdb1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2987,12 +2987,15 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	/* Manage tx mitigation */
+ 	tx_q->tx_count_frames += nfrags + 1;
+-	if (priv->tx_coal_frames <= tx_q->tx_count_frames) {
++	if (likely(priv->tx_coal_frames > tx_q->tx_count_frames) &&
++	    !(priv->synopsys_id >= DWMAC_CORE_4_00 &&
++	    (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
++	    priv->hwts_tx_en)) {
++		stmmac_tx_timer_arm(priv, queue);
++	} else {
++		tx_q->tx_count_frames = 0;
+ 		stmmac_set_tx_ic(priv, desc);
+ 		priv->xstats.tx_set_ic_bit++;
+-		tx_q->tx_count_frames = 0;
+-	} else {
+-		stmmac_tx_timer_arm(priv, queue);
+ 	}
+ 
+ 	skb_tx_timestamp(skb);
+@@ -3206,12 +3209,15 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	 * element in case of no SG.
+ 	 */
+ 	tx_q->tx_count_frames += nfrags + 1;
+-	if (priv->tx_coal_frames <= tx_q->tx_count_frames) {
++	if (likely(priv->tx_coal_frames > tx_q->tx_count_frames) &&
++	    !(priv->synopsys_id >= DWMAC_CORE_4_00 &&
++	    (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
++	    priv->hwts_tx_en)) {
++		stmmac_tx_timer_arm(priv, queue);
++	} else {
++		tx_q->tx_count_frames = 0;
+ 		stmmac_set_tx_ic(priv, desc);
+ 		priv->xstats.tx_set_ic_bit++;
+-		tx_q->tx_count_frames = 0;
+-	} else {
+-		stmmac_tx_timer_arm(priv, queue);
+ 	}
+ 
+ 	skb_tx_timestamp(skb);
+-- 
+2.17.1
+

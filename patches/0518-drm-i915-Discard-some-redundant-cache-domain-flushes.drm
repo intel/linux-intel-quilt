@@ -1,0 +1,118 @@
+From ec9a4778acc3a3658655fbef01ed99ba1abbbd35 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 14 Jun 2019 12:10:52 +0100
+Subject: [PATCH 518/529] drm/i915: Discard some redundant cache domain flushes
+
+Since commit a679f58d0510 ("drm/i915: Flush pages on acquisition"), we
+flush objects on acquire their pages and as such when we create an
+object for the purpose of writing into it, we do not need to manually
+flush.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Matthew Auld <matthew.william.auld@gmail.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190614111053.25615-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c |  6 ------
+ drivers/gpu/drm/i915/gt/selftest_workarounds.c        |  6 ------
+ drivers/gpu/drm/i915/intel_guc_log.c                  | 11 +----------
+ drivers/gpu/drm/i915/intel_overlay.c                  |  8 --------
+ 4 files changed, 1 insertion(+), 30 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+index 74b0e5871c4b..9e2878a59023 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+@@ -209,12 +209,6 @@ gpu_fill_dw(struct i915_vma *vma, u64 offset, unsigned long count, u32 value)
+ 	i915_gem_object_flush_map(obj);
+ 	i915_gem_object_unpin_map(obj);
+ 
+-	i915_gem_object_lock(obj);
+-	err = i915_gem_object_set_to_gtt_domain(obj, false);
+-	i915_gem_object_unlock(obj);
+-	if (err)
+-		goto err;
+-
+ 	vma = i915_vma_instance(obj, vma->vm, NULL);
+ 	if (IS_ERR(vma)) {
+ 		err = PTR_ERR(vma);
+diff --git a/drivers/gpu/drm/i915/gt/selftest_workarounds.c b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+index c8d335d63f9c..93e9579b8a4f 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+@@ -368,12 +368,6 @@ static struct i915_vma *create_batch(struct i915_gem_context *ctx)
+ 	if (err)
+ 		goto err_obj;
+ 
+-	i915_gem_object_lock(obj);
+-	err = i915_gem_object_set_to_wc_domain(obj, true);
+-	i915_gem_object_unlock(obj);
+-	if (err)
+-		goto err_obj;
+-
+ 	return vma;
+ 
+ err_obj:
+diff --git a/drivers/gpu/drm/i915/intel_guc_log.c b/drivers/gpu/drm/i915/intel_guc_log.c
+index 67eadc82c396..4f9c53681f92 100644
+--- a/drivers/gpu/drm/i915/intel_guc_log.c
++++ b/drivers/gpu/drm/i915/intel_guc_log.c
+@@ -344,29 +344,20 @@ static void capture_logs_work(struct work_struct *work)
+ static int guc_log_map(struct intel_guc_log *log)
+ {
+ 	void *vaddr;
+-	int ret;
+ 
+ 	lockdep_assert_held(&log->relay.lock);
+ 
+ 	if (!log->vma)
+ 		return -ENODEV;
+ 
+-	i915_gem_object_lock(log->vma->obj);
+-	ret = i915_gem_object_set_to_wc_domain(log->vma->obj, true);
+-	i915_gem_object_unlock(log->vma->obj);
+-	if (ret)
+-		return ret;
+-
+ 	/*
+ 	 * Create a WC (Uncached for read) vmalloc mapping of log
+ 	 * buffer pages, so that we can directly get the data
+ 	 * (up-to-date) from memory.
+ 	 */
+ 	vaddr = i915_gem_object_pin_map(log->vma->obj, I915_MAP_WC);
+-	if (IS_ERR(vaddr)) {
+-		DRM_ERROR("Couldn't map log buffer pages %d\n", ret);
++	if (IS_ERR(vaddr))
+ 		return PTR_ERR(vaddr);
+-	}
+ 
+ 	log->relay.buf_addr = vaddr;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_overlay.c b/drivers/gpu/drm/i915/intel_overlay.c
+index a2ac06a08715..21339b7f6a3e 100644
+--- a/drivers/gpu/drm/i915/intel_overlay.c
++++ b/drivers/gpu/drm/i915/intel_overlay.c
+@@ -1377,12 +1377,6 @@ void intel_overlay_setup(struct drm_i915_private *dev_priv)
+ 	if (ret)
+ 		goto out_free;
+ 
+-	i915_gem_object_lock(overlay->reg_bo);
+-	ret = i915_gem_object_set_to_gtt_domain(overlay->reg_bo, true);
+-	i915_gem_object_unlock(overlay->reg_bo);
+-	if (ret)
+-		goto out_reg_bo;
+-
+ 	memset_io(overlay->regs, 0, sizeof(struct overlay_registers));
+ 	update_polyphase_filter(overlay->regs);
+ 	update_reg_attrs(overlay, overlay->regs);
+@@ -1391,8 +1385,6 @@ void intel_overlay_setup(struct drm_i915_private *dev_priv)
+ 	DRM_INFO("Initialized overlay support.\n");
+ 	return;
+ 
+-out_reg_bo:
+-	i915_gem_object_put(overlay->reg_bo);
+ out_free:
+ 	kfree(overlay);
+ }
+-- 
+2.17.1
+

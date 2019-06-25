@@ -1,0 +1,79 @@
+From d4ea17b847ef55a891328a6408a55bd528fa211d Mon Sep 17 00:00:00 2001
+From: Weifeng Voon <weifeng.voon@intel.com>
+Date: Wed, 5 Jun 2019 19:08:54 +0800
+Subject: [PATCH 09/23] net: stmmac: setup clk for EHL
+
+EHL DW EQOS is running on a 200Mhz clock. Setting up stmmac-clk,
+ptp clock and ptp_max_adj to 200Mhz.
+
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c    | 17 +++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_ptp.c    |  3 +++
+ include/linux/stmmac.h                          |  1 +
+ 3 files changed, 21 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 316a03aad688..74501af8f9b5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -9,6 +9,7 @@
+   Author: Giuseppe Cavallaro <peppe.cavallaro@st.com>
+ *******************************************************************************/
+ 
++#include <linux/clk-provider.h>
+ #include <linux/pci.h>
+ #include <linux/dmi.h>
+ 
+@@ -180,6 +181,22 @@ static int ehl_common_data(struct pci_dev *pdev,
+ 	plat->axi->axi_blen[1] = 8;
+ 	plat->axi->axi_blen[2] = 16;
+ 
++	/* Set PTP clock rate & PTP max adj for EHL as 200MHz */
++	plat->clk_ptp_rate = 200000000;
++	plat->ptp_max_adj = plat->clk_ptp_rate;
++
++	/* Set system clock */
++	clk_unregister_fixed_rate(plat->stmmac_clk);
++	plat->stmmac_clk = clk_register_fixed_rate(&pdev->dev,
++						   "stmmac-clk", NULL, 0,
++						   plat->clk_ptp_rate);
++
++	if (IS_ERR(plat->stmmac_clk)) {
++		dev_warn(&pdev->dev, "Fail to register stmmac-clk\n");
++		plat->stmmac_clk = NULL;
++	}
++	clk_prepare_enable(plat->stmmac_clk);
++
+ 	/* Set default value for multicast hash bins */
+ 	plat->multicast_filter_bins = HASH_TABLE_SIZE;
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index c48224973a37..173493db038c 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -194,6 +194,9 @@ void stmmac_ptp_register(struct stmmac_priv *priv)
+ 		priv->pps[i].available = true;
+ 	}
+ 
++	if (priv->plat->ptp_max_adj)
++		stmmac_ptp_clock_ops.max_adj = priv->plat->ptp_max_adj;
++
+ 	stmmac_ptp_clock_ops.n_per_out = priv->dma_cap.pps_out_num;
+ 
+ 	spin_lock_init(&priv->ptp_lock);
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index e35b82d00882..2b2bc134cbde 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -173,6 +173,7 @@ struct plat_stmmacenet_data {
+ 	struct clk *clk_ptp_ref;
+ 	unsigned int clk_ptp_rate;
+ 	unsigned int clk_ref_rate;
++	s32 ptp_max_adj;
+ 	struct reset_control *stmmac_rst;
+ 	struct stmmac_axi *axi;
+ 	int has_gmac4;
+-- 
+2.17.1
+

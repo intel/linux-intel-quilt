@@ -1,0 +1,94 @@
+From f9964811f7eca12b62b4e9616f0a21383d48ca6c Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 2 May 2019 21:30:09 +0100
+Subject: [PATCH 154/529] drm/i915/guc: Fix runtime suspend
+
+We are not allowed to rpm_get() inside the runtime-suspend callback, so
+split the intel_uc_suspend() into the core that assumes the caller holds
+the wakeref (intel_uc_runtime_suspend), and one that acquires the wakeref
+as necessary (intel_uc_suspend).
+
+Reported-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Fixes: 79ffac8599c4 ("drm/i915: Invert the GEM wakeref hierarchy")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Reviewed-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190502203009.15727-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_drv.c |  2 +-
+ drivers/gpu/drm/i915/intel_uc.c | 25 +++++++++++++++++--------
+ drivers/gpu/drm/i915/intel_uc.h |  1 +
+ 3 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index e6ce530d7581..5ed864752c7b 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -2890,7 +2890,7 @@ static int intel_runtime_suspend(struct device *kdev)
+ 	 */
+ 	i915_gem_runtime_suspend(dev_priv);
+ 
+-	intel_uc_suspend(dev_priv);
++	intel_uc_runtime_suspend(dev_priv);
+ 
+ 	intel_runtime_pm_disable_interrupts(dev_priv);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_uc.c b/drivers/gpu/drm/i915/intel_uc.c
+index 01ea36e3150c..1ee70df51627 100644
+--- a/drivers/gpu/drm/i915/intel_uc.c
++++ b/drivers/gpu/drm/i915/intel_uc.c
+@@ -481,22 +481,31 @@ void intel_uc_reset_prepare(struct drm_i915_private *i915)
+ 	intel_uc_sanitize(i915);
+ }
+ 
+-void intel_uc_suspend(struct drm_i915_private *i915)
++void intel_uc_runtime_suspend(struct drm_i915_private *i915)
+ {
+ 	struct intel_guc *guc = &i915->guc;
+-	intel_wakeref_t wakeref;
+ 	int err;
+ 
+ 	if (guc->fw.load_status != INTEL_UC_FIRMWARE_SUCCESS)
+ 		return;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
+-		err = intel_guc_suspend(guc);
+-		if (err)
+-			DRM_DEBUG_DRIVER("Failed to suspend GuC, err=%d", err);
++	err = intel_guc_suspend(guc);
++	if (err)
++		DRM_DEBUG_DRIVER("Failed to suspend GuC, err=%d", err);
+ 
+-		guc_disable_communication(guc);
+-	}
++	guc_disable_communication(guc);
++}
++
++void intel_uc_suspend(struct drm_i915_private *i915)
++{
++	struct intel_guc *guc = &i915->guc;
++	intel_wakeref_t wakeref;
++
++	if (guc->fw.load_status != INTEL_UC_FIRMWARE_SUCCESS)
++		return;
++
++	with_intel_runtime_pm(i915, wakeref)
++		intel_uc_runtime_suspend(i915);
+ }
+ 
+ int intel_uc_resume(struct drm_i915_private *i915)
+diff --git a/drivers/gpu/drm/i915/intel_uc.h b/drivers/gpu/drm/i915/intel_uc.h
+index c92436b1f1c5..3ea06c87dfcd 100644
+--- a/drivers/gpu/drm/i915/intel_uc.h
++++ b/drivers/gpu/drm/i915/intel_uc.h
+@@ -40,6 +40,7 @@ int intel_uc_init(struct drm_i915_private *dev_priv);
+ void intel_uc_fini(struct drm_i915_private *dev_priv);
+ void intel_uc_reset_prepare(struct drm_i915_private *i915);
+ void intel_uc_suspend(struct drm_i915_private *i915);
++void intel_uc_runtime_suspend(struct drm_i915_private *i915);
+ int intel_uc_resume(struct drm_i915_private *dev_priv);
+ 
+ static inline bool intel_uc_is_using_guc(struct drm_i915_private *i915)
+-- 
+2.17.1
+

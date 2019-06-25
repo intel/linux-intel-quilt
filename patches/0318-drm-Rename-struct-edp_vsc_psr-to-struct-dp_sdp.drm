@@ -1,0 +1,191 @@
+From 6e1c080175808892b9ee47cf976af4d5f92b1bf9 Mon Sep 17 00:00:00 2001
+From: Gwan-gyeong Mun <gwan-gyeong.mun@intel.com>
+Date: Tue, 21 May 2019 15:17:17 +0300
+Subject: [PATCH 318/529] drm: Rename struct edp_vsc_psr to struct dp_sdp
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+VSC SDP Payload for PSR is one of data block type of SDP (Secondaray Data
+Packet). In order to generalize SDP packet structure name, it renames
+struct edp_vsc_psr to struct dp_sdp. And each SDP data blocks have
+different usages, each SDP type has different reserved data blocks and
+Video_Stream_Configuration Extension VESA SDP might use all of Data Blocks
+as Extended INFORFRAME Data Byte. so it makes Data Block variables as
+array type. And it adds comments of details of DB of VSC SDP Payload
+for Pixel Encoding/Colorimetry Format. This comments follows DP 1.4a spec,
+section 2.2.5.7.5, chapter "VSC SDP Payload for Pixel Encoding/Colorimetry
+Format".
+
+v7: Addressed review comments from Ville.
+
+v9: Rename a member value name DB to db on struct dp_sdp [Laurent]
+
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Signed-off-by: Gwan-gyeong Mun <gwan-gyeong.mun@intel.com>
+Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Acked-by: Laurent Pinchart <laurent.pinchart@ideasonboard.com>
+Acked-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190521121721.32010-3-gwan-gyeong.mun@intel.com
+---
+ .../drm/bridge/analogix/analogix_dp_core.c    | 12 +++----
+ .../drm/bridge/analogix/analogix_dp_core.h    |  2 +-
+ .../gpu/drm/bridge/analogix/analogix_dp_reg.c | 10 +++---
+ drivers/gpu/drm/i915/intel_psr.c              |  2 +-
+ include/drm/drm_dp_helper.h                   | 33 +++++++++++++------
+ 5 files changed, 36 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+index 3666c308c34a..be0cc2f8027c 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+@@ -111,7 +111,7 @@ EXPORT_SYMBOL_GPL(analogix_dp_psr_enabled);
+ 
+ int analogix_dp_enable_psr(struct analogix_dp_device *dp)
+ {
+-	struct edp_vsc_psr psr_vsc;
++	struct dp_sdp psr_vsc;
+ 
+ 	if (!dp->psr_enable)
+ 		return 0;
+@@ -123,8 +123,8 @@ int analogix_dp_enable_psr(struct analogix_dp_device *dp)
+ 	psr_vsc.sdp_header.HB2 = 0x2;
+ 	psr_vsc.sdp_header.HB3 = 0x8;
+ 
+-	psr_vsc.DB0 = 0;
+-	psr_vsc.DB1 = EDP_VSC_PSR_STATE_ACTIVE | EDP_VSC_PSR_CRC_VALUES_VALID;
++	psr_vsc.db[0] = 0;
++	psr_vsc.db[1] = EDP_VSC_PSR_STATE_ACTIVE | EDP_VSC_PSR_CRC_VALUES_VALID;
+ 
+ 	return analogix_dp_send_psr_spd(dp, &psr_vsc, true);
+ }
+@@ -132,7 +132,7 @@ EXPORT_SYMBOL_GPL(analogix_dp_enable_psr);
+ 
+ int analogix_dp_disable_psr(struct analogix_dp_device *dp)
+ {
+-	struct edp_vsc_psr psr_vsc;
++	struct dp_sdp psr_vsc;
+ 	int ret;
+ 
+ 	if (!dp->psr_enable)
+@@ -145,8 +145,8 @@ int analogix_dp_disable_psr(struct analogix_dp_device *dp)
+ 	psr_vsc.sdp_header.HB2 = 0x2;
+ 	psr_vsc.sdp_header.HB3 = 0x8;
+ 
+-	psr_vsc.DB0 = 0;
+-	psr_vsc.DB1 = 0;
++	psr_vsc.db[0] = 0;
++	psr_vsc.db[1] = 0;
+ 
+ 	ret = drm_dp_dpcd_writeb(&dp->aux, DP_SET_POWER, DP_SET_POWER_D0);
+ 	if (ret != 1) {
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.h b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.h
+index 8d82f2555880..0133fb361ecb 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.h
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.h
+@@ -250,7 +250,7 @@ void analogix_dp_enable_scrambling(struct analogix_dp_device *dp);
+ void analogix_dp_disable_scrambling(struct analogix_dp_device *dp);
+ void analogix_dp_enable_psr_crc(struct analogix_dp_device *dp);
+ int analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
+-			     struct edp_vsc_psr *vsc, bool blocking);
++			     struct dp_sdp *vsc, bool blocking);
+ ssize_t analogix_dp_transfer(struct analogix_dp_device *dp,
+ 			     struct drm_dp_aux_msg *msg);
+ 
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
+index 7ae311aa13a5..98d8fe1400ed 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_reg.c
+@@ -1037,7 +1037,7 @@ static ssize_t analogix_dp_get_psr_status(struct analogix_dp_device *dp)
+ }
+ 
+ int analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
+-			     struct edp_vsc_psr *vsc, bool blocking)
++			     struct dp_sdp *vsc, bool blocking)
+ {
+ 	unsigned int val;
+ 	int ret;
+@@ -1065,8 +1065,8 @@ int analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
+ 	writel(0x5D, dp->reg_base + ANALOGIX_DP_SPD_PB3);
+ 
+ 	/* configure DB0 / DB1 values */
+-	writel(vsc->DB0, dp->reg_base + ANALOGIX_DP_VSC_SHADOW_DB0);
+-	writel(vsc->DB1, dp->reg_base + ANALOGIX_DP_VSC_SHADOW_DB1);
++	writel(vsc->db[0], dp->reg_base + ANALOGIX_DP_VSC_SHADOW_DB0);
++	writel(vsc->db[1], dp->reg_base + ANALOGIX_DP_VSC_SHADOW_DB1);
+ 
+ 	/* set reuse spd inforframe */
+ 	val = readl(dp->reg_base + ANALOGIX_DP_VIDEO_CTL_3);
+@@ -1088,8 +1088,8 @@ int analogix_dp_send_psr_spd(struct analogix_dp_device *dp,
+ 
+ 	ret = readx_poll_timeout(analogix_dp_get_psr_status, dp, psr_status,
+ 		psr_status >= 0 &&
+-		((vsc->DB1 && psr_status == DP_PSR_SINK_ACTIVE_RFB) ||
+-		(!vsc->DB1 && psr_status == DP_PSR_SINK_INACTIVE)), 1500,
++		((vsc->db[1] && psr_status == DP_PSR_SINK_ACTIVE_RFB) ||
++		(!vsc->db[1] && psr_status == DP_PSR_SINK_INACTIVE)), 1500,
+ 		DP_TIMEOUT_PSR_LOOP_MS * 1000);
+ 	if (ret) {
+ 		dev_warn(dp->dev, "Failed to apply PSR %d\n", ret);
+diff --git a/drivers/gpu/drm/i915/intel_psr.c b/drivers/gpu/drm/i915/intel_psr.c
+index 2a547a128a37..01ca502099df 100644
+--- a/drivers/gpu/drm/i915/intel_psr.c
++++ b/drivers/gpu/drm/i915/intel_psr.c
+@@ -342,7 +342,7 @@ static void intel_psr_setup_vsc(struct intel_dp *intel_dp,
+ {
+ 	struct intel_digital_port *intel_dig_port = dp_to_dig_port(intel_dp);
+ 	struct drm_i915_private *dev_priv = dp_to_i915(intel_dp);
+-	struct edp_vsc_psr psr_vsc;
++	struct dp_sdp psr_vsc;
+ 
+ 	if (dev_priv->psr.psr2_enabled) {
+ 		/* Prepare VSC Header for SU as per EDP 1.4 spec, Table 6.11 */
+diff --git a/include/drm/drm_dp_helper.h b/include/drm/drm_dp_helper.h
+index 97ce790a5b5a..3fc534ee8174 100644
+--- a/include/drm/drm_dp_helper.h
++++ b/include/drm/drm_dp_helper.h
+@@ -1083,17 +1083,30 @@ struct dp_sdp_header {
+ #define EDP_SDP_HEADER_VALID_PAYLOAD_BYTES	0x1F
+ #define DP_SDP_PPS_HEADER_PAYLOAD_BYTES_MINUS_1 0x7F
+ 
+-struct edp_vsc_psr {
++/**
++ * struct dp_sdp - DP secondary data packet
++ * @sdp_header: DP secondary data packet header
++ * @db: DP secondaray data packet data blocks
++ * VSC SDP Payload for PSR
++ * db[0]: Stereo Interface
++ * db[1]: 0 - PSR State; 1 - Update RFB; 2 - CRC Valid
++ * db[2]: CRC value bits 7:0 of the R or Cr component
++ * db[3]: CRC value bits 15:8 of the R or Cr component
++ * db[4]: CRC value bits 7:0 of the G or Y component
++ * db[5]: CRC value bits 15:8 of the G or Y component
++ * db[6]: CRC value bits 7:0 of the B or Cb component
++ * db[7]: CRC value bits 15:8 of the B or Cb component
++ * db[8] - db[31]: Reserved
++ * VSC SDP Payload for Pixel Encoding/Colorimetry Format
++ * db[0] - db[15]: Reserved
++ * db[16]: Pixel Encoding and Colorimetry Formats
++ * db[17]: Dynamic Range and Component Bit Depth
++ * db[18]: Content Type
++ * db[19] - db[31]: Reserved
++ */
++struct dp_sdp {
+ 	struct dp_sdp_header sdp_header;
+-	u8 DB0; /* Stereo Interface */
+-	u8 DB1; /* 0 - PSR State; 1 - Update RFB; 2 - CRC Valid */
+-	u8 DB2; /* CRC value bits 7:0 of the R or Cr component */
+-	u8 DB3; /* CRC value bits 15:8 of the R or Cr component */
+-	u8 DB4; /* CRC value bits 7:0 of the G or Y component */
+-	u8 DB5; /* CRC value bits 15:8 of the G or Y component */
+-	u8 DB6; /* CRC value bits 7:0 of the B or Cb component */
+-	u8 DB7; /* CRC value bits 15:8 of the B or Cb component */
+-	u8 DB8_31[24]; /* Reserved */
++	u8 db[32];
+ } __packed;
+ 
+ #define EDP_VSC_PSR_STATE_ACTIVE	(1<<0)
+-- 
+2.17.1
+

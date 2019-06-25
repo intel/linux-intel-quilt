@@ -1,0 +1,150 @@
+From ab97c40095a227c4d3663cbee3ce70eea83e3b46 Mon Sep 17 00:00:00 2001
+From: Oscar Mateo <oscar.mateo@intel.com>
+Date: Mon, 27 May 2019 18:36:07 +0000
+Subject: [PATCH 365/529] drm/i915/guc: Create vfuncs for the GuC interrupts
+ control functions
+
+Controlling and handling of the GuC interrupts is Gen specific.
+Create virtual functions to avoid redundant runtime Gen checks.
+Gen-specific versions of these functions will follow.
+
+v2: move vfuncs to struct guc (Daniele)
+v3: rebased
+
+Signed-off-by: Oscar Mateo <oscar.mateo@intel.com>
+Signed-off-by: Michal Wajdeczko <michal.wajdeczko@intel.com>
+Cc: Rodrigo Vivi <rodrigo.vivi@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190527183613.17076-12-michal.wajdeczko@intel.com
+---
+ drivers/gpu/drm/i915/i915_irq.c  |  6 +++---
+ drivers/gpu/drm/i915/intel_guc.c |  8 ++++++--
+ drivers/gpu/drm/i915/intel_guc.h |  8 +++++++-
+ drivers/gpu/drm/i915/intel_uc.c  | 21 ++++++++++++++++++---
+ 4 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 233211fde0ea..607709a8c229 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -600,10 +600,10 @@ void gen9_enable_guc_interrupts(struct drm_i915_private *dev_priv)
+ 	assert_rpm_wakelock_held(dev_priv);
+ 
+ 	spin_lock_irq(&dev_priv->irq_lock);
+-	if (!dev_priv->guc.interrupts_enabled) {
++	if (!dev_priv->guc.interrupts.enabled) {
+ 		WARN_ON_ONCE(I915_READ(gen6_pm_iir(dev_priv)) &
+ 				       dev_priv->pm_guc_events);
+-		dev_priv->guc.interrupts_enabled = true;
++		dev_priv->guc.interrupts.enabled = true;
+ 		gen6_enable_pm_irq(dev_priv, dev_priv->pm_guc_events);
+ 	}
+ 	spin_unlock_irq(&dev_priv->irq_lock);
+@@ -614,7 +614,7 @@ void gen9_disable_guc_interrupts(struct drm_i915_private *dev_priv)
+ 	assert_rpm_wakelock_held(dev_priv);
+ 
+ 	spin_lock_irq(&dev_priv->irq_lock);
+-	dev_priv->guc.interrupts_enabled = false;
++	dev_priv->guc.interrupts.enabled = false;
+ 
+ 	gen6_disable_pm_irq(dev_priv, dev_priv->pm_guc_events);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_guc.c b/drivers/gpu/drm/i915/intel_guc.c
+index 538868a10168..28642bf977bd 100644
+--- a/drivers/gpu/drm/i915/intel_guc.c
++++ b/drivers/gpu/drm/i915/intel_guc.c
+@@ -86,10 +86,14 @@ void intel_guc_init_early(struct intel_guc *guc)
+ 	spin_lock_init(&guc->irq_lock);
+ 	guc->send = intel_guc_send_nop;
+ 	guc->handler = intel_guc_to_host_event_handler_nop;
+-	if (INTEL_GEN(i915) >= 11)
++	if (INTEL_GEN(i915) >= 11) {
+ 		guc->notify = gen11_guc_raise_irq;
+-	else
++	} else {
+ 		guc->notify = gen8_guc_raise_irq;
++		guc->interrupts.reset = gen9_reset_guc_interrupts;
++		guc->interrupts.enable = gen9_enable_guc_interrupts;
++		guc->interrupts.disable = gen9_disable_guc_interrupts;
++	}
+ }
+ 
+ static int guc_init_wq(struct intel_guc *guc)
+diff --git a/drivers/gpu/drm/i915/intel_guc.h b/drivers/gpu/drm/i915/intel_guc.h
+index d4b015ab8a36..cbfed7a77c8b 100644
+--- a/drivers/gpu/drm/i915/intel_guc.h
++++ b/drivers/gpu/drm/i915/intel_guc.h
+@@ -55,9 +55,15 @@ struct intel_guc {
+ 
+ 	/* intel_guc_recv interrupt related state */
+ 	spinlock_t irq_lock;
+-	bool interrupts_enabled;
+ 	unsigned int msg_enabled_mask;
+ 
++	struct {
++		bool enabled;
++		void (*reset)(struct drm_i915_private *i915);
++		void (*enable)(struct drm_i915_private *i915);
++		void (*disable)(struct drm_i915_private *i915);
++	} interrupts;
++
+ 	struct i915_vma *ads_vma;
+ 	struct i915_vma *stage_desc_pool;
+ 	void *stage_desc_pool_vaddr;
+diff --git a/drivers/gpu/drm/i915/intel_uc.c b/drivers/gpu/drm/i915/intel_uc.c
+index 3eb4f4320667..a5ba0f007959 100644
+--- a/drivers/gpu/drm/i915/intel_uc.c
++++ b/drivers/gpu/drm/i915/intel_uc.c
+@@ -218,11 +218,26 @@ static void guc_free_load_err_log(struct intel_guc *guc)
+ 		i915_gem_object_put(guc->load_err_log);
+ }
+ 
++static void guc_reset_interrupts(struct intel_guc *guc)
++{
++	guc->interrupts.reset(guc_to_i915(guc));
++}
++
++static void guc_enable_interrupts(struct intel_guc *guc)
++{
++	guc->interrupts.enable(guc_to_i915(guc));
++}
++
++static void guc_disable_interrupts(struct intel_guc *guc)
++{
++	guc->interrupts.disable(guc_to_i915(guc));
++}
++
+ static int guc_enable_communication(struct intel_guc *guc)
+ {
+ 	struct drm_i915_private *i915 = guc_to_i915(guc);
+ 
+-	gen9_enable_guc_interrupts(i915);
++	guc_enable_interrupts(guc);
+ 
+ 	if (HAS_GUC_CT(i915))
+ 		return intel_guc_ct_enable(&guc->ct);
+@@ -250,7 +265,7 @@ static void guc_disable_communication(struct intel_guc *guc)
+ 	if (HAS_GUC_CT(i915))
+ 		intel_guc_ct_disable(&guc->ct);
+ 
+-	gen9_disable_guc_interrupts(i915);
++	guc_disable_interrupts(guc);
+ 
+ 	guc->send = intel_guc_send_nop;
+ 	guc->handler = intel_guc_to_host_event_handler_nop;
+@@ -391,7 +406,7 @@ int intel_uc_init_hw(struct drm_i915_private *i915)
+ 
+ 	GEM_BUG_ON(!HAS_GUC(i915));
+ 
+-	gen9_reset_guc_interrupts(i915);
++	guc_reset_interrupts(guc);
+ 
+ 	/* WaEnableuKernelHeaderValidFix:skl */
+ 	/* WaEnableGuCBootHashCheckNotSet:skl,bxt,kbl */
+-- 
+2.17.1
+

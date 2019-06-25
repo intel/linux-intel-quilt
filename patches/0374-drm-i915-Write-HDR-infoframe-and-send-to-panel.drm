@@ -1,0 +1,133 @@
+From 0e847580def1573df5f779a774463529a0b2397f Mon Sep 17 00:00:00 2001
+From: Uma Shankar <uma.shankar@intel.com>
+Date: Sat, 18 May 2019 16:09:27 +0530
+Subject: [PATCH 374/529] drm/i915: Write HDR infoframe and send to panel
+
+Enable writing of HDR metadata infoframe to panel.
+The data will be provid by usersapace compositors, based
+on blending policies and passsed to driver through a blob
+property.
+
+v2: Rebase
+
+v3: Fixed a warning message
+
+v4: Addressed Shashank's review comments
+
+v5: Rebase. Added infoframe calculation in compute config.
+
+v6: Addressed Shashank's review comment. Added HDR metadata
+support from GEN10 onwards as per Shashank's recommendation.
+
+v7: Addressed Shashank's review comments
+
+v8: Added Shashank's RB.
+
+v9: Addressed Ville's review comments.
+
+v10: Removed a redundant check as core already handles it, as per
+Ville's comment.
+
+v11: Added the metadata available check to avoid failure in
+compute_config.
+
+Signed-off-by: Uma Shankar <uma.shankar@intel.com>
+Reviewed-by: Shashank Sharma <shashank.sharma@intel.com>
+Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Signed-off-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/1558175967-22068-1-git-send-email-uma.shankar@intel.com
+---
+ drivers/gpu/drm/i915/intel_drv.h  |  1 +
+ drivers/gpu/drm/i915/intel_hdmi.c | 43 +++++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 9e063309829c..a321f5de81d6 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -912,6 +912,7 @@ struct intel_crtc_state {
+ 		union hdmi_infoframe avi;
+ 		union hdmi_infoframe spd;
+ 		union hdmi_infoframe hdmi;
++		union hdmi_infoframe drm;
+ 	} infoframes;
+ 
+ 	/* HDMI scrambling status */
+diff --git a/drivers/gpu/drm/i915/intel_hdmi.c b/drivers/gpu/drm/i915/intel_hdmi.c
+index aba9d48f45f5..5293bcfaff74 100644
+--- a/drivers/gpu/drm/i915/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/intel_hdmi.c
+@@ -575,6 +575,7 @@ static const u8 infoframe_type_to_idx[] = {
+ 	HDMI_INFOFRAME_TYPE_AVI,
+ 	HDMI_INFOFRAME_TYPE_SPD,
+ 	HDMI_INFOFRAME_TYPE_VENDOR,
++	HDMI_INFOFRAME_TYPE_DRM,
+ };
+ 
+ u32 intel_hdmi_infoframe_enable(unsigned int type)
+@@ -797,6 +798,40 @@ intel_hdmi_compute_hdmi_infoframe(struct intel_encoder *encoder,
+ 	return true;
+ }
+ 
++static bool
++intel_hdmi_compute_drm_infoframe(struct intel_encoder *encoder,
++				 struct intel_crtc_state *crtc_state,
++				 struct drm_connector_state *conn_state)
++{
++	struct hdmi_drm_infoframe *frame = &crtc_state->infoframes.drm.drm;
++	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
++	int ret;
++
++	if (!(INTEL_GEN(dev_priv) >= 10 || IS_GEMINILAKE(dev_priv)))
++		return true;
++
++	if (!crtc_state->has_infoframe)
++		return true;
++
++	if (!conn_state->hdr_output_metadata)
++		return true;
++
++	crtc_state->infoframes.enable |=
++		intel_hdmi_infoframe_enable(HDMI_INFOFRAME_TYPE_DRM);
++
++	ret = drm_hdmi_infoframe_set_hdr_metadata(frame, conn_state);
++	if (ret < 0) {
++		DRM_DEBUG_KMS("couldn't set HDR metadata in infoframe\n");
++		return false;
++	}
++
++	ret = hdmi_drm_infoframe_check(frame);
++	if (WARN_ON(ret))
++		return false;
++
++	return true;
++}
++
+ static void g4x_set_infoframes(struct intel_encoder *encoder,
+ 			       bool enable,
+ 			       const struct intel_crtc_state *crtc_state,
+@@ -1183,6 +1218,9 @@ static void hsw_set_infoframes(struct intel_encoder *encoder,
+ 	intel_write_infoframe(encoder, crtc_state,
+ 			      HDMI_INFOFRAME_TYPE_VENDOR,
+ 			      &crtc_state->infoframes.hdmi);
++	intel_write_infoframe(encoder, crtc_state,
++			      HDMI_INFOFRAME_TYPE_DRM,
++			      &crtc_state->infoframes.drm);
+ }
+ 
+ void intel_dp_dual_mode_set_tmds_output(struct intel_hdmi *hdmi, bool enable)
+@@ -2389,6 +2427,11 @@ int intel_hdmi_compute_config(struct intel_encoder *encoder,
+ 		return -EINVAL;
+ 	}
+ 
++	if (!intel_hdmi_compute_drm_infoframe(encoder, pipe_config, conn_state)) {
++		DRM_DEBUG_KMS("bad DRM infoframe\n");
++		return -EINVAL;
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

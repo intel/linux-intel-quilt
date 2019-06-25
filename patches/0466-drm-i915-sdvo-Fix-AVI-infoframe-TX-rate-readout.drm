@@ -1,0 +1,55 @@
+From b7b267622832804104a3a4a8e1fe9e5fed26b597 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Tue, 9 Apr 2019 17:40:48 +0300
+Subject: [PATCH 466/529] drm/i915/sdvo: Fix AVI infoframe TX rate readout
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The AVI infoframe readout code currently issues a
+SDVO_CMD_GET_HBUF_TXRATE before SDVO_CMD_SET_HBUF_INDEX, which is
+not the correct order for these two operations. So far this wasn't
+a problem since we left the index pointing at the AVI infoframe
+buffer at the end of the modeset. However once we start to write
+to other buffers (namely ELD) that is no longer going to be true.
+Fix up the order so that we always read out the TX rate for the
+correct buffer.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190409144054.24561-2-ville.syrjala@linux.intel.com
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+---
+ drivers/gpu/drm/i915/intel_sdvo.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_sdvo.c b/drivers/gpu/drm/i915/intel_sdvo.c
+index d7cd5b2567e0..899f8278d29c 100644
+--- a/drivers/gpu/drm/i915/intel_sdvo.c
++++ b/drivers/gpu/drm/i915/intel_sdvo.c
+@@ -1012,6 +1012,11 @@ static ssize_t intel_sdvo_read_infoframe(struct intel_sdvo *intel_sdvo,
+ 	if (av_split < if_index)
+ 		return 0;
+ 
++	if (!intel_sdvo_set_value(intel_sdvo,
++				  SDVO_CMD_SET_HBUF_INDEX,
++				  set_buf_index, 2))
++		return -ENXIO;
++
+ 	if (!intel_sdvo_get_value(intel_sdvo,
+ 				  SDVO_CMD_GET_HBUF_TXRATE,
+ 				  &tx_rate, 1))
+@@ -1020,11 +1025,6 @@ static ssize_t intel_sdvo_read_infoframe(struct intel_sdvo *intel_sdvo,
+ 	if (tx_rate == SDVO_HBUF_TX_DISABLED)
+ 		return 0;
+ 
+-	if (!intel_sdvo_set_value(intel_sdvo,
+-				  SDVO_CMD_SET_HBUF_INDEX,
+-				  set_buf_index, 2))
+-		return -ENXIO;
+-
+ 	if (!intel_sdvo_get_value(intel_sdvo, SDVO_CMD_GET_HBUF_INFO,
+ 				  &hbuf_size, 1))
+ 		return -ENXIO;
+-- 
+2.17.1
+

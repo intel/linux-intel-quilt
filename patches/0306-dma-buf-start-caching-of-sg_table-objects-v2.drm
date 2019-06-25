@@ -1,0 +1,125 @@
+From b753fb9d02ff649a888b5d3780c35bb0e9c1329f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Christian=20K=C3=B6nig?= <christian.koenig@amd.com>
+Date: Tue, 3 Jul 2018 16:42:26 +0200
+Subject: [PATCH 306/529] dma-buf: start caching of sg_table objects v2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+To allow a smooth transition from pinning buffer objects to dynamic
+invalidation we first start to cache the sg_table for an attachment.
+
+v2: keep closer to the DRM implementation
+
+Signed-off-by: Christian König <christian.koenig@amd.com>
+Reviewed-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Link: https://patchwork.kernel.org/patch/10943053/
+---
+ drivers/dma-buf/dma-buf.c | 27 +++++++++++++++++++++++++--
+ include/linux/dma-buf.h   | 13 +++++++++++++
+ 2 files changed, 38 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma-buf/dma-buf.c b/drivers/dma-buf/dma-buf.c
+index c204c4569c95..39d948968591 100644
+--- a/drivers/dma-buf/dma-buf.c
++++ b/drivers/dma-buf/dma-buf.c
+@@ -565,6 +565,7 @@ struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
+ 	list_add(&attach->node, &dmabuf->attachments);
+ 
+ 	mutex_unlock(&dmabuf->lock);
++
+ 	return attach;
+ 
+ err_attach:
+@@ -587,6 +588,9 @@ void dma_buf_detach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
+ 	if (WARN_ON(!dmabuf || !attach))
+ 		return;
+ 
++	if (attach->sgt)
++		dmabuf->ops->unmap_dma_buf(attach, attach->sgt, attach->dir);
++
+ 	mutex_lock(&dmabuf->lock);
+ 	list_del(&attach->node);
+ 	if (dmabuf->ops->detach)
+@@ -622,10 +626,27 @@ struct sg_table *dma_buf_map_attachment(struct dma_buf_attachment *attach,
+ 	if (WARN_ON(!attach || !attach->dmabuf))
+ 		return ERR_PTR(-EINVAL);
+ 
++	if (attach->sgt) {
++		/*
++		 * Two mappings with different directions for the same
++		 * attachment are not allowed.
++		 */
++		if (attach->dir != direction &&
++		    attach->dir != DMA_BIDIRECTIONAL)
++			return ERR_PTR(-EBUSY);
++
++		return attach->sgt;
++	}
++
+ 	sg_table = attach->dmabuf->ops->map_dma_buf(attach, direction);
+ 	if (!sg_table)
+ 		sg_table = ERR_PTR(-ENOMEM);
+ 
++	if (!IS_ERR(sg_table) && attach->dmabuf->ops->cache_sgt_mapping) {
++		attach->sgt = sg_table;
++		attach->dir = direction;
++	}
++
+ 	return sg_table;
+ }
+ EXPORT_SYMBOL_GPL(dma_buf_map_attachment);
+@@ -649,8 +670,10 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *attach,
+ 	if (WARN_ON(!attach || !attach->dmabuf || !sg_table))
+ 		return;
+ 
+-	attach->dmabuf->ops->unmap_dma_buf(attach, sg_table,
+-						direction);
++	if (attach->sgt == sg_table)
++		return;
++
++	attach->dmabuf->ops->unmap_dma_buf(attach, sg_table, direction);
+ }
+ EXPORT_SYMBOL_GPL(dma_buf_unmap_attachment);
+ 
+diff --git a/include/linux/dma-buf.h b/include/linux/dma-buf.h
+index eaeb4dd5f3f0..47e2453283db 100644
+--- a/include/linux/dma-buf.h
++++ b/include/linux/dma-buf.h
+@@ -33,6 +33,15 @@ struct dma_buf_attachment;
+  * @vunmap: [optional] unmaps a vmap from the buffer
+  */
+ struct dma_buf_ops {
++	/**
++	  * @cache_sgt_mapping:
++	  *
++	  * If true the framework will cache the first mapping made for each
++	  * attachment. This avoids creating mappings for attachments multiple
++	  * times.
++	  */
++	bool cache_sgt_mapping;
++
+ 	/**
+ 	 * @attach:
+ 	 *
+@@ -312,6 +321,8 @@ struct dma_buf {
+  * @dmabuf: buffer for this attachment.
+  * @dev: device attached to the buffer.
+  * @node: list of dma_buf_attachment.
++ * @sgt: cached mapping.
++ * @dir: direction of cached mapping.
+  * @priv: exporter specific attachment data.
+  *
+  * This structure holds the attachment information between the dma_buf buffer
+@@ -327,6 +338,8 @@ struct dma_buf_attachment {
+ 	struct dma_buf *dmabuf;
+ 	struct device *dev;
+ 	struct list_head node;
++	struct sg_table *sgt;
++	enum dma_data_direction dir;
+ 	void *priv;
+ };
+ 
+-- 
+2.17.1
+

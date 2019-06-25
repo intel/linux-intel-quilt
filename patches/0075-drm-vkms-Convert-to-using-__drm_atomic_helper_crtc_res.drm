@@ -1,0 +1,74 @@
+From 26a9fb2cf25f2f6aa5ec7a900c2fbc7467e8b203 Mon Sep 17 00:00:00 2001
+From: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Date: Fri, 1 Mar 2019 13:56:26 +0100
+Subject: [PATCH 075/529] drm/vkms: Convert to using
+ __drm_atomic_helper_crtc_reset() for reset.
+
+Convert vkms to using __drm_atomic_helper_crtc_reset(), instead of
+writing its own version. Instead of open coding destroy_state(),
+call it directly for freeing the old state.
+
+Signed-off-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Cc: Rodrigo Siqueira <rodrigosiqueiramelo@gmail.com>
+Cc: Haneen Mohammed <hamohammed.sa@gmail.com>
+Cc: Daniel Vetter <daniel@ffwll.ch>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190301125627.7285-17-maarten.lankhorst@linux.intel.com
+Reviewed-by: Rodrigo Siqueira <rodrigosiqueiramelo@gmail.com>
+---
+ drivers/gpu/drm/vkms/vkms_crtc.c | 33 +++++++++++++-------------------
+ 1 file changed, 13 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/vkms/vkms_crtc.c b/drivers/gpu/drm/vkms/vkms_crtc.c
+index bb66dbcd5e3f..7508815fac11 100644
+--- a/drivers/gpu/drm/vkms/vkms_crtc.c
++++ b/drivers/gpu/drm/vkms/vkms_crtc.c
+@@ -83,26 +83,6 @@ bool vkms_get_vblank_timestamp(struct drm_device *dev, unsigned int pipe,
+ 	return true;
+ }
+ 
+-static void vkms_atomic_crtc_reset(struct drm_crtc *crtc)
+-{
+-	struct vkms_crtc_state *vkms_state = NULL;
+-
+-	if (crtc->state) {
+-		vkms_state = to_vkms_crtc_state(crtc->state);
+-		__drm_atomic_helper_crtc_destroy_state(crtc->state);
+-		kfree(vkms_state);
+-		crtc->state = NULL;
+-	}
+-
+-	vkms_state = kzalloc(sizeof(*vkms_state), GFP_KERNEL);
+-	if (!vkms_state)
+-		return;
+-	INIT_WORK(&vkms_state->crc_work, vkms_crc_work_handle);
+-
+-	crtc->state = &vkms_state->base;
+-	crtc->state->crtc = crtc;
+-}
+-
+ static struct drm_crtc_state *
+ vkms_atomic_crtc_duplicate_state(struct drm_crtc *crtc)
+ {
+@@ -135,6 +115,19 @@ static void vkms_atomic_crtc_destroy_state(struct drm_crtc *crtc,
+ 	}
+ }
+ 
++static void vkms_atomic_crtc_reset(struct drm_crtc *crtc)
++{
++	struct vkms_crtc_state *vkms_state =
++		kzalloc(sizeof(*vkms_state), GFP_KERNEL);
++
++	if (crtc->state)
++		vkms_atomic_crtc_destroy_state(crtc, crtc->state);
++
++	__drm_atomic_helper_crtc_reset(crtc, &vkms_state->base);
++	if (vkms_state)
++		INIT_WORK(&vkms_state->crc_work, vkms_crc_work_handle);
++}
++
+ static const struct drm_crtc_funcs vkms_crtc_funcs = {
+ 	.set_config             = drm_atomic_helper_set_config,
+ 	.destroy                = drm_crtc_cleanup,
+-- 
+2.17.1
+
