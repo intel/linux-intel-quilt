@@ -1,0 +1,44 @@
+From 48bfe8ebf2a080dc30fe09cfc897b30ea89d548f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 28 May 2019 16:40:53 +0100
+Subject: [PATCH 400/681] drm/i915: Avoid refcount_inc on known zero count
+
+In intel_wakeref_auto, we use refcount_inc_not_zero to detect the first
+use and initialise the timer. On doing so, we have to avoid using
+refcount_inc on that zero count as the debug code flags that as an
+error:
+	refcount_t: increment on 0; use-after-free.
+
+Rearrange the code so that if we know the count is 0 and we are
+initialising, we explicitly set it to 1.
+
+Fixes: b27e35ae5b18 ("drm/i915: Keep user GGTT alive for a minimum of 250ms")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190528154053.22004-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/intel_wakeref.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_wakeref.c b/drivers/gpu/drm/i915/intel_wakeref.c
+index c2dda5a375f0..c25ba1b5e8ba 100644
+--- a/drivers/gpu/drm/i915/intel_wakeref.c
++++ b/drivers/gpu/drm/i915/intel_wakeref.c
+@@ -114,11 +114,11 @@ void intel_wakeref_auto(struct intel_wakeref_auto *wf, unsigned long timeout)
+ 
+ 	if (!refcount_inc_not_zero(&wf->count)) {
+ 		spin_lock_irqsave(&wf->lock, flags);
+-		if (!refcount_read(&wf->count)) {
++		if (!refcount_inc_not_zero(&wf->count)) {
+ 			GEM_BUG_ON(wf->wakeref);
+ 			wf->wakeref = intel_runtime_pm_get_if_in_use(wf->i915);
++			refcount_set(&wf->count, 1);
+ 		}
+-		refcount_inc(&wf->count);
+ 		spin_unlock_irqrestore(&wf->lock, flags);
+ 	}
+ 
+-- 
+2.17.1
+

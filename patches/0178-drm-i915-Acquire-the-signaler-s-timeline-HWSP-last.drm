@@ -1,0 +1,43 @@
+From 7c2ff6924925ab0fda455f2972333c0a66e16816 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 3 May 2019 15:02:39 +0100
+Subject: [PATCH 178/681] drm/i915: Acquire the signaler's timeline HWSP last
+
+Acquiring the signaler's timeline takes an active reference to their
+HWSP that we would like to avoid if possible, so take it after
+performing all of our allocations required to set up the fencing. The
+acquisition also provides the final check that the target has not
+already signaled allowing us to avoid the semaphore at the last moment.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190503140239.32668-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_request.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 63085fc77c70..a1ca43ef3440 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -826,13 +826,13 @@ emit_semaphore_wait(struct i915_request *to,
+ 	if (err < 0)
+ 		return err;
+ 
+-	/* We need to pin the signaler's HWSP until we are finished reading. */
+-	err = i915_timeline_read_hwsp(from, to, &hwsp_offset);
++	/* Only submit our spinner after the signaler is running! */
++	err = i915_request_await_execution(to, from, gfp);
+ 	if (err)
+ 		return err;
+ 
+-	/* Only submit our spinner after the signaler is running! */
+-	err = i915_request_await_execution(to, from, gfp);
++	/* We need to pin the signaler's HWSP until we are finished reading. */
++	err = i915_timeline_read_hwsp(from, to, &hwsp_offset);
+ 	if (err)
+ 		return err;
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,90 @@
+From 9ec582078664cd88a9acbc72c4ea9193f2e23395 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 3 May 2019 12:52:14 +0100
+Subject: [PATCH 180/681] drm/i915: Prefer checking the wakeref itself rather
+ than the counter
+
+The counter goes to zero at the start of the parking cycle, but the
+wakeref itself is held until the end. Likewise, the counter becomes one
+at the end of the unparking, but the wakeref is taken first. If we check
+the wakeref instead of the counter, we include the unpark/unparking time
+as intel_wakeref_is_active(), and do not spuriously declare inactive if
+we fail to park (i.e. the parking and wakeref drop is postponed).
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190503115225.30831-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/intel_wakeref.c | 20 +++++++++++++++++---
+ drivers/gpu/drm/i915/intel_wakeref.h |  2 +-
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_wakeref.c b/drivers/gpu/drm/i915/intel_wakeref.c
+index 1f94bc4ff9e4..91196d9612bb 100644
+--- a/drivers/gpu/drm/i915/intel_wakeref.c
++++ b/drivers/gpu/drm/i915/intel_wakeref.c
+@@ -7,6 +7,19 @@
+ #include "intel_drv.h"
+ #include "intel_wakeref.h"
+ 
++static void rpm_get(struct drm_i915_private *i915, struct intel_wakeref *wf)
++{
++	wf->wakeref = intel_runtime_pm_get(i915);
++}
++
++static void rpm_put(struct drm_i915_private *i915, struct intel_wakeref *wf)
++{
++	intel_wakeref_t wakeref = fetch_and_zero(&wf->wakeref);
++
++	intel_runtime_pm_put(i915, wakeref);
++	GEM_BUG_ON(!wakeref);
++}
++
+ int __intel_wakeref_get_first(struct drm_i915_private *i915,
+ 			      struct intel_wakeref *wf,
+ 			      int (*fn)(struct intel_wakeref *wf))
+@@ -21,11 +34,11 @@ int __intel_wakeref_get_first(struct drm_i915_private *i915,
+ 	if (!atomic_read(&wf->count)) {
+ 		int err;
+ 
+-		wf->wakeref = intel_runtime_pm_get(i915);
++		rpm_get(i915, wf);
+ 
+ 		err = fn(wf);
+ 		if (unlikely(err)) {
+-			intel_runtime_pm_put(i915, wf->wakeref);
++			rpm_put(i915, wf);
+ 			mutex_unlock(&wf->mutex);
+ 			return err;
+ 		}
+@@ -46,7 +59,7 @@ int __intel_wakeref_put_last(struct drm_i915_private *i915,
+ 
+ 	err = fn(wf);
+ 	if (likely(!err))
+-		intel_runtime_pm_put(i915, wf->wakeref);
++		rpm_put(i915, wf);
+ 	else
+ 		atomic_inc(&wf->count);
+ 	mutex_unlock(&wf->mutex);
+@@ -58,4 +71,5 @@ void __intel_wakeref_init(struct intel_wakeref *wf, struct lock_class_key *key)
+ {
+ 	__mutex_init(&wf->mutex, "wakeref", key);
+ 	atomic_set(&wf->count, 0);
++	wf->wakeref = 0;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_wakeref.h b/drivers/gpu/drm/i915/intel_wakeref.h
+index a979d638344b..db742291211c 100644
+--- a/drivers/gpu/drm/i915/intel_wakeref.h
++++ b/drivers/gpu/drm/i915/intel_wakeref.h
+@@ -127,7 +127,7 @@ intel_wakeref_unlock(struct intel_wakeref *wf)
+ static inline bool
+ intel_wakeref_active(struct intel_wakeref *wf)
+ {
+-	return atomic_read(&wf->count);
++	return READ_ONCE(wf->wakeref);
+ }
+ 
+ #endif /* INTEL_WAKEREF_H */
+-- 
+2.17.1
+

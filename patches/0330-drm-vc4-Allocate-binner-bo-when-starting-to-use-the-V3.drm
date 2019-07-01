@@ -1,0 +1,371 @@
+From 93acf9710708c55326e489caac76ad399f852577 Mon Sep 17 00:00:00 2001
+From: Paul Kocialkowski <paul.kocialkowski@bootlin.com>
+Date: Thu, 16 May 2019 16:55:44 +0200
+Subject: [PATCH 330/681] drm/vc4: Allocate binner bo when starting to use the
+ V3D
+
+The binner BO is not required until the V3D is in use, so avoid
+allocating it at probe and do it on the first non-dumb BO allocation.
+
+Keep track of which clients are using the V3D and liberate the buffer
+when there is none left, using a kref. Protect the logic with a
+mutex to avoid race conditions.
+
+The binner BO is created at the time of the first render ioctl and is
+destroyed when there is no client and no exec job using it left.
+
+The Out-Of-Memory (OOM) interrupt also gets some tweaking, to avoid
+enabling it before having allocated a binner bo.
+
+We also want to keep the BO alive during runtime suspend/resume to avoid
+failing to allocate it at resume. This happens when the CMA pool is
+full at that point and results in a hard crash.
+
+Signed-off-by: Paul Kocialkowski <paul.kocialkowski@bootlin.com>
+Reviewed-by: Eric Anholt <eric@anholt.net>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190516145544.29051-5-paul.kocialkowski@bootlin.com
+---
+ drivers/gpu/drm/vc4/vc4_bo.c  | 31 +++++++++++++++++-
+ drivers/gpu/drm/vc4/vc4_drv.c |  6 ++++
+ drivers/gpu/drm/vc4/vc4_drv.h | 14 ++++++++
+ drivers/gpu/drm/vc4/vc4_gem.c | 11 +++++++
+ drivers/gpu/drm/vc4/vc4_irq.c | 21 ++++++++----
+ drivers/gpu/drm/vc4/vc4_v3d.c | 62 +++++++++++++++++++++++++++--------
+ 6 files changed, 125 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/vc4/vc4_bo.c b/drivers/gpu/drm/vc4/vc4_bo.c
+index d185a522da49..a75a2f98b82f 100644
+--- a/drivers/gpu/drm/vc4/vc4_bo.c
++++ b/drivers/gpu/drm/vc4/vc4_bo.c
+@@ -796,13 +796,36 @@ vc4_prime_import_sg_table(struct drm_device *dev,
+ 	return obj;
+ }
+ 
++static int vc4_grab_bin_bo(struct vc4_dev *vc4, struct vc4_file *vc4file)
++{
++	int ret;
++
++	if (!vc4->v3d)
++		return -ENODEV;
++
++	if (vc4file->bin_bo_used)
++		return 0;
++
++	ret = vc4_v3d_bin_bo_get(vc4, &vc4file->bin_bo_used);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
+ int vc4_create_bo_ioctl(struct drm_device *dev, void *data,
+ 			struct drm_file *file_priv)
+ {
+ 	struct drm_vc4_create_bo *args = data;
++	struct vc4_file *vc4file = file_priv->driver_priv;
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
+ 	struct vc4_bo *bo = NULL;
+ 	int ret;
+ 
++	ret = vc4_grab_bin_bo(vc4, vc4file);
++	if (ret)
++		return ret;
++
+ 	/*
+ 	 * We can't allocate from the BO cache, because the BOs don't
+ 	 * get zeroed, and that might leak data between users.
+@@ -843,6 +866,8 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
+ 			   struct drm_file *file_priv)
+ {
+ 	struct drm_vc4_create_shader_bo *args = data;
++	struct vc4_file *vc4file = file_priv->driver_priv;
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
+ 	struct vc4_bo *bo = NULL;
+ 	int ret;
+ 
+@@ -862,6 +887,10 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
+ 		return -EINVAL;
+ 	}
+ 
++	ret = vc4_grab_bin_bo(vc4, vc4file);
++	if (ret)
++		return ret;
++
+ 	bo = vc4_bo_create(dev, args->size, true, VC4_BO_TYPE_V3D_SHADER);
+ 	if (IS_ERR(bo))
+ 		return PTR_ERR(bo);
+@@ -891,7 +920,7 @@ vc4_create_shader_bo_ioctl(struct drm_device *dev, void *data,
+ 	 */
+ 	ret = drm_gem_handle_create(file_priv, &bo->base.base, &args->handle);
+ 
+- fail:
++fail:
+ 	drm_gem_object_put_unlocked(&bo->base.base);
+ 
+ 	return ret;
+diff --git a/drivers/gpu/drm/vc4/vc4_drv.c b/drivers/gpu/drm/vc4/vc4_drv.c
+index e88235eeed6c..bf11930e40e1 100644
+--- a/drivers/gpu/drm/vc4/vc4_drv.c
++++ b/drivers/gpu/drm/vc4/vc4_drv.c
+@@ -125,8 +125,12 @@ static int vc4_open(struct drm_device *dev, struct drm_file *file)
+ 
+ static void vc4_close(struct drm_device *dev, struct drm_file *file)
+ {
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
+ 	struct vc4_file *vc4file = file->driver_priv;
+ 
++	if (vc4file->bin_bo_used)
++		vc4_v3d_bin_bo_put(vc4);
++
+ 	vc4_perfmon_close_file(vc4file);
+ 	kfree(vc4file);
+ }
+@@ -271,6 +275,8 @@ static int vc4_drm_bind(struct device *dev)
+ 	drm->dev_private = vc4;
+ 	INIT_LIST_HEAD(&vc4->debugfs_list);
+ 
++	mutex_init(&vc4->bin_bo_lock);
++
+ 	ret = vc4_bo_cache_init(drm);
+ 	if (ret)
+ 		goto dev_put;
+diff --git a/drivers/gpu/drm/vc4/vc4_drv.h b/drivers/gpu/drm/vc4/vc4_drv.h
+index 24c45f2d9df1..616c011bcb82 100644
+--- a/drivers/gpu/drm/vc4/vc4_drv.h
++++ b/drivers/gpu/drm/vc4/vc4_drv.h
+@@ -213,6 +213,11 @@ struct vc4_dev {
+ 	 * the minor is available (after drm_dev_register()).
+ 	 */
+ 	struct list_head debugfs_list;
++
++	/* Mutex for binner bo allocation. */
++	struct mutex bin_bo_lock;
++	/* Reference count for our binner bo. */
++	struct kref bin_bo_kref;
+ };
+ 
+ static inline struct vc4_dev *
+@@ -581,6 +586,11 @@ struct vc4_exec_info {
+ 	 * NULL otherwise.
+ 	 */
+ 	struct vc4_perfmon *perfmon;
++
++	/* Whether the exec has taken a reference to the binner BO, which should
++	 * happen with a VC4_PACKET_TILE_BINNING_MODE_CONFIG packet.
++	 */
++	bool bin_bo_used;
+ };
+ 
+ /* Per-open file private data. Any driver-specific resource that has to be
+@@ -591,6 +601,8 @@ struct vc4_file {
+ 		struct idr idr;
+ 		struct mutex lock;
+ 	} perfmon;
++
++	bool bin_bo_used;
+ };
+ 
+ static inline struct vc4_exec_info *
+@@ -830,6 +842,8 @@ void vc4_plane_async_set_fb(struct drm_plane *plane,
+ extern struct platform_driver vc4_v3d_driver;
+ extern const struct of_device_id vc4_v3d_dt_match[];
+ int vc4_v3d_get_bin_slot(struct vc4_dev *vc4);
++int vc4_v3d_bin_bo_get(struct vc4_dev *vc4, bool *used);
++void vc4_v3d_bin_bo_put(struct vc4_dev *vc4);
+ int vc4_v3d_pm_get(struct vc4_dev *vc4);
+ void vc4_v3d_pm_put(struct vc4_dev *vc4);
+ 
+diff --git a/drivers/gpu/drm/vc4/vc4_gem.c b/drivers/gpu/drm/vc4/vc4_gem.c
+index d9311be32a4f..84795d928f20 100644
+--- a/drivers/gpu/drm/vc4/vc4_gem.c
++++ b/drivers/gpu/drm/vc4/vc4_gem.c
+@@ -820,6 +820,7 @@ static int
+ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
+ {
+ 	struct drm_vc4_submit_cl *args = exec->args;
++	struct vc4_dev *vc4 = to_vc4_dev(dev);
+ 	void *temp = NULL;
+ 	void *bin;
+ 	int ret = 0;
+@@ -918,6 +919,12 @@ vc4_get_bcl(struct drm_device *dev, struct vc4_exec_info *exec)
+ 	if (ret)
+ 		goto fail;
+ 
++	if (exec->found_tile_binning_mode_config_packet) {
++		ret = vc4_v3d_bin_bo_get(vc4, &exec->bin_bo_used);
++		if (ret)
++			goto fail;
++	}
++
+ 	/* Block waiting on any previous rendering into the CS's VBO,
+ 	 * IB, or textures, so that pixels are actually written by the
+ 	 * time we try to read them.
+@@ -966,6 +973,10 @@ vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
+ 	vc4->bin_alloc_used &= ~exec->bin_slots;
+ 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
+ 
++	/* Release the reference on the binner BO if needed. */
++	if (exec->bin_bo_used)
++		vc4_v3d_bin_bo_put(vc4);
++
+ 	/* Release the reference we had on the perf monitor. */
+ 	vc4_perfmon_put(exec->perfmon);
+ 
+diff --git a/drivers/gpu/drm/vc4/vc4_irq.c b/drivers/gpu/drm/vc4/vc4_irq.c
+index 723dc86b4511..e226c24e543f 100644
+--- a/drivers/gpu/drm/vc4/vc4_irq.c
++++ b/drivers/gpu/drm/vc4/vc4_irq.c
+@@ -59,18 +59,22 @@ vc4_overflow_mem_work(struct work_struct *work)
+ {
+ 	struct vc4_dev *vc4 =
+ 		container_of(work, struct vc4_dev, overflow_mem_work);
+-	struct vc4_bo *bo = vc4->bin_bo;
++	struct vc4_bo *bo;
+ 	int bin_bo_slot;
+ 	struct vc4_exec_info *exec;
+ 	unsigned long irqflags;
+ 
+-	if (!bo)
+-		return;
++	mutex_lock(&vc4->bin_bo_lock);
++
++	if (!vc4->bin_bo)
++		goto complete;
++
++	bo = vc4->bin_bo;
+ 
+ 	bin_bo_slot = vc4_v3d_get_bin_slot(vc4);
+ 	if (bin_bo_slot < 0) {
+ 		DRM_ERROR("Couldn't allocate binner overflow mem\n");
+-		return;
++		goto complete;
+ 	}
+ 
+ 	spin_lock_irqsave(&vc4->job_lock, irqflags);
+@@ -101,6 +105,9 @@ vc4_overflow_mem_work(struct work_struct *work)
+ 	V3D_WRITE(V3D_INTCTL, V3D_INT_OUTOMEM);
+ 	V3D_WRITE(V3D_INTENA, V3D_INT_OUTOMEM);
+ 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
++
++complete:
++	mutex_unlock(&vc4->bin_bo_lock);
+ }
+ 
+ static void
+@@ -252,8 +259,10 @@ vc4_irq_postinstall(struct drm_device *dev)
+ 	if (!vc4->v3d)
+ 		return 0;
+ 
+-	/* Enable both the render done and out of memory interrupts. */
+-	V3D_WRITE(V3D_INTENA, V3D_DRIVER_IRQS);
++	/* Enable the render done interrupts. The out-of-memory interrupt is
++	 * enabled as soon as we have a binner BO allocated.
++	 */
++	V3D_WRITE(V3D_INTENA, V3D_INT_FLDONE | V3D_INT_FRDONE);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/vc4/vc4_v3d.c b/drivers/gpu/drm/vc4/vc4_v3d.c
+index c54f9afb2d5d..fee4f90e71aa 100644
+--- a/drivers/gpu/drm/vc4/vc4_v3d.c
++++ b/drivers/gpu/drm/vc4/vc4_v3d.c
+@@ -283,6 +283,14 @@ static int bin_bo_alloc(struct vc4_dev *vc4)
+ 			WARN_ON_ONCE(sizeof(vc4->bin_alloc_used) * 8 !=
+ 				     bo->base.base.size / vc4->bin_alloc_size);
+ 
++			kref_init(&vc4->bin_bo_kref);
++
++			/* Enable the out-of-memory interrupt to set our
++			 * newly-allocated binner BO, potentially from an
++			 * already-pending-but-masked interrupt.
++			 */
++			V3D_WRITE(V3D_INTENA, V3D_INT_OUTOMEM);
++
+ 			break;
+ 		}
+ 
+@@ -302,6 +310,47 @@ static int bin_bo_alloc(struct vc4_dev *vc4)
+ 	return ret;
+ }
+ 
++int vc4_v3d_bin_bo_get(struct vc4_dev *vc4, bool *used)
++{
++	int ret = 0;
++
++	mutex_lock(&vc4->bin_bo_lock);
++
++	if (used && *used)
++		goto complete;
++
++	if (vc4->bin_bo)
++		kref_get(&vc4->bin_bo_kref);
++	else
++		ret = bin_bo_alloc(vc4);
++
++	if (ret == 0 && used)
++		*used = true;
++
++complete:
++	mutex_unlock(&vc4->bin_bo_lock);
++
++	return ret;
++}
++
++static void bin_bo_release(struct kref *ref)
++{
++	struct vc4_dev *vc4 = container_of(ref, struct vc4_dev, bin_bo_kref);
++
++	if (WARN_ON_ONCE(!vc4->bin_bo))
++		return;
++
++	drm_gem_object_put_unlocked(&vc4->bin_bo->base.base);
++	vc4->bin_bo = NULL;
++}
++
++void vc4_v3d_bin_bo_put(struct vc4_dev *vc4)
++{
++	mutex_lock(&vc4->bin_bo_lock);
++	kref_put(&vc4->bin_bo_kref, bin_bo_release);
++	mutex_unlock(&vc4->bin_bo_lock);
++}
++
+ #ifdef CONFIG_PM
+ static int vc4_v3d_runtime_suspend(struct device *dev)
+ {
+@@ -310,9 +359,6 @@ static int vc4_v3d_runtime_suspend(struct device *dev)
+ 
+ 	vc4_irq_uninstall(vc4->dev);
+ 
+-	drm_gem_object_put_unlocked(&vc4->bin_bo->base.base);
+-	vc4->bin_bo = NULL;
+-
+ 	clk_disable_unprepare(v3d->clk);
+ 
+ 	return 0;
+@@ -324,10 +370,6 @@ static int vc4_v3d_runtime_resume(struct device *dev)
+ 	struct vc4_dev *vc4 = v3d->vc4;
+ 	int ret;
+ 
+-	ret = bin_bo_alloc(vc4);
+-	if (ret)
+-		return ret;
+-
+ 	ret = clk_prepare_enable(v3d->clk);
+ 	if (ret != 0)
+ 		return ret;
+@@ -394,12 +436,6 @@ static int vc4_v3d_bind(struct device *dev, struct device *master, void *data)
+ 	if (ret != 0)
+ 		return ret;
+ 
+-	ret = bin_bo_alloc(vc4);
+-	if (ret) {
+-		clk_disable_unprepare(v3d->clk);
+-		return ret;
+-	}
+-
+ 	/* Reset the binner overflow address/size at setup, to be sure
+ 	 * we don't reuse an old one.
+ 	 */
+-- 
+2.17.1
+

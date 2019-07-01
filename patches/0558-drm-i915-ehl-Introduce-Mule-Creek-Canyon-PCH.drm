@@ -1,0 +1,261 @@
+From 50a1de5bfeb6f6b5305c866682e4b799d7290225 Mon Sep 17 00:00:00 2001
+From: Matt Roper <matthew.d.roper@intel.com>
+Date: Fri, 14 Jun 2019 17:42:10 -0700
+Subject: [PATCH 558/681] drm/i915/ehl: Introduce Mule Creek Canyon PCH
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Although EHL introduces a new PCH, the South Display part of the PCH
+that we care about is nearly identical to ICP, just with some pins
+remapped.  Most notably, Port C is mapped to the pins that ICP uses for
+TC Port 1.
+
+Signed-off-by: Matt Roper <matthew.d.roper@intel.com>
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190615004210.16656-1-matthew.d.roper@intel.com
+---
+ drivers/gpu/drm/i915/display/intel_bios.c     | 11 +++++++-
+ drivers/gpu/drm/i915/display/intel_gmbus.c    | 14 ++++++++--
+ drivers/gpu/drm/i915/display/intel_hdmi.c     | 26 ++++++++++++++++++-
+ drivers/gpu/drm/i915/display/intel_vbt_defs.h |  3 +++
+ drivers/gpu/drm/i915/i915_drv.c               |  8 +++++-
+ drivers/gpu/drm/i915/i915_drv.h               |  3 +++
+ drivers/gpu/drm/i915/i915_irq.c               | 19 ++++++++++----
+ 7 files changed, 74 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_bios.c b/drivers/gpu/drm/i915/display/intel_bios.c
+index 270719fabbc5..c4710889cb32 100644
+--- a/drivers/gpu/drm/i915/display/intel_bios.c
++++ b/drivers/gpu/drm/i915/display/intel_bios.c
+@@ -1348,12 +1348,21 @@ static const u8 icp_ddc_pin_map[] = {
+ 	[ICL_DDC_BUS_PORT_4] = GMBUS_PIN_12_TC4_ICP,
+ };
+ 
++static const u8 mcc_ddc_pin_map[] = {
++	[MCC_DDC_BUS_DDI_A] = GMBUS_PIN_1_BXT,
++	[MCC_DDC_BUS_DDI_B] = GMBUS_PIN_2_BXT,
++	[MCC_DDC_BUS_DDI_C] = GMBUS_PIN_9_TC1_ICP,
++};
++
+ static u8 map_ddc_pin(struct drm_i915_private *dev_priv, u8 vbt_pin)
+ {
+ 	const u8 *ddc_pin_map;
+ 	int n_entries;
+ 
+-	if (HAS_PCH_ICP(dev_priv)) {
++	if (HAS_PCH_MCC(dev_priv)) {
++		ddc_pin_map = mcc_ddc_pin_map;
++		n_entries = ARRAY_SIZE(mcc_ddc_pin_map);
++	} else if (HAS_PCH_ICP(dev_priv)) {
+ 		ddc_pin_map = icp_ddc_pin_map;
+ 		n_entries = ARRAY_SIZE(icp_ddc_pin_map);
+ 	} else if (HAS_PCH_CNP(dev_priv)) {
+diff --git a/drivers/gpu/drm/i915/display/intel_gmbus.c b/drivers/gpu/drm/i915/display/intel_gmbus.c
+index aa88e6e7cc65..4f6a9bd5af47 100644
+--- a/drivers/gpu/drm/i915/display/intel_gmbus.c
++++ b/drivers/gpu/drm/i915/display/intel_gmbus.c
+@@ -88,11 +88,19 @@ static const struct gmbus_pin gmbus_pins_icp[] = {
+ 	[GMBUS_PIN_12_TC4_ICP] = { "tc4", GPIOM },
+ };
+ 
++static const struct gmbus_pin gmbus_pins_mcc[] = {
++	[GMBUS_PIN_1_BXT] = { "dpa", GPIOB },
++	[GMBUS_PIN_2_BXT] = { "dpb", GPIOC },
++	[GMBUS_PIN_9_TC1_ICP] = { "dpc", GPIOJ },
++};
++
+ /* pin is expected to be valid */
+ static const struct gmbus_pin *get_gmbus_pin(struct drm_i915_private *dev_priv,
+ 					     unsigned int pin)
+ {
+-	if (HAS_PCH_ICP(dev_priv))
++	if (HAS_PCH_MCC(dev_priv))
++		return &gmbus_pins_mcc[pin];
++	else if (HAS_PCH_ICP(dev_priv))
+ 		return &gmbus_pins_icp[pin];
+ 	else if (HAS_PCH_CNP(dev_priv))
+ 		return &gmbus_pins_cnp[pin];
+@@ -111,7 +119,9 @@ bool intel_gmbus_is_valid_pin(struct drm_i915_private *dev_priv,
+ {
+ 	unsigned int size;
+ 
+-	if (HAS_PCH_ICP(dev_priv))
++	if (HAS_PCH_MCC(dev_priv))
++		size = ARRAY_SIZE(gmbus_pins_mcc);
++	else if (HAS_PCH_ICP(dev_priv))
+ 		size = ARRAY_SIZE(gmbus_pins_icp);
+ 	else if (HAS_PCH_CNP(dev_priv))
+ 		size = ARRAY_SIZE(gmbus_pins_cnp);
+diff --git a/drivers/gpu/drm/i915/display/intel_hdmi.c b/drivers/gpu/drm/i915/display/intel_hdmi.c
+index 187a2b828b97..0ebec69bbbfc 100644
+--- a/drivers/gpu/drm/i915/display/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/display/intel_hdmi.c
+@@ -2959,6 +2959,28 @@ static u8 icl_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
+ 	return ddc_pin;
+ }
+ 
++static u8 mcc_port_to_ddc_pin(struct drm_i915_private *dev_priv, enum port port)
++{
++	u8 ddc_pin;
++
++	switch (port) {
++	case PORT_A:
++		ddc_pin = GMBUS_PIN_1_BXT;
++		break;
++	case PORT_B:
++		ddc_pin = GMBUS_PIN_2_BXT;
++		break;
++	case PORT_C:
++		ddc_pin = GMBUS_PIN_9_TC1_ICP;
++		break;
++	default:
++		MISSING_CASE(port);
++		ddc_pin = GMBUS_PIN_1_BXT;
++		break;
++	}
++	return ddc_pin;
++}
++
+ static u8 g4x_port_to_ddc_pin(struct drm_i915_private *dev_priv,
+ 			      enum port port)
+ {
+@@ -2995,7 +3017,9 @@ static u8 intel_hdmi_ddc_pin(struct drm_i915_private *dev_priv,
+ 		return info->alternate_ddc_pin;
+ 	}
+ 
+-	if (HAS_PCH_ICP(dev_priv))
++	if (HAS_PCH_MCC(dev_priv))
++		ddc_pin = mcc_port_to_ddc_pin(dev_priv, port);
++	else if (HAS_PCH_ICP(dev_priv))
+ 		ddc_pin = icl_port_to_ddc_pin(dev_priv, port);
+ 	else if (HAS_PCH_CNP(dev_priv))
+ 		ddc_pin = cnp_port_to_ddc_pin(dev_priv, port);
+diff --git a/drivers/gpu/drm/i915/display/intel_vbt_defs.h b/drivers/gpu/drm/i915/display/intel_vbt_defs.h
+index 89ef14cafb6b..2f4894e9a03d 100644
+--- a/drivers/gpu/drm/i915/display/intel_vbt_defs.h
++++ b/drivers/gpu/drm/i915/display/intel_vbt_defs.h
+@@ -314,6 +314,9 @@ enum vbt_gmbus_ddi {
+ 	ICL_DDC_BUS_PORT_2,
+ 	ICL_DDC_BUS_PORT_3,
+ 	ICL_DDC_BUS_PORT_4,
++	MCC_DDC_BUS_DDI_A = 0x1,
++	MCC_DDC_BUS_DDI_B,
++	MCC_DDC_BUS_DDI_C = 0x4,
+ };
+ 
+ #define DP_AUX_A 0x40
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 535b9be4fc58..f62e3397d936 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -218,6 +218,10 @@ intel_pch_type(const struct drm_i915_private *dev_priv, unsigned short id)
+ 		DRM_DEBUG_KMS("Found Ice Lake PCH\n");
+ 		WARN_ON(!IS_ICELAKE(dev_priv));
+ 		return PCH_ICP;
++	case INTEL_PCH_MCC_DEVICE_ID_TYPE:
++		DRM_DEBUG_KMS("Found Mule Creek Canyon PCH\n");
++		WARN_ON(!IS_ELKHARTLAKE(dev_priv));
++		return PCH_MCC;
+ 	default:
+ 		return PCH_NONE;
+ 	}
+@@ -245,7 +249,9 @@ intel_virt_detect_pch(const struct drm_i915_private *dev_priv)
+ 	 * make an educated guess as to which PCH is really there.
+ 	 */
+ 
+-	if (IS_ICELAKE(dev_priv))
++	if (IS_ELKHARTLAKE(dev_priv))
++		id = INTEL_PCH_MCC_DEVICE_ID_TYPE;
++	else if (IS_ICELAKE(dev_priv))
+ 		id = INTEL_PCH_ICP_DEVICE_ID_TYPE;
+ 	else if (IS_CANNONLAKE(dev_priv) || IS_COFFEELAKE(dev_priv))
+ 		id = INTEL_PCH_CNP_DEVICE_ID_TYPE;
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index e77f0289bfff..5969c83d3ba8 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -534,6 +534,7 @@ enum intel_pch {
+ 	PCH_SPT,        /* Sunrisepoint/Kaby Lake PCH */
+ 	PCH_CNP,        /* Cannon/Comet Lake PCH */
+ 	PCH_ICP,	/* Ice Lake PCH */
++	PCH_MCC,        /* Mule Creek Canyon PCH */
+ };
+ 
+ #define QUIRK_LVDS_SSC_DISABLE (1<<1)
+@@ -2356,12 +2357,14 @@ IS_SUBPLATFORM(const struct drm_i915_private *i915,
+ #define INTEL_PCH_CNP_LP_DEVICE_ID_TYPE		0x9D80
+ #define INTEL_PCH_CMP_DEVICE_ID_TYPE		0x0280
+ #define INTEL_PCH_ICP_DEVICE_ID_TYPE		0x3480
++#define INTEL_PCH_MCC_DEVICE_ID_TYPE		0x4B00
+ #define INTEL_PCH_P2X_DEVICE_ID_TYPE		0x7100
+ #define INTEL_PCH_P3X_DEVICE_ID_TYPE		0x7000
+ #define INTEL_PCH_QEMU_DEVICE_ID_TYPE		0x2900 /* qemu q35 has 2918 */
+ 
+ #define INTEL_PCH_TYPE(dev_priv) ((dev_priv)->pch_type)
+ #define INTEL_PCH_ID(dev_priv) ((dev_priv)->pch_id)
++#define HAS_PCH_MCC(dev_priv) (INTEL_PCH_TYPE(dev_priv) == PCH_MCC)
+ #define HAS_PCH_ICP(dev_priv) (INTEL_PCH_TYPE(dev_priv) == PCH_ICP)
+ #define HAS_PCH_CNP(dev_priv) (INTEL_PCH_TYPE(dev_priv) == PCH_CNP)
+ #define HAS_PCH_SPT(dev_priv) (INTEL_PCH_TYPE(dev_priv) == PCH_SPT)
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 2aeb0431c432..b2e27b5b0df9 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -142,6 +142,12 @@ static const u32 hpd_icp[HPD_NUM_PINS] = {
+ 	[HPD_PORT_F] = SDE_TC4_HOTPLUG_ICP
+ };
+ 
++static const u32 hpd_mcc[HPD_NUM_PINS] = {
++	[HPD_PORT_A] = SDE_DDIA_HOTPLUG_ICP,
++	[HPD_PORT_B] = SDE_DDIB_HOTPLUG_ICP,
++	[HPD_PORT_C] = SDE_TC1_HOTPLUG_ICP
++};
++
+ static void gen3_irq_reset(struct intel_uncore *uncore, i915_reg_t imr,
+ 			   i915_reg_t iir, i915_reg_t ier)
+ {
+@@ -2498,7 +2504,8 @@ static void cpt_irq_handler(struct drm_i915_private *dev_priv, u32 pch_iir)
+ 		cpt_serr_int_handler(dev_priv);
+ }
+ 
+-static void icp_irq_handler(struct drm_i915_private *dev_priv, u32 pch_iir)
++static void icp_irq_handler(struct drm_i915_private *dev_priv, u32 pch_iir,
++			    const u32 *pins)
+ {
+ 	u32 ddi_hotplug_trigger = pch_iir & SDE_DDI_MASK_ICP;
+ 	u32 tc_hotplug_trigger = pch_iir & SDE_TC_MASK_ICP;
+@@ -2512,7 +2519,7 @@ static void icp_irq_handler(struct drm_i915_private *dev_priv, u32 pch_iir)
+ 
+ 		intel_get_hpd_pins(dev_priv, &pin_mask, &long_mask,
+ 				   ddi_hotplug_trigger,
+-				   dig_hotplug_reg, hpd_icp,
++				   dig_hotplug_reg, pins,
+ 				   icp_ddi_port_hotplug_long_detect);
+ 	}
+ 
+@@ -2524,7 +2531,7 @@ static void icp_irq_handler(struct drm_i915_private *dev_priv, u32 pch_iir)
+ 
+ 		intel_get_hpd_pins(dev_priv, &pin_mask, &long_mask,
+ 				   tc_hotplug_trigger,
+-				   dig_hotplug_reg, hpd_icp,
++				   dig_hotplug_reg, pins,
+ 				   icp_tc_port_hotplug_long_detect);
+ 	}
+ 
+@@ -2955,8 +2962,10 @@ gen8_de_irq_handler(struct drm_i915_private *dev_priv, u32 master_ctl)
+ 			I915_WRITE(SDEIIR, iir);
+ 			ret = IRQ_HANDLED;
+ 
+-			if (INTEL_PCH_TYPE(dev_priv) >= PCH_ICP)
+-				icp_irq_handler(dev_priv, iir);
++			if (INTEL_PCH_TYPE(dev_priv) >= PCH_MCC)
++				icp_irq_handler(dev_priv, iir, hpd_mcc);
++			else if (INTEL_PCH_TYPE(dev_priv) >= PCH_ICP)
++				icp_irq_handler(dev_priv, iir, hpd_icp);
+ 			else if (INTEL_PCH_TYPE(dev_priv) >= PCH_SPT)
+ 				spt_irq_handler(dev_priv, iir);
+ 			else
+-- 
+2.17.1
+
