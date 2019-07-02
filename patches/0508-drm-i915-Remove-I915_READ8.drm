@@ -1,0 +1,165 @@
+From c12152aabe7ddf815ec51ac7c5c3fe1f20dc1f2a Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Tue, 11 Jun 2019 11:45:43 +0100
+Subject: [PATCH 508/681] drm/i915: Remove I915_READ8
+
+Only a few call sites remain which have been converted to uncore mmio
+accessors and so the macro can be removed.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190611104548.30545-1-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/i915_drv.h  |  2 --
+ drivers/gpu/drm/i915/intel_crt.c | 41 ++++++++++++++++++--------------
+ drivers/gpu/drm/i915/intel_pm.c  |  6 ++---
+ 3 files changed, 26 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 427c530a6c12..f90bab84ac52 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2838,8 +2838,6 @@ extern void intel_display_print_error_state(struct drm_i915_error_state_buf *e,
+ #define __I915_REG_OP(op__, dev_priv__, ...) \
+ 	intel_uncore_##op__(&(dev_priv__)->uncore, __VA_ARGS__)
+ 
+-#define I915_READ8(reg__)	  __I915_REG_OP(read8, dev_priv, (reg__))
+-
+ #define I915_READ16(reg__)	   __I915_REG_OP(read16, dev_priv, (reg__))
+ #define I915_WRITE16(reg__, val__) __I915_REG_OP(write16, dev_priv, (reg__), (val__))
+ 
+diff --git a/drivers/gpu/drm/i915/intel_crt.c b/drivers/gpu/drm/i915/intel_crt.c
+index bb56518576a1..3fcf2f84bcce 100644
+--- a/drivers/gpu/drm/i915/intel_crt.c
++++ b/drivers/gpu/drm/i915/intel_crt.c
+@@ -643,6 +643,7 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ {
+ 	struct drm_device *dev = crt->base.base.dev;
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	u32 save_bclrpat;
+ 	u32 save_vtotal;
+ 	u32 vtotal, vactive;
+@@ -663,9 +664,9 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 	pipeconf_reg = PIPECONF(pipe);
+ 	pipe_dsl_reg = PIPEDSL(pipe);
+ 
+-	save_bclrpat = I915_READ(bclrpat_reg);
+-	save_vtotal = I915_READ(vtotal_reg);
+-	vblank = I915_READ(vblank_reg);
++	save_bclrpat = intel_uncore_read(uncore, bclrpat_reg);
++	save_vtotal = intel_uncore_read(uncore, vtotal_reg);
++	vblank = intel_uncore_read(uncore, vblank_reg);
+ 
+ 	vtotal = ((save_vtotal >> 16) & 0xfff) + 1;
+ 	vactive = (save_vtotal & 0x7ff) + 1;
+@@ -674,21 +675,23 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 	vblank_end = ((vblank >> 16) & 0xfff) + 1;
+ 
+ 	/* Set the border color to purple. */
+-	I915_WRITE(bclrpat_reg, 0x500050);
++	intel_uncore_write(uncore, bclrpat_reg, 0x500050);
+ 
+ 	if (!IS_GEN(dev_priv, 2)) {
+-		u32 pipeconf = I915_READ(pipeconf_reg);
+-		I915_WRITE(pipeconf_reg, pipeconf | PIPECONF_FORCE_BORDER);
+-		POSTING_READ(pipeconf_reg);
++		u32 pipeconf = intel_uncore_read(uncore, pipeconf_reg);
++		intel_uncore_write(uncore,
++				   pipeconf_reg,
++				   pipeconf | PIPECONF_FORCE_BORDER);
++		intel_uncore_posting_read(uncore, pipeconf_reg);
+ 		/* Wait for next Vblank to substitue
+ 		 * border color for Color info */
+ 		intel_wait_for_vblank(dev_priv, pipe);
+-		st00 = I915_READ8(_VGA_MSR_WRITE);
++		st00 = intel_uncore_read8(uncore, _VGA_MSR_WRITE);
+ 		status = ((st00 & (1 << 4)) != 0) ?
+ 			connector_status_connected :
+ 			connector_status_disconnected;
+ 
+-		I915_WRITE(pipeconf_reg, pipeconf);
++		intel_uncore_write(uncore, pipeconf_reg, pipeconf);
+ 	} else {
+ 		bool restore_vblank = false;
+ 		int count, detect;
+@@ -702,9 +705,10 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 			u32 vsync_start = (vsync & 0xffff) + 1;
+ 
+ 			vblank_start = vsync_start;
+-			I915_WRITE(vblank_reg,
+-				   (vblank_start - 1) |
+-				   ((vblank_end - 1) << 16));
++			intel_uncore_write(uncore,
++					   vblank_reg,
++					   (vblank_start - 1) |
++					   ((vblank_end - 1) << 16));
+ 			restore_vblank = true;
+ 		}
+ 		/* sample in the vertical border, selecting the larger one */
+@@ -716,9 +720,10 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 		/*
+ 		 * Wait for the border to be displayed
+ 		 */
+-		while (I915_READ(pipe_dsl_reg) >= vactive)
++		while (intel_uncore_read(uncore, pipe_dsl_reg) >= vactive)
+ 			;
+-		while ((dsl = I915_READ(pipe_dsl_reg)) <= vsample)
++		while ((dsl = intel_uncore_read(uncore, pipe_dsl_reg)) <=
++		       vsample)
+ 			;
+ 		/*
+ 		 * Watch ST00 for an entire scanline
+@@ -728,14 +733,14 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 		do {
+ 			count++;
+ 			/* Read the ST00 VGA status register */
+-			st00 = I915_READ8(_VGA_MSR_WRITE);
++			st00 = intel_uncore_read8(uncore, _VGA_MSR_WRITE);
+ 			if (st00 & (1 << 4))
+ 				detect++;
+-		} while ((I915_READ(pipe_dsl_reg) == dsl));
++		} while ((intel_uncore_read(uncore, pipe_dsl_reg) == dsl));
+ 
+ 		/* restore vblank if necessary */
+ 		if (restore_vblank)
+-			I915_WRITE(vblank_reg, vblank);
++			intel_uncore_write(uncore, vblank_reg, vblank);
+ 		/*
+ 		 * If more than 3/4 of the scanline detected a monitor,
+ 		 * then it is assumed to be present. This works even on i830,
+@@ -748,7 +753,7 @@ intel_crt_load_detect(struct intel_crt *crt, u32 pipe)
+ 	}
+ 
+ 	/* Restore previous settings */
+-	I915_WRITE(bclrpat_reg, save_bclrpat);
++	intel_uncore_write(uncore, bclrpat_reg, save_bclrpat);
+ 
+ 	return status;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index d7272d4ff258..93e411e6ad19 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -8160,15 +8160,15 @@ unsigned long i915_chipset_val(struct drm_i915_private *dev_priv)
+ 	return val;
+ }
+ 
+-unsigned long i915_mch_val(struct drm_i915_private *dev_priv)
++unsigned long i915_mch_val(struct drm_i915_private *i915)
+ {
+ 	unsigned long m, x, b;
+ 	u32 tsfs;
+ 
+-	tsfs = I915_READ(TSFS);
++	tsfs = intel_uncore_read(&i915->uncore, TSFS);
+ 
+ 	m = ((tsfs & TSFS_SLOPE_MASK) >> TSFS_SLOPE_SHIFT);
+-	x = I915_READ8(TR1);
++	x = intel_uncore_read8(&i915->uncore, TR1);
+ 
+ 	b = tsfs & TSFS_INTR_MASK;
+ 
+-- 
+2.17.1
+

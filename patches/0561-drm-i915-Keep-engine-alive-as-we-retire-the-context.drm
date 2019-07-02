@@ -1,0 +1,92 @@
+From 5e19a92f36e27d30f3fd95df2f0722b46bdeacdb Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 18 Jun 2019 08:41:28 +0100
+Subject: [PATCH 561/681] drm/i915: Keep engine alive as we retire the context
+
+Though we pin the context first before taking the pm wakeref, during
+retire we need to unpin before dropping the pm wakeref (breaking the
+"natural" onion). During the unpin, we may need to attach a cleanup
+operation on to the engine wakeref, ergo we want to keep the engine
+awake until after the unpin.
+
+v2: Push the engine wakeref into the barrier so we keep the onion unwind
+ordering in the request itself
+
+Fixes: ce476c80b8bf ("drm/i915: Keep contexts pinned until after the next kernel context switch")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190618074153.16055-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_active.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index 2d019ac6db20..293e5bcc4b6c 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -4,6 +4,8 @@
+  * Copyright © 2019 Intel Corporation
+  */
+ 
++#include "gt/intel_engine_pm.h"
++
+ #include "i915_drv.h"
+ #include "i915_active.h"
+ #include "i915_globals.h"
+@@ -268,8 +270,9 @@ int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
+ 					    struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *i915 = engine->i915;
++	struct llist_node *pos, *next;
+ 	unsigned long tmp;
+-	int err = 0;
++	int err;
+ 
+ 	GEM_BUG_ON(!engine->mask);
+ 	for_each_engine_masked(engine, i915, engine->mask, tmp) {
+@@ -279,7 +282,7 @@ int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
+ 		node = kmem_cache_alloc(global.slab_cache, GFP_KERNEL);
+ 		if (unlikely(!node)) {
+ 			err = -ENOMEM;
+-			break;
++			goto unwind;
+ 		}
+ 
+ 		i915_active_request_init(&node->base,
+@@ -288,10 +291,24 @@ int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
+ 		node->ref = ref;
+ 		ref->count++;
+ 
++		intel_engine_pm_get(engine);
+ 		llist_add((struct llist_node *)&node->base.link,
+ 			  &ref->barriers);
+ 	}
+ 
++	return 0;
++
++unwind:
++	llist_for_each_safe(pos, next, llist_del_all(&ref->barriers)) {
++		struct active_node *node;
++
++		node = container_of((struct list_head *)pos,
++				    typeof(*node), base.link);
++		engine = (void *)rcu_access_pointer(node->base.request);
++
++		intel_engine_pm_put(engine);
++		kmem_cache_free(global.slab_cache, node);
++	}
+ 	return err;
+ }
+ 
+@@ -328,6 +345,7 @@ void i915_active_acquire_barrier(struct i915_active *ref)
+ 
+ 		llist_add((struct llist_node *)&node->base.link,
+ 			  &engine->barrier_tasks);
++		intel_engine_pm_put(engine);
+ 	}
+ 	i915_active_release(ref);
+ }
+-- 
+2.17.1
+

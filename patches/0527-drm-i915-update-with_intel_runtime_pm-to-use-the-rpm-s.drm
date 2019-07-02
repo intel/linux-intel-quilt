@@ -1,0 +1,569 @@
+From 00e711bd2fe745c99ae69d1d35c47283d08b987e Mon Sep 17 00:00:00 2001
+From: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Date: Thu, 13 Jun 2019 16:21:55 -0700
+Subject: [PATCH 527/681] drm/i915: update with_intel_runtime_pm to use the rpm
+ structure
+
+Matching the underlying get/put functions.
+
+Signed-off-by: Daniele Ceraolo Spurio <daniele.ceraolospurio@intel.com>
+Cc: Imre Deak <imre.deak@intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Acked-by: Imre Deak <imre.deak@intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190613232156.34940-8-daniele.ceraolospurio@intel.com
+---
+ drivers/gpu/drm/i915/gem/i915_gem_shrinker.c  |  8 +++----
+ .../drm/i915/gem/selftests/i915_gem_context.c |  6 ++---
+ drivers/gpu/drm/i915/gt/intel_context.c       |  2 +-
+ drivers/gpu/drm/i915/gt/intel_reset.c         |  2 +-
+ drivers/gpu/drm/i915/gt/selftest_reset.c      |  2 +-
+ .../gpu/drm/i915/gt/selftest_workarounds.c    |  4 ++--
+ drivers/gpu/drm/i915/i915_debugfs.c           | 24 +++++++++----------
+ drivers/gpu/drm/i915/i915_gem.c               |  2 +-
+ drivers/gpu/drm/i915/i915_gem_gtt.c           |  8 +++----
+ drivers/gpu/drm/i915/i915_pmu.c               |  3 ++-
+ drivers/gpu/drm/i915/i915_sysfs.c             |  2 +-
+ drivers/gpu/drm/i915/intel_guc_log.c          |  6 ++---
+ drivers/gpu/drm/i915/intel_huc.c              |  2 +-
+ drivers/gpu/drm/i915/intel_panel.c            |  2 +-
+ drivers/gpu/drm/i915/intel_pm.c               |  8 +++----
+ drivers/gpu/drm/i915/intel_runtime_pm.h       | 12 +++++-----
+ drivers/gpu/drm/i915/intel_uc.c               |  2 +-
+ drivers/gpu/drm/i915/intel_uncore.c           |  2 +-
+ drivers/gpu/drm/i915/selftests/i915_gem.c     |  6 ++---
+ .../gpu/drm/i915/selftests/i915_gem_evict.c   |  2 +-
+ drivers/gpu/drm/i915/selftests/i915_request.c |  2 +-
+ 21 files changed, 54 insertions(+), 53 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c b/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
+index 13ff05566a0a..a521f23c18ad 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
+@@ -297,7 +297,7 @@ unsigned long i915_gem_shrink_all(struct drm_i915_private *i915)
+ 	intel_wakeref_t wakeref;
+ 	unsigned long freed = 0;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		freed = i915_gem_shrink(i915, -1UL, NULL,
+ 					I915_SHRINK_BOUND |
+ 					I915_SHRINK_UNBOUND |
+@@ -358,7 +358,7 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
+ 	if (sc->nr_scanned < sc->nr_to_scan && current_is_kswapd()) {
+ 		intel_wakeref_t wakeref;
+ 
+-		with_intel_runtime_pm(i915, wakeref) {
++		with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 			freed += i915_gem_shrink(i915,
+ 						 sc->nr_to_scan - sc->nr_scanned,
+ 						 &sc->nr_scanned,
+@@ -385,7 +385,7 @@ i915_gem_shrinker_oom(struct notifier_block *nb, unsigned long event, void *ptr)
+ 	unsigned long flags;
+ 
+ 	freed_pages = 0;
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
+ 					       I915_SHRINK_BOUND |
+ 					       I915_SHRINK_UNBOUND |
+@@ -433,7 +433,7 @@ i915_gem_shrinker_vmap(struct notifier_block *nb, unsigned long event, void *ptr
+ 				   MAX_SCHEDULE_TIMEOUT))
+ 		goto out;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
+ 					       I915_SHRINK_BOUND |
+ 					       I915_SHRINK_UNBOUND |
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+index b85a4a43536a..03ac5003abf1 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+@@ -527,7 +527,7 @@ static int igt_ctx_exec(void *arg)
+ 				}
+ 			}
+ 
+-			with_intel_runtime_pm(i915, wakeref)
++			with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 				err = gpu_fill(obj, ctx, engine, dw);
+ 			if (err) {
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+@@ -647,7 +647,7 @@ static int igt_shared_ctx_exec(void *arg)
+ 			}
+ 
+ 			err = 0;
+-			with_intel_runtime_pm(i915, wakeref)
++			with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 				err = gpu_fill(obj, ctx, engine, dw);
+ 			if (err) {
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+@@ -1230,7 +1230,7 @@ static int igt_ctx_readonly(void *arg)
+ 			}
+ 
+ 			err = 0;
+-			with_intel_runtime_pm(i915, wakeref)
++			with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 				err = gpu_fill(obj, ctx, engine, dw);
+ 			if (err) {
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index 73c1082bd65b..848df91e2b20 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -54,7 +54,7 @@ int __intel_context_do_pin(struct intel_context *ce)
+ 		intel_wakeref_t wakeref;
+ 
+ 		err = 0;
+-		with_intel_runtime_pm(ce->engine->i915, wakeref)
++		with_intel_runtime_pm(&ce->engine->i915->runtime_pm, wakeref)
+ 			err = ce->ops->pin(ce);
+ 		if (err)
+ 			goto err;
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index 9e7d400c083a..6e6807a3f748 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -851,7 +851,7 @@ void i915_gem_set_wedged(struct drm_i915_private *i915)
+ 	intel_wakeref_t wakeref;
+ 
+ 	mutex_lock(&error->wedge_mutex);
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		__i915_gem_set_wedged(i915);
+ 	mutex_unlock(&error->wedge_mutex);
+ }
+diff --git a/drivers/gpu/drm/i915/gt/selftest_reset.c b/drivers/gpu/drm/i915/gt/selftest_reset.c
+index 91f0349882fc..89da9e7cc1ba 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_reset.c
++++ b/drivers/gpu/drm/i915/gt/selftest_reset.c
+@@ -111,7 +111,7 @@ int intel_reset_live_selftests(struct drm_i915_private *i915)
+ 	if (i915_terminally_wedged(i915))
+ 		return -EIO; /* we're long past hope of a successful reset */
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		err = i915_subtests(tests, i915);
+ 
+ 	return err;
+diff --git a/drivers/gpu/drm/i915/gt/selftest_workarounds.c b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+index 8891e1a8ac16..91449d5157f6 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+@@ -256,7 +256,7 @@ switch_to_scratch_context(struct intel_engine_cs *engine,
+ 	GEM_BUG_ON(i915_gem_context_is_bannable(ctx));
+ 
+ 	rq = ERR_PTR(-ENODEV);
+-	with_intel_runtime_pm(engine->i915, wakeref)
++	with_intel_runtime_pm(&engine->i915->runtime_pm, wakeref)
+ 		rq = igt_spinner_create_request(spin, ctx, engine, MI_NOOP);
+ 
+ 	kernel_context_close(ctx);
+@@ -312,7 +312,7 @@ static int check_whitelist_across_reset(struct intel_engine_cs *engine,
+ 	if (err)
+ 		goto out;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		err = reset(engine);
+ 
+ 	igt_spinner_end(&spin);
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 5ca41165fb78..f58486820823 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -769,7 +769,7 @@ static int i915_gpu_info_open(struct inode *inode, struct file *file)
+ 	intel_wakeref_t wakeref;
+ 
+ 	gpu = NULL;
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		gpu = i915_capture_gpu_state(i915);
+ 	if (IS_ERR(gpu))
+ 		return PTR_ERR(gpu);
+@@ -1097,7 +1097,7 @@ static int i915_hangcheck_info(struct seq_file *m, void *unused)
+ 		return 0;
+ 	}
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		for_each_engine(engine, dev_priv, id)
+ 			acthd[id] = intel_engine_get_active_head(engine);
+ 
+@@ -1357,7 +1357,7 @@ static int i915_drpc_info(struct seq_file *m, void *unused)
+ 	intel_wakeref_t wakeref;
+ 	int err = -ENODEV;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		if (IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv))
+ 			err = vlv_drpc_info(m);
+ 		else if (INTEL_GEN(dev_priv) >= 6)
+@@ -1524,7 +1524,7 @@ static int i915_emon_status(struct seq_file *m, void *unused)
+ 	if (!IS_GEN(i915, 5))
+ 		return -ENODEV;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		unsigned long temp, chipset, gfx;
+ 
+ 		temp = i915_mch_val(i915);
+@@ -1816,7 +1816,7 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 	u32 act_freq = rps->cur_freq;
+ 	intel_wakeref_t wakeref;
+ 
+-	with_intel_runtime_pm_if_in_use(dev_priv, wakeref) {
++	with_intel_runtime_pm_if_in_use(&dev_priv->runtime_pm, wakeref) {
+ 		if (IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv)) {
+ 			vlv_punit_get(dev_priv);
+ 			act_freq = vlv_punit_read(dev_priv,
+@@ -1899,7 +1899,7 @@ static int i915_huc_load_status_info(struct seq_file *m, void *data)
+ 	p = drm_seq_file_printer(m);
+ 	intel_uc_fw_dump(&dev_priv->huc.fw, &p);
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		seq_printf(m, "\nHuC status 0x%08x:\n", I915_READ(HUC_STATUS2));
+ 
+ 	return 0;
+@@ -1917,7 +1917,7 @@ static int i915_guc_load_status_info(struct seq_file *m, void *data)
+ 	p = drm_seq_file_printer(m);
+ 	intel_uc_fw_dump(&dev_priv->guc.fw, &p);
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		u32 tmp = I915_READ(GUC_STATUS);
+ 		u32 i;
+ 
+@@ -2423,7 +2423,7 @@ static int i915_energy_uJ(struct seq_file *m, void *data)
+ 		return -ENODEV;
+ 
+ 	units = (power & 0x1f00) >> 8;
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		power = I915_READ(MCH_SECP_NRG_STTS);
+ 
+ 	power = (1000000 * power) >> units; /* convert to uJ */
+@@ -3009,7 +3009,7 @@ static ssize_t i915_ipc_status_write(struct file *file, const char __user *ubuf,
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		if (!dev_priv->ipc_enabled && enable)
+ 			DRM_INFO("Enabling IPC: WM will be proper only after next commit\n");
+ 		dev_priv->wm.distrust_bios_wm = true;
+@@ -3761,7 +3761,7 @@ i915_cache_sharing_get(void *data, u64 *val)
+ 	if (!(IS_GEN_RANGE(dev_priv, 6, 7)))
+ 		return -ENODEV;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		snpcr = I915_READ(GEN6_MBCUNIT_SNPCR);
+ 
+ 	*val = (snpcr & GEN6_MBC_SNPCR_MASK) >> GEN6_MBC_SNPCR_SHIFT;
+@@ -3782,7 +3782,7 @@ i915_cache_sharing_set(void *data, u64 val)
+ 		return -EINVAL;
+ 
+ 	DRM_DEBUG_DRIVER("Manually setting uncore sharing to %llu\n", val);
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		u32 snpcr;
+ 
+ 		/* Update the cache sharing policy here as well */
+@@ -4028,7 +4028,7 @@ static int i915_sseu_status(struct seq_file *m, void *unused)
+ 	sseu.max_eus_per_subslice =
+ 		RUNTIME_INFO(dev_priv)->sseu.max_eus_per_subslice;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		if (IS_CHERRYVIEW(dev_priv))
+ 			cherryview_sseu_device_status(dev_priv, &sseu);
+ 		else if (IS_BROADWELL(dev_priv))
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 9804e194fa7d..217236596202 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -262,7 +262,7 @@ void i915_gem_flush_ggtt_writes(struct drm_i915_private *dev_priv)
+ 
+ 	i915_gem_chipset_flush(dev_priv);
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		struct intel_uncore *uncore = &dev_priv->uncore;
+ 
+ 		spin_lock_irq(&uncore->lock);
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 057ea8303bce..278de04a96aa 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -2619,7 +2619,7 @@ static int ggtt_bind_vma(struct i915_vma *vma,
+ 	if (i915_gem_object_is_readonly(obj))
+ 		pte_flags |= PTE_READ_ONLY;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		vma->vm->insert_entries(vma->vm, vma, cache_level, pte_flags);
+ 
+ 	vma->page_sizes.gtt = I915_GTT_PAGE_SIZE;
+@@ -2639,7 +2639,7 @@ static void ggtt_unbind_vma(struct i915_vma *vma)
+ 	struct drm_i915_private *i915 = vma->vm->i915;
+ 	intel_wakeref_t wakeref;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		vma->vm->clear_range(vma->vm, vma->node.start, vma->size);
+ }
+ 
+@@ -2674,7 +2674,7 @@ static int aliasing_gtt_bind_vma(struct i915_vma *vma,
+ 	if (flags & I915_VMA_GLOBAL_BIND) {
+ 		intel_wakeref_t wakeref;
+ 
+-		with_intel_runtime_pm(i915, wakeref) {
++		with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 			vma->vm->insert_entries(vma->vm, vma,
+ 						cache_level, pte_flags);
+ 		}
+@@ -2691,7 +2691,7 @@ static void aliasing_gtt_unbind_vma(struct i915_vma *vma)
+ 		struct i915_address_space *vm = vma->vm;
+ 		intel_wakeref_t wakeref;
+ 
+-		with_intel_runtime_pm(i915, wakeref)
++		with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 			vm->clear_range(vm, vma->node.start, vma->size);
+ 	}
+ 
+diff --git a/drivers/gpu/drm/i915/i915_pmu.c b/drivers/gpu/drm/i915/i915_pmu.c
+index 507fcdb0f97e..8fe46ee920a0 100644
+--- a/drivers/gpu/drm/i915/i915_pmu.c
++++ b/drivers/gpu/drm/i915/i915_pmu.c
+@@ -227,7 +227,8 @@ frequency_sample(struct drm_i915_private *dev_priv, unsigned int period_ns)
+ 		if (dev_priv->gt.awake) {
+ 			intel_wakeref_t wakeref;
+ 
+-			with_intel_runtime_pm_if_in_use(dev_priv, wakeref) {
++			with_intel_runtime_pm_if_in_use(&dev_priv->runtime_pm,
++							wakeref) {
+ 				val = intel_uncore_read_notrace(&dev_priv->uncore,
+ 								GEN6_RPSTAT1);
+ 				val = intel_get_cagf(dev_priv, val);
+diff --git a/drivers/gpu/drm/i915/i915_sysfs.c b/drivers/gpu/drm/i915/i915_sysfs.c
+index 75acbf686ec9..ecac1c386109 100644
+--- a/drivers/gpu/drm/i915/i915_sysfs.c
++++ b/drivers/gpu/drm/i915/i915_sysfs.c
+@@ -48,7 +48,7 @@ static u32 calc_residency(struct drm_i915_private *dev_priv,
+ 	intel_wakeref_t wakeref;
+ 	u64 res = 0;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		res = intel_rc6_residency_us(dev_priv, reg);
+ 
+ 	return DIV_ROUND_CLOSEST_ULL(res, 1000);
+diff --git a/drivers/gpu/drm/i915/intel_guc_log.c b/drivers/gpu/drm/i915/intel_guc_log.c
+index 4f9c53681f92..bf1446629703 100644
+--- a/drivers/gpu/drm/i915/intel_guc_log.c
++++ b/drivers/gpu/drm/i915/intel_guc_log.c
+@@ -436,7 +436,7 @@ static void guc_log_capture_logs(struct intel_guc_log *log)
+ 	 * Generally device is expected to be active only at this
+ 	 * time, so get/put should be really quick.
+ 	 */
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		guc_action_flush_log_complete(guc);
+ }
+ 
+@@ -515,7 +515,7 @@ int intel_guc_log_set_level(struct intel_guc_log *log, u32 level)
+ 	if (log->level == level)
+ 		goto out_unlock;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		ret = guc_action_control_log(guc,
+ 					     GUC_LOG_LEVEL_IS_VERBOSE(level),
+ 					     GUC_LOG_LEVEL_IS_ENABLED(level),
+@@ -600,7 +600,7 @@ void intel_guc_log_relay_flush(struct intel_guc_log *log)
+ 	 */
+ 	flush_work(&log->relay.flush_work);
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		guc_action_flush_log(guc);
+ 
+ 	/* GuC would have updated log buffer by now, so capture it */
+diff --git a/drivers/gpu/drm/i915/intel_huc.c b/drivers/gpu/drm/i915/intel_huc.c
+index 8572a0588efc..fb6f693d3cac 100644
+--- a/drivers/gpu/drm/i915/intel_huc.c
++++ b/drivers/gpu/drm/i915/intel_huc.c
+@@ -174,7 +174,7 @@ int intel_huc_check_status(struct intel_huc *huc)
+ 	if (!HAS_HUC(dev_priv))
+ 		return -ENODEV;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref)
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref)
+ 		status = (I915_READ(huc->status.reg) & huc->status.mask) ==
+ 			  huc->status.value;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_panel.c b/drivers/gpu/drm/i915/intel_panel.c
+index 9cd4e37e3934..39d742094065 100644
+--- a/drivers/gpu/drm/i915/intel_panel.c
++++ b/drivers/gpu/drm/i915/intel_panel.c
+@@ -1288,7 +1288,7 @@ static int intel_backlight_device_get_brightness(struct backlight_device *bd)
+ 	intel_wakeref_t wakeref;
+ 	int ret = 0;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		u32 hw_level;
+ 
+ 		drm_modeset_lock(&dev->mode_config.connection_mutex, NULL);
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 2c7f3ebc0117..b03e2a467e8b 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -8167,7 +8167,7 @@ unsigned long i915_chipset_val(struct drm_i915_private *dev_priv)
+ 	if (!IS_GEN(dev_priv, 5))
+ 		return 0;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		spin_lock_irq(&mchdev_lock);
+ 		val = __i915_chipset_val(dev_priv);
+ 		spin_unlock_irq(&mchdev_lock);
+@@ -8253,7 +8253,7 @@ void i915_update_gfx_val(struct drm_i915_private *dev_priv)
+ 	if (!IS_GEN(dev_priv, 5))
+ 		return;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		spin_lock_irq(&mchdev_lock);
+ 		__i915_update_gfx_val(dev_priv);
+ 		spin_unlock_irq(&mchdev_lock);
+@@ -8305,7 +8305,7 @@ unsigned long i915_gfx_val(struct drm_i915_private *dev_priv)
+ 	if (!IS_GEN(dev_priv, 5))
+ 		return 0;
+ 
+-	with_intel_runtime_pm(dev_priv, wakeref) {
++	with_intel_runtime_pm(&dev_priv->runtime_pm, wakeref) {
+ 		spin_lock_irq(&mchdev_lock);
+ 		val = __i915_gfx_val(dev_priv);
+ 		spin_unlock_irq(&mchdev_lock);
+@@ -8346,7 +8346,7 @@ unsigned long i915_read_mch_val(void)
+ 	if (!i915)
+ 		return 0;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		spin_lock_irq(&mchdev_lock);
+ 		chipset_val = __i915_chipset_val(i915);
+ 		graphics_val = __i915_gfx_val(i915);
+diff --git a/drivers/gpu/drm/i915/intel_runtime_pm.h b/drivers/gpu/drm/i915/intel_runtime_pm.h
+index f6445ca5bbf1..f2d6299a8161 100644
+--- a/drivers/gpu/drm/i915/intel_runtime_pm.h
++++ b/drivers/gpu/drm/i915/intel_runtime_pm.h
+@@ -179,13 +179,13 @@ intel_wakeref_t intel_runtime_pm_get_if_in_use(struct intel_runtime_pm *rpm);
+ intel_wakeref_t intel_runtime_pm_get_noresume(struct intel_runtime_pm *rpm);
+ intel_wakeref_t intel_runtime_pm_get_raw(struct intel_runtime_pm *rpm);
+ 
+-#define with_intel_runtime_pm(i915, wf) \
+-	for ((wf) = intel_runtime_pm_get(&(i915)->runtime_pm); (wf); \
+-	     intel_runtime_pm_put(&(i915)->runtime_pm, (wf)), (wf) = 0)
++#define with_intel_runtime_pm(rpm, wf) \
++	for ((wf) = intel_runtime_pm_get(rpm); (wf); \
++	     intel_runtime_pm_put((rpm), (wf)), (wf) = 0)
+ 
+-#define with_intel_runtime_pm_if_in_use(i915, wf) \
+-	for ((wf) = intel_runtime_pm_get_if_in_use(&(i915)->runtime_pm); (wf); \
+-	     intel_runtime_pm_put(&(i915)->runtime_pm, (wf)), (wf) = 0)
++#define with_intel_runtime_pm_if_in_use(rpm, wf) \
++	for ((wf) = intel_runtime_pm_get_if_in_use(rpm); (wf); \
++	     intel_runtime_pm_put((rpm), (wf)), (wf) = 0)
+ 
+ void intel_runtime_pm_put_unchecked(struct intel_runtime_pm *rpm);
+ #if IS_ENABLED(CONFIG_DRM_I915_DEBUG_RUNTIME_PM)
+diff --git a/drivers/gpu/drm/i915/intel_uc.c b/drivers/gpu/drm/i915/intel_uc.c
+index a8e7f0ba7c3b..ae45651ac73c 100644
+--- a/drivers/gpu/drm/i915/intel_uc.c
++++ b/drivers/gpu/drm/i915/intel_uc.c
+@@ -537,7 +537,7 @@ void intel_uc_suspend(struct drm_i915_private *i915)
+ 	if (!intel_guc_is_loaded(guc))
+ 		return;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		intel_uc_runtime_suspend(i915);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_uncore.c b/drivers/gpu/drm/i915/intel_uncore.c
+index 5eb1d130fc2e..da33aa672c3d 100644
+--- a/drivers/gpu/drm/i915/intel_uncore.c
++++ b/drivers/gpu/drm/i915/intel_uncore.c
+@@ -1702,7 +1702,7 @@ int i915_reg_read_ioctl(struct drm_device *dev,
+ 
+ 	flags = reg->offset & (entry->size - 1);
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		if (entry->size == 8 && flags == I915_REG_READ_8B_WA)
+ 			reg->val = intel_uncore_read64_2x32(uncore,
+ 							    entry->offset_ldw,
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem.c b/drivers/gpu/drm/i915/selftests/i915_gem.c
+index 23a54da47ca5..c6a01a6e87f1 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem.c
+@@ -88,7 +88,7 @@ static void pm_suspend(struct drm_i915_private *i915)
+ {
+ 	intel_wakeref_t wakeref;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		i915_gem_suspend_gtt_mappings(i915);
+ 		i915_gem_suspend_late(i915);
+ 	}
+@@ -98,7 +98,7 @@ static void pm_hibernate(struct drm_i915_private *i915)
+ {
+ 	intel_wakeref_t wakeref;
+ 
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		i915_gem_suspend_gtt_mappings(i915);
+ 
+ 		i915_gem_freeze(i915);
+@@ -114,7 +114,7 @@ static void pm_resume(struct drm_i915_private *i915)
+ 	 * Both suspend and hibernate follow the same wakeup path and assume
+ 	 * that runtime-pm just works.
+ 	 */
+-	with_intel_runtime_pm(i915, wakeref) {
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+ 		intel_gt_sanitize(i915, false);
+ 		i915_gem_sanitize(i915);
+ 		i915_gem_resume(i915);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_evict.c b/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
+index e5f67474dcb4..8c69198c7e4e 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_evict.c
+@@ -539,7 +539,7 @@ int i915_gem_evict_mock_selftests(void)
+ 		return -ENOMEM;
+ 
+ 	mutex_lock(&i915->drm.struct_mutex);
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		err = i915_subtests(tests, i915);
+ 
+ 	mutex_unlock(&i915->drm.struct_mutex);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_request.c b/drivers/gpu/drm/i915/selftests/i915_request.c
+index dd4e72eafc6c..3de24f3d4ed5 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_request.c
++++ b/drivers/gpu/drm/i915/selftests/i915_request.c
+@@ -514,7 +514,7 @@ int i915_request_mock_selftests(void)
+ 	if (!i915)
+ 		return -ENOMEM;
+ 
+-	with_intel_runtime_pm(i915, wakeref)
++	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
+ 		err = i915_subtests(tests, i915);
+ 
+ 	drm_dev_put(&i915->drm);
+-- 
+2.17.1
+

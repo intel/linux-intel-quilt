@@ -1,0 +1,439 @@
+From 818b4b37b099686773b8173ece44a8be4917bb64 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 18 Jun 2019 08:41:30 +0100
+Subject: [PATCH 576/681] drm/i915: Stop passing I915_WAIT_LOCKED to
+ i915_request_wait()
+
+Since commit eb8d0f5af4ec ("drm/i915: Remove GPU reset dependence on
+struct_mutex"), the I915_WAIT_LOCKED flags passed to i915_request_wait()
+has been defunct. Now go ahead and remove it from all callers.
+
+References: eb8d0f5af4ec ("drm/i915: Remove GPU reset dependence on struct_mutex")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190618074153.16055-3-chris@chris-wilson.co.uk
+---
+ .../drm/i915/gem/selftests/i915_gem_context.c | 14 +++------
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c    |  2 +-
+ drivers/gpu/drm/i915/gt/intel_workarounds.c   |  2 +-
+ drivers/gpu/drm/i915/gt/selftest_hangcheck.c  |  9 ++----
+ drivers/gpu/drm/i915/gt/selftest_lrc.c        | 24 ++++++---------
+ .../gpu/drm/i915/gt/selftest_workarounds.c    |  6 ++--
+ drivers/gpu/drm/i915/i915_active.h            |  2 +-
+ drivers/gpu/drm/i915/i915_request.c           |  4 ---
+ drivers/gpu/drm/i915/i915_trace.h             |  3 +-
+ drivers/gpu/drm/i915/selftests/i915_request.c | 30 +++++++------------
+ .../gpu/drm/i915/selftests/i915_timeline.c    |  6 ++--
+ 11 files changed, 36 insertions(+), 66 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+index 03ac5003abf1..eaa2b16574c7 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+@@ -83,9 +83,7 @@ static int live_nop_switch(void *arg)
+ 			}
+ 			i915_request_add(rq);
+ 		}
+-		if (i915_request_wait(rq,
+-				      I915_WAIT_LOCKED,
+-				      HZ / 5) < 0) {
++		if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 			pr_err("Failed to populated %d contexts\n", nctx);
+ 			i915_gem_set_wedged(i915);
+ 			err = -EIO;
+@@ -128,9 +126,7 @@ static int live_nop_switch(void *arg)
+ 
+ 				i915_request_add(rq);
+ 			}
+-			if (i915_request_wait(rq,
+-					      I915_WAIT_LOCKED,
+-					      HZ / 5) < 0) {
++			if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 				pr_err("Switching between %ld contexts timed out\n",
+ 				       prime);
+ 				i915_gem_set_wedged(i915);
+@@ -893,7 +889,7 @@ __read_slice_count(struct drm_i915_private *i915,
+ 	if (spin)
+ 		igt_spinner_end(spin);
+ 
+-	ret = i915_request_wait(rq, I915_WAIT_LOCKED, MAX_SCHEDULE_TIMEOUT);
++	ret = i915_request_wait(rq, 0, MAX_SCHEDULE_TIMEOUT);
+ 	i915_request_put(rq);
+ 	if (ret < 0)
+ 		return ret;
+@@ -980,9 +976,7 @@ __sseu_finish(struct drm_i915_private *i915,
+ 		igt_spinner_end(spin);
+ 
+ 	if ((flags & TEST_IDLE) && ret == 0) {
+-		ret = i915_gem_wait_for_idle(i915,
+-					     I915_WAIT_LOCKED,
+-					     MAX_SCHEDULE_TIMEOUT);
++		ret = i915_gem_wait_for_idle(i915, 0, MAX_SCHEDULE_TIMEOUT);
+ 		if (ret)
+ 			return ret;
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index bd35ad202459..c6023bc9452d 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1815,7 +1815,7 @@ static noinline int wait_for_space(struct intel_ring *ring, unsigned int bytes)
+ 		return -ENOSPC;
+ 
+ 	timeout = i915_request_wait(target,
+-				    I915_WAIT_INTERRUPTIBLE | I915_WAIT_LOCKED,
++				    I915_WAIT_INTERRUPTIBLE,
+ 				    MAX_SCHEDULE_TIMEOUT);
+ 	if (timeout < 0)
+ 		return timeout;
+diff --git a/drivers/gpu/drm/i915/gt/intel_workarounds.c b/drivers/gpu/drm/i915/gt/intel_workarounds.c
+index d37ebcddb963..f6663cec387a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/intel_workarounds.c
+@@ -1435,7 +1435,7 @@ static int engine_wa_list_verify(struct intel_context *ce,
+ 		goto err_vma;
+ 
+ 	i915_request_add(rq);
+-	if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0) {
++	if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 		err = -ETIME;
+ 		goto err_vma;
+ 	}
+diff --git a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+index b0b2998e56b8..1ee4c923044f 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
++++ b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+@@ -339,8 +339,7 @@ static int igt_hang_sanitycheck(void *arg)
+ 
+ 		timeout = 0;
+ 		igt_wedge_on_timeout(&w, i915, HZ / 10 /* 100ms timeout*/)
+-			timeout = i915_request_wait(rq,
+-						    I915_WAIT_LOCKED,
++			timeout = i915_request_wait(rq, 0,
+ 						    MAX_SCHEDULE_TIMEOUT);
+ 		if (i915_reset_failed(i915))
+ 			timeout = -EIO;
+@@ -1098,7 +1097,7 @@ static int igt_reset_wait(void *arg)
+ 
+ 	reset_count = fake_hangcheck(i915, ALL_ENGINES);
+ 
+-	timeout = i915_request_wait(rq, I915_WAIT_LOCKED, 10);
++	timeout = i915_request_wait(rq, 0, 10);
+ 	if (timeout < 0) {
+ 		pr_err("i915_request_wait failed on a stuck request: err=%ld\n",
+ 		       timeout);
+@@ -1666,9 +1665,7 @@ static int igt_atomic_reset_engine(struct intel_engine_cs *engine,
+ 		struct igt_wedge_me w;
+ 
+ 		igt_wedge_on_timeout(&w, i915, HZ / 20 /* 50ms timeout*/)
+-			i915_request_wait(rq,
+-					  I915_WAIT_LOCKED,
+-					  MAX_SCHEDULE_TIMEOUT);
++			i915_request_wait(rq, 0, MAX_SCHEDULE_TIMEOUT);
+ 		if (i915_reset_failed(i915))
+ 			err = -EIO;
+ 	}
+diff --git a/drivers/gpu/drm/i915/gt/selftest_lrc.c b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+index d84d31e3da19..401e8b539297 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_lrc.c
++++ b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+@@ -192,7 +192,7 @@ static int live_busywait_preempt(void *arg)
+ 		}
+ 
+ 		/* Low priority request should be busywaiting now */
+-		if (i915_request_wait(lo, I915_WAIT_LOCKED, 1) != -ETIME) {
++		if (i915_request_wait(lo, 0, 1) != -ETIME) {
+ 			pr_err("%s: Busywaiting request did not!\n",
+ 			       engine->name);
+ 			err = -EIO;
+@@ -220,7 +220,7 @@ static int live_busywait_preempt(void *arg)
+ 		intel_ring_advance(hi, cs);
+ 		i915_request_add(hi);
+ 
+-		if (i915_request_wait(lo, I915_WAIT_LOCKED, HZ / 5) < 0) {
++		if (i915_request_wait(lo, 0, HZ / 5) < 0) {
+ 			struct drm_printer p = drm_info_printer(i915->drm.dev);
+ 
+ 			pr_err("%s: Failed to preempt semaphore busywait!\n",
+@@ -739,7 +739,6 @@ static int live_suppress_wait_preempt(void *arg)
+ 			GEM_BUG_ON(!i915_request_started(rq[0]));
+ 
+ 			if (i915_request_wait(rq[depth],
+-					      I915_WAIT_LOCKED |
+ 					      I915_WAIT_PRIORITY,
+ 					      1) != -ETIME) {
+ 				pr_err("%s: Waiter depth:%d completed!\n",
+@@ -841,7 +840,7 @@ static int live_chain_preempt(void *arg)
+ 			 __func__, engine->name, ring_size);
+ 
+ 		igt_spinner_end(&lo.spin);
+-		if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 2) < 0) {
++		if (i915_request_wait(rq, 0, HZ / 2) < 0) {
+ 			pr_err("Timed out waiting to flush %s\n", engine->name);
+ 			goto err_wedged;
+ 		}
+@@ -882,7 +881,7 @@ static int live_chain_preempt(void *arg)
+ 			engine->schedule(rq, &attr);
+ 
+ 			igt_spinner_end(&hi.spin);
+-			if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0) {
++			if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 				struct drm_printer p =
+ 					drm_info_printer(i915->drm.dev);
+ 
+@@ -898,7 +897,7 @@ static int live_chain_preempt(void *arg)
+ 			if (IS_ERR(rq))
+ 				goto err_wedged;
+ 			i915_request_add(rq);
+-			if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0) {
++			if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 				struct drm_printer p =
+ 					drm_info_printer(i915->drm.dev);
+ 
+@@ -1396,9 +1395,7 @@ static int nop_virtual_engine(struct drm_i915_private *i915,
+ 		}
+ 
+ 		for (nc = 0; nc < nctx; nc++) {
+-			if (i915_request_wait(request[nc],
+-					      I915_WAIT_LOCKED,
+-					      HZ / 10) < 0) {
++			if (i915_request_wait(request[nc], 0, HZ / 10) < 0) {
+ 				pr_err("%s(%s): wait for %llx:%lld timed out\n",
+ 				       __func__, ve[0]->engine->name,
+ 				       request[nc]->fence.context,
+@@ -1545,7 +1542,7 @@ static int mask_virtual_engine(struct drm_i915_private *i915,
+ 	}
+ 
+ 	for (n = 0; n < nsibling; n++) {
+-		if (i915_request_wait(request[n], I915_WAIT_LOCKED, HZ / 10) < 0) {
++		if (i915_request_wait(request[n], 0, HZ / 10) < 0) {
+ 			pr_err("%s(%s): wait for %llx:%lld timed out\n",
+ 			       __func__, ve->engine->name,
+ 			       request[n]->fence.context,
+@@ -1720,9 +1717,7 @@ static int bond_virtual_engine(struct drm_i915_private *i915,
+ 		}
+ 		onstack_fence_fini(&fence);
+ 
+-		if (i915_request_wait(rq[0],
+-				      I915_WAIT_LOCKED,
+-				      HZ / 10) < 0) {
++		if (i915_request_wait(rq[0], 0, HZ / 10) < 0) {
+ 			pr_err("Master request did not execute (on %s)!\n",
+ 			       rq[0]->engine->name);
+ 			err = -EIO;
+@@ -1730,8 +1725,7 @@ static int bond_virtual_engine(struct drm_i915_private *i915,
+ 		}
+ 
+ 		for (n = 0; n < nsibling; n++) {
+-			if (i915_request_wait(rq[n + 1],
+-					      I915_WAIT_LOCKED,
++			if (i915_request_wait(rq[n + 1], 0,
+ 					      MAX_SCHEDULE_TIMEOUT) < 0) {
+ 				err = -EIO;
+ 				goto out;
+diff --git a/drivers/gpu/drm/i915/gt/selftest_workarounds.c b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+index 5f2011f3a4a4..9eaf030affd0 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+@@ -567,7 +567,7 @@ static int check_dirty_whitelist(struct i915_gem_context *ctx,
+ 		if (err)
+ 			goto out_batch;
+ 
+-		if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0) {
++		if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 			pr_err("%s: Futzing %x timedout; cancelling test\n",
+ 			       engine->name, reg);
+ 			i915_gem_set_wedged(ctx->i915);
+@@ -769,7 +769,7 @@ static int read_whitelisted_registers(struct i915_gem_context *ctx,
+ err_req:
+ 	i915_request_add(rq);
+ 
+-	if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0)
++	if (i915_request_wait(rq, 0, HZ / 5) < 0)
+ 		err = -EIO;
+ 
+ 	return err;
+@@ -825,7 +825,7 @@ static int scrub_whitelisted_registers(struct i915_gem_context *ctx,
+ 
+ err_request:
+ 	i915_request_add(rq);
+-	if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0)
++	if (i915_request_wait(rq, 0, HZ / 5) < 0)
+ 		err = -EIO;
+ 
+ err_unpin:
+diff --git a/drivers/gpu/drm/i915/i915_active.h b/drivers/gpu/drm/i915/i915_active.h
+index d55d37673944..c14eebf6d074 100644
+--- a/drivers/gpu/drm/i915/i915_active.h
++++ b/drivers/gpu/drm/i915/i915_active.h
+@@ -330,7 +330,7 @@ i915_active_request_retire(struct i915_active_request *active,
+ 		return 0;
+ 
+ 	ret = i915_request_wait(request,
+-				I915_WAIT_INTERRUPTIBLE | I915_WAIT_LOCKED,
++				I915_WAIT_INTERRUPTIBLE,
+ 				MAX_SCHEDULE_TIMEOUT);
+ 	if (ret < 0)
+ 		return ret;
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 0c2b53b8a3d1..a195a92d0105 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -1360,10 +1360,6 @@ static void request_wait_wake(struct dma_fence *fence, struct dma_fence_cb *cb)
+  * maximum of @timeout jiffies (with MAX_SCHEDULE_TIMEOUT implying an
+  * unbounded wait).
+  *
+- * If the caller holds the struct_mutex, the caller must pass I915_WAIT_LOCKED
+- * in via the flags, and vice versa if the struct_mutex is not held, the caller
+- * must not specify that the wait is locked.
+- *
+  * Returns the remaining time (in jiffies) if the request completed, which may
+  * be zero or -ETIME if the request is unfinished after the timeout expires.
+  * May return -EINTR is called with I915_WAIT_INTERRUPTIBLE and a signal is
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index 5c8cfaa70d72..f4ce643b3bc3 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -863,10 +863,9 @@ TRACE_EVENT(i915_request_wait_begin,
+ 			   __entry->flags = flags;
+ 			   ),
+ 
+-	    TP_printk("dev=%u, engine=%u:%u, hw_id=%u, ctx=%llu, seqno=%u, blocking=%u, flags=0x%x",
++	    TP_printk("dev=%u, engine=%u:%u, hw_id=%u, ctx=%llu, seqno=%u, flags=0x%x",
+ 		      __entry->dev, __entry->class, __entry->instance,
+ 		      __entry->hw_id, __entry->ctx, __entry->seqno,
+-		      !!(__entry->flags & I915_WAIT_LOCKED),
+ 		      __entry->flags)
+ );
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/i915_request.c b/drivers/gpu/drm/i915/selftests/i915_request.c
+index 3de24f3d4ed5..298bb7116c51 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_request.c
++++ b/drivers/gpu/drm/i915/selftests/i915_request.c
+@@ -74,12 +74,12 @@ static int igt_wait_request(void *arg)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, 0) != -ETIME) {
++	if (i915_request_wait(request, 0, 0) != -ETIME) {
+ 		pr_err("request wait (busy query) succeeded (expected timeout before submit!)\n");
+ 		goto out_unlock;
+ 	}
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, T) != -ETIME) {
++	if (i915_request_wait(request, 0, T) != -ETIME) {
+ 		pr_err("request wait succeeded (expected timeout before submit!)\n");
+ 		goto out_unlock;
+ 	}
+@@ -91,7 +91,7 @@ static int igt_wait_request(void *arg)
+ 
+ 	i915_request_add(request);
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, 0) != -ETIME) {
++	if (i915_request_wait(request, 0, 0) != -ETIME) {
+ 		pr_err("request wait (busy query) succeeded (expected timeout after submit!)\n");
+ 		goto out_unlock;
+ 	}
+@@ -101,12 +101,12 @@ static int igt_wait_request(void *arg)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, T / 2) != -ETIME) {
++	if (i915_request_wait(request, 0, T / 2) != -ETIME) {
+ 		pr_err("request wait succeeded (expected timeout!)\n");
+ 		goto out_unlock;
+ 	}
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, T) == -ETIME) {
++	if (i915_request_wait(request, 0, T) == -ETIME) {
+ 		pr_err("request wait timed out!\n");
+ 		goto out_unlock;
+ 	}
+@@ -116,7 +116,7 @@ static int igt_wait_request(void *arg)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (i915_request_wait(request, I915_WAIT_LOCKED, T) == -ETIME) {
++	if (i915_request_wait(request, 0, T) == -ETIME) {
+ 		pr_err("request wait timed out when already complete!\n");
+ 		goto out_unlock;
+ 	}
+@@ -574,9 +574,7 @@ static int live_nop_request(void *arg)
+ 
+ 				i915_request_add(request);
+ 			}
+-			i915_request_wait(request,
+-					  I915_WAIT_LOCKED,
+-					  MAX_SCHEDULE_TIMEOUT);
++			i915_request_wait(request, 0, MAX_SCHEDULE_TIMEOUT);
+ 
+ 			times[1] = ktime_sub(ktime_get_raw(), times[1]);
+ 			if (prime == 1)
+@@ -706,9 +704,7 @@ static int live_empty_request(void *arg)
+ 			err = PTR_ERR(request);
+ 			goto out_batch;
+ 		}
+-		i915_request_wait(request,
+-				  I915_WAIT_LOCKED,
+-				  MAX_SCHEDULE_TIMEOUT);
++		i915_request_wait(request, 0, MAX_SCHEDULE_TIMEOUT);
+ 
+ 		for_each_prime_number_from(prime, 1, 8192) {
+ 			times[1] = ktime_get_raw();
+@@ -720,9 +716,7 @@ static int live_empty_request(void *arg)
+ 					goto out_batch;
+ 				}
+ 			}
+-			i915_request_wait(request,
+-					  I915_WAIT_LOCKED,
+-					  MAX_SCHEDULE_TIMEOUT);
++			i915_request_wait(request, 0, MAX_SCHEDULE_TIMEOUT);
+ 
+ 			times[1] = ktime_sub(ktime_get_raw(), times[1]);
+ 			if (prime == 1)
+@@ -895,8 +889,7 @@ static int live_all_engines(void *arg)
+ 	for_each_engine(engine, i915, id) {
+ 		long timeout;
+ 
+-		timeout = i915_request_wait(request[id],
+-					    I915_WAIT_LOCKED,
++		timeout = i915_request_wait(request[id], 0,
+ 					    MAX_SCHEDULE_TIMEOUT);
+ 		if (timeout < 0) {
+ 			err = timeout;
+@@ -1013,8 +1006,7 @@ static int live_sequential_engines(void *arg)
+ 			goto out_request;
+ 		}
+ 
+-		timeout = i915_request_wait(request[id],
+-					    I915_WAIT_LOCKED,
++		timeout = i915_request_wait(request[id], 0,
+ 					    MAX_SCHEDULE_TIMEOUT);
+ 		if (timeout < 0) {
+ 			err = timeout;
+diff --git a/drivers/gpu/drm/i915/selftests/i915_timeline.c b/drivers/gpu/drm/i915/selftests/i915_timeline.c
+index 724bf3650b3e..76d3977f1d4b 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_timeline.c
++++ b/drivers/gpu/drm/i915/selftests/i915_timeline.c
+@@ -724,7 +724,7 @@ static int live_hwsp_wrap(void *arg)
+ 
+ 		i915_request_add(rq);
+ 
+-		if (i915_request_wait(rq, I915_WAIT_LOCKED, HZ / 5) < 0) {
++		if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 			pr_err("Wait for timeline writes timed out!\n");
+ 			err = -EIO;
+ 			goto out;
+@@ -797,9 +797,7 @@ static int live_hwsp_recycle(void *arg)
+ 				goto out;
+ 			}
+ 
+-			if (i915_request_wait(rq,
+-					      I915_WAIT_LOCKED,
+-					      HZ / 5) < 0) {
++			if (i915_request_wait(rq, 0, HZ / 5) < 0) {
+ 				pr_err("Wait for timeline writes timed out!\n");
+ 				i915_timeline_put(tl);
+ 				err = -EIO;
+-- 
+2.17.1
+

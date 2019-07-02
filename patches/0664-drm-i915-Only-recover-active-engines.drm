@@ -1,0 +1,198 @@
+From 65b48df4e51754e285c5e11f35ab1cf95569134c Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 26 Jun 2019 16:45:48 +0100
+Subject: [PATCH 664/681] drm/i915: Only recover active engines
+
+If we issue a reset to a currently idle engine, leave it idle
+afterwards. This is useful to excise a linkage between reset and the
+shrinker. When waking the engine, we need to pin the default context
+image which we use for overwriting a guilty context -- if the engine is
+idle we do not need this pinned image! However, this pinning means that
+waking the engine acquires the FS_RECLAIM, and so may trigger the
+shrinker. The shrinker itself may need to wait upon the GPU to unbind
+and object and so may require services of reset; ergo we should avoid
+the engine wake up path.
+
+The danger in skipping the recovery for idle engines is that we leave the
+engine with no context defined, which may interfere with the operation of
+the power context on some older platforms. In practice, we should only
+be resetting an active GPU but it something to look out for on Ironlake
+(if memory serves).
+
+Fixes: 79ffac8599c4 ("drm/i915: Invert the GEM wakeref hierarchy")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Imre Deak <imre.deak@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190626154549.10066-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_reset.c    | 37 ++++++++++++++----------
+ drivers/gpu/drm/i915/gt/selftest_reset.c |  6 ++--
+ 2 files changed, 26 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index 8ce92c51564e..e7cbd9cf85c1 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -678,7 +678,6 @@ static void reset_prepare_engine(struct intel_engine_cs *engine)
+ 	 * written to the powercontext is undefined and so we may lose
+ 	 * GPU state upon resume, i.e. fail to restart after a reset.
+ 	 */
+-	intel_engine_pm_get(engine);
+ 	intel_uncore_forcewake_get(engine->uncore, FORCEWAKE_ALL);
+ 	engine->reset.prepare(engine);
+ }
+@@ -709,16 +708,21 @@ static void revoke_mmaps(struct drm_i915_private *i915)
+ 	}
+ }
+ 
+-static void reset_prepare(struct drm_i915_private *i915)
++static intel_engine_mask_t reset_prepare(struct drm_i915_private *i915)
+ {
+ 	struct intel_engine_cs *engine;
++	intel_engine_mask_t awake = 0;
+ 	enum intel_engine_id id;
+ 
+-	intel_gt_pm_get(&i915->gt);
+-	for_each_engine(engine, i915, id)
++	for_each_engine(engine, i915, id) {
++		if (intel_engine_pm_get_if_awake(engine))
++			awake |= engine->mask;
+ 		reset_prepare_engine(engine);
++	}
+ 
+ 	intel_uc_reset_prepare(i915);
++
++	return awake;
+ }
+ 
+ static void gt_revoke(struct drm_i915_private *i915)
+@@ -752,20 +756,22 @@ static int gt_reset(struct drm_i915_private *i915,
+ static void reset_finish_engine(struct intel_engine_cs *engine)
+ {
+ 	engine->reset.finish(engine);
+-	intel_engine_pm_put(engine);
+ 	intel_uncore_forcewake_put(engine->uncore, FORCEWAKE_ALL);
++
++	intel_engine_signal_breadcrumbs(engine);
+ }
+ 
+-static void reset_finish(struct drm_i915_private *i915)
++static void reset_finish(struct drm_i915_private *i915,
++			 intel_engine_mask_t awake)
+ {
+ 	struct intel_engine_cs *engine;
+ 	enum intel_engine_id id;
+ 
+ 	for_each_engine(engine, i915, id) {
+ 		reset_finish_engine(engine);
+-		intel_engine_signal_breadcrumbs(engine);
++		if (awake & engine->mask)
++			intel_engine_pm_put(engine);
+ 	}
+-	intel_gt_pm_put(&i915->gt);
+ }
+ 
+ static void nop_submit_request(struct i915_request *request)
+@@ -789,6 +795,7 @@ static void __i915_gem_set_wedged(struct drm_i915_private *i915)
+ {
+ 	struct i915_gpu_error *error = &i915->gpu_error;
+ 	struct intel_engine_cs *engine;
++	intel_engine_mask_t awake;
+ 	enum intel_engine_id id;
+ 
+ 	if (test_bit(I915_WEDGED, &error->flags))
+@@ -808,7 +815,7 @@ static void __i915_gem_set_wedged(struct drm_i915_private *i915)
+ 	 * rolling the global seqno forward (since this would complete requests
+ 	 * for which we haven't set the fence error to EIO yet).
+ 	 */
+-	reset_prepare(i915);
++	awake = reset_prepare(i915);
+ 
+ 	/* Even if the GPU reset fails, it should still stop the engines */
+ 	if (!INTEL_INFO(i915)->gpu_reset_clobbers_display)
+@@ -832,7 +839,7 @@ static void __i915_gem_set_wedged(struct drm_i915_private *i915)
+ 	for_each_engine(engine, i915, id)
+ 		engine->cancel_requests(engine);
+ 
+-	reset_finish(i915);
++	reset_finish(i915, awake);
+ 
+ 	GEM_TRACE("end\n");
+ }
+@@ -964,6 +971,7 @@ void i915_reset(struct drm_i915_private *i915,
+ 		const char *reason)
+ {
+ 	struct i915_gpu_error *error = &i915->gpu_error;
++	intel_engine_mask_t awake;
+ 	int ret;
+ 
+ 	GEM_TRACE("flags=%lx\n", error->flags);
+@@ -980,7 +988,7 @@ void i915_reset(struct drm_i915_private *i915,
+ 		dev_notice(i915->drm.dev, "Resetting chip for %s\n", reason);
+ 	error->reset_count++;
+ 
+-	reset_prepare(i915);
++	awake = reset_prepare(i915);
+ 
+ 	if (!intel_has_gpu_reset(i915)) {
+ 		if (i915_modparams.reset)
+@@ -1021,7 +1029,7 @@ void i915_reset(struct drm_i915_private *i915,
+ 	i915_queue_hangcheck(i915);
+ 
+ finish:
+-	reset_finish(i915);
++	reset_finish(i915, awake);
+ unlock:
+ 	mutex_unlock(&error->wedge_mutex);
+ 	return;
+@@ -1072,7 +1080,7 @@ int i915_reset_engine(struct intel_engine_cs *engine, const char *msg)
+ 	GEM_TRACE("%s flags=%lx\n", engine->name, error->flags);
+ 	GEM_BUG_ON(!test_bit(I915_RESET_ENGINE + engine->id, &error->flags));
+ 
+-	if (!intel_engine_pm_is_awake(engine))
++	if (!intel_engine_pm_get_if_awake(engine))
+ 		return 0;
+ 
+ 	reset_prepare_engine(engine);
+@@ -1107,12 +1115,11 @@ int i915_reset_engine(struct intel_engine_cs *engine, const char *msg)
+ 	 * process to program RING_MODE, HWSP and re-enable submission.
+ 	 */
+ 	ret = engine->resume(engine);
+-	if (ret)
+-		goto out;
+ 
+ out:
+ 	intel_engine_cancel_stop_cs(engine);
+ 	reset_finish_engine(engine);
++	intel_engine_pm_put(engine);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gt/selftest_reset.c b/drivers/gpu/drm/i915/gt/selftest_reset.c
+index 641cf3aee8d5..672e32e1ef95 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_reset.c
++++ b/drivers/gpu/drm/i915/gt/selftest_reset.c
+@@ -71,15 +71,17 @@ static int igt_atomic_reset(void *arg)
+ 		goto unlock;
+ 
+ 	for (p = igt_atomic_phases; p->name; p++) {
++		intel_engine_mask_t awake;
++
+ 		GEM_TRACE("intel_gpu_reset under %s\n", p->name);
+ 
+-		reset_prepare(i915);
++		awake = reset_prepare(i915);
+ 		p->critical_section_begin();
+ 
+ 		err = intel_gpu_reset(i915, ALL_ENGINES);
+ 
+ 		p->critical_section_end();
+-		reset_finish(i915);
++		reset_finish(i915, awake);
+ 
+ 		if (err) {
+ 			pr_err("intel_gpu_reset failed under %s\n", p->name);
+-- 
+2.17.1
+
