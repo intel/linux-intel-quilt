@@ -1,0 +1,148 @@
+From 2bfb1d2e55b11f282433bfb995047f37e717713c Mon Sep 17 00:00:00 2001
+From: Dongwon Kim <dongwon.kim@intel.com>
+Date: Tue, 4 Jun 2019 15:48:37 +0800
+Subject: [PATCH 07/16] dma-buf/hyper_dmabuf: protecting exporting, importing
+ and release process
+
+For safer execution of exporting, importing and release of dmabuf,
+protection using global mutex has been added to those routines.
+
+Signed-off-by: Dongwon Kim <dongwon.kim@intel.com>
+---
+ drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c      |  5 +++++
+ drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_msg.c        | 10 +++++++++-
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c    |  6 +++++-
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+index 107d28e39e13..1ede172e1ad7 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+@@ -229,6 +229,8 @@ static int hyper_dmabuf_export_remote_ioctl(struct file *filp, void *data)
+ 		return PTR_ERR(dma_buf);
+ 	}
+ 
++	mutex_lock(&hy_drv_priv->lock);
++
+ 	/* we check if this specific attachment was already exported
+ 	 * to the same domain and if yes and it's valid sgt_info,
+ 	 * it returns hyper_dmabuf_id of pre-exported sgt_info
+@@ -246,6 +248,7 @@ static int hyper_dmabuf_export_remote_ioctl(struct file *filp, void *data)
+ 		if (ret <= 0) {
+ 			dma_buf_put(dma_buf);
+ 			export_remote_attr->hid = hid;
++			mutex_unlock(&hy_drv_priv->lock);
+ 			return ret;
+ 		}
+ 	}
+@@ -384,6 +387,7 @@ static int hyper_dmabuf_export_remote_ioctl(struct file *filp, void *data)
+ 
+ 	exported->filp = filp;
+ 
++	mutex_unlock(&hy_drv_priv->lock);
+ 	return ret;
+ 
+ /* Clean-up if error occurs */
+@@ -422,6 +426,7 @@ static int hyper_dmabuf_export_remote_ioctl(struct file *filp, void *data)
+ fail_attach:
+ 	dma_buf_put(dma_buf);
+ 
++	mutex_unlock(&hy_drv_priv->lock);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_msg.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_msg.c
+index 48db3fd8bb0e..ac0508bdd92f 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_msg.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_msg.c
+@@ -148,6 +148,7 @@ static void cmd_process_work(struct work_struct *work)
+ 		 * priv synchronization. for existing imported_sgt_info
+ 		 * so not creating a new one
+ 		 */
++		mutex_lock(&hy_drv_priv->lock);
+ 		if (req->op[4] == 0) {
+ 			hyper_dmabuf_id_t exist = {req->op[0],
+ 						   {req->op[1], req->op[2],
+@@ -158,6 +159,7 @@ static void cmd_process_work(struct work_struct *work)
+ 			if (!imported) {
+ 				dev_err(hy_drv_priv->dev,
+ 					"Can't find imported sgt_info\n");
++				mutex_unlock(&hy_drv_priv->lock);
+ 				break;
+ 			}
+ 
+@@ -172,6 +174,7 @@ static void cmd_process_work(struct work_struct *work)
+ 				if (!imported->priv) {
+ 					/* set it invalid */
+ 					imported->valid = 0;
++					mutex_unlock(&hy_drv_priv->lock);
+ 					break;
+ 				}
+ 			}
+@@ -184,19 +187,23 @@ static void cmd_process_work(struct work_struct *work)
+ 			hyper_dmabuf_import_event(imported->hid);
+ #endif
+ 
++			mutex_unlock(&hy_drv_priv->lock);
+ 			break;
+ 		}
+ 
+ 		imported = kcalloc(1, sizeof(*imported), GFP_KERNEL);
+ 
+-		if (!imported)
++		if (!imported) {
++			mutex_unlock(&hy_drv_priv->lock);
+ 			break;
++		}
+ 
+ 		imported->sz_priv = req->op[9];
+ 		imported->priv = kcalloc(1, req->op[9], GFP_KERNEL);
+ 
+ 		if (!imported->priv) {
+ 			kfree(imported);
++			mutex_unlock(&hy_drv_priv->lock);
+ 			break;
+ 		}
+ 
+@@ -230,6 +237,7 @@ static void cmd_process_work(struct work_struct *work)
+ 		hyper_dmabuf_import_event(imported->hid);
+ #endif
+ 
++		mutex_unlock(&hy_drv_priv->lock);
+ 		break;
+ 
+ 	case HYPER_DMABUF_OPS_TO_SOURCE:
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
+index 3cd3d6c98c33..03cdedf84e44 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
+@@ -163,14 +163,17 @@ int hyper_dmabuf_remote_sync(hyper_dmabuf_id_t hid, int ops)
+ 			 exported->hid.id, exported->hid.rng_key[0],
+ 			 exported->hid.rng_key[1], exported->hid.rng_key[2],
+ 			 exported->active - 1);
++		mutex_lock(&hy_drv_priv->lock);
+ 
+ 		exported->active--;
+ 
+ 		/* If there are still importers just break, if no then
+ 		 * continue with final cleanup
+ 		 */
+-		if (exported->active)
++		if (exported->active) {
++			mutex_unlock(&hy_drv_priv->lock);
+ 			break;
++		}
+ 
+ 		/* Importer just released buffer fd, check if there is
+ 		 * any other importer still using it.
+@@ -190,6 +193,7 @@ int hyper_dmabuf_remote_sync(hyper_dmabuf_id_t hid, int ops)
+ 			/* store hyper_dmabuf_id in the list for reuse */
+ 			hyper_dmabuf_store_hid(hid);
+ 		}
++		mutex_unlock(&hy_drv_priv->lock);
+ 
+ 		break;
+ 
+-- 
+2.17.1
+
