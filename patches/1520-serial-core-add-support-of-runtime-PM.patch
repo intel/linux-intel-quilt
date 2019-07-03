@@ -1,7 +1,7 @@
-From 3b48ef546c93763b5eff9f24da20fe7af3ec4726 Mon Sep 17 00:00:00 2001
+From f831fe9f7ce7f0dc22958a152d1ce217498462b5 Mon Sep 17 00:00:00 2001
 From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
 Date: Wed, 16 Nov 2016 19:38:22 +0200
-Subject: [PATCH 1520/2302] serial: core: add support of runtime PM
+Subject: [PATCH 1520/2313] serial: core: add support of runtime PM
 
 8250 driver has wrong implementation of runtime PM, e.g. it uses an irq_safe
 flag. This patch adds runtime PM calls to serial core once for all UART
@@ -17,7 +17,7 @@ Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
  1 file changed, 133 insertions(+), 13 deletions(-)
 
 diff --git a/drivers/tty/serial/serial_core.c b/drivers/tty/serial/serial_core.c
-index 51a58c3..9a670bb 100644
+index c39246b..5f74cf0 100644
 --- a/drivers/tty/serial/serial_core.c
 +++ b/drivers/tty/serial/serial_core.c
 @@ -35,6 +35,7 @@
@@ -62,7 +62,7 @@ index 51a58c3..9a670bb 100644
  	if (atomic_dec_and_test(&uport->state->refcount))
  		wake_up(&uport->state->remove_wait);
  }
-@@ -157,12 +175,15 @@ uart_update_mctrl(struct uart_port *port, unsigned int set, unsigned int clear)
+@@ -154,12 +172,15 @@ uart_update_mctrl(struct uart_port *port, unsigned int set, unsigned int clear)
  	unsigned long flags;
  	unsigned int old;
  
@@ -78,7 +78,7 @@ index 51a58c3..9a670bb 100644
  }
  
  #define uart_set_mctrl(port, set)	uart_update_mctrl(port, set, 0)
-@@ -231,7 +252,11 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
+@@ -228,7 +249,11 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
  		free_page(page);
  	}
  
@@ -90,7 +90,7 @@ index 51a58c3..9a670bb 100644
  	if (retval == 0) {
  		if (uart_console(uport) && uport->cons->cflag) {
  			tty->termios.c_cflag = uport->cons->cflag;
-@@ -527,6 +552,8 @@ static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
+@@ -524,6 +549,8 @@ static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
  		return;
  
  	termios = &tty->termios;
@@ -99,7 +99,7 @@ index 51a58c3..9a670bb 100644
  	uport->ops->set_termios(uport, termios, old_termios);
  
  	/*
-@@ -555,6 +582,8 @@ static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
+@@ -552,6 +579,8 @@ static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
  			__uart_start(tty);
  	}
  	spin_unlock_irq(&uport->lock);
@@ -108,7 +108,7 @@ index 51a58c3..9a670bb 100644
  }
  
  static int uart_put_char(struct tty_struct *tty, unsigned char c)
-@@ -572,12 +601,18 @@ static int uart_put_char(struct tty_struct *tty, unsigned char c)
+@@ -569,12 +598,18 @@ static int uart_put_char(struct tty_struct *tty, unsigned char c)
  		return 0;
  	}
  
@@ -129,7 +129,7 @@ index 51a58c3..9a670bb 100644
  	return ret;
  }
  
-@@ -611,6 +646,11 @@ static int uart_write(struct tty_struct *tty,
+@@ -608,6 +643,11 @@ static int uart_write(struct tty_struct *tty,
  		return 0;
  	}
  
@@ -141,7 +141,7 @@ index 51a58c3..9a670bb 100644
  	while (port) {
  		c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
  		if (count < c)
-@@ -625,7 +665,8 @@ static int uart_write(struct tty_struct *tty,
+@@ -622,7 +662,8 @@ static int uart_write(struct tty_struct *tty,
  	}
  
  	__uart_start(tty);
@@ -151,7 +151,7 @@ index 51a58c3..9a670bb 100644
  	return ret;
  }
  
-@@ -636,9 +677,17 @@ static int uart_write_room(struct tty_struct *tty)
+@@ -633,9 +674,17 @@ static int uart_write_room(struct tty_struct *tty)
  	unsigned long flags;
  	int ret;
  
@@ -171,7 +171,7 @@ index 51a58c3..9a670bb 100644
  	return ret;
  }
  
-@@ -649,9 +698,17 @@ static int uart_chars_in_buffer(struct tty_struct *tty)
+@@ -646,9 +695,17 @@ static int uart_chars_in_buffer(struct tty_struct *tty)
  	unsigned long flags;
  	int ret;
  
@@ -191,7 +191,7 @@ index 51a58c3..9a670bb 100644
  	return ret;
  }
  
-@@ -1055,7 +1112,10 @@ static int uart_get_lsr_info(struct tty_struct *tty,
+@@ -1052,7 +1109,10 @@ static int uart_get_lsr_info(struct tty_struct *tty,
  	struct uart_port *uport = uart_port_check(state);
  	unsigned int result;
  
@@ -202,7 +202,7 @@ index 51a58c3..9a670bb 100644
  
  	/*
  	 * If we're about to load something into the transmit
-@@ -1085,9 +1145,13 @@ static int uart_tiocmget(struct tty_struct *tty)
+@@ -1082,9 +1142,13 @@ static int uart_tiocmget(struct tty_struct *tty)
  
  	if (!tty_io_error(tty)) {
  		result = uport->mctrl;
@@ -216,7 +216,7 @@ index 51a58c3..9a670bb 100644
  	}
  out:
  	mutex_unlock(&port->mutex);
-@@ -1128,8 +1192,11 @@ static int uart_break_ctl(struct tty_struct *tty, int break_state)
+@@ -1125,8 +1189,11 @@ static int uart_break_ctl(struct tty_struct *tty, int break_state)
  	if (!uport)
  		goto out;
  
@@ -228,7 +228,7 @@ index 51a58c3..9a670bb 100644
  	ret = 0;
  out:
  	mutex_unlock(&port->mutex);
-@@ -1178,7 +1245,10 @@ static int uart_do_autoconfig(struct tty_struct *tty,struct uart_state *state)
+@@ -1175,7 +1242,10 @@ static int uart_do_autoconfig(struct tty_struct *tty,struct uart_state *state)
  		 * This will claim the ports resources if
  		 * a port is found.
  		 */
@@ -239,7 +239,7 @@ index 51a58c3..9a670bb 100644
  
  		ret = uart_startup(tty, state, 1);
  		if (ret == 0)
-@@ -1274,13 +1344,13 @@ static int uart_get_icount(struct tty_struct *tty,
+@@ -1271,13 +1341,13 @@ static int uart_get_icount(struct tty_struct *tty,
  	struct uart_icount cnow;
  	struct uart_port *uport;
  
@@ -255,7 +255,7 @@ index 51a58c3..9a670bb 100644
  
  	icount->cts         = cnow.cts;
  	icount->dsr         = cnow.dsr;
-@@ -1440,8 +1510,12 @@ static void uart_set_ldisc(struct tty_struct *tty)
+@@ -1437,8 +1507,12 @@ static void uart_set_ldisc(struct tty_struct *tty)
  
  	mutex_lock(&state->port.mutex);
  	uport = uart_port_check(state);
@@ -269,7 +269,7 @@ index 51a58c3..9a670bb 100644
  	mutex_unlock(&state->port.mutex);
  }
  
-@@ -1541,9 +1615,12 @@ static void uart_tty_port_shutdown(struct tty_port *port)
+@@ -1538,9 +1612,12 @@ static void uart_tty_port_shutdown(struct tty_port *port)
  	if (WARN(!uport, "detached port still initialized!\n"))
  		return;
  
@@ -282,7 +282,7 @@ index 51a58c3..9a670bb 100644
  
  	uart_port_shutdown(port);
  
-@@ -1672,8 +1749,12 @@ static void uart_port_shutdown(struct tty_port *port)
+@@ -1669,8 +1746,12 @@ static void uart_port_shutdown(struct tty_port *port)
  	/*
  	 * Free the IRQ and disable the port.
  	 */
@@ -296,7 +296,7 @@ index 51a58c3..9a670bb 100644
  
  	/*
  	 * Ensure that the IRQ handler isn't running on another CPU.
-@@ -1808,9 +1889,12 @@ static void uart_line_info(struct seq_file *m, struct uart_driver *drv, int i)
+@@ -1802,9 +1883,12 @@ static void uart_line_info(struct seq_file *m, struct uart_driver *drv, int i)
  		pm_state = state->pm_state;
  		if (pm_state != UART_PM_STATE_ON)
  			uart_change_pm(state, UART_PM_STATE_ON);
@@ -309,7 +309,7 @@ index 51a58c3..9a670bb 100644
  		if (pm_state != UART_PM_STATE_ON)
  			uart_change_pm(state, pm_state);
  
-@@ -2068,7 +2152,15 @@ uart_set_options(struct uart_port *port, struct console *co,
+@@ -2062,7 +2146,15 @@ uart_set_options(struct uart_port *port, struct console *co,
  	 */
  	port->mctrl |= TIOCM_DTR;
  
@@ -326,7 +326,7 @@ index 51a58c3..9a670bb 100644
  	/*
  	 * Allow the setting of the UART parameters with a NULL console
  	 * too:
-@@ -2147,11 +2239,14 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
+@@ -2141,11 +2233,14 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
  		tty_port_set_suspended(port, 1);
  		tty_port_set_initialized(port, 0);
  
@@ -341,7 +341,7 @@ index 51a58c3..9a670bb 100644
  
  		/*
  		 * Wait for the transmitter to empty.
-@@ -2162,7 +2257,10 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
+@@ -2156,7 +2251,10 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
  			dev_err(uport->dev, "%s: Unable to drain transmitter\n",
  				uport->name);
  
@@ -352,7 +352,7 @@ index 51a58c3..9a670bb 100644
  	}
  
  	/*
-@@ -2217,7 +2315,12 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
+@@ -2211,7 +2309,12 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
  
  		if (console_suspend_enabled)
  			uart_change_pm(state, UART_PM_STATE_ON);
@@ -365,7 +365,7 @@ index 51a58c3..9a670bb 100644
  		if (console_suspend_enabled)
  			console_start(uport->cons);
  	}
-@@ -2227,20 +2330,31 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
+@@ -2221,20 +2324,31 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
  		int ret;
  
  		uart_change_pm(state, UART_PM_STATE_ON);
@@ -397,7 +397,7 @@ index 51a58c3..9a670bb 100644
  				tty_port_set_initialized(port, 1);
  			} else {
  				/*
-@@ -2334,9 +2448,12 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
+@@ -2328,9 +2442,12 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
  		 * keep the DTR setting that is set in uart_set_options()
  		 * We probably don't need a spinlock around this, but
  		 */
@@ -410,7 +410,7 @@ index 51a58c3..9a670bb 100644
  
  		/*
  		 * If this driver supports console, and it hasn't been
-@@ -3001,6 +3118,7 @@ void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
+@@ -3003,6 +3120,7 @@ void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
  	uport->icount.cts++;
  
  	if (uart_softcts_mode(uport)) {
@@ -418,7 +418,7 @@ index 51a58c3..9a670bb 100644
  		if (uport->hw_stopped) {
  			if (status) {
  				uport->hw_stopped = 0;
-@@ -3013,6 +3131,8 @@ void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
+@@ -3015,6 +3133,8 @@ void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
  				uport->ops->stop_tx(uport);
  			}
  		}
