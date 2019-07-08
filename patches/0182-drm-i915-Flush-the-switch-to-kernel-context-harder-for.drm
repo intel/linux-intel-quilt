@@ -1,0 +1,58 @@
+From 83bb9bb2c8546e4b76634a8d3b6cbf664a04eff3 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 7 May 2019 13:11:05 +0100
+Subject: [PATCH 182/733] drm/i915: Flush the switch-to-kernel-context harder
+ for DROP_IDLE
+
+To complete the idle worker, we must complete 2 passes of wait-for-idle.
+At the end of the first pass, we queue a switch-to-kernel-context and
+may only idle after waiting for its completion. Speed up the flush_work
+by doing the wait explicitly, which then allows us to remove the
+unbounded loop trying to complete the flush_work in the next patch.
+
+References: 79ffac8599c4 ("drm/i915: Invert the GEM wakeref hierarchy")
+Testcase: igt/gem_ppgtt/flind-and-close-vma-leak
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190507121108.18377-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_debugfs.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 14cd83e9ea8b..f60aed7747e5 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -3901,14 +3901,26 @@ i915_drop_caches_set(void *data, u64 val)
+ 
+ 	/* No need to check and wait for gpu resets, only libdrm auto-restarts
+ 	 * on ioctls on -EAGAIN. */
+-	if (val & (DROP_ACTIVE | DROP_RETIRE | DROP_RESET_SEQNO)) {
++	if (val & (DROP_ACTIVE | DROP_IDLE | DROP_RETIRE | DROP_RESET_SEQNO)) {
+ 		int ret;
+ 
+ 		ret = mutex_lock_interruptible(&i915->drm.struct_mutex);
+ 		if (ret)
+ 			return ret;
+ 
+-		if (val & DROP_ACTIVE)
++		/*
++		 * To finish the flush of the idle_worker, we must complete
++		 * the switch-to-kernel-context, which requires a double
++		 * pass through wait_for_idle: first queues the switch,
++		 * second waits for the switch.
++		 */
++		if (ret == 0 && val & (DROP_IDLE | DROP_ACTIVE))
++			ret = i915_gem_wait_for_idle(i915,
++						     I915_WAIT_INTERRUPTIBLE |
++						     I915_WAIT_LOCKED,
++						     MAX_SCHEDULE_TIMEOUT);
++
++		if (ret == 0 && val & DROP_IDLE)
+ 			ret = i915_gem_wait_for_idle(i915,
+ 						     I915_WAIT_INTERRUPTIBLE |
+ 						     I915_WAIT_LOCKED,
+-- 
+2.17.1
+

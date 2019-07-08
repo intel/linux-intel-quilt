@@ -1,0 +1,57 @@
+From 67c86b889b4996a902bdedf00e250972d0c51118 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 14 Jun 2019 23:06:16 +0100
+Subject: [PATCH 531/733] drm/i915: Avoid tainting i915_gem_park() with
+ wakeref.lock
+
+While we need to flush the wakeref before parking, we do not need to
+perform the i915_gem_park() itself underneath the wakeref lock, merely
+the struct_mutex. If we rearrange the locks, we can avoid the unnecessary
+tainting.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190614220616.24932-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gem/i915_gem_pm.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_pm.c b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+index 141f3ea349a4..05011d4a3b88 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_pm.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+@@ -48,23 +48,22 @@ static void idle_work_handler(struct work_struct *work)
+ {
+ 	struct drm_i915_private *i915 =
+ 		container_of(work, typeof(*i915), gem.idle_work);
+-	bool restart = true;
++	bool park;
+ 
+-	cancel_delayed_work(&i915->gem.retire_work);
++	cancel_delayed_work_sync(&i915->gem.retire_work);
+ 	mutex_lock(&i915->drm.struct_mutex);
+ 
+ 	intel_wakeref_lock(&i915->gt.wakeref);
+-	if (!intel_wakeref_active(&i915->gt.wakeref) && !work_pending(work)) {
+-		i915_gem_park(i915);
+-		restart = false;
+-	}
++	park = !intel_wakeref_active(&i915->gt.wakeref) && !work_pending(work);
+ 	intel_wakeref_unlock(&i915->gt.wakeref);
+-
+-	mutex_unlock(&i915->drm.struct_mutex);
+-	if (restart)
++	if (park)
++		i915_gem_park(i915);
++	else
+ 		queue_delayed_work(i915->wq,
+ 				   &i915->gem.retire_work,
+ 				   round_jiffies_up_relative(HZ));
++
++	mutex_unlock(&i915->drm.struct_mutex);
+ }
+ 
+ static void retire_work_handler(struct work_struct *work)
+-- 
+2.17.1
+

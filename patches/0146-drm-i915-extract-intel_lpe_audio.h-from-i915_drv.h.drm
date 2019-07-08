@@ -1,0 +1,147 @@
+From 8bc7d4c24e8aff5de66b5aadc6d5d4490a30e7d9 Mon Sep 17 00:00:00 2001
+From: Jani Nikula <jani.nikula@intel.com>
+Date: Thu, 2 May 2019 18:02:41 +0300
+Subject: [PATCH 146/733] drm/i915: extract intel_lpe_audio.h from i915_drv.h
+
+It used to be handy that we only had a couple of headers, but over time
+i915_drv.h has become unwieldy. Extract declarations to a separate
+header file corresponding to the implementation module, clarifying the
+modularity of the driver.
+
+Ensure the new header is self-contained, and do so with minimal further
+includes, using forward declarations as needed. Include the new header
+only where needed, and sort the modified include directives while at it
+and as needed.
+
+No functional changes.
+
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/9101a58b9f10bcf11332175e17b6e6e45f4ebd17.1556809195.git.jani.nikula@intel.com
+---
+ drivers/gpu/drm/i915/Makefile.header-test |  1 +
+ drivers/gpu/drm/i915/i915_drv.h           |  8 --------
+ drivers/gpu/drm/i915/i915_irq.c           |  1 +
+ drivers/gpu/drm/i915/intel_audio.c        |  2 +-
+ drivers/gpu/drm/i915/intel_lpe_audio.c    |  8 +++++---
+ drivers/gpu/drm/i915/intel_lpe_audio.h    | 22 ++++++++++++++++++++++
+ 6 files changed, 30 insertions(+), 12 deletions(-)
+ create mode 100644 drivers/gpu/drm/i915/intel_lpe_audio.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile.header-test b/drivers/gpu/drm/i915/Makefile.header-test
+index 459b84f84c2a..4375ff4abd8e 100644
+--- a/drivers/gpu/drm/i915/Makefile.header-test
++++ b/drivers/gpu/drm/i915/Makefile.header-test
+@@ -42,6 +42,7 @@ header_test := \
+ 	intel_hdcp.h \
+ 	intel_hdmi.h \
+ 	intel_hotplug.h \
++	intel_lpe_audio.h \
+ 	intel_lspcon.h \
+ 	intel_lvds.h \
+ 	intel_overlay.h \
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 85cc5e126065..91efe2864bb1 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -3247,14 +3247,6 @@ extern int i915_restore_state(struct drm_i915_private *dev_priv);
+ void i915_setup_sysfs(struct drm_i915_private *dev_priv);
+ void i915_teardown_sysfs(struct drm_i915_private *dev_priv);
+ 
+-/* intel_lpe_audio.c */
+-int  intel_lpe_audio_init(struct drm_i915_private *dev_priv);
+-void intel_lpe_audio_teardown(struct drm_i915_private *dev_priv);
+-void intel_lpe_audio_irq_handler(struct drm_i915_private *dev_priv);
+-void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
+-			    enum pipe pipe, enum port port,
+-			    const void *eld, int ls_clock, bool dp_output);
+-
+ /* intel_i2c.c */
+ extern int intel_setup_gmbus(struct drm_i915_private *dev_priv);
+ extern void intel_teardown_gmbus(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index e31137bd86f7..233211fde0ea 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -43,6 +43,7 @@
+ #include "intel_drv.h"
+ #include "intel_fifo_underrun.h"
+ #include "intel_hotplug.h"
++#include "intel_lpe_audio.h"
+ #include "intel_psr.h"
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/intel_audio.c b/drivers/gpu/drm/i915/intel_audio.c
+index 5c0b73f63843..840daff12246 100644
+--- a/drivers/gpu/drm/i915/intel_audio.c
++++ b/drivers/gpu/drm/i915/intel_audio.c
+@@ -26,11 +26,11 @@
+ 
+ #include <drm/drm_edid.h>
+ #include <drm/i915_component.h>
+-#include <drm/intel_lpe_audio.h>
+ 
+ #include "i915_drv.h"
+ #include "intel_audio.h"
+ #include "intel_drv.h"
++#include "intel_lpe_audio.h"
+ 
+ /**
+  * DOC: High Definition Audio over HDMI and Display Port
+diff --git a/drivers/gpu/drm/i915/intel_lpe_audio.c b/drivers/gpu/drm/i915/intel_lpe_audio.c
+index f8239bca3820..b19800b58442 100644
+--- a/drivers/gpu/drm/i915/intel_lpe_audio.c
++++ b/drivers/gpu/drm/i915/intel_lpe_audio.c
+@@ -61,16 +61,18 @@
+  */
+ 
+ #include <linux/acpi.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/irq.h>
+ #include <linux/pci.h>
+-#include <linux/pm_runtime.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ 
+-#include "i915_drv.h"
+-#include <linux/delay.h>
+ #include <drm/intel_lpe_audio.h>
+ 
++#include "i915_drv.h"
++#include "intel_lpe_audio.h"
++
+ #define HAS_LPE_AUDIO(dev_priv) ((dev_priv)->lpe_audio.platdev != NULL)
+ 
+ static struct platform_device *
+diff --git a/drivers/gpu/drm/i915/intel_lpe_audio.h b/drivers/gpu/drm/i915/intel_lpe_audio.h
+new file mode 100644
+index 000000000000..f848c5038714
+--- /dev/null
++++ b/drivers/gpu/drm/i915/intel_lpe_audio.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright © 2019 Intel Corporation
++ */
++
++#ifndef __INTEL_LPE_AUDIO_H__
++#define __INTEL_LPE_AUDIO_H__
++
++#include <linux/types.h>
++
++enum pipe;
++enum port;
++struct drm_i915_private;
++
++int  intel_lpe_audio_init(struct drm_i915_private *dev_priv);
++void intel_lpe_audio_teardown(struct drm_i915_private *dev_priv);
++void intel_lpe_audio_irq_handler(struct drm_i915_private *dev_priv);
++void intel_lpe_audio_notify(struct drm_i915_private *dev_priv,
++			    enum pipe pipe, enum port port,
++			    const void *eld, int ls_clock, bool dp_output);
++
++#endif /* __INTEL_LPE_AUDIO_H__ */
+-- 
+2.17.1
+

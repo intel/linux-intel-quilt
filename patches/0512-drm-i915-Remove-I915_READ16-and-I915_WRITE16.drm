@@ -1,0 +1,567 @@
+From a9f43298eb0d4e57442d82dcc02f28696deeafcc Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Tue, 11 Jun 2019 11:45:48 +0100
+Subject: [PATCH 512/733] drm/i915: Remove I915_READ16 and I915_WRITE16
+
+Remove call sites in favour of uncore mmio accessors and remove the old
+macros.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190611104548.30545-6-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c |   6 +-
+ drivers/gpu/drm/i915/i915_debugfs.c        |  37 ++++----
+ drivers/gpu/drm/i915/i915_drv.h            |   3 -
+ drivers/gpu/drm/i915/i915_gpu_error.c      | 104 ++++++++++++---------
+ drivers/gpu/drm/i915/i915_irq.c            |  40 ++++----
+ drivers/gpu/drm/i915/intel_pm.c            |  93 ++++++++++--------
+ 6 files changed, 161 insertions(+), 122 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index b0a71dac7b24..b3bf47e8162f 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -986,10 +986,10 @@ i8xx_irq_enable(struct intel_engine_cs *engine)
+ static void
+ i8xx_irq_disable(struct intel_engine_cs *engine)
+ {
+-	struct drm_i915_private *dev_priv = engine->i915;
++	struct drm_i915_private *i915 = engine->i915;
+ 
+-	dev_priv->irq_mask |= engine->irq_enable_mask;
+-	I915_WRITE16(GEN2_IMR, dev_priv->irq_mask);
++	i915->irq_mask |= engine->irq_enable_mask;
++	intel_uncore_write16(&i915->uncore, GEN2_IMR, i915->irq_mask);
+ }
+ 
+ static int
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 3d3d27ff5dab..026fb46020f6 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -826,6 +826,7 @@ static const struct file_operations i915_error_state_fops = {
+ static int i915_frequency_info(struct seq_file *m, void *unused)
+ {
+ 	struct drm_i915_private *dev_priv = node_to_i915(m->private);
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	struct intel_rps *rps = &dev_priv->gt_pm.rps;
+ 	intel_wakeref_t wakeref;
+ 	int ret = 0;
+@@ -833,8 +834,8 @@ static int i915_frequency_info(struct seq_file *m, void *unused)
+ 	wakeref = intel_runtime_pm_get(dev_priv);
+ 
+ 	if (IS_GEN(dev_priv, 5)) {
+-		u16 rgvswctl = I915_READ16(MEMSWCTL);
+-		u16 rgvstat = I915_READ16(MEMSTAT_ILK);
++		u16 rgvswctl = intel_uncore_read16(uncore, MEMSWCTL);
++		u16 rgvstat = intel_uncore_read16(uncore, MEMSTAT_ILK);
+ 
+ 		seq_printf(m, "Requested P-state: %d\n", (rgvswctl >> 8) & 0xf);
+ 		seq_printf(m, "Requested VID: %d\n", rgvswctl & 0x3f);
+@@ -1156,13 +1157,14 @@ static int i915_reset_info(struct seq_file *m, void *unused)
+ 
+ static int ironlake_drpc_info(struct seq_file *m)
+ {
+-	struct drm_i915_private *dev_priv = node_to_i915(m->private);
++	struct drm_i915_private *i915 = node_to_i915(m->private);
++	struct intel_uncore *uncore = &i915->uncore;
+ 	u32 rgvmodectl, rstdbyctl;
+ 	u16 crstandvid;
+ 
+-	rgvmodectl = I915_READ(MEMMODECTL);
+-	rstdbyctl = I915_READ(RSTDBYCTL);
+-	crstandvid = I915_READ16(CRSTANDVID);
++	rgvmodectl = intel_uncore_read(uncore, MEMMODECTL);
++	rstdbyctl = intel_uncore_read(uncore, RSTDBYCTL);
++	crstandvid = intel_uncore_read16(uncore, CRSTANDVID);
+ 
+ 	seq_printf(m, "HD boost: %s\n", yesno(rgvmodectl & MEMMODE_BOOST_EN));
+ 	seq_printf(m, "Boost freq: %d\n",
+@@ -1745,6 +1747,7 @@ static const char *swizzle_string(unsigned swizzle)
+ static int i915_swizzle_info(struct seq_file *m, void *data)
+ {
+ 	struct drm_i915_private *dev_priv = node_to_i915(m->private);
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	intel_wakeref_t wakeref;
+ 
+ 	wakeref = intel_runtime_pm_get(dev_priv);
+@@ -1756,30 +1759,30 @@ static int i915_swizzle_info(struct seq_file *m, void *data)
+ 
+ 	if (IS_GEN_RANGE(dev_priv, 3, 4)) {
+ 		seq_printf(m, "DDC = 0x%08x\n",
+-			   I915_READ(DCC));
++			   intel_uncore_read(uncore, DCC));
+ 		seq_printf(m, "DDC2 = 0x%08x\n",
+-			   I915_READ(DCC2));
++			   intel_uncore_read(uncore, DCC2));
+ 		seq_printf(m, "C0DRB3 = 0x%04x\n",
+-			   I915_READ16(C0DRB3));
++			   intel_uncore_read16(uncore, C0DRB3));
+ 		seq_printf(m, "C1DRB3 = 0x%04x\n",
+-			   I915_READ16(C1DRB3));
++			   intel_uncore_read16(uncore, C1DRB3));
+ 	} else if (INTEL_GEN(dev_priv) >= 6) {
+ 		seq_printf(m, "MAD_DIMM_C0 = 0x%08x\n",
+-			   I915_READ(MAD_DIMM_C0));
++			   intel_uncore_read(uncore, MAD_DIMM_C0));
+ 		seq_printf(m, "MAD_DIMM_C1 = 0x%08x\n",
+-			   I915_READ(MAD_DIMM_C1));
++			   intel_uncore_read(uncore, MAD_DIMM_C1));
+ 		seq_printf(m, "MAD_DIMM_C2 = 0x%08x\n",
+-			   I915_READ(MAD_DIMM_C2));
++			   intel_uncore_read(uncore, MAD_DIMM_C2));
+ 		seq_printf(m, "TILECTL = 0x%08x\n",
+-			   I915_READ(TILECTL));
++			   intel_uncore_read(uncore, TILECTL));
+ 		if (INTEL_GEN(dev_priv) >= 8)
+ 			seq_printf(m, "GAMTARBMODE = 0x%08x\n",
+-				   I915_READ(GAMTARBMODE));
++				   intel_uncore_read(uncore, GAMTARBMODE));
+ 		else
+ 			seq_printf(m, "ARB_MODE = 0x%08x\n",
+-				   I915_READ(ARB_MODE));
++				   intel_uncore_read(uncore, ARB_MODE));
+ 		seq_printf(m, "DISP_ARB_CTL = 0x%08x\n",
+-			   I915_READ(DISP_ARB_CTL));
++			   intel_uncore_read(uncore, DISP_ARB_CTL));
+ 	}
+ 
+ 	if (dev_priv->quirks & QUIRK_PIN_SWIZZLED_PAGES)
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 7ac63699f055..eb98d285d290 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2838,9 +2838,6 @@ extern void intel_display_print_error_state(struct drm_i915_error_state_buf *e,
+ #define __I915_REG_OP(op__, dev_priv__, ...) \
+ 	intel_uncore_##op__(&(dev_priv__)->uncore, __VA_ARGS__)
+ 
+-#define I915_READ16(reg__)	   __I915_REG_OP(read16, dev_priv, (reg__))
+-#define I915_WRITE16(reg__, val__) __I915_REG_OP(write16, dev_priv, (reg__), (val__))
+-
+ #define I915_READ(reg__)	 __I915_REG_OP(read, dev_priv, (reg__))
+ #define I915_WRITE(reg__, val__) __I915_REG_OP(write, dev_priv, (reg__), (val__))
+ 
+diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
+index dc026d5cd7a0..d7f164c9f2eb 100644
+--- a/drivers/gpu/drm/i915/i915_gpu_error.c
++++ b/drivers/gpu/drm/i915/i915_gpu_error.c
+@@ -1576,7 +1576,8 @@ static void capture_uc_state(struct i915_gpu_state *error)
+ /* Capture all registers which don't fit into another category. */
+ static void capture_reg_state(struct i915_gpu_state *error)
+ {
+-	struct drm_i915_private *dev_priv = error->i915;
++	struct drm_i915_private *i915 = error->i915;
++	struct intel_uncore *uncore = &i915->uncore;
+ 	int i;
+ 
+ 	/* General organization
+@@ -1588,71 +1589,84 @@ static void capture_reg_state(struct i915_gpu_state *error)
+ 	 */
+ 
+ 	/* 1: Registers specific to a single generation */
+-	if (IS_VALLEYVIEW(dev_priv)) {
+-		error->gtier[0] = I915_READ(GTIER);
+-		error->ier = I915_READ(VLV_IER);
+-		error->forcewake = I915_READ_FW(FORCEWAKE_VLV);
++	if (IS_VALLEYVIEW(i915)) {
++		error->gtier[0] = intel_uncore_read(uncore, GTIER);
++		error->ier = intel_uncore_read(uncore, VLV_IER);
++		error->forcewake = intel_uncore_read_fw(uncore, FORCEWAKE_VLV);
+ 	}
+ 
+-	if (IS_GEN(dev_priv, 7))
+-		error->err_int = I915_READ(GEN7_ERR_INT);
++	if (IS_GEN(i915, 7))
++		error->err_int = intel_uncore_read(uncore, GEN7_ERR_INT);
+ 
+-	if (INTEL_GEN(dev_priv) >= 8) {
+-		error->fault_data0 = I915_READ(GEN8_FAULT_TLB_DATA0);
+-		error->fault_data1 = I915_READ(GEN8_FAULT_TLB_DATA1);
++	if (INTEL_GEN(i915) >= 8) {
++		error->fault_data0 = intel_uncore_read(uncore,
++						       GEN8_FAULT_TLB_DATA0);
++		error->fault_data1 = intel_uncore_read(uncore,
++						       GEN8_FAULT_TLB_DATA1);
+ 	}
+ 
+-	if (IS_GEN(dev_priv, 6)) {
+-		error->forcewake = I915_READ_FW(FORCEWAKE);
+-		error->gab_ctl = I915_READ(GAB_CTL);
+-		error->gfx_mode = I915_READ(GFX_MODE);
++	if (IS_GEN(i915, 6)) {
++		error->forcewake = intel_uncore_read_fw(uncore, FORCEWAKE);
++		error->gab_ctl = intel_uncore_read(uncore, GAB_CTL);
++		error->gfx_mode = intel_uncore_read(uncore, GFX_MODE);
+ 	}
+ 
+ 	/* 2: Registers which belong to multiple generations */
+-	if (INTEL_GEN(dev_priv) >= 7)
+-		error->forcewake = I915_READ_FW(FORCEWAKE_MT);
++	if (INTEL_GEN(i915) >= 7)
++		error->forcewake = intel_uncore_read_fw(uncore, FORCEWAKE_MT);
+ 
+-	if (INTEL_GEN(dev_priv) >= 6) {
+-		error->derrmr = I915_READ(DERRMR);
+-		error->error = I915_READ(ERROR_GEN6);
+-		error->done_reg = I915_READ(DONE_REG);
++	if (INTEL_GEN(i915) >= 6) {
++		error->derrmr = intel_uncore_read(uncore, DERRMR);
++		error->error = intel_uncore_read(uncore, ERROR_GEN6);
++		error->done_reg = intel_uncore_read(uncore, DONE_REG);
+ 	}
+ 
+-	if (INTEL_GEN(dev_priv) >= 5)
+-		error->ccid = I915_READ(CCID(RENDER_RING_BASE));
++	if (INTEL_GEN(i915) >= 5)
++		error->ccid = intel_uncore_read(uncore, CCID(RENDER_RING_BASE));
+ 
+ 	/* 3: Feature specific registers */
+-	if (IS_GEN_RANGE(dev_priv, 6, 7)) {
+-		error->gam_ecochk = I915_READ(GAM_ECOCHK);
+-		error->gac_eco = I915_READ(GAC_ECO_BITS);
++	if (IS_GEN_RANGE(i915, 6, 7)) {
++		error->gam_ecochk = intel_uncore_read(uncore, GAM_ECOCHK);
++		error->gac_eco = intel_uncore_read(uncore, GAC_ECO_BITS);
+ 	}
+ 
+ 	/* 4: Everything else */
+-	if (INTEL_GEN(dev_priv) >= 11) {
+-		error->ier = I915_READ(GEN8_DE_MISC_IER);
+-		error->gtier[0] = I915_READ(GEN11_RENDER_COPY_INTR_ENABLE);
+-		error->gtier[1] = I915_READ(GEN11_VCS_VECS_INTR_ENABLE);
+-		error->gtier[2] = I915_READ(GEN11_GUC_SG_INTR_ENABLE);
+-		error->gtier[3] = I915_READ(GEN11_GPM_WGBOXPERF_INTR_ENABLE);
+-		error->gtier[4] = I915_READ(GEN11_CRYPTO_RSVD_INTR_ENABLE);
+-		error->gtier[5] = I915_READ(GEN11_GUNIT_CSME_INTR_ENABLE);
++	if (INTEL_GEN(i915) >= 11) {
++		error->ier = intel_uncore_read(uncore, GEN8_DE_MISC_IER);
++		error->gtier[0] =
++			intel_uncore_read(uncore,
++					  GEN11_RENDER_COPY_INTR_ENABLE);
++		error->gtier[1] =
++			intel_uncore_read(uncore, GEN11_VCS_VECS_INTR_ENABLE);
++		error->gtier[2] =
++			intel_uncore_read(uncore, GEN11_GUC_SG_INTR_ENABLE);
++		error->gtier[3] =
++			intel_uncore_read(uncore,
++					  GEN11_GPM_WGBOXPERF_INTR_ENABLE);
++		error->gtier[4] =
++			intel_uncore_read(uncore,
++					  GEN11_CRYPTO_RSVD_INTR_ENABLE);
++		error->gtier[5] =
++			intel_uncore_read(uncore,
++					  GEN11_GUNIT_CSME_INTR_ENABLE);
+ 		error->ngtier = 6;
+-	} else if (INTEL_GEN(dev_priv) >= 8) {
+-		error->ier = I915_READ(GEN8_DE_MISC_IER);
++	} else if (INTEL_GEN(i915) >= 8) {
++		error->ier = intel_uncore_read(uncore, GEN8_DE_MISC_IER);
+ 		for (i = 0; i < 4; i++)
+-			error->gtier[i] = I915_READ(GEN8_GT_IER(i));
++			error->gtier[i] = intel_uncore_read(uncore,
++							    GEN8_GT_IER(i));
+ 		error->ngtier = 4;
+-	} else if (HAS_PCH_SPLIT(dev_priv)) {
+-		error->ier = I915_READ(DEIER);
+-		error->gtier[0] = I915_READ(GTIER);
++	} else if (HAS_PCH_SPLIT(i915)) {
++		error->ier = intel_uncore_read(uncore, DEIER);
++		error->gtier[0] = intel_uncore_read(uncore, GTIER);
+ 		error->ngtier = 1;
+-	} else if (IS_GEN(dev_priv, 2)) {
+-		error->ier = I915_READ16(GEN2_IER);
+-	} else if (!IS_VALLEYVIEW(dev_priv)) {
+-		error->ier = I915_READ(GEN2_IER);
++	} else if (IS_GEN(i915, 2)) {
++		error->ier = intel_uncore_read16(uncore, GEN2_IER);
++	} else if (!IS_VALLEYVIEW(i915)) {
++		error->ier = intel_uncore_read(uncore, GEN2_IER);
+ 	}
+-	error->eir = I915_READ(EIR);
+-	error->pgtbl_er = I915_READ(PGTBL_ER);
++	error->eir = intel_uncore_read(uncore, EIR);
++	error->pgtbl_er = intel_uncore_read(uncore, PGTBL_ER);
+ }
+ 
+ static const char *
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 9db9fbd0e70c..cd9edddd6718 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1232,20 +1232,23 @@ int intel_get_crtc_scanline(struct intel_crtc *crtc)
+ 
+ static void ironlake_rps_change_irq_handler(struct drm_i915_private *dev_priv)
+ {
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	u32 busy_up, busy_down, max_avg, min_avg;
+ 	u8 new_delay;
+ 
+ 	spin_lock(&mchdev_lock);
+ 
+-	I915_WRITE16(MEMINTRSTS, I915_READ(MEMINTRSTS));
++	intel_uncore_write16(uncore,
++			     MEMINTRSTS,
++			     intel_uncore_read(uncore, MEMINTRSTS));
+ 
+ 	new_delay = dev_priv->ips.cur_delay;
+ 
+-	I915_WRITE16(MEMINTRSTS, MEMINT_EVAL_CHG);
+-	busy_up = I915_READ(RCPREVBSYTUPAVG);
+-	busy_down = I915_READ(RCPREVBSYTDNAVG);
+-	max_avg = I915_READ(RCBMAXAVG);
+-	min_avg = I915_READ(RCBMINAVG);
++	intel_uncore_write16(uncore, MEMINTRSTS, MEMINT_EVAL_CHG);
++	busy_up = intel_uncore_read(uncore, RCPREVBSYTUPAVG);
++	busy_down = intel_uncore_read(uncore, RCPREVBSYTDNAVG);
++	max_avg = intel_uncore_read(uncore, RCBMAXAVG);
++	min_avg = intel_uncore_read(uncore, RCBMINAVG);
+ 
+ 	/* Handle RCS change request from hw */
+ 	if (busy_up > max_avg) {
+@@ -4324,8 +4327,10 @@ static int i8xx_irq_postinstall(struct drm_device *dev)
+ 	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	u16 enable_mask;
+ 
+-	I915_WRITE16(EMR, ~(I915_ERROR_PAGE_TABLE |
+-			    I915_ERROR_MEMORY_REFRESH));
++	intel_uncore_write16(uncore,
++			     EMR,
++			     ~(I915_ERROR_PAGE_TABLE |
++			       I915_ERROR_MEMORY_REFRESH));
+ 
+ 	/* Unmask the interrupts that we always want on. */
+ 	dev_priv->irq_mask =
+@@ -4351,17 +4356,18 @@ static int i8xx_irq_postinstall(struct drm_device *dev)
+ 	return 0;
+ }
+ 
+-static void i8xx_error_irq_ack(struct drm_i915_private *dev_priv,
++static void i8xx_error_irq_ack(struct drm_i915_private *i915,
+ 			       u16 *eir, u16 *eir_stuck)
+ {
++	struct intel_uncore *uncore = &i915->uncore;
+ 	u16 emr;
+ 
+-	*eir = I915_READ16(EIR);
++	*eir = intel_uncore_read16(uncore, EIR);
+ 
+ 	if (*eir)
+-		I915_WRITE16(EIR, *eir);
++		intel_uncore_write16(uncore, EIR, *eir);
+ 
+-	*eir_stuck = I915_READ16(EIR);
++	*eir_stuck = intel_uncore_read16(uncore, EIR);
+ 	if (*eir_stuck == 0)
+ 		return;
+ 
+@@ -4375,9 +4381,9 @@ static void i8xx_error_irq_ack(struct drm_i915_private *dev_priv,
+ 	 * (or by a GPU reset) so we mask any bit that
+ 	 * remains set.
+ 	 */
+-	emr = I915_READ16(EMR);
+-	I915_WRITE16(EMR, 0xffff);
+-	I915_WRITE16(EMR, emr | *eir_stuck);
++	emr = intel_uncore_read16(uncore, EMR);
++	intel_uncore_write16(uncore, EMR, 0xffff);
++	intel_uncore_write16(uncore, EMR, emr | *eir_stuck);
+ }
+ 
+ static void i8xx_error_irq_handler(struct drm_i915_private *dev_priv,
+@@ -4443,7 +4449,7 @@ static irqreturn_t i8xx_irq_handler(int irq, void *arg)
+ 		u16 eir = 0, eir_stuck = 0;
+ 		u16 iir;
+ 
+-		iir = I915_READ16(GEN2_IIR);
++		iir = intel_uncore_read16(&dev_priv->uncore, GEN2_IIR);
+ 		if (iir == 0)
+ 			break;
+ 
+@@ -4456,7 +4462,7 @@ static irqreturn_t i8xx_irq_handler(int irq, void *arg)
+ 		if (iir & I915_MASTER_ERROR_INTERRUPT)
+ 			i8xx_error_irq_ack(dev_priv, &eir, &eir_stuck);
+ 
+-		I915_WRITE16(GEN2_IIR, iir);
++		intel_uncore_write16(&dev_priv->uncore, GEN2_IIR, iir);
+ 
+ 		if (iir & I915_USER_INTERRUPT)
+ 			intel_engine_breadcrumbs_irq(dev_priv->engine[RCS0]);
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 5a6679e2b6ee..2c7f3ebc0117 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -191,8 +191,8 @@ static void i915_ironlake_get_mem_freq(struct drm_i915_private *dev_priv)
+ {
+ 	u16 ddrpll, csipll;
+ 
+-	ddrpll = I915_READ16(DDRMPLL1);
+-	csipll = I915_READ16(CSIPLL0);
++	ddrpll = intel_uncore_read16(&dev_priv->uncore, DDRMPLL1);
++	csipll = intel_uncore_read16(&dev_priv->uncore, CSIPLL0);
+ 
+ 	switch (ddrpll & 0xff) {
+ 	case 0xc:
+@@ -6432,26 +6432,27 @@ bool ironlake_set_drps(struct drm_i915_private *i915, u8 val)
+ 
+ static void ironlake_enable_drps(struct drm_i915_private *dev_priv)
+ {
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	u32 rgvmodectl;
+ 	u8 fmax, fmin, fstart, vstart;
+ 
+ 	spin_lock_irq(&mchdev_lock);
+ 
+-	rgvmodectl = I915_READ(MEMMODECTL);
++	rgvmodectl = intel_uncore_read(uncore, MEMMODECTL);
+ 
+ 	/* Enable temp reporting */
+-	I915_WRITE16(PMMISC, I915_READ(PMMISC) | MCPPCE_EN);
+-	I915_WRITE16(TSC1, I915_READ(TSC1) | TSE);
++	intel_uncore_write16(uncore, PMMISC, I915_READ(PMMISC) | MCPPCE_EN);
++	intel_uncore_write16(uncore, TSC1, I915_READ(TSC1) | TSE);
+ 
+ 	/* 100ms RC evaluation intervals */
+-	I915_WRITE(RCUPEI, 100000);
+-	I915_WRITE(RCDNEI, 100000);
++	intel_uncore_write(uncore, RCUPEI, 100000);
++	intel_uncore_write(uncore, RCDNEI, 100000);
+ 
+ 	/* Set max/min thresholds to 90ms and 80ms respectively */
+-	I915_WRITE(RCBMAXAVG, 90000);
+-	I915_WRITE(RCBMINAVG, 80000);
++	intel_uncore_write(uncore, RCBMAXAVG, 90000);
++	intel_uncore_write(uncore, RCBMINAVG, 80000);
+ 
+-	I915_WRITE(MEMIHYST, 1);
++	intel_uncore_write(uncore, MEMIHYST, 1);
+ 
+ 	/* Set up min, max, and cur for interrupt handling */
+ 	fmax = (rgvmodectl & MEMMODE_FMAX_MASK) >> MEMMODE_FMAX_SHIFT;
+@@ -6459,8 +6460,8 @@ static void ironlake_enable_drps(struct drm_i915_private *dev_priv)
+ 	fstart = (rgvmodectl & MEMMODE_FSTART_MASK) >>
+ 		MEMMODE_FSTART_SHIFT;
+ 
+-	vstart = (I915_READ(PXVFREQ(fstart)) & PXVFREQ_PX_MASK) >>
+-		PXVFREQ_PX_SHIFT;
++	vstart = (intel_uncore_read(uncore, PXVFREQ(fstart)) &
++		  PXVFREQ_PX_MASK) >> PXVFREQ_PX_SHIFT;
+ 
+ 	dev_priv->ips.fmax = fmax; /* IPS callback will increase this */
+ 	dev_priv->ips.fstart = fstart;
+@@ -6472,53 +6473,66 @@ static void ironlake_enable_drps(struct drm_i915_private *dev_priv)
+ 	DRM_DEBUG_DRIVER("fmax: %d, fmin: %d, fstart: %d\n",
+ 			 fmax, fmin, fstart);
+ 
+-	I915_WRITE(MEMINTREN, MEMINT_CX_SUPR_EN | MEMINT_EVAL_CHG_EN);
++	intel_uncore_write(uncore,
++			   MEMINTREN,
++			   MEMINT_CX_SUPR_EN | MEMINT_EVAL_CHG_EN);
+ 
+ 	/*
+ 	 * Interrupts will be enabled in ironlake_irq_postinstall
+ 	 */
+ 
+-	I915_WRITE(VIDSTART, vstart);
+-	POSTING_READ(VIDSTART);
++	intel_uncore_write(uncore, VIDSTART, vstart);
++	intel_uncore_posting_read(uncore, VIDSTART);
+ 
+ 	rgvmodectl |= MEMMODE_SWMODE_EN;
+-	I915_WRITE(MEMMODECTL, rgvmodectl);
++	intel_uncore_write(uncore, MEMMODECTL, rgvmodectl);
+ 
+-	if (wait_for_atomic((I915_READ(MEMSWCTL) & MEMCTL_CMD_STS) == 0, 10))
++	if (wait_for_atomic((intel_uncore_read(uncore, MEMSWCTL) &
++			     MEMCTL_CMD_STS) == 0, 10))
+ 		DRM_ERROR("stuck trying to change perf mode\n");
+ 	mdelay(1);
+ 
+ 	ironlake_set_drps(dev_priv, fstart);
+ 
+-	dev_priv->ips.last_count1 = I915_READ(DMIEC) +
+-		I915_READ(DDREC) + I915_READ(CSIEC);
++	dev_priv->ips.last_count1 =
++		intel_uncore_read(uncore, DMIEC) +
++		intel_uncore_read(uncore, DDREC) +
++		intel_uncore_read(uncore, CSIEC);
+ 	dev_priv->ips.last_time1 = jiffies_to_msecs(jiffies);
+-	dev_priv->ips.last_count2 = I915_READ(GFXEC);
++	dev_priv->ips.last_count2 = intel_uncore_read(uncore, GFXEC);
+ 	dev_priv->ips.last_time2 = ktime_get_raw_ns();
+ 
+ 	spin_unlock_irq(&mchdev_lock);
+ }
+ 
+-static void ironlake_disable_drps(struct drm_i915_private *dev_priv)
++static void ironlake_disable_drps(struct drm_i915_private *i915)
+ {
++	struct intel_uncore *uncore = &i915->uncore;
+ 	u16 rgvswctl;
+ 
+ 	spin_lock_irq(&mchdev_lock);
+ 
+-	rgvswctl = I915_READ16(MEMSWCTL);
++	rgvswctl = intel_uncore_read16(uncore, MEMSWCTL);
+ 
+ 	/* Ack interrupts, disable EFC interrupt */
+-	I915_WRITE(MEMINTREN, I915_READ(MEMINTREN) & ~MEMINT_EVAL_CHG_EN);
+-	I915_WRITE(MEMINTRSTS, MEMINT_EVAL_CHG);
+-	I915_WRITE(DEIER, I915_READ(DEIER) & ~DE_PCU_EVENT);
+-	I915_WRITE(DEIIR, DE_PCU_EVENT);
+-	I915_WRITE(DEIMR, I915_READ(DEIMR) | DE_PCU_EVENT);
++	intel_uncore_write(uncore,
++			   MEMINTREN,
++			   intel_uncore_read(uncore, MEMINTREN) &
++			   ~MEMINT_EVAL_CHG_EN);
++	intel_uncore_write(uncore, MEMINTRSTS, MEMINT_EVAL_CHG);
++	intel_uncore_write(uncore,
++			   DEIER,
++			   intel_uncore_read(uncore, DEIER) & ~DE_PCU_EVENT);
++	intel_uncore_write(uncore, DEIIR, DE_PCU_EVENT);
++	intel_uncore_write(uncore,
++			   DEIMR,
++			   intel_uncore_read(uncore, DEIMR) | DE_PCU_EVENT);
+ 
+ 	/* Go back to the starting frequency */
+-	ironlake_set_drps(dev_priv, dev_priv->ips.fstart);
++	ironlake_set_drps(i915, i915->ips.fstart);
+ 	mdelay(1);
+ 	rgvswctl |= MEMCTL_CMD_STS;
+-	I915_WRITE(MEMSWCTL, rgvswctl);
++	intel_uncore_write(uncore, MEMSWCTL, rgvswctl);
+ 	mdelay(1);
+ 
+ 	spin_unlock_irq(&mchdev_lock);
+@@ -9504,16 +9518,21 @@ static void g4x_init_clock_gating(struct drm_i915_private *dev_priv)
+ 
+ static void i965gm_init_clock_gating(struct drm_i915_private *dev_priv)
+ {
+-	I915_WRITE(RENCLK_GATE_D1, I965_RCC_CLOCK_GATE_DISABLE);
+-	I915_WRITE(RENCLK_GATE_D2, 0);
+-	I915_WRITE(DSPCLK_GATE_D, 0);
+-	I915_WRITE(RAMCLK_GATE_D, 0);
+-	I915_WRITE16(DEUC, 0);
+-	I915_WRITE(MI_ARB_STATE,
+-		   _MASKED_BIT_ENABLE(MI_ARB_DISPLAY_TRICKLE_FEED_DISABLE));
++	struct intel_uncore *uncore = &dev_priv->uncore;
++
++	intel_uncore_write(uncore, RENCLK_GATE_D1, I965_RCC_CLOCK_GATE_DISABLE);
++	intel_uncore_write(uncore, RENCLK_GATE_D2, 0);
++	intel_uncore_write(uncore, DSPCLK_GATE_D, 0);
++	intel_uncore_write(uncore, RAMCLK_GATE_D, 0);
++	intel_uncore_write16(uncore, DEUC, 0);
++	intel_uncore_write(uncore,
++			   MI_ARB_STATE,
++			   _MASKED_BIT_ENABLE(MI_ARB_DISPLAY_TRICKLE_FEED_DISABLE));
+ 
+ 	/* WaDisable_RenderCache_OperationalFlush:gen4 */
+-	I915_WRITE(CACHE_MODE_0, _MASKED_BIT_DISABLE(RC_OP_FLUSH_ENABLE));
++	intel_uncore_write(uncore,
++			   CACHE_MODE_0,
++			   _MASKED_BIT_DISABLE(RC_OP_FLUSH_ENABLE));
+ }
+ 
+ static void i965g_init_clock_gating(struct drm_i915_private *dev_priv)
+-- 
+2.17.1
+

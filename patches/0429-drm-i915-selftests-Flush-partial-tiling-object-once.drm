@@ -1,0 +1,64 @@
+From 32ace228075c28d1496e10551be0dddb7431c126 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 4 Jun 2019 13:00:20 +0100
+Subject: [PATCH 429/733] drm/i915/selftests: Flush partial-tiling object once
+
+We only need to flush the object once prior to starting the partial
+tiling test as inside the test we explicitly maintain coherency.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190604120022.20472-1-chris@chris-wilson.co.uk
+---
+ .../drm/i915/gem/selftests/i915_gem_mman.c    | 21 ++++++++-----------
+ 1 file changed, 9 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
+index 5db3327958fb..b92809418729 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
+@@ -98,6 +98,14 @@ static int check_partial_mapping(struct drm_i915_gem_object *obj,
+ 	GEM_BUG_ON(i915_gem_object_get_tiling(obj) != tile->tiling);
+ 	GEM_BUG_ON(i915_gem_object_get_stride(obj) != tile->stride);
+ 
++	i915_gem_object_lock(obj);
++	err = i915_gem_object_set_to_gtt_domain(obj, true);
++	i915_gem_object_unlock(obj);
++	if (err) {
++		pr_err("Failed to flush to GTT write domain; err=%d\n", err);
++		return err;
++	}
++
+ 	for_each_prime_number_from(page, 1, npages) {
+ 		struct i915_ggtt_view view =
+ 			compute_partial_view(obj, page, MIN_CHUNK_PAGES);
+@@ -110,15 +118,6 @@ static int check_partial_mapping(struct drm_i915_gem_object *obj,
+ 		GEM_BUG_ON(view.partial.size > nreal);
+ 		cond_resched();
+ 
+-		i915_gem_object_lock(obj);
+-		err = i915_gem_object_set_to_gtt_domain(obj, true);
+-		i915_gem_object_unlock(obj);
+-		if (err) {
+-			pr_err("Failed to flush to GTT write domain; err=%d\n",
+-			       err);
+-			return err;
+-		}
+-
+ 		vma = i915_gem_object_ggtt_pin(obj, &view, 0, 0, PIN_MAPPABLE);
+ 		if (IS_ERR(vma)) {
+ 			pr_err("Failed to pin partial view: offset=%lu; err=%d\n",
+@@ -144,9 +143,7 @@ static int check_partial_mapping(struct drm_i915_gem_object *obj,
+ 		if (offset >= obj->base.size)
+ 			continue;
+ 
+-		i915_gem_object_lock(obj);
+-		i915_gem_object_flush_write_domain(obj, ~I915_GEM_DOMAIN_CPU);
+-		i915_gem_object_unlock(obj);
++		i915_gem_flush_ggtt_writes(to_i915(obj->base.dev));
+ 
+ 		p = i915_gem_object_get_page(obj, offset >> PAGE_SHIFT);
+ 		cpu = kmap(p) + offset_in_page(offset);
+-- 
+2.17.1
+

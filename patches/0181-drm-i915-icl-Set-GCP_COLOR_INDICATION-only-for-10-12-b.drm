@@ -1,0 +1,104 @@
+From 9887a4d4f0530d3e9996d559ccffd72f9841ba0e Mon Sep 17 00:00:00 2001
+From: Clinton Taylor <Clinton.A.Taylor@intel.com>
+Date: Mon, 29 Apr 2019 16:08:11 -0700
+Subject: [PATCH 181/733] drm/i915/icl: Set GCP_COLOR_INDICATION only for 10/12
+ bit deep color
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+v2: Fix commit msg to reflect why issue occurs(Jani)
+Set GCP_COLOR_INDICATION only when we set 10/12 bit deep color.
+
+Changing settings from 10/12 bit deep color to 8 bit(& vice versa)
+doesn't work correctly using xrandr max bpc property. When we
+connect a monitor which supports deep color, the highest deep color
+setting is selected; which sets GCP_COLOR_INDICATION. When we change
+the setting to 8 bit color, we still set GCP_COLOR_INDICATION which
+doesn't allow the switch back to 8 bit color.
+
+v3,4: Add comments & drop changes in intel_hdmi_compute_config(Ville)
+Since HSW+, GCP_COLOR_INDICATION is not required for 8bpc.
+
+Drop the changes in intel_hdmi_compute_config as desired_bpp
+is needed to change values for pipe_bpp based on bw_constrained flag.
+
+v5: Fix missing logical && in condition for setting GCP_COLOR_INDICATION.
+
+v6: Fix comment formatting (Ville)
+
+v7: Add reviewed by Ville
+
+v8: Set GCP_COLOR_INDICATION based on spec:
+For Gen 7.5 or later platforms, indicate color depth only for deep
+color modes. Bspec: 8135,7751,50524
+
+Pre DDI platforms, indicate color depth if deep color is supported
+by sink. Bspec: 7854
+
+Exception: CHERRYVIEW behaves like Pre DDI platforms.
+Bspec: 15975
+
+Check pipe_bpp is less than bpp * 3 in hdmi_deep_color_possible,
+to not set 12 bit deep color for every modeset. This fixes the issue
+where 12 bit color was selected even when user selected 10 bit.(Ville)
+
+v9: Maintain a consistent behavior for all platforms and support
+GCP_COLOR_INDICATION only when we are in deep color mode. Remove
+hdmi_sink_is_deep_color() - no longer needed as checking pipe_bpp > 24
+takes care of the deep color mode scenario.
+
+Separate patch for fixing switch from 12 bit to 10 bit deep color
+mode.
+
+Co-developed-by: Aditya Swarup <aditya.swarup@intel.com>
+Signed-off-by: Clinton Taylor
+Signed-off-by: Aditya Swarup <aditya.swarup@intel.com>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Cc: Jani Nikula <jani.nikula@intel.com>
+Cc: Manasi Navare <manasi.d.navare@intel.com>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190429230811.9983-1-aditya.swarup@intel.com
+---
+ drivers/gpu/drm/i915/intel_hdmi.c | 17 ++---------------
+ 1 file changed, 2 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_hdmi.c b/drivers/gpu/drm/i915/intel_hdmi.c
+index fc3d18a90d74..37bf341976e3 100644
+--- a/drivers/gpu/drm/i915/intel_hdmi.c
++++ b/drivers/gpu/drm/i915/intel_hdmi.c
+@@ -853,19 +853,6 @@ static void g4x_set_infoframes(struct intel_encoder *encoder,
+ 			      &crtc_state->infoframes.hdmi);
+ }
+ 
+-static bool hdmi_sink_is_deep_color(const struct drm_connector_state *conn_state)
+-{
+-	struct drm_connector *connector = conn_state->connector;
+-
+-	/*
+-	 * HDMI cloning is only supported on g4x which doesn't
+-	 * support deep color or GCP infoframes anyway so no
+-	 * need to worry about multiple HDMI sinks here.
+-	 */
+-
+-	return connector->display_info.bpc > 8;
+-}
+-
+ /*
+  * Determine if default_phase=1 can be indicated in the GCP infoframe.
+  *
+@@ -970,8 +957,8 @@ static void intel_hdmi_compute_gcp_infoframe(struct intel_encoder *encoder,
+ 	crtc_state->infoframes.enable |=
+ 		intel_hdmi_infoframe_enable(HDMI_PACKET_TYPE_GENERAL_CONTROL);
+ 
+-	/* Indicate color depth whenever the sink supports deep color */
+-	if (hdmi_sink_is_deep_color(conn_state))
++	/* Indicate color indication for deep color mode */
++	if (crtc_state->pipe_bpp > 24)
+ 		crtc_state->infoframes.gcp |= GCP_COLOR_INDICATION;
+ 
+ 	/* Enable default_phase whenever the display mode is suitably aligned */
+-- 
+2.17.1
+

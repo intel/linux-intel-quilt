@@ -1,0 +1,169 @@
+From 6b0c040995dcf34758a91d9f8562c92eab8bab7e Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Tue, 11 Jun 2019 11:45:44 +0100
+Subject: [PATCH 508/733] drm/i915: Remove I915_POSTING_READ_FW
+
+Only a few call sites remain which have been converted to uncore mmio
+accessors and so the macro can be removed.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190611104548.30545-2-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/i915_drv.h             |  1 -
+ drivers/gpu/drm/i915/i915_gem.c             |  9 +++---
+ drivers/gpu/drm/i915/i915_irq.c             |  2 +-
+ drivers/gpu/drm/i915/intel_guc_submission.c |  4 +--
+ drivers/gpu/drm/i915/intel_pm.c             | 31 +++++++++++----------
+ 5 files changed, 24 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index f90bab84ac52..2cbd60c4a5dc 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2877,7 +2877,6 @@ extern void intel_display_print_error_state(struct drm_i915_error_state_buf *e,
+  */
+ #define I915_READ_FW(reg__) __I915_REG_OP(read_fw, dev_priv, (reg__))
+ #define I915_WRITE_FW(reg__, val__) __I915_REG_OP(write_fw, dev_priv, (reg__), (val__))
+-#define POSTING_READ_FW(reg__) __I915_REG_OP(posting_read_fw, dev_priv, (reg__))
+ 
+ /* "Broadcast RGB" property */
+ #define INTEL_BROADCAST_RGB_AUTO 0
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 17e8809c5312..4017ecf561f6 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -263,11 +263,12 @@ void i915_gem_flush_ggtt_writes(struct drm_i915_private *dev_priv)
+ 	i915_gem_chipset_flush(dev_priv);
+ 
+ 	with_intel_runtime_pm(dev_priv, wakeref) {
+-		spin_lock_irq(&dev_priv->uncore.lock);
++		struct intel_uncore *uncore = &dev_priv->uncore;
+ 
+-		POSTING_READ_FW(RING_HEAD(RENDER_RING_BASE));
+-
+-		spin_unlock_irq(&dev_priv->uncore.lock);
++		spin_lock_irq(&uncore->lock);
++		intel_uncore_posting_read_fw(uncore,
++					     RING_HEAD(RENDER_RING_BASE));
++		spin_unlock_irq(&uncore->lock);
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 11c451358fb8..9db9fbd0e70c 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -387,7 +387,7 @@ static void ilk_update_gt_irq(struct drm_i915_private *dev_priv,
+ void gen5_enable_gt_irq(struct drm_i915_private *dev_priv, u32 mask)
+ {
+ 	ilk_update_gt_irq(dev_priv, mask, mask);
+-	POSTING_READ_FW(GTIMR);
++	intel_uncore_posting_read_fw(&dev_priv->uncore, GTIMR);
+ }
+ 
+ void gen5_disable_gt_irq(struct drm_i915_private *dev_priv, u32 mask)
+diff --git a/drivers/gpu/drm/i915/intel_guc_submission.c b/drivers/gpu/drm/i915/intel_guc_submission.c
+index 89592ef778b8..97f6970d8da8 100644
+--- a/drivers/gpu/drm/i915/intel_guc_submission.c
++++ b/drivers/gpu/drm/i915/intel_guc_submission.c
+@@ -557,10 +557,10 @@ static void guc_add_request(struct intel_guc *guc, struct i915_request *rq)
+  */
+ static void flush_ggtt_writes(struct i915_vma *vma)
+ {
+-	struct drm_i915_private *dev_priv = vma->vm->i915;
++	struct drm_i915_private *i915 = vma->vm->i915;
+ 
+ 	if (i915_vma_is_map_and_fenceable(vma))
+-		POSTING_READ_FW(GUC_STATUS);
++		intel_uncore_posting_read_fw(&i915->uncore, GUC_STATUS);
+ }
+ 
+ static void inject_preempt_context(struct work_struct *work)
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 93e411e6ad19..84588ff8732f 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -1949,6 +1949,7 @@ static void vlv_atomic_update_fifo(struct intel_atomic_state *state,
+ {
+ 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->base.crtc);
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
++	struct intel_uncore *uncore = &dev_priv->uncore;
+ 	const struct vlv_fifo_state *fifo_state =
+ 		&crtc_state->wm.vlv.fifo_state;
+ 	int sprite0_start, sprite1_start, fifo_size;
+@@ -1974,13 +1975,13 @@ static void vlv_atomic_update_fifo(struct intel_atomic_state *state,
+ 	 * intel_pipe_update_start() has already disabled interrupts
+ 	 * for us, so a plain spin_lock() is sufficient here.
+ 	 */
+-	spin_lock(&dev_priv->uncore.lock);
++	spin_lock(&uncore->lock);
+ 
+ 	switch (crtc->pipe) {
+ 		u32 dsparb, dsparb2, dsparb3;
+ 	case PIPE_A:
+-		dsparb = I915_READ_FW(DSPARB);
+-		dsparb2 = I915_READ_FW(DSPARB2);
++		dsparb = intel_uncore_read_fw(uncore, DSPARB);
++		dsparb2 = intel_uncore_read_fw(uncore, DSPARB2);
+ 
+ 		dsparb &= ~(VLV_FIFO(SPRITEA, 0xff) |
+ 			    VLV_FIFO(SPRITEB, 0xff));
+@@ -1992,12 +1993,12 @@ static void vlv_atomic_update_fifo(struct intel_atomic_state *state,
+ 		dsparb2 |= (VLV_FIFO(SPRITEA_HI, sprite0_start >> 8) |
+ 			   VLV_FIFO(SPRITEB_HI, sprite1_start >> 8));
+ 
+-		I915_WRITE_FW(DSPARB, dsparb);
+-		I915_WRITE_FW(DSPARB2, dsparb2);
++		intel_uncore_write_fw(uncore, DSPARB, dsparb);
++		intel_uncore_write_fw(uncore, DSPARB2, dsparb2);
+ 		break;
+ 	case PIPE_B:
+-		dsparb = I915_READ_FW(DSPARB);
+-		dsparb2 = I915_READ_FW(DSPARB2);
++		dsparb = intel_uncore_read_fw(uncore, DSPARB);
++		dsparb2 = intel_uncore_read_fw(uncore, DSPARB2);
+ 
+ 		dsparb &= ~(VLV_FIFO(SPRITEC, 0xff) |
+ 			    VLV_FIFO(SPRITED, 0xff));
+@@ -2009,12 +2010,12 @@ static void vlv_atomic_update_fifo(struct intel_atomic_state *state,
+ 		dsparb2 |= (VLV_FIFO(SPRITEC_HI, sprite0_start >> 8) |
+ 			   VLV_FIFO(SPRITED_HI, sprite1_start >> 8));
+ 
+-		I915_WRITE_FW(DSPARB, dsparb);
+-		I915_WRITE_FW(DSPARB2, dsparb2);
++		intel_uncore_write_fw(uncore, DSPARB, dsparb);
++		intel_uncore_write_fw(uncore, DSPARB2, dsparb2);
+ 		break;
+ 	case PIPE_C:
+-		dsparb3 = I915_READ_FW(DSPARB3);
+-		dsparb2 = I915_READ_FW(DSPARB2);
++		dsparb3 = intel_uncore_read_fw(uncore, DSPARB3);
++		dsparb2 = intel_uncore_read_fw(uncore, DSPARB2);
+ 
+ 		dsparb3 &= ~(VLV_FIFO(SPRITEE, 0xff) |
+ 			     VLV_FIFO(SPRITEF, 0xff));
+@@ -2026,16 +2027,16 @@ static void vlv_atomic_update_fifo(struct intel_atomic_state *state,
+ 		dsparb2 |= (VLV_FIFO(SPRITEE_HI, sprite0_start >> 8) |
+ 			   VLV_FIFO(SPRITEF_HI, sprite1_start >> 8));
+ 
+-		I915_WRITE_FW(DSPARB3, dsparb3);
+-		I915_WRITE_FW(DSPARB2, dsparb2);
++		intel_uncore_write_fw(uncore, DSPARB3, dsparb3);
++		intel_uncore_write_fw(uncore, DSPARB2, dsparb2);
+ 		break;
+ 	default:
+ 		break;
+ 	}
+ 
+-	POSTING_READ_FW(DSPARB);
++	intel_uncore_posting_read_fw(uncore, DSPARB);
+ 
+-	spin_unlock(&dev_priv->uncore.lock);
++	spin_unlock(&uncore->lock);
+ }
+ 
+ #undef VLV_FIFO
+-- 
+2.17.1
+

@@ -1,0 +1,853 @@
+From fc2e99c802ff966c6e935233e1c67205d2c9786a Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 14 Jun 2019 17:46:04 +0100
+Subject: [PATCH 528/733] drm/i915: Keep contexts pinned until after the next
+ kernel context switch
+
+We need to keep the context image pinned in memory until after the GPU
+has finished writing into it. Since it continues to write as we signal
+the final breadcrumb, we need to keep it pinned until the request after
+it is complete. Currently we know the order in which requests execute on
+each engine, and so to remove that presumption we need to identify a
+request/context-switch we know must occur after our completion. Any
+request queued after the signal must imply a context switch, for
+simplicity we use a fresh request from the kernel context.
+
+The sequence of operations for keeping the context pinned until saved is:
+
+ - On context activation, we preallocate a node for each physical engine
+   the context may operate on. This is to avoid allocations during
+   unpinning, which may be from inside FS_RECLAIM context (aka the
+   shrinker)
+
+ - On context deactivation on retirement of the last active request (which
+   is before we know the context has been saved), we add the
+   preallocated node onto a barrier list on each engine
+
+ - On engine idling, we emit a switch to kernel context. When this
+   switch completes, we know that all previous contexts must have been
+   saved, and so on retiring this request we can finally unpin all the
+   contexts that were marked as deactivated prior to the switch.
+
+We can enhance this in future by flushing all the idle contexts on a
+regular heartbeat pulse of a switch to kernel context, which will also
+be used to check for hung engines.
+
+v2: intel_context_active_acquire/_release
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190614164606.15633-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gem/i915_gem_context.c   | 24 ++----
+ drivers/gpu/drm/i915/gem/i915_gem_context.h   |  1 -
+ drivers/gpu/drm/i915/gem/i915_gem_pm.c        | 20 ++++-
+ drivers/gpu/drm/i915/gem/i915_gem_shrinker.c  | 17 ++--
+ drivers/gpu/drm/i915/gt/intel_context.c       | 80 ++++++++++++++++---
+ drivers/gpu/drm/i915/gt/intel_context.h       |  3 +
+ drivers/gpu/drm/i915/gt/intel_context_types.h |  6 +-
+ drivers/gpu/drm/i915/gt/intel_engine.h        |  2 -
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c     | 23 +-----
+ drivers/gpu/drm/i915/gt/intel_engine_pm.c     |  2 +
+ drivers/gpu/drm/i915/gt/intel_engine_types.h  | 13 +--
+ drivers/gpu/drm/i915/gt/intel_lrc.c           | 62 ++------------
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c    | 44 +---------
+ drivers/gpu/drm/i915/gt/mock_engine.c         | 11 +--
+ drivers/gpu/drm/i915/i915_active.c            | 78 ++++++++++++++++++
+ drivers/gpu/drm/i915/i915_active.h            |  5 ++
+ drivers/gpu/drm/i915/i915_active_types.h      |  3 +
+ drivers/gpu/drm/i915/i915_gem.c               |  4 -
+ drivers/gpu/drm/i915/i915_request.c           | 15 ----
+ .../gpu/drm/i915/selftests/mock_gem_device.c  |  1 -
+ 20 files changed, 219 insertions(+), 195 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context.c b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+index c86ca9f21532..6200060aef05 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+@@ -692,17 +692,6 @@ int i915_gem_contexts_init(struct drm_i915_private *dev_priv)
+ 	return 0;
+ }
+ 
+-void i915_gem_contexts_lost(struct drm_i915_private *dev_priv)
+-{
+-	struct intel_engine_cs *engine;
+-	enum intel_engine_id id;
+-
+-	lockdep_assert_held(&dev_priv->drm.struct_mutex);
+-
+-	for_each_engine(engine, dev_priv, id)
+-		intel_engine_lost_context(engine);
+-}
+-
+ void i915_gem_contexts_fini(struct drm_i915_private *i915)
+ {
+ 	lockdep_assert_held(&i915->drm.struct_mutex);
+@@ -1203,10 +1192,6 @@ gen8_modify_rpcs(struct intel_context *ce, struct intel_sseu sseu)
+ 	if (ret)
+ 		goto out_add;
+ 
+-	ret = gen8_emit_rpcs_config(rq, ce, sseu);
+-	if (ret)
+-		goto out_add;
+-
+ 	/*
+ 	 * Guarantee context image and the timeline remains pinned until the
+ 	 * modifying request is retired by setting the ce activity tracker.
+@@ -1214,9 +1199,12 @@ gen8_modify_rpcs(struct intel_context *ce, struct intel_sseu sseu)
+ 	 * But we only need to take one pin on the account of it. Or in other
+ 	 * words transfer the pinned ce object to tracked active request.
+ 	 */
+-	if (!i915_active_request_isset(&ce->active_tracker))
+-		__intel_context_pin(ce);
+-	__i915_active_request_set(&ce->active_tracker, rq);
++	GEM_BUG_ON(i915_active_is_idle(&ce->active));
++	ret = i915_active_ref(&ce->active, rq->fence.context, rq);
++	if (ret)
++		goto out_add;
++
++	ret = gen8_emit_rpcs_config(rq, ce, sseu);
+ 
+ out_add:
+ 	i915_request_add(rq);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context.h b/drivers/gpu/drm/i915/gem/i915_gem_context.h
+index 630392c77e48..9691dd062f72 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context.h
+@@ -134,7 +134,6 @@ static inline bool i915_gem_context_is_kernel(struct i915_gem_context *ctx)
+ 
+ /* i915_gem_context.c */
+ int __must_check i915_gem_contexts_init(struct drm_i915_private *dev_priv);
+-void i915_gem_contexts_lost(struct drm_i915_private *dev_priv);
+ void i915_gem_contexts_fini(struct drm_i915_private *dev_priv);
+ 
+ int i915_gem_context_open(struct drm_i915_private *i915,
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_pm.c b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+index 6e75702c5671..141f3ea349a4 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_pm.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+@@ -10,6 +10,22 @@
+ #include "i915_drv.h"
+ #include "i915_globals.h"
+ 
++static void call_idle_barriers(struct intel_engine_cs *engine)
++{
++	struct llist_node *node, *next;
++
++	llist_for_each_safe(node, next, llist_del_all(&engine->barrier_tasks)) {
++		struct i915_active_request *active =
++			container_of((struct list_head *)node,
++				     typeof(*active), link);
++
++		INIT_LIST_HEAD(&active->link);
++		RCU_INIT_POINTER(active->request, NULL);
++
++		active->retire(active, NULL);
++	}
++}
++
+ static void i915_gem_park(struct drm_i915_private *i915)
+ {
+ 	struct intel_engine_cs *engine;
+@@ -17,8 +33,10 @@ static void i915_gem_park(struct drm_i915_private *i915)
+ 
+ 	lockdep_assert_held(&i915->drm.struct_mutex);
+ 
+-	for_each_engine(engine, i915, id)
++	for_each_engine(engine, i915, id) {
++		call_idle_barriers(engine); /* cleanup after wedging */
+ 		i915_gem_batch_pool_fini(&engine->batch_pool);
++	}
+ 
+ 	i915_timelines_park(i915);
+ 	i915_vma_parked(i915);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c b/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
+index a521f23c18ad..c851c4029597 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_shrinker.c
+@@ -160,18 +160,13 @@ i915_gem_shrink(struct drm_i915_private *i915,
+ 		return 0;
+ 
+ 	/*
+-	 * When shrinking the active list, also consider active contexts.
+-	 * Active contexts are pinned until they are retired, and so can
+-	 * not be simply unbound to retire and unpin their pages. To shrink
+-	 * the contexts, we must wait until the gpu is idle.
+-	 *
+-	 * We don't care about errors here; if we cannot wait upon the GPU,
+-	 * we will free as much as we can and hope to get a second chance.
++	 * When shrinking the active list, we should also consider active
++	 * contexts. Active contexts are pinned until they are retired, and
++	 * so can not be simply unbound to retire and unpin their pages. To
++	 * shrink the contexts, we must wait until the gpu is idle and
++	 * completed its switch to the kernel context. In short, we do
++	 * not have a good mechanism for idling a specific context.
+ 	 */
+-	if (shrink & I915_SHRINK_ACTIVE)
+-		i915_gem_wait_for_idle(i915,
+-				       I915_WAIT_LOCKED,
+-				       MAX_SCHEDULE_TIMEOUT);
+ 
+ 	trace_i915_gem_shrink(i915, target, shrink);
+ 	i915_retire_requests(i915);
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index 848df91e2b20..b24c9f7ed1cc 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -61,7 +61,6 @@ int __intel_context_do_pin(struct intel_context *ce)
+ 
+ 		i915_gem_context_get(ce->gem_context); /* for ctx->ppgtt */
+ 
+-		intel_context_get(ce);
+ 		smp_mb__before_atomic(); /* flush pin before it is visible */
+ 	}
+ 
+@@ -89,20 +88,45 @@ void intel_context_unpin(struct intel_context *ce)
+ 		ce->ops->unpin(ce);
+ 
+ 		i915_gem_context_put(ce->gem_context);
+-		intel_context_put(ce);
++		intel_context_active_release(ce);
+ 	}
+ 
+ 	mutex_unlock(&ce->pin_mutex);
+ 	intel_context_put(ce);
+ }
+ 
+-static void intel_context_retire(struct i915_active_request *active,
+-				 struct i915_request *rq)
++static int __context_pin_state(struct i915_vma *vma, unsigned long flags)
+ {
+-	struct intel_context *ce =
+-		container_of(active, typeof(*ce), active_tracker);
++	int err;
+ 
+-	intel_context_unpin(ce);
++	err = i915_vma_pin(vma, 0, 0, flags | PIN_GLOBAL);
++	if (err)
++		return err;
++
++	/*
++	 * And mark it as a globally pinned object to let the shrinker know
++	 * it cannot reclaim the object until we release it.
++	 */
++	vma->obj->pin_global++;
++	vma->obj->mm.dirty = true;
++
++	return 0;
++}
++
++static void __context_unpin_state(struct i915_vma *vma)
++{
++	vma->obj->pin_global--;
++	__i915_vma_unpin(vma);
++}
++
++static void intel_context_retire(struct i915_active *active)
++{
++	struct intel_context *ce = container_of(active, typeof(*ce), active);
++
++	if (ce->state)
++		__context_unpin_state(ce->state);
++
++	intel_context_put(ce);
+ }
+ 
+ void
+@@ -126,8 +150,46 @@ intel_context_init(struct intel_context *ce,
+ 
+ 	mutex_init(&ce->pin_mutex);
+ 
+-	i915_active_request_init(&ce->active_tracker,
+-				 NULL, intel_context_retire);
++	i915_active_init(ctx->i915, &ce->active, intel_context_retire);
++}
++
++int intel_context_active_acquire(struct intel_context *ce, unsigned long flags)
++{
++	int err;
++
++	if (!i915_active_acquire(&ce->active))
++		return 0;
++
++	intel_context_get(ce);
++
++	if (!ce->state)
++		return 0;
++
++	err = __context_pin_state(ce->state, flags);
++	if (err) {
++		i915_active_cancel(&ce->active);
++		intel_context_put(ce);
++		return err;
++	}
++
++	/* Preallocate tracking nodes */
++	if (!i915_gem_context_is_kernel(ce->gem_context)) {
++		err = i915_active_acquire_preallocate_barrier(&ce->active,
++							      ce->engine);
++		if (err) {
++			i915_active_release(&ce->active);
++			return err;
++		}
++	}
++
++	return 0;
++}
++
++void intel_context_active_release(struct intel_context *ce)
++{
++	/* Nodes preallocated in intel_context_active() */
++	i915_active_acquire_barrier(&ce->active);
++	i915_active_release(&ce->active);
+ }
+ 
+ static void i915_global_context_shrink(void)
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.h b/drivers/gpu/drm/i915/gt/intel_context.h
+index 6d5453ba2c1e..a47275bc4f01 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.h
++++ b/drivers/gpu/drm/i915/gt/intel_context.h
+@@ -102,6 +102,9 @@ static inline void intel_context_exit(struct intel_context *ce)
+ 		ce->ops->exit(ce);
+ }
+ 
++int intel_context_active_acquire(struct intel_context *ce, unsigned long flags);
++void intel_context_active_release(struct intel_context *ce);
++
+ static inline struct intel_context *intel_context_get(struct intel_context *ce)
+ {
+ 	kref_get(&ce->ref);
+diff --git a/drivers/gpu/drm/i915/gt/intel_context_types.h b/drivers/gpu/drm/i915/gt/intel_context_types.h
+index 825fcf0ac9c4..e95be4be9612 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_context_types.h
+@@ -56,10 +56,10 @@ struct intel_context {
+ 	intel_engine_mask_t saturated; /* submitting semaphores too late? */
+ 
+ 	/**
+-	 * active_tracker: Active tracker for the external rq activity
+-	 * on this intel_context object.
++	 * active: Active tracker for the rq activity (inc. external) on this
++	 * intel_context object.
+ 	 */
+-	struct i915_active_request active_tracker;
++	struct i915_active active;
+ 
+ 	const struct intel_context_ops *ops;
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine.h b/drivers/gpu/drm/i915/gt/intel_engine.h
+index 1439fa4093ac..3b5a6d152997 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine.h
+@@ -467,8 +467,6 @@ static inline void intel_engine_reset(struct intel_engine_cs *engine,
+ bool intel_engine_is_idle(struct intel_engine_cs *engine);
+ bool intel_engines_are_idle(struct drm_i915_private *dev_priv);
+ 
+-void intel_engine_lost_context(struct intel_engine_cs *engine);
+-
+ void intel_engines_reset_default_submission(struct drm_i915_private *i915);
+ unsigned int intel_engines_has_context_isolation(struct drm_i915_private *i915);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index 39220e16ea26..22242e927baa 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -611,6 +611,8 @@ static int intel_engine_setup_common(struct intel_engine_cs *engine)
+ {
+ 	int err;
+ 
++	init_llist_head(&engine->barrier_tasks);
++
+ 	err = init_status_page(engine);
+ 	if (err)
+ 		return err;
+@@ -870,6 +872,7 @@ void intel_engine_cleanup_common(struct intel_engine_cs *engine)
+ 	if (engine->preempt_context)
+ 		intel_context_unpin(engine->preempt_context);
+ 	intel_context_unpin(engine->kernel_context);
++	GEM_BUG_ON(!llist_empty(&engine->barrier_tasks));
+ 
+ 	i915_timeline_fini(&engine->timeline);
+ 
+@@ -1201,26 +1204,6 @@ void intel_engines_reset_default_submission(struct drm_i915_private *i915)
+ 		engine->set_default_submission(engine);
+ }
+ 
+-/**
+- * intel_engine_lost_context: called when the GPU is reset into unknown state
+- * @engine: the engine
+- *
+- * We have either reset the GPU or otherwise about to lose state tracking of
+- * the current GPU logical state (e.g. suspend). On next use, it is therefore
+- * imperative that we make no presumptions about the current state and load
+- * from scratch.
+- */
+-void intel_engine_lost_context(struct intel_engine_cs *engine)
+-{
+-	struct intel_context *ce;
+-
+-	lockdep_assert_held(&engine->i915->drm.struct_mutex);
+-
+-	ce = fetch_and_zero(&engine->last_retired_context);
+-	if (ce)
+-		intel_context_unpin(ce);
+-}
+-
+ bool intel_engine_can_store_dword(struct intel_engine_cs *engine)
+ {
+ 	switch (INTEL_GEN(engine->i915)) {
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.c b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+index 903bee3d6c6d..d14e352b0b17 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+@@ -88,6 +88,8 @@ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+ 
+ 	/* Check again on the next retirement. */
+ 	engine->wakeref_serial = engine->serial + 1;
++
++	i915_request_add_barriers(rq);
+ 	__i915_request_commit(rq);
+ 
+ 	return false;
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_types.h b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+index 01223864237a..33a31aa2d2ae 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_engine_types.h
+@@ -11,6 +11,7 @@
+ #include <linux/irq_work.h>
+ #include <linux/kref.h>
+ #include <linux/list.h>
++#include <linux/llist.h>
+ #include <linux/types.h>
+ 
+ #include "i915_gem.h"
+@@ -288,6 +289,7 @@ struct intel_engine_cs {
+ 	struct intel_ring *buffer;
+ 
+ 	struct i915_timeline timeline;
++	struct llist_head barrier_tasks;
+ 
+ 	struct intel_context *kernel_context; /* pinned */
+ 	struct intel_context *preempt_context; /* pinned; optional */
+@@ -435,17 +437,6 @@ struct intel_engine_cs {
+ 
+ 	struct intel_engine_execlists execlists;
+ 
+-	/* Contexts are pinned whilst they are active on the GPU. The last
+-	 * context executed remains active whilst the GPU is idle - the
+-	 * switch away and write to the context object only occurs on the
+-	 * next execution.  Contexts are only unpinned on retirement of the
+-	 * following request ensuring that we can always write to the object
+-	 * on the context switch even after idling. Across suspend, we switch
+-	 * to the kernel context and trash it as the save may not happen
+-	 * before the hardware is powered down.
+-	 */
+-	struct intel_context *last_retired_context;
+-
+ 	/* status_notifier: list of callbacks for context-switch changes */
+ 	struct atomic_notifier_head context_status_notifier;
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index b8f5592da18f..d0a51752386f 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1422,60 +1422,11 @@ static void execlists_context_destroy(struct kref *kref)
+ 	intel_context_free(ce);
+ }
+ 
+-static int __context_pin(struct i915_vma *vma)
+-{
+-	unsigned int flags;
+-	int err;
+-
+-	flags = PIN_GLOBAL | PIN_HIGH;
+-	flags |= PIN_OFFSET_BIAS | i915_ggtt_pin_bias(vma);
+-
+-	err = i915_vma_pin(vma, 0, 0, flags);
+-	if (err)
+-		return err;
+-
+-	vma->obj->pin_global++;
+-	vma->obj->mm.dirty = true;
+-
+-	return 0;
+-}
+-
+-static void __context_unpin(struct i915_vma *vma)
+-{
+-	vma->obj->pin_global--;
+-	__i915_vma_unpin(vma);
+-}
+-
+ static void execlists_context_unpin(struct intel_context *ce)
+ {
+-	struct intel_engine_cs *engine;
+-
+-	/*
+-	 * The tasklet may still be using a pointer to our state, via an
+-	 * old request. However, since we know we only unpin the context
+-	 * on retirement of the following request, we know that the last
+-	 * request referencing us will have had a completion CS interrupt.
+-	 * If we see that it is still active, it means that the tasklet hasn't
+-	 * had the chance to run yet; let it run before we teardown the
+-	 * reference it may use.
+-	 */
+-	engine = READ_ONCE(ce->inflight);
+-	if (unlikely(engine)) {
+-		unsigned long flags;
+-
+-		spin_lock_irqsave(&engine->timeline.lock, flags);
+-		process_csb(engine);
+-		spin_unlock_irqrestore(&engine->timeline.lock, flags);
+-
+-		GEM_BUG_ON(READ_ONCE(ce->inflight));
+-	}
+-
+ 	i915_gem_context_unpin_hw_id(ce->gem_context);
+-
+-	intel_ring_unpin(ce->ring);
+-
+ 	i915_gem_object_unpin_map(ce->state->obj);
+-	__context_unpin(ce->state);
++	intel_ring_unpin(ce->ring);
+ }
+ 
+ static void
+@@ -1512,7 +1463,10 @@ __execlists_context_pin(struct intel_context *ce,
+ 		goto err;
+ 	GEM_BUG_ON(!ce->state);
+ 
+-	ret = __context_pin(ce->state);
++	ret = intel_context_active_acquire(ce,
++					   engine->i915->ggtt.pin_bias |
++					   PIN_OFFSET_BIAS |
++					   PIN_HIGH);
+ 	if (ret)
+ 		goto err;
+ 
+@@ -1521,7 +1475,7 @@ __execlists_context_pin(struct intel_context *ce,
+ 					I915_MAP_OVERRIDE);
+ 	if (IS_ERR(vaddr)) {
+ 		ret = PTR_ERR(vaddr);
+-		goto unpin_vma;
++		goto unpin_active;
+ 	}
+ 
+ 	ret = intel_ring_pin(ce->ring);
+@@ -1542,8 +1496,8 @@ __execlists_context_pin(struct intel_context *ce,
+ 	intel_ring_unpin(ce->ring);
+ unpin_map:
+ 	i915_gem_object_unpin_map(ce->state->obj);
+-unpin_vma:
+-	__context_unpin(ce->state);
++unpin_active:
++	intel_context_active_release(ce);
+ err:
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index b3bf47e8162f..cc901edec09a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1349,45 +1349,9 @@ static void __context_unpin_ppgtt(struct i915_gem_context *ctx)
+ 		gen6_ppgtt_unpin(i915_vm_to_ppgtt(vm));
+ }
+ 
+-static int __context_pin(struct intel_context *ce)
+-{
+-	struct i915_vma *vma;
+-	int err;
+-
+-	vma = ce->state;
+-	if (!vma)
+-		return 0;
+-
+-	err = i915_vma_pin(vma, 0, 0, PIN_GLOBAL | PIN_HIGH);
+-	if (err)
+-		return err;
+-
+-	/*
+-	 * And mark is as a globally pinned object to let the shrinker know
+-	 * it cannot reclaim the object until we release it.
+-	 */
+-	vma->obj->pin_global++;
+-	vma->obj->mm.dirty = true;
+-
+-	return 0;
+-}
+-
+-static void __context_unpin(struct intel_context *ce)
+-{
+-	struct i915_vma *vma;
+-
+-	vma = ce->state;
+-	if (!vma)
+-		return;
+-
+-	vma->obj->pin_global--;
+-	i915_vma_unpin(vma);
+-}
+-
+ static void ring_context_unpin(struct intel_context *ce)
+ {
+ 	__context_unpin_ppgtt(ce->gem_context);
+-	__context_unpin(ce);
+ }
+ 
+ static struct i915_vma *
+@@ -1477,18 +1441,18 @@ static int ring_context_pin(struct intel_context *ce)
+ 		ce->state = vma;
+ 	}
+ 
+-	err = __context_pin(ce);
++	err = intel_context_active_acquire(ce, PIN_HIGH);
+ 	if (err)
+ 		return err;
+ 
+ 	err = __context_pin_ppgtt(ce->gem_context);
+ 	if (err)
+-		goto err_unpin;
++		goto err_active;
+ 
+ 	return 0;
+ 
+-err_unpin:
+-	__context_unpin(ce);
++err_active:
++	intel_context_active_release(ce);
+ 	return err;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gt/mock_engine.c b/drivers/gpu/drm/i915/gt/mock_engine.c
+index 6d7562769eb2..d1ef515bac8d 100644
+--- a/drivers/gpu/drm/i915/gt/mock_engine.c
++++ b/drivers/gpu/drm/i915/gt/mock_engine.c
+@@ -146,12 +146,18 @@ static void mock_context_destroy(struct kref *ref)
+ 
+ static int mock_context_pin(struct intel_context *ce)
+ {
++	int ret;
++
+ 	if (!ce->ring) {
+ 		ce->ring = mock_ring(ce->engine);
+ 		if (!ce->ring)
+ 			return -ENOMEM;
+ 	}
+ 
++	ret = intel_context_active_acquire(ce, PIN_HIGH);
++	if (ret)
++		return ret;
++
+ 	mock_timeline_pin(ce->ring->timeline);
+ 	return 0;
+ }
+@@ -328,14 +334,9 @@ void mock_engine_free(struct intel_engine_cs *engine)
+ {
+ 	struct mock_engine *mock =
+ 		container_of(engine, typeof(*mock), base);
+-	struct intel_context *ce;
+ 
+ 	GEM_BUG_ON(timer_pending(&mock->hw_delay));
+ 
+-	ce = fetch_and_zero(&engine->last_retired_context);
+-	if (ce)
+-		intel_context_unpin(ce);
+-
+ 	intel_context_unpin(engine->kernel_context);
+ 
+ 	intel_engine_fini_breadcrumbs(engine);
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index 863ae12707ba..2d019ac6db20 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -157,6 +157,7 @@ void i915_active_init(struct drm_i915_private *i915,
+ 	ref->retire = retire;
+ 	ref->tree = RB_ROOT;
+ 	i915_active_request_init(&ref->last, NULL, last_retire);
++	init_llist_head(&ref->barriers);
+ 	ref->count = 0;
+ }
+ 
+@@ -263,6 +264,83 @@ void i915_active_fini(struct i915_active *ref)
+ }
+ #endif
+ 
++int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
++					    struct intel_engine_cs *engine)
++{
++	struct drm_i915_private *i915 = engine->i915;
++	unsigned long tmp;
++	int err = 0;
++
++	GEM_BUG_ON(!engine->mask);
++	for_each_engine_masked(engine, i915, engine->mask, tmp) {
++		struct intel_context *kctx = engine->kernel_context;
++		struct active_node *node;
++
++		node = kmem_cache_alloc(global.slab_cache, GFP_KERNEL);
++		if (unlikely(!node)) {
++			err = -ENOMEM;
++			break;
++		}
++
++		i915_active_request_init(&node->base,
++					 (void *)engine, node_retire);
++		node->timeline = kctx->ring->timeline->fence_context;
++		node->ref = ref;
++		ref->count++;
++
++		llist_add((struct llist_node *)&node->base.link,
++			  &ref->barriers);
++	}
++
++	return err;
++}
++
++void i915_active_acquire_barrier(struct i915_active *ref)
++{
++	struct llist_node *pos, *next;
++
++	i915_active_acquire(ref);
++
++	llist_for_each_safe(pos, next, llist_del_all(&ref->barriers)) {
++		struct intel_engine_cs *engine;
++		struct active_node *node;
++		struct rb_node **p, *parent;
++
++		node = container_of((struct list_head *)pos,
++				    typeof(*node), base.link);
++
++		engine = (void *)rcu_access_pointer(node->base.request);
++		RCU_INIT_POINTER(node->base.request, ERR_PTR(-EAGAIN));
++
++		parent = NULL;
++		p = &ref->tree.rb_node;
++		while (*p) {
++			parent = *p;
++			if (rb_entry(parent,
++				     struct active_node,
++				     node)->timeline < node->timeline)
++				p = &parent->rb_right;
++			else
++				p = &parent->rb_left;
++		}
++		rb_link_node(&node->node, parent, p);
++		rb_insert_color(&node->node, &ref->tree);
++
++		llist_add((struct llist_node *)&node->base.link,
++			  &engine->barrier_tasks);
++	}
++	i915_active_release(ref);
++}
++
++void i915_request_add_barriers(struct i915_request *rq)
++{
++	struct intel_engine_cs *engine = rq->engine;
++	struct llist_node *node, *next;
++
++	llist_for_each_safe(node, next, llist_del_all(&engine->barrier_tasks))
++		list_add_tail((struct list_head *)node, &rq->active_list);
++}
++
+ int i915_active_request_set(struct i915_active_request *active,
+ 			    struct i915_request *rq)
+ {
+diff --git a/drivers/gpu/drm/i915/i915_active.h b/drivers/gpu/drm/i915/i915_active.h
+index 7d758719ce39..d55d37673944 100644
+--- a/drivers/gpu/drm/i915/i915_active.h
++++ b/drivers/gpu/drm/i915/i915_active.h
+@@ -406,4 +406,9 @@ void i915_active_fini(struct i915_active *ref);
+ static inline void i915_active_fini(struct i915_active *ref) { }
+ #endif
+ 
++int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
++					    struct intel_engine_cs *engine);
++void i915_active_acquire_barrier(struct i915_active *ref);
++void i915_request_add_barriers(struct i915_request *rq);
++
+ #endif /* _I915_ACTIVE_H_ */
+diff --git a/drivers/gpu/drm/i915/i915_active_types.h b/drivers/gpu/drm/i915/i915_active_types.h
+index b679253b53a5..c025991b9233 100644
+--- a/drivers/gpu/drm/i915/i915_active_types.h
++++ b/drivers/gpu/drm/i915/i915_active_types.h
+@@ -7,6 +7,7 @@
+ #ifndef _I915_ACTIVE_TYPES_H_
+ #define _I915_ACTIVE_TYPES_H_
+ 
++#include <linux/llist.h>
+ #include <linux/rbtree.h>
+ #include <linux/rcupdate.h>
+ 
+@@ -31,6 +32,8 @@ struct i915_active {
+ 	unsigned int count;
+ 
+ 	void (*retire)(struct i915_active *ref);
++
++	struct llist_head barriers;
+ };
+ 
+ #endif /* _I915_ACTIVE_TYPES_H_ */
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 217236596202..335efeaad4f1 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1199,10 +1199,6 @@ void i915_gem_sanitize(struct drm_i915_private *i915)
+ 
+ 	intel_uncore_forcewake_put(&i915->uncore, FORCEWAKE_ALL);
+ 	intel_runtime_pm_put(&i915->runtime_pm, wakeref);
+-
+-	mutex_lock(&i915->drm.struct_mutex);
+-	i915_gem_contexts_lost(i915);
+-	mutex_unlock(&i915->drm.struct_mutex);
+ }
+ 
+ void i915_gem_init_swizzling(struct drm_i915_private *dev_priv)
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index da76e4d1c7f1..38d112d8aba7 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -213,18 +213,6 @@ static void __retire_engine_request(struct intel_engine_cs *engine,
+ 	spin_unlock(&rq->lock);
+ 
+ 	local_irq_enable();
+-
+-	/*
+-	 * The backing object for the context is done after switching to the
+-	 * *next* context. Therefore we cannot retire the previous context until
+-	 * the next context has already started running. However, since we
+-	 * cannot take the required locks at i915_request_submit() we
+-	 * defer the unpinning of the active context to now, retirement of
+-	 * the subsequent request.
+-	 */
+-	if (engine->last_retired_context)
+-		intel_context_unpin(engine->last_retired_context);
+-	engine->last_retired_context = rq->hw_context;
+ }
+ 
+ static void __retire_engine_upto(struct intel_engine_cs *engine,
+@@ -759,9 +747,6 @@ __i915_request_create(struct intel_context *ce, gfp_t gfp)
+ 
+ 	rq->infix = rq->ring->emit; /* end of header; start of user payload */
+ 
+-	/* Keep a second pin for the dual retirement along engine and ring */
+-	__intel_context_pin(ce);
+-
+ 	intel_context_mark_active(ce);
+ 	return rq;
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/mock_gem_device.c b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+index 82f2be6cec5b..64bc51400ae7 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_gem_device.c
++++ b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+@@ -56,7 +56,6 @@ static void mock_device_release(struct drm_device *dev)
+ 
+ 	mutex_lock(&i915->drm.struct_mutex);
+ 	mock_device_flush(i915);
+-	i915_gem_contexts_lost(i915);
+ 	mutex_unlock(&i915->drm.struct_mutex);
+ 
+ 	flush_work(&i915->gem.idle_work);
+-- 
+2.17.1
+

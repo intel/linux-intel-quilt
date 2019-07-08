@@ -1,0 +1,72 @@
+From 61fa12081adedbaa5d446c8e98cc1f0bd97842db Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Fri, 17 May 2019 22:31:28 +0300
+Subject: [PATCH 424/733] drm/i915: Move state dump to the end of
+ atomic_check()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently we're dumping the crtc states before they have
+been fully calculated. Move the dumping to the end of
+.atomic_check() so we get a fully up to date dump.
+
+Let's also do the dump for fully disabled pipes, but we'll
+limit that to just saying that the pipe is disabled since
+the rest of the state is going to be nonsense in that case.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190517193132.8140-10-ville.syrjala@linux.intel.com
+Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+---
+ drivers/gpu/drm/i915/intel_display.c | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index df2d8ff84640..ed602ce67c35 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11809,8 +11809,9 @@ static void intel_dump_pipe_config(struct intel_crtc_state *pipe_config,
+ 	struct drm_framebuffer *fb;
+ 	char buf[64];
+ 
+-	DRM_DEBUG_KMS("[CRTC:%d:%s]%s\n",
+-		      crtc->base.base.id, crtc->base.name, context);
++	DRM_DEBUG_KMS("[CRTC:%d:%s] enable: %s %s\n",
++		      crtc->base.base.id, crtc->base.name,
++		      yesno(pipe_config->base.enable), context);
+ 
+ 	snprintf_output_types(buf, sizeof(buf), pipe_config->output_types);
+ 	DRM_DEBUG_KMS("output_types: %s (0x%x)\n",
+@@ -13423,10 +13424,6 @@ static int intel_atomic_check(struct drm_device *dev,
+ 
+ 		if (needs_modeset(&new_crtc_state->base))
+ 			any_ms = true;
+-
+-		intel_dump_pipe_config(new_crtc_state,
+-				       needs_modeset(&new_crtc_state->base) ?
+-				       "[modeset]" : "[fastset]");
+ 	}
+ 
+ 	ret = drm_dp_mst_atomic_check(&state->base);
+@@ -13458,6 +13455,17 @@ static int intel_atomic_check(struct drm_device *dev,
+ 	if (ret)
+ 		return ret;
+ 
++	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state,
++					    new_crtc_state, i) {
++		if (!needs_modeset(&new_crtc_state->base) &&
++		    !new_crtc_state->update_pipe)
++			continue;
++
++		intel_dump_pipe_config(new_crtc_state,
++				       needs_modeset(&new_crtc_state->base) ?
++				       "[modeset]" : "[fastset]");
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

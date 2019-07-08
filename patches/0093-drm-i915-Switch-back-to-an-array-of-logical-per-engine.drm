@@ -1,0 +1,1122 @@
+From 8373bb4cf9d5ae90df854d534ac586699d3b1f83 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 26 Apr 2019 17:33:34 +0100
+Subject: [PATCH 093/733] drm/i915: Switch back to an array of logical
+ per-engine HW contexts
+
+We switched to a tree of per-engine HW context to accommodate the
+introduction of virtual engines. However, we plan to also support
+multiple instances of the same engine within the GEM context, defeating
+our use of the engine as a key to looking up the HW context. Just
+allocate a logical per-engine instance and always use an index into the
+ctx->engines[]. Later on, this ctx->engines[] may be replaced by a user
+specified map.
+
+v2: Add for_each_gem_engine() helper to iterator within the engines lock
+v3: intel_context_create_request() helper
+v4: s/unsigned long/unsigned int/ 4 billion engines is quite enough.
+v5: Push iterator locking to caller
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190426163336.15906-7-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_context.c       | 112 ++++--------------
+ drivers/gpu/drm/i915/gt/intel_context.h       |  27 +----
+ drivers/gpu/drm/i915/gt/intel_context_types.h |   2 -
+ drivers/gpu/drm/i915/gt/intel_engine_cs.c     |   2 +-
+ drivers/gpu/drm/i915/gt/mock_engine.c         |   3 +-
+ drivers/gpu/drm/i915/gvt/scheduler.c          |   2 +-
+ drivers/gpu/drm/i915/i915_gem.c               |  24 ++--
+ drivers/gpu/drm/i915/i915_gem_context.c       |  96 +++++++++++++--
+ drivers/gpu/drm/i915/i915_gem_context.h       |  58 +++++++++
+ drivers/gpu/drm/i915/i915_gem_context_types.h |  40 ++++++-
+ drivers/gpu/drm/i915/i915_gem_execbuffer.c    |  70 +++++------
+ drivers/gpu/drm/i915/i915_perf.c              |  80 +++++++------
+ drivers/gpu/drm/i915/i915_request.c           |  15 +--
+ drivers/gpu/drm/i915/intel_guc_submission.c   |  22 ++--
+ .../gpu/drm/i915/selftests/i915_gem_context.c |   2 +-
+ drivers/gpu/drm/i915/selftests/mock_context.c |  14 ++-
+ 16 files changed, 328 insertions(+), 241 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index 6fcc463296bd..71a94791be26 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -17,7 +17,7 @@ static struct i915_global_context {
+ 	struct kmem_cache *slab_ce;
+ } global;
+ 
+-struct intel_context *intel_context_alloc(void)
++static struct intel_context *intel_context_alloc(void)
+ {
+ 	return kmem_cache_zalloc(global.slab_ce, GFP_KERNEL);
+ }
+@@ -28,104 +28,17 @@ void intel_context_free(struct intel_context *ce)
+ }
+ 
+ struct intel_context *
+-intel_context_lookup(struct i915_gem_context *ctx,
++intel_context_create(struct i915_gem_context *ctx,
+ 		     struct intel_engine_cs *engine)
+ {
+-	struct intel_context *ce = NULL;
+-	struct rb_node *p;
+-
+-	spin_lock(&ctx->hw_contexts_lock);
+-	p = ctx->hw_contexts.rb_node;
+-	while (p) {
+-		struct intel_context *this =
+-			rb_entry(p, struct intel_context, node);
+-
+-		if (this->engine == engine) {
+-			GEM_BUG_ON(this->gem_context != ctx);
+-			ce = this;
+-			break;
+-		}
+-
+-		if (this->engine < engine)
+-			p = p->rb_right;
+-		else
+-			p = p->rb_left;
+-	}
+-	spin_unlock(&ctx->hw_contexts_lock);
+-
+-	return ce;
+-}
+-
+-struct intel_context *
+-__intel_context_insert(struct i915_gem_context *ctx,
+-		       struct intel_engine_cs *engine,
+-		       struct intel_context *ce)
+-{
+-	struct rb_node **p, *parent;
+-	int err = 0;
+-
+-	spin_lock(&ctx->hw_contexts_lock);
+-
+-	parent = NULL;
+-	p = &ctx->hw_contexts.rb_node;
+-	while (*p) {
+-		struct intel_context *this;
+-
+-		parent = *p;
+-		this = rb_entry(parent, struct intel_context, node);
+-
+-		if (this->engine == engine) {
+-			err = -EEXIST;
+-			ce = this;
+-			break;
+-		}
+-
+-		if (this->engine < engine)
+-			p = &parent->rb_right;
+-		else
+-			p = &parent->rb_left;
+-	}
+-	if (!err) {
+-		rb_link_node(&ce->node, parent, p);
+-		rb_insert_color(&ce->node, &ctx->hw_contexts);
+-	}
+-
+-	spin_unlock(&ctx->hw_contexts_lock);
+-
+-	return ce;
+-}
+-
+-void __intel_context_remove(struct intel_context *ce)
+-{
+-	struct i915_gem_context *ctx = ce->gem_context;
+-
+-	spin_lock(&ctx->hw_contexts_lock);
+-	rb_erase(&ce->node, &ctx->hw_contexts);
+-	spin_unlock(&ctx->hw_contexts_lock);
+-}
+-
+-struct intel_context *
+-intel_context_instance(struct i915_gem_context *ctx,
+-		       struct intel_engine_cs *engine)
+-{
+-	struct intel_context *ce, *pos;
+-
+-	ce = intel_context_lookup(ctx, engine);
+-	if (likely(ce))
+-		return intel_context_get(ce);
++	struct intel_context *ce;
+ 
+ 	ce = intel_context_alloc();
+ 	if (!ce)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	intel_context_init(ce, ctx, engine);
+-
+-	pos = __intel_context_insert(ctx, engine, ce);
+-	if (unlikely(pos != ce)) /* Beaten! Use their HW context instead */
+-		intel_context_free(ce);
+-
+-	GEM_BUG_ON(intel_context_lookup(ctx, engine) != pos);
+-	return intel_context_get(pos);
++	return ce;
+ }
+ 
+ int __intel_context_do_pin(struct intel_context *ce)
+@@ -204,6 +117,8 @@ intel_context_init(struct intel_context *ce,
+ 		   struct i915_gem_context *ctx,
+ 		   struct intel_engine_cs *engine)
+ {
++	GEM_BUG_ON(!engine->cops);
++
+ 	kref_init(&ce->ref);
+ 
+ 	ce->gem_context = ctx;
+@@ -255,3 +170,18 @@ void intel_context_exit_engine(struct intel_context *ce)
+ {
+ 	intel_engine_pm_put(ce->engine);
+ }
++
++struct i915_request *intel_context_create_request(struct intel_context *ce)
++{
++	struct i915_request *rq;
++	int err;
++
++	err = intel_context_pin(ce);
++	if (unlikely(err))
++		return ERR_PTR(err);
++
++	rq = i915_request_create(ce);
++	intel_context_unpin(ce);
++
++	return rq;
++}
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.h b/drivers/gpu/drm/i915/gt/intel_context.h
+index b746add6b71d..63392c88cd98 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.h
++++ b/drivers/gpu/drm/i915/gt/intel_context.h
+@@ -12,24 +12,16 @@
+ #include "intel_context_types.h"
+ #include "intel_engine_types.h"
+ 
+-struct intel_context *intel_context_alloc(void);
+-void intel_context_free(struct intel_context *ce);
+-
+ void intel_context_init(struct intel_context *ce,
+ 			struct i915_gem_context *ctx,
+ 			struct intel_engine_cs *engine);
+ 
+-/**
+- * intel_context_lookup - Find the matching HW context for this (ctx, engine)
+- * @ctx - the parent GEM context
+- * @engine - the target HW engine
+- *
+- * May return NULL if the HW context hasn't been instantiated (i.e. unused).
+- */
+ struct intel_context *
+-intel_context_lookup(struct i915_gem_context *ctx,
++intel_context_create(struct i915_gem_context *ctx,
+ 		     struct intel_engine_cs *engine);
+ 
++void intel_context_free(struct intel_context *ce);
++
+ /**
+  * intel_context_lock_pinned - Stablises the 'pinned' status of the HW context
+  * @ce - the context
+@@ -71,17 +63,6 @@ static inline void intel_context_unlock_pinned(struct intel_context *ce)
+ 	mutex_unlock(&ce->pin_mutex);
+ }
+ 
+-struct intel_context *
+-__intel_context_insert(struct i915_gem_context *ctx,
+-		       struct intel_engine_cs *engine,
+-		       struct intel_context *ce);
+-void
+-__intel_context_remove(struct intel_context *ce);
+-
+-struct intel_context *
+-intel_context_instance(struct i915_gem_context *ctx,
+-		       struct intel_engine_cs *engine);
+-
+ int __intel_context_do_pin(struct intel_context *ce);
+ 
+ static inline int intel_context_pin(struct intel_context *ce)
+@@ -144,4 +125,6 @@ static inline void intel_context_timeline_unlock(struct intel_context *ce)
+ 	mutex_unlock(&ce->ring->timeline->mutex);
+ }
+ 
++struct i915_request *intel_context_create_request(struct intel_context *ce);
++
+ #endif /* __INTEL_CONTEXT_H__ */
+diff --git a/drivers/gpu/drm/i915/gt/intel_context_types.h b/drivers/gpu/drm/i915/gt/intel_context_types.h
+index 53ff30cdfc24..5b404169bee2 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_context_types.h
+@@ -10,7 +10,6 @@
+ #include <linux/kref.h>
+ #include <linux/list.h>
+ #include <linux/mutex.h>
+-#include <linux/rbtree.h>
+ #include <linux/types.h>
+ 
+ #include "i915_active_types.h"
+@@ -64,7 +63,6 @@ struct intel_context {
+ 	struct i915_active_request active_tracker;
+ 
+ 	const struct intel_context_ops *ops;
+-	struct rb_node node;
+ 
+ 	/** sseu: Control eu/slice partitioning */
+ 	struct intel_sseu sseu;
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_cs.c b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+index 7682f16fa567..f7308479d511 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_cs.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_cs.c
+@@ -732,7 +732,7 @@ static int pin_context(struct i915_gem_context *ctx,
+ 	struct intel_context *ce;
+ 	int err;
+ 
+-	ce = intel_context_instance(ctx, engine);
++	ce = i915_gem_context_get_engine(ctx, engine->id);
+ 	if (IS_ERR(ce))
+ 		return PTR_ERR(ce);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/mock_engine.c b/drivers/gpu/drm/i915/gt/mock_engine.c
+index 85cdbfe1d989..2941916b37bf 100644
+--- a/drivers/gpu/drm/i915/gt/mock_engine.c
++++ b/drivers/gpu/drm/i915/gt/mock_engine.c
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "i915_drv.h"
++#include "i915_gem_context.h"
+ #include "intel_context.h"
+ #include "intel_engine_pm.h"
+ 
+@@ -286,7 +287,7 @@ int mock_engine_init(struct intel_engine_cs *engine)
+ 	i915_timeline_set_subclass(&engine->timeline, TIMELINE_ENGINE);
+ 
+ 	engine->kernel_context =
+-		intel_context_instance(i915->kernel_context, engine);
++		i915_gem_context_get_engine(i915->kernel_context, engine->id);
+ 	if (IS_ERR(engine->kernel_context))
+ 		goto err_timeline;
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 0c7a771c2f88..2f1c12d877cb 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -1221,7 +1221,7 @@ int intel_vgpu_setup_submission(struct intel_vgpu *vgpu)
+ 		INIT_LIST_HEAD(&s->workload_q_head[i]);
+ 		s->shadow[i] = ERR_PTR(-EINVAL);
+ 
+-		ce = intel_context_instance(ctx, engine);
++		ce = i915_gem_context_get_engine(ctx, i);
+ 		if (IS_ERR(ce)) {
+ 			ret = PTR_ERR(ce);
+ 			goto out_shadow_ctx;
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index ba13132bdef4..8f42e44425a6 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -4289,8 +4289,9 @@ int i915_gem_init_hw(struct drm_i915_private *dev_priv)
+ 
+ static int __intel_engines_record_defaults(struct drm_i915_private *i915)
+ {
+-	struct i915_gem_context *ctx;
+ 	struct intel_engine_cs *engine;
++	struct i915_gem_context *ctx;
++	struct i915_gem_engines *e;
+ 	enum intel_engine_id id;
+ 	int err = 0;
+ 
+@@ -4307,18 +4308,21 @@ static int __intel_engines_record_defaults(struct drm_i915_private *i915)
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+ 
++	e = i915_gem_context_lock_engines(ctx);
++
+ 	for_each_engine(engine, i915, id) {
++		struct intel_context *ce = e->engines[id];
+ 		struct i915_request *rq;
+ 
+-		rq = i915_request_alloc(engine, ctx);
++		rq = intel_context_create_request(ce);
+ 		if (IS_ERR(rq)) {
+ 			err = PTR_ERR(rq);
+-			goto out_ctx;
++			goto err_active;
+ 		}
+ 
+ 		err = 0;
+-		if (engine->init_context)
+-			err = engine->init_context(rq);
++		if (rq->engine->init_context)
++			err = rq->engine->init_context(rq);
+ 
+ 		i915_request_add(rq);
+ 		if (err)
+@@ -4332,15 +4336,10 @@ static int __intel_engines_record_defaults(struct drm_i915_private *i915)
+ 	}
+ 
+ 	for_each_engine(engine, i915, id) {
+-		struct intel_context *ce;
+-		struct i915_vma *state;
++		struct intel_context *ce = e->engines[id];
++		struct i915_vma *state = ce->state;
+ 		void *vaddr;
+ 
+-		ce = intel_context_lookup(ctx, engine);
+-		if (!ce)
+-			continue;
+-
+-		state = ce->state;
+ 		if (!state)
+ 			continue;
+ 
+@@ -4396,6 +4395,7 @@ static int __intel_engines_record_defaults(struct drm_i915_private *i915)
+ 	}
+ 
+ out_ctx:
++	i915_gem_context_unlock_engines(ctx);
+ 	i915_gem_context_set_closed(ctx);
+ 	i915_gem_context_put(ctx);
+ 	return err;
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index d9db3fea151c..3ea199ca834b 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -150,7 +150,7 @@ lookup_user_engine(struct i915_gem_context *ctx, u16 class, u16 instance)
+ 	if (!engine)
+ 		return ERR_PTR(-EINVAL);
+ 
+-	return intel_context_instance(ctx, engine);
++	return i915_gem_context_get_engine(ctx, engine->id);
+ }
+ 
+ static inline int new_hw_id(struct drm_i915_private *i915, gfp_t gfp)
+@@ -242,10 +242,51 @@ static void release_hw_id(struct i915_gem_context *ctx)
+ 	mutex_unlock(&i915->contexts.mutex);
+ }
+ 
+-static void i915_gem_context_free(struct i915_gem_context *ctx)
++static void __free_engines(struct i915_gem_engines *e, unsigned int count)
+ {
+-	struct intel_context *it, *n;
++	while (count--) {
++		if (!e->engines[count])
++			continue;
++
++		intel_context_put(e->engines[count]);
++	}
++	kfree(e);
++}
++
++static void free_engines(struct i915_gem_engines *e)
++{
++	__free_engines(e, e->num_engines);
++}
++
++static struct i915_gem_engines *default_engines(struct i915_gem_context *ctx)
++{
++	struct intel_engine_cs *engine;
++	struct i915_gem_engines *e;
++	enum intel_engine_id id;
++
++	e = kzalloc(struct_size(e, engines, I915_NUM_ENGINES), GFP_KERNEL);
++	if (!e)
++		return ERR_PTR(-ENOMEM);
++
++	e->i915 = ctx->i915;
++	for_each_engine(engine, ctx->i915, id) {
++		struct intel_context *ce;
++
++		ce = intel_context_create(ctx, engine);
++		if (IS_ERR(ce)) {
++			__free_engines(e, id);
++			return ERR_CAST(ce);
++		}
+ 
++		e->engines[id] = ce;
++	}
++	e->num_engines = id;
++
++	return e;
++}
++
++static void i915_gem_context_free(struct i915_gem_context *ctx)
++{
+ 	lockdep_assert_held(&ctx->i915->drm.struct_mutex);
+ 	GEM_BUG_ON(!i915_gem_context_is_closed(ctx));
+ 	GEM_BUG_ON(!list_empty(&ctx->active_engines));
+@@ -253,8 +294,8 @@ static void i915_gem_context_free(struct i915_gem_context *ctx)
+ 	release_hw_id(ctx);
+ 	i915_ppgtt_put(ctx->ppgtt);
+ 
+-	rbtree_postorder_for_each_entry_safe(it, n, &ctx->hw_contexts, node)
+-		intel_context_put(it);
++	free_engines(rcu_access_pointer(ctx->engines));
++	mutex_destroy(&ctx->engines_mutex);
+ 
+ 	if (ctx->timeline)
+ 		i915_timeline_put(ctx->timeline);
+@@ -363,6 +404,8 @@ static struct i915_gem_context *
+ __create_context(struct drm_i915_private *dev_priv)
+ {
+ 	struct i915_gem_context *ctx;
++	struct i915_gem_engines *e;
++	int err;
+ 	int i;
+ 
+ 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+@@ -376,8 +419,13 @@ __create_context(struct drm_i915_private *dev_priv)
+ 	INIT_LIST_HEAD(&ctx->active_engines);
+ 	mutex_init(&ctx->mutex);
+ 
+-	ctx->hw_contexts = RB_ROOT;
+-	spin_lock_init(&ctx->hw_contexts_lock);
++	mutex_init(&ctx->engines_mutex);
++	e = default_engines(ctx);
++	if (IS_ERR(e)) {
++		err = PTR_ERR(e);
++		goto err_free;
++	}
++	RCU_INIT_POINTER(ctx->engines, e);
+ 
+ 	INIT_RADIX_TREE(&ctx->handles_vma, GFP_KERNEL);
+ 	INIT_LIST_HEAD(&ctx->handles_list);
+@@ -399,6 +447,10 @@ __create_context(struct drm_i915_private *dev_priv)
+ 		ctx->hang_timestamp[i] = jiffies - CONTEXT_FAST_HANG_JIFFIES;
+ 
+ 	return ctx;
++
++err_free:
++	kfree(ctx);
++	return ERR_PTR(err);
+ }
+ 
+ static struct i915_hw_ppgtt *
+@@ -857,7 +909,8 @@ static int context_barrier_task(struct i915_gem_context *ctx,
+ {
+ 	struct drm_i915_private *i915 = ctx->i915;
+ 	struct context_barrier_task *cb;
+-	struct intel_context *ce, *next;
++	struct i915_gem_engines_iter it;
++	struct intel_context *ce;
+ 	int err = 0;
+ 
+ 	lockdep_assert_held(&i915->drm.struct_mutex);
+@@ -870,20 +923,19 @@ static int context_barrier_task(struct i915_gem_context *ctx,
+ 	i915_active_init(i915, &cb->base, cb_retire);
+ 	i915_active_acquire(&cb->base);
+ 
+-	rbtree_postorder_for_each_entry_safe(ce, next, &ctx->hw_contexts, node) {
+-		struct intel_engine_cs *engine = ce->engine;
++	for_each_gem_engine(ce, i915_gem_context_lock_engines(ctx), it) {
+ 		struct i915_request *rq;
+ 
+-		if (!(engine->mask & engines))
++		if (!(ce->engine->mask & engines))
+ 			continue;
+ 
+ 		if (I915_SELFTEST_ONLY(context_barrier_inject_fault &
+-				       engine->mask)) {
++				       ce->engine->mask)) {
+ 			err = -ENXIO;
+ 			break;
+ 		}
+ 
+-		rq = i915_request_alloc(engine, ctx);
++		rq = intel_context_create_request(ce);
+ 		if (IS_ERR(rq)) {
+ 			err = PTR_ERR(rq);
+ 			break;
+@@ -899,6 +951,7 @@ static int context_barrier_task(struct i915_gem_context *ctx,
+ 		if (err)
+ 			break;
+ 	}
++	i915_gem_context_unlock_engines(ctx);
+ 
+ 	cb->task = err ? NULL : task; /* caller needs to unwind instead */
+ 	cb->data = data;
+@@ -1729,6 +1782,23 @@ int __i915_gem_context_pin_hw_id(struct i915_gem_context *ctx)
+ 	return err;
+ }
+ 
++/* GEM context-engines iterator: for_each_gem_engine() */
++struct intel_context *
++i915_gem_engines_iter_next(struct i915_gem_engines_iter *it)
++{
++	const struct i915_gem_engines *e = it->engines;
++	struct intel_context *ctx;
++
++	do {
++		if (it->idx >= e->num_engines)
++			return NULL;
++
++		ctx = e->engines[it->idx++];
++	} while (!ctx);
++
++	return ctx;
++}
++
+ #if IS_ENABLED(CONFIG_DRM_I915_SELFTEST)
+ #include "selftests/mock_context.c"
+ #include "selftests/i915_gem_context.c"
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.h b/drivers/gpu/drm/i915/i915_gem_context.h
+index 5a8e080499fb..272e183ebc0c 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.h
++++ b/drivers/gpu/drm/i915/i915_gem_context.h
+@@ -176,6 +176,64 @@ static inline void i915_gem_context_put(struct i915_gem_context *ctx)
+ 	kref_put(&ctx->ref, i915_gem_context_release);
+ }
+ 
++static inline struct i915_gem_engines *
++i915_gem_context_engines(struct i915_gem_context *ctx)
++{
++	return rcu_dereference_protected(ctx->engines,
++					 lockdep_is_held(&ctx->engines_mutex));
++}
++
++static inline struct i915_gem_engines *
++i915_gem_context_lock_engines(struct i915_gem_context *ctx)
++	__acquires(&ctx->engines_mutex)
++{
++	mutex_lock(&ctx->engines_mutex);
++	return i915_gem_context_engines(ctx);
++}
++
++static inline void
++i915_gem_context_unlock_engines(struct i915_gem_context *ctx)
++	__releases(&ctx->engines_mutex)
++{
++	mutex_unlock(&ctx->engines_mutex);
++}
++
++static inline struct intel_context *
++i915_gem_context_lookup_engine(struct i915_gem_context *ctx, unsigned int idx)
++{
++	return i915_gem_context_engines(ctx)->engines[idx];
++}
++
++static inline struct intel_context *
++i915_gem_context_get_engine(struct i915_gem_context *ctx, unsigned int idx)
++{
++	struct intel_context *ce = ERR_PTR(-EINVAL);
++
++	rcu_read_lock(); {
++		struct i915_gem_engines *e = rcu_dereference(ctx->engines);
++		if (likely(idx < e->num_engines && e->engines[idx]))
++			ce = intel_context_get(e->engines[idx]);
++	} rcu_read_unlock();
++
++	return ce;
++}
++
++static inline void
++i915_gem_engines_iter_init(struct i915_gem_engines_iter *it,
++			   struct i915_gem_engines *engines)
++{
++	GEM_BUG_ON(!engines);
++	it->engines = engines;
++	it->idx = 0;
++}
++
++struct intel_context *
++i915_gem_engines_iter_next(struct i915_gem_engines_iter *it);
++
++#define for_each_gem_engine(ce, engines, it) \
++	for (i915_gem_engines_iter_init(&(it), (engines)); \
++	     ((ce) = i915_gem_engines_iter_next(&(it)));)
++
+ struct i915_lut_handle *i915_lut_handle_alloc(void);
+ void i915_lut_handle_free(struct i915_lut_handle *lut);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_gem_context_types.h b/drivers/gpu/drm/i915/i915_gem_context_types.h
+index d282a6ab3b9f..5f84618cf7db 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context_types.h
++++ b/drivers/gpu/drm/i915/i915_gem_context_types.h
+@@ -29,6 +29,18 @@ struct i915_hw_ppgtt;
+ struct i915_timeline;
+ struct intel_ring;
+ 
++struct i915_gem_engines {
++	struct rcu_work rcu;
++	struct drm_i915_private *i915;
++	unsigned int num_engines;
++	struct intel_context *engines[];
++};
++
++struct i915_gem_engines_iter {
++	unsigned int idx;
++	const struct i915_gem_engines *engines;
++};
++
+ /**
+  * struct i915_gem_context - client state
+  *
+@@ -42,6 +54,30 @@ struct i915_gem_context {
+ 	/** file_priv: owning file descriptor */
+ 	struct drm_i915_file_private *file_priv;
+ 
++	/**
++	 * @engines: User defined engines for this context
++	 *
++	 * Various uAPI offer the ability to lookup up an
++	 * index from this array to select an engine operate on.
++	 *
++	 * Multiple logically distinct instances of the same engine
++	 * may be defined in the array, as well as composite virtual
++	 * engines.
++	 *
++	 * Execbuf uses the I915_EXEC_RING_MASK as an index into this
++	 * array to select which HW context + engine to execute on. For
++	 * the default array, the user_ring_map[] is used to translate
++	 * the legacy uABI onto the approprate index (e.g. both
++	 * I915_EXEC_DEFAULT and I915_EXEC_RENDER select the same
++	 * context, and I915_EXEC_BSD is weird). For a use defined
++	 * array, execbuf uses I915_EXEC_RING_MASK as a plain index.
++	 *
++	 * User defined by I915_CONTEXT_PARAM_ENGINE (when the
++	 * CONTEXT_USER_ENGINES flag is set).
++	 */
++	struct i915_gem_engines __rcu *engines;
++	struct mutex engines_mutex; /* guards writes to engines */
++
+ 	struct i915_timeline *timeline;
+ 
+ 	/**
+@@ -134,10 +170,6 @@ struct i915_gem_context {
+ 
+ 	struct i915_sched_attr sched;
+ 
+-	/** hw_contexts: per-engine logical HW state */
+-	struct rb_root hw_contexts;
+-	spinlock_t hw_contexts_lock;
+-
+ 	/** ring_size: size for allocating the per-engine ring buffer */
+ 	u32 ring_size;
+ 	/** desc_template: invariant fields for the HW context descriptor */
+diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+index 2bab8ee0ab1e..361c232dde83 100644
+--- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
+@@ -2077,9 +2077,7 @@ gen8_dispatch_bsd_engine(struct drm_i915_private *dev_priv,
+ 	return file_priv->bsd_engine;
+ }
+ 
+-#define I915_USER_RINGS (4)
+-
+-static const enum intel_engine_id user_ring_map[I915_USER_RINGS + 1] = {
++static const enum intel_engine_id user_ring_map[] = {
+ 	[I915_EXEC_DEFAULT]	= RCS0,
+ 	[I915_EXEC_RENDER]	= RCS0,
+ 	[I915_EXEC_BLT]		= BCS0,
+@@ -2087,10 +2085,8 @@ static const enum intel_engine_id user_ring_map[I915_USER_RINGS + 1] = {
+ 	[I915_EXEC_VEBOX]	= VECS0
+ };
+ 
+-static int eb_pin_context(struct i915_execbuffer *eb,
+-			  struct intel_engine_cs *engine)
++static int eb_pin_context(struct i915_execbuffer *eb, struct intel_context *ce)
+ {
+-	struct intel_context *ce;
+ 	int err;
+ 
+ 	/*
+@@ -2101,21 +2097,16 @@ static int eb_pin_context(struct i915_execbuffer *eb,
+ 	if (err)
+ 		return err;
+ 
+-	ce = intel_context_instance(eb->gem_context, engine);
+-	if (IS_ERR(ce))
+-		return PTR_ERR(ce);
+-
+ 	/*
+ 	 * Pinning the contexts may generate requests in order to acquire
+ 	 * GGTT space, so do this first before we reserve a seqno for
+ 	 * ourselves.
+ 	 */
+ 	err = intel_context_pin(ce);
+-	intel_context_put(ce);
+ 	if (err)
+ 		return err;
+ 
+-	eb->engine = engine;
++	eb->engine = ce->engine;
+ 	eb->context = ce;
+ 	return 0;
+ }
+@@ -2125,25 +2116,19 @@ static void eb_unpin_context(struct i915_execbuffer *eb)
+ 	intel_context_unpin(eb->context);
+ }
+ 
+-static int
+-eb_select_engine(struct i915_execbuffer *eb,
+-		 struct drm_file *file,
+-		 struct drm_i915_gem_execbuffer2 *args)
++static unsigned int
++eb_select_legacy_ring(struct i915_execbuffer *eb,
++		      struct drm_file *file,
++		      struct drm_i915_gem_execbuffer2 *args)
+ {
+ 	struct drm_i915_private *i915 = eb->i915;
+ 	unsigned int user_ring_id = args->flags & I915_EXEC_RING_MASK;
+-	struct intel_engine_cs *engine;
+-
+-	if (user_ring_id > I915_USER_RINGS) {
+-		DRM_DEBUG("execbuf with unknown ring: %u\n", user_ring_id);
+-		return -EINVAL;
+-	}
+ 
+-	if ((user_ring_id != I915_EXEC_BSD) &&
+-	    ((args->flags & I915_EXEC_BSD_MASK) != 0)) {
++	if (user_ring_id != I915_EXEC_BSD &&
++	    (args->flags & I915_EXEC_BSD_MASK)) {
+ 		DRM_DEBUG("execbuf with non bsd ring but with invalid "
+ 			  "bsd dispatch flags: %d\n", (int)(args->flags));
+-		return -EINVAL;
++		return -1;
+ 	}
+ 
+ 	if (user_ring_id == I915_EXEC_BSD && HAS_ENGINE(i915, VCS1)) {
+@@ -2158,20 +2143,39 @@ eb_select_engine(struct i915_execbuffer *eb,
+ 		} else {
+ 			DRM_DEBUG("execbuf with unknown bsd ring: %u\n",
+ 				  bsd_idx);
+-			return -EINVAL;
++			return -1;
+ 		}
+ 
+-		engine = i915->engine[_VCS(bsd_idx)];
+-	} else {
+-		engine = i915->engine[user_ring_map[user_ring_id]];
++		return _VCS(bsd_idx);
+ 	}
+ 
+-	if (!engine) {
+-		DRM_DEBUG("execbuf with invalid ring: %u\n", user_ring_id);
+-		return -EINVAL;
++	if (user_ring_id >= ARRAY_SIZE(user_ring_map)) {
++		DRM_DEBUG("execbuf with unknown ring: %u\n", user_ring_id);
++		return -1;
+ 	}
+ 
+-	return eb_pin_context(eb, engine);
++	return user_ring_map[user_ring_id];
++}
++
++static int
++eb_select_engine(struct i915_execbuffer *eb,
++		 struct drm_file *file,
++		 struct drm_i915_gem_execbuffer2 *args)
++{
++	struct intel_context *ce;
++	unsigned int idx;
++	int err;
++
++	idx = eb_select_legacy_ring(eb, file, args);
++
++	ce = i915_gem_context_get_engine(eb->gem_context, idx);
++	if (IS_ERR(ce))
++		return PTR_ERR(ce);
++
++	err = eb_pin_context(eb, ce);
++	intel_context_put(ce);
++
++	return err;
+ }
+ 
+ static void
+diff --git a/drivers/gpu/drm/i915/i915_perf.c b/drivers/gpu/drm/i915/i915_perf.c
+index bbff24c66447..bebea5ba5c26 100644
+--- a/drivers/gpu/drm/i915/i915_perf.c
++++ b/drivers/gpu/drm/i915/i915_perf.c
+@@ -1203,35 +1203,35 @@ static int i915_oa_read(struct i915_perf_stream *stream,
+ static struct intel_context *oa_pin_context(struct drm_i915_private *i915,
+ 					    struct i915_gem_context *ctx)
+ {
+-	struct intel_engine_cs *engine = i915->engine[RCS0];
++	struct i915_gem_engines_iter it;
+ 	struct intel_context *ce;
+ 	int err;
+ 
+-	ce = intel_context_instance(ctx, engine);
+-	if (IS_ERR(ce))
+-		return ce;
+-
+ 	err = i915_mutex_lock_interruptible(&i915->drm);
+-	if (err) {
+-		intel_context_put(ce);
++	if (err)
+ 		return ERR_PTR(err);
++
++	for_each_gem_engine(ce, i915_gem_context_lock_engines(ctx), it) {
++		if (ce->engine->class != RENDER_CLASS)
++			continue;
++
++		/*
++		 * As the ID is the gtt offset of the context's vma we
++		 * pin the vma to ensure the ID remains fixed.
++		 */
++		err = intel_context_pin(ce);
++		if (err == 0) {
++			i915->perf.oa.pinned_ctx = ce;
++			break;
++		}
+ 	}
++	i915_gem_context_unlock_engines(ctx);
+ 
+-	/*
+-	 * As the ID is the gtt offset of the context's vma we
+-	 * pin the vma to ensure the ID remains fixed.
+-	 *
+-	 * NB: implied RCS engine...
+-	 */
+-	err = intel_context_pin(ce);
+ 	mutex_unlock(&i915->drm.struct_mutex);
+-	intel_context_put(ce);
+ 	if (err)
+ 		return ERR_PTR(err);
+ 
+-	i915->perf.oa.pinned_ctx = ce;
+-
+-	return ce;
++	return i915->perf.oa.pinned_ctx;
+ }
+ 
+ /**
+@@ -1717,7 +1717,6 @@ gen8_update_reg_state_unlocked(struct intel_context *ce,
+ static int gen8_configure_all_contexts(struct drm_i915_private *dev_priv,
+ 				       const struct i915_oa_config *oa_config)
+ {
+-	struct intel_engine_cs *engine = dev_priv->engine[RCS0];
+ 	unsigned int map_type = i915_coherent_map_type(dev_priv);
+ 	struct i915_gem_context *ctx;
+ 	struct i915_request *rq;
+@@ -1746,30 +1745,43 @@ static int gen8_configure_all_contexts(struct drm_i915_private *dev_priv,
+ 
+ 	/* Update all contexts now that we've stalled the submission. */
+ 	list_for_each_entry(ctx, &dev_priv->contexts.list, link) {
+-		struct intel_context *ce = intel_context_lookup(ctx, engine);
+-		u32 *regs;
+-
+-		/* OA settings will be set upon first use */
+-		if (!ce || !ce->state)
+-			continue;
+-
+-		regs = i915_gem_object_pin_map(ce->state->obj, map_type);
+-		if (IS_ERR(regs))
+-			return PTR_ERR(regs);
++		struct i915_gem_engines_iter it;
++		struct intel_context *ce;
++
++		for_each_gem_engine(ce,
++				    i915_gem_context_lock_engines(ctx),
++				    it) {
++			u32 *regs;
++
++			if (ce->engine->class != RENDER_CLASS)
++				continue;
++
++			/* OA settings will be set upon first use */
++			if (!ce->state)
++				continue;
++
++			regs = i915_gem_object_pin_map(ce->state->obj,
++						       map_type);
++			if (IS_ERR(regs)) {
++				i915_gem_context_unlock_engines(ctx);
++				return PTR_ERR(regs);
++			}
+ 
+-		ce->state->obj->mm.dirty = true;
+-		regs += LRC_STATE_PN * PAGE_SIZE / sizeof(*regs);
++			ce->state->obj->mm.dirty = true;
++			regs += LRC_STATE_PN * PAGE_SIZE / sizeof(*regs);
+ 
+-		gen8_update_reg_state_unlocked(ce, regs, oa_config);
++			gen8_update_reg_state_unlocked(ce, regs, oa_config);
+ 
+-		i915_gem_object_unpin_map(ce->state->obj);
++			i915_gem_object_unpin_map(ce->state->obj);
++		}
++		i915_gem_context_unlock_engines(ctx);
+ 	}
+ 
+ 	/*
+ 	 * Apply the configuration by doing one context restore of the edited
+ 	 * context image.
+ 	 */
+-	rq = i915_request_create(engine->kernel_context);
++	rq = i915_request_create(dev_priv->engine[RCS0]->kernel_context);
+ 	if (IS_ERR(rq))
+ 		return PTR_ERR(rq);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index e40dd6e38dbc..859f6574a1dc 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -786,7 +786,6 @@ i915_request_alloc(struct intel_engine_cs *engine, struct i915_gem_context *ctx)
+ 	struct drm_i915_private *i915 = engine->i915;
+ 	struct intel_context *ce;
+ 	struct i915_request *rq;
+-	int err;
+ 
+ 	/*
+ 	 * Preempt contexts are reserved for exclusive use to inject a
+@@ -800,21 +799,13 @@ i915_request_alloc(struct intel_engine_cs *engine, struct i915_gem_context *ctx)
+ 	 * GGTT space, so do this first before we reserve a seqno for
+ 	 * ourselves.
+ 	 */
+-	ce = intel_context_instance(ctx, engine);
++	ce = i915_gem_context_get_engine(ctx, engine->id);
+ 	if (IS_ERR(ce))
+ 		return ERR_CAST(ce);
+ 
+-	err = intel_context_pin(ce);
+-	if (err) {
+-		rq = ERR_PTR(err);
+-		goto err_put;
+-	}
+-
+-	rq = i915_request_create(ce);
+-	intel_context_unpin(ce);
+-
+-err_put:
++	rq = intel_context_create_request(ce);
+ 	intel_context_put(ce);
++
+ 	return rq;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_guc_submission.c b/drivers/gpu/drm/i915/intel_guc_submission.c
+index 0e5a74b47394..7e443973b806 100644
+--- a/drivers/gpu/drm/i915/intel_guc_submission.c
++++ b/drivers/gpu/drm/i915/intel_guc_submission.c
+@@ -363,11 +363,10 @@ static void guc_stage_desc_pool_destroy(struct intel_guc *guc)
+ static void guc_stage_desc_init(struct intel_guc_client *client)
+ {
+ 	struct intel_guc *guc = client->guc;
+-	struct drm_i915_private *dev_priv = guc_to_i915(guc);
+-	struct intel_engine_cs *engine;
+ 	struct i915_gem_context *ctx = client->owner;
++	struct i915_gem_engines_iter it;
+ 	struct guc_stage_desc *desc;
+-	unsigned int tmp;
++	struct intel_context *ce;
+ 	u32 gfx_addr;
+ 
+ 	desc = __get_stage_desc(client);
+@@ -381,10 +380,11 @@ static void guc_stage_desc_init(struct intel_guc_client *client)
+ 	desc->priority = client->priority;
+ 	desc->db_id = client->doorbell_id;
+ 
+-	for_each_engine_masked(engine, dev_priv, client->engines, tmp) {
+-		struct intel_context *ce = intel_context_lookup(ctx, engine);
+-		u32 guc_engine_id = engine->guc_id;
+-		struct guc_execlist_context *lrc = &desc->lrc[guc_engine_id];
++	for_each_gem_engine(ce, i915_gem_context_lock_engines(ctx), it) {
++		struct guc_execlist_context *lrc;
++
++		if (!(ce->engine->mask & client->engines))
++			continue;
+ 
+ 		/* TODO: We have a design issue to be solved here. Only when we
+ 		 * receive the first batch, we know which engine is used by the
+@@ -393,7 +393,7 @@ static void guc_stage_desc_init(struct intel_guc_client *client)
+ 		 * for now who owns a GuC client. But for future owner of GuC
+ 		 * client, need to make sure lrc is pinned prior to enter here.
+ 		 */
+-		if (!ce || !ce->state)
++		if (!ce->state)
+ 			break;	/* XXX: continue? */
+ 
+ 		/*
+@@ -403,6 +403,7 @@ static void guc_stage_desc_init(struct intel_guc_client *client)
+ 		 * Instead, the GuC uses the LRCA of the user mode context (see
+ 		 * guc_add_request below).
+ 		 */
++		lrc = &desc->lrc[ce->engine->guc_id];
+ 		lrc->context_desc = lower_32_bits(ce->lrc_desc);
+ 
+ 		/* The state page is after PPHWSP */
+@@ -413,15 +414,16 @@ static void guc_stage_desc_init(struct intel_guc_client *client)
+ 		 * here. In proxy submission, it wants the stage id
+ 		 */
+ 		lrc->context_id = (client->stage_id << GUC_ELC_CTXID_OFFSET) |
+-				(guc_engine_id << GUC_ELC_ENGINE_OFFSET);
++				(ce->engine->guc_id << GUC_ELC_ENGINE_OFFSET);
+ 
+ 		lrc->ring_begin = intel_guc_ggtt_offset(guc, ce->ring->vma);
+ 		lrc->ring_end = lrc->ring_begin + ce->ring->size - 1;
+ 		lrc->ring_next_free_location = lrc->ring_begin;
+ 		lrc->ring_current_tail_pointer_value = 0;
+ 
+-		desc->engines_used |= (1 << guc_engine_id);
++		desc->engines_used |= BIT(ce->engine->guc_id);
+ 	}
++	i915_gem_context_unlock_engines(ctx);
+ 
+ 	DRM_DEBUG_DRIVER("Host engines 0x%x => GuC engines used 0x%x\n",
+ 			 client->engines, desc->engines_used);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+index 214d1fd2f4dc..7fd224a4ca4c 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_context.c
+@@ -1094,7 +1094,7 @@ __igt_ctx_sseu(struct drm_i915_private *i915,
+ 
+ 	wakeref = intel_runtime_pm_get(i915);
+ 
+-	ce = intel_context_instance(ctx, i915->engine[RCS0]);
++	ce = i915_gem_context_get_engine(ctx, RCS0);
+ 	if (IS_ERR(ce)) {
+ 		ret = PTR_ERR(ce);
+ 		goto out_rpm;
+diff --git a/drivers/gpu/drm/i915/selftests/mock_context.c b/drivers/gpu/drm/i915/selftests/mock_context.c
+index 0426093bf1d9..71c750693585 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_context.c
++++ b/drivers/gpu/drm/i915/selftests/mock_context.c
+@@ -30,6 +30,7 @@ mock_context(struct drm_i915_private *i915,
+ 	     const char *name)
+ {
+ 	struct i915_gem_context *ctx;
++	struct i915_gem_engines *e;
+ 	int ret;
+ 
+ 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+@@ -40,8 +41,11 @@ mock_context(struct drm_i915_private *i915,
+ 	INIT_LIST_HEAD(&ctx->link);
+ 	ctx->i915 = i915;
+ 
+-	ctx->hw_contexts = RB_ROOT;
+-	spin_lock_init(&ctx->hw_contexts_lock);
++	mutex_init(&ctx->engines_mutex);
++	e = default_engines(ctx);
++	if (IS_ERR(e))
++		goto err_free;
++	RCU_INIT_POINTER(ctx->engines, e);
+ 
+ 	INIT_RADIX_TREE(&ctx->handles_vma, GFP_KERNEL);
+ 	INIT_LIST_HEAD(&ctx->handles_list);
+@@ -51,7 +55,7 @@ mock_context(struct drm_i915_private *i915,
+ 
+ 	ret = i915_gem_context_pin_hw_id(ctx);
+ 	if (ret < 0)
+-		goto err_handles;
++		goto err_engines;
+ 
+ 	if (name) {
+ 		struct i915_hw_ppgtt *ppgtt;
+@@ -69,7 +73,9 @@ mock_context(struct drm_i915_private *i915,
+ 
+ 	return ctx;
+ 
+-err_handles:
++err_engines:
++	free_engines(rcu_access_pointer(ctx->engines));
++err_free:
+ 	kfree(ctx);
+ 	return NULL;
+ 
+-- 
+2.17.1
+
