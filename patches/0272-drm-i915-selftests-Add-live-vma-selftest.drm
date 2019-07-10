@@ -1,0 +1,234 @@
+From bf2c81095982024a7d8d7fadbcb6f278edbf6b27 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Thu, 9 May 2019 15:21:54 +0300
+Subject: [PATCH 272/733] drm/i915/selftests: Add live vma selftest
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add a live selftest to excercise rotated/remapped vmas. We simply
+write through the rotated/remapped vma, and confirm that the data
+appears in the right page when read through the normal vma.
+
+Not sure what the fallout of making all rotated/remapped vmas
+mappable/fenceable would be, hence I just hacked it in the test.
+
+v2: Grab rpm reference (Chris)
+    GEM_BUG_ON(view.type not as expected) (Chris)
+    Allow CAN_FENCE for rotated/remapped vmas (Chris)
+    Update intel_plane_uses_fence() to ask for a fence
+    only for normal vmas on gen4+
+v3: Deal with intel_wakeref_t
+v4: Rebase
+
+Cc: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190509122159.24376-4-ville.syrjala@linux.intel.com
+Reviewed-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+---
+ drivers/gpu/drm/i915/i915_vma.c               |   8 -
+ drivers/gpu/drm/i915/intel_display.c          |   4 +-
+ .../drm/i915/selftests/i915_live_selftests.h  |   1 +
+ drivers/gpu/drm/i915/selftests/i915_vma.c     | 142 ++++++++++++++++++
+ 4 files changed, 146 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_vma.c b/drivers/gpu/drm/i915/i915_vma.c
+index 3dc9fa6d73b2..cf405ffda045 100644
+--- a/drivers/gpu/drm/i915/i915_vma.c
++++ b/drivers/gpu/drm/i915/i915_vma.c
+@@ -480,14 +480,6 @@ void __i915_vma_set_map_and_fenceable(struct i915_vma *vma)
+ 	GEM_BUG_ON(!i915_vma_is_ggtt(vma));
+ 	GEM_BUG_ON(!vma->fence_size);
+ 
+-	/*
+-	 * Explicitly disable for rotated VMA since the display does not
+-	 * need the fence and the VMA is not accessible to other users.
+-	 */
+-	if (vma->ggtt_view.type == I915_GGTT_VIEW_ROTATED ||
+-	    vma->ggtt_view.type == I915_GGTT_VIEW_REMAPPED)
+-		return;
+-
+ 	fenceable = (vma->node.size >= vma->fence_size &&
+ 		     IS_ALIGNED(vma->node.start, vma->fence_alignment));
+ 
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index dc61b20208c5..5c2d027a9f3e 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -2077,7 +2077,9 @@ static bool intel_plane_uses_fence(const struct intel_plane_state *plane_state)
+ 	struct intel_plane *plane = to_intel_plane(plane_state->base.plane);
+ 	struct drm_i915_private *dev_priv = to_i915(plane->base.dev);
+ 
+-	return INTEL_GEN(dev_priv) < 4 || plane->has_fbc;
++	return INTEL_GEN(dev_priv) < 4 ||
++		(plane->has_fbc &&
++		 plane_state->view.type == I915_GGTT_VIEW_NORMAL);
+ }
+ 
+ struct i915_vma *
+diff --git a/drivers/gpu/drm/i915/selftests/i915_live_selftests.h b/drivers/gpu/drm/i915/selftests/i915_live_selftests.h
+index 6d766925ad04..a54f590788a4 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_live_selftests.h
++++ b/drivers/gpu/drm/i915/selftests/i915_live_selftests.h
+@@ -17,6 +17,7 @@ selftest(requests, i915_request_live_selftests)
+ selftest(active, i915_active_live_selftests)
+ selftest(objects, i915_gem_object_live_selftests)
+ selftest(dmabuf, i915_gem_dmabuf_live_selftests)
++selftest(vma, i915_vma_live_selftests)
+ selftest(coherency, i915_gem_coherency_live_selftests)
+ selftest(gtt, i915_gem_gtt_live_selftests)
+ selftest(gem, i915_gem_live_selftests)
+diff --git a/drivers/gpu/drm/i915/selftests/i915_vma.c b/drivers/gpu/drm/i915/selftests/i915_vma.c
+index 89f6ef945c1b..0027c1fac336 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_vma.c
++++ b/drivers/gpu/drm/i915/selftests/i915_vma.c
+@@ -834,3 +834,145 @@ int i915_vma_mock_selftests(void)
+ 	drm_dev_put(&i915->drm);
+ 	return err;
+ }
++
++static int igt_vma_remapped_gtt(void *arg)
++{
++	struct drm_i915_private *i915 = arg;
++	const struct intel_remapped_plane_info planes[] = {
++		{ .width = 1, .height = 1, .stride = 1 },
++		{ .width = 2, .height = 2, .stride = 2 },
++		{ .width = 4, .height = 4, .stride = 4 },
++		{ .width = 8, .height = 8, .stride = 8 },
++
++		{ .width = 3, .height = 5, .stride = 3 },
++		{ .width = 3, .height = 5, .stride = 4 },
++		{ .width = 3, .height = 5, .stride = 5 },
++
++		{ .width = 5, .height = 3, .stride = 5 },
++		{ .width = 5, .height = 3, .stride = 7 },
++		{ .width = 5, .height = 3, .stride = 9 },
++
++		{ .width = 4, .height = 6, .stride = 6 },
++		{ .width = 6, .height = 4, .stride = 6 },
++		{ }
++	}, *p;
++	enum i915_ggtt_view_type types[] = {
++		I915_GGTT_VIEW_ROTATED,
++		I915_GGTT_VIEW_REMAPPED,
++		0,
++	}, *t;
++	struct drm_i915_gem_object *obj;
++	intel_wakeref_t wakeref;
++	int err = 0;
++
++	obj = i915_gem_object_create_internal(i915, 10 * 10 * PAGE_SIZE);
++	if (IS_ERR(obj))
++		return PTR_ERR(obj);
++
++	mutex_lock(&i915->drm.struct_mutex);
++
++	wakeref = intel_runtime_pm_get(i915);
++
++	for (t = types; *t; t++) {
++		for (p = planes; p->width; p++) {
++			struct i915_ggtt_view view = {
++				.type = *t,
++				.rotated.plane[0] = *p,
++			};
++			struct i915_vma *vma;
++			u32 __iomem *map;
++			unsigned int x, y;
++			int err;
++
++			err = i915_gem_object_set_to_gtt_domain(obj, true);
++			if (err)
++				goto out;
++
++			vma = i915_gem_object_ggtt_pin(obj, &view, 0, 0, PIN_MAPPABLE);
++			if (IS_ERR(vma)) {
++				err = PTR_ERR(vma);
++				goto out;
++			}
++
++			GEM_BUG_ON(vma->ggtt_view.type != *t);
++
++			map = i915_vma_pin_iomap(vma);
++			i915_vma_unpin(vma);
++			if (IS_ERR(map)) {
++				err = PTR_ERR(map);
++				goto out;
++			}
++
++			for (y = 0 ; y < p->height; y++) {
++				for (x = 0 ; x < p->width; x++) {
++					unsigned int offset;
++					u32 val = y << 16 | x;
++
++					if (*t == I915_GGTT_VIEW_ROTATED)
++						offset = (x * p->height + y) * PAGE_SIZE;
++					else
++						offset = (y * p->width + x) * PAGE_SIZE;
++
++					iowrite32(val, &map[offset / sizeof(*map)]);
++				}
++			}
++
++			i915_vma_unpin_iomap(vma);
++
++			vma = i915_gem_object_ggtt_pin(obj, NULL, 0, 0, PIN_MAPPABLE);
++			if (IS_ERR(vma)) {
++				err = PTR_ERR(vma);
++				goto out;
++			}
++
++			GEM_BUG_ON(vma->ggtt_view.type != I915_GGTT_VIEW_NORMAL);
++
++			map = i915_vma_pin_iomap(vma);
++			i915_vma_unpin(vma);
++			if (IS_ERR(map)) {
++				err = PTR_ERR(map);
++				goto out;
++			}
++
++			for (y = 0 ; y < p->height; y++) {
++				for (x = 0 ; x < p->width; x++) {
++					unsigned int offset, src_idx;
++					u32 exp = y << 16 | x;
++					u32 val;
++
++					if (*t == I915_GGTT_VIEW_ROTATED)
++						src_idx = rotated_index(&view.rotated, 0, x, y);
++					else
++						src_idx = remapped_index(&view.remapped, 0, x, y);
++					offset = src_idx * PAGE_SIZE;
++
++					val = ioread32(&map[offset / sizeof(*map)]);
++					if (val != exp) {
++						pr_err("%s VMA write test failed, expected 0x%x, found 0x%x\n",
++						       *t == I915_GGTT_VIEW_ROTATED ? "Rotated" : "Remapped",
++						       val, exp);
++						i915_vma_unpin_iomap(vma);
++						goto out;
++					}
++				}
++			}
++			i915_vma_unpin_iomap(vma);
++		}
++	}
++
++out:
++	intel_runtime_pm_put(i915, wakeref);
++	mutex_unlock(&i915->drm.struct_mutex);
++	i915_gem_object_put(obj);
++
++	return err;
++}
++
++int i915_vma_live_selftests(struct drm_i915_private *i915)
++{
++	static const struct i915_subtest tests[] = {
++		SUBTEST(igt_vma_remapped_gtt),
++	};
++
++	return i915_subtests(tests, i915);
++}
+-- 
+2.17.1
+

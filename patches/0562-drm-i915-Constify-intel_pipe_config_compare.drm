@@ -1,0 +1,116 @@
+From b181c9c38fe5d3555d11aa7d216e9f0b8620f655 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Wed, 12 Jun 2019 16:07:59 +0300
+Subject: [PATCH 562/733] drm/i915: Constify intel_pipe_config_compare()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Now that intel_pipe_config_compare() no longer clobbers the passed
+in state we can make both crtc states const. And while at we simplify
+the calling convention, and clean up intel_compare_link_m_n() a bit.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190612130801.2085-2-ville.syrjala@linux.intel.com
+Reviewed-by: Imre Deak <imre.deak@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_display.c | 43 ++++++++------------
+ 1 file changed, 17 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 853f2a37e8db..11310b7a8fda 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -12292,18 +12292,14 @@ intel_compare_m_n(unsigned int m, unsigned int n,
+ 
+ static bool
+ intel_compare_link_m_n(const struct intel_link_m_n *m_n,
+-		       struct intel_link_m_n *m2_n2,
+-		       bool adjust)
+-{
+-	if (m_n->tu == m2_n2->tu &&
+-	    intel_compare_m_n(m_n->gmch_m, m_n->gmch_n,
+-			      m2_n2->gmch_m, m2_n2->gmch_n, !adjust) &&
+-	    intel_compare_m_n(m_n->link_m, m_n->link_n,
+-			      m2_n2->link_m, m2_n2->link_n, !adjust)) {
+-		return true;
+-	}
+-
+-	return false;
++		       const struct intel_link_m_n *m2_n2,
++		       bool exact)
++{
++	return m_n->tu == m2_n2->tu &&
++		intel_compare_m_n(m_n->gmch_m, m_n->gmch_n,
++				  m2_n2->gmch_m, m2_n2->gmch_n, exact) &&
++		intel_compare_m_n(m_n->link_m, m_n->link_n,
++				  m2_n2->link_m, m2_n2->link_n, exact);
+ }
+ 
+ static bool
+@@ -12373,11 +12369,11 @@ static bool fastboot_enabled(struct drm_i915_private *dev_priv)
+ }
+ 
+ static bool
+-intel_pipe_config_compare(struct drm_i915_private *dev_priv,
+-			  struct intel_crtc_state *current_config,
+-			  struct intel_crtc_state *pipe_config,
++intel_pipe_config_compare(const struct intel_crtc_state *current_config,
++			  const struct intel_crtc_state *pipe_config,
+ 			  bool adjust)
+ {
++	struct drm_i915_private *dev_priv = to_i915(current_config->base.crtc->dev);
+ 	bool ret = true;
+ 	bool fixup_inherited = adjust &&
+ 		(current_config->base.mode.private_flags & I915_MODE_FLAG_INHERITED) &&
+@@ -12448,7 +12444,7 @@ intel_pipe_config_compare(struct drm_i915_private *dev_priv,
+ #define PIPE_CONF_CHECK_M_N(name) do { \
+ 	if (!intel_compare_link_m_n(&current_config->name, \
+ 				    &pipe_config->name,\
+-				    adjust)) { \
++				    !adjust)) { \
+ 		pipe_config_err(adjust, __stringify(name), \
+ 			  "(expected tu %i gmch %i/%i link %i/%i, " \
+ 			  "found tu %i, gmch %i/%i link %i/%i)\n", \
+@@ -12473,9 +12469,9 @@ intel_pipe_config_compare(struct drm_i915_private *dev_priv,
+  */
+ #define PIPE_CONF_CHECK_M_N_ALT(name, alt_name) do { \
+ 	if (!intel_compare_link_m_n(&current_config->name, \
+-				    &pipe_config->name, adjust) && \
++				    &pipe_config->name, !adjust) && \
+ 	    !intel_compare_link_m_n(&current_config->alt_name, \
+-				    &pipe_config->name, adjust)) { \
++				    &pipe_config->name, !adjust)) { \
+ 		pipe_config_err(adjust, __stringify(name), \
+ 			  "(expected tu %i gmch %i/%i link %i/%i, " \
+ 			  "or tu %i gmch %i/%i link %i/%i, " \
+@@ -12985,8 +12981,7 @@ verify_crtc_state(struct drm_crtc *crtc,
+ 	intel_pipe_config_sanity_check(dev_priv, pipe_config);
+ 
+ 	sw_config = to_intel_crtc_state(new_crtc_state);
+-	if (!intel_pipe_config_compare(dev_priv, sw_config,
+-				       pipe_config, false)) {
++	if (!intel_pipe_config_compare(sw_config, pipe_config, false)) {
+ 		I915_STATE_WARN(1, "pipe state doesn't match!\n");
+ 		intel_dump_pipe_config(pipe_config, NULL, "[hw state]");
+ 		intel_dump_pipe_config(sw_config, NULL, "[sw state]");
+@@ -13431,14 +13426,10 @@ static int calc_watermark_data(struct intel_atomic_state *state)
+ 	return 0;
+ }
+ 
+-static void intel_crtc_check_fastset(struct intel_crtc_state *old_crtc_state,
++static void intel_crtc_check_fastset(const struct intel_crtc_state *old_crtc_state,
+ 				     struct intel_crtc_state *new_crtc_state)
+ {
+-	struct drm_i915_private *dev_priv =
+-		to_i915(new_crtc_state->base.crtc->dev);
+-
+-	if (!intel_pipe_config_compare(dev_priv, old_crtc_state,
+-				       new_crtc_state, true))
++	if (!intel_pipe_config_compare(old_crtc_state, new_crtc_state, true))
+ 		return;
+ 
+ 	new_crtc_state->base.mode_changed = false;
+-- 
+2.17.1
+

@@ -1,0 +1,55 @@
+From 5eebfd3625e95b8859e2c38febc40bf6db5b0c94 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 1 May 2019 12:45:36 +0100
+Subject: [PATCH 157/733] drm/i915: Delay semaphore submission until the start
+ of the signaler
+
+Currently we submit the semaphore busywait as soon as the signaler is
+submitted to HW. However, we may submit the signaler as the tail of a
+batch of requests, and even not as the first context in the HW list,
+i.e. the busywait may start spinning far in advance of the signaler even
+starting.
+
+If we wait until the request before the signaler is completed before
+submitting the busywait, we prevent the busywait from starting too
+early, if the signaler is not first in submission port.
+
+To handle the case where the signaler is at the start of the second (or
+later) submission port, we will need to delay the execution callback
+until we know the context is promoted to port0. A challenge for later.
+
+Fixes: e88619646971 ("drm/i915: Use HW semaphores for inter-engine synchroni
+sation on gen8+")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190501114541.10077-9-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_request.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 63085fc77c70..a1ca43ef3440 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -826,13 +826,13 @@ emit_semaphore_wait(struct i915_request *to,
+ 	if (err < 0)
+ 		return err;
+ 
+-	/* We need to pin the signaler's HWSP until we are finished reading. */
+-	err = i915_timeline_read_hwsp(from, to, &hwsp_offset);
++	/* Only submit our spinner after the signaler is running! */
++	err = i915_request_await_execution(to, from, gfp);
+ 	if (err)
+ 		return err;
+ 
+-	/* Only submit our spinner after the signaler is running! */
+-	err = i915_request_await_execution(to, from, gfp);
++	/* We need to pin the signaler's HWSP until we are finished reading. */
++	err = i915_timeline_read_hwsp(from, to, &hwsp_offset);
+ 	if (err)
+ 		return err;
+ 
+-- 
+2.17.1
+

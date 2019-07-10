@@ -1,0 +1,406 @@
+From e4e2382688a6f9f70d9dda64dc9dd84d907fcfac Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 28 May 2019 10:29:44 +0100
+Subject: [PATCH 377/733] drm/i915: Move object->pages API to
+ i915_gem_object.[ch]
+
+Currently the code for manipulating the pages on an object is still
+residing in i915_gem.c, move it to i915_gem_object.c
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Matthew Auld
+Link: https://patchwork.freedesktop.org/patch/msgid/20190528092956.14910-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Makefile                 |   4 +-
+ .../gpu/drm/i915/{ => gem}/i915_gem_object.c  |   0
+ .../gpu/drm/i915/{ => gem}/i915_gem_object.h  | 132 +++++++++++++++-
+ drivers/gpu/drm/i915/i915_drv.h               | 141 +-----------------
+ drivers/gpu/drm/i915/i915_globals.c           |   2 +-
+ drivers/gpu/drm/i915/i915_vma.h               |   2 +-
+ drivers/gpu/drm/i915/intel_frontbuffer.h      |   2 +-
+ 7 files changed, 143 insertions(+), 140 deletions(-)
+ rename drivers/gpu/drm/i915/{ => gem}/i915_gem_object.c (100%)
+ rename drivers/gpu/drm/i915/{ => gem}/i915_gem_object.h (58%)
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index 23a45d7baabb..f96846846cba 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -86,7 +86,10 @@ i915-y += $(gt-y)
+ 
+ # GEM (Graphics Execution Management) code
+ obj-y += gem/
++gem-y += \
++	gem/i915_gem_object.o
+ i915-y += \
++	  $(gem-y) \
+ 	  i915_active.o \
+ 	  i915_cmd_parser.o \
+ 	  i915_gem_batch_pool.o \
+@@ -99,7 +102,6 @@ i915-y += \
+ 	  i915_gem_gtt.o \
+ 	  i915_gem_internal.o \
+ 	  i915_gem.o \
+-	  i915_gem_object.o \
+ 	  i915_gem_pm.o \
+ 	  i915_gem_render_state.o \
+ 	  i915_gem_shrinker.o \
+diff --git a/drivers/gpu/drm/i915/i915_gem_object.c b/drivers/gpu/drm/i915/gem/i915_gem_object.c
+similarity index 100%
+rename from drivers/gpu/drm/i915/i915_gem_object.c
+rename to drivers/gpu/drm/i915/gem/i915_gem_object.c
+diff --git a/drivers/gpu/drm/i915/i915_gem_object.h b/drivers/gpu/drm/i915/gem/i915_gem_object.h
+similarity index 58%
+rename from drivers/gpu/drm/i915/i915_gem_object.h
+rename to drivers/gpu/drm/i915/gem/i915_gem_object.h
+index 3666b0c5f6ca..9dfd8b0db725 100644
+--- a/drivers/gpu/drm/i915/i915_gem_object.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object.h
+@@ -13,7 +13,7 @@
+ 
+ #include <drm/i915_drm.h>
+ 
+-#include "gem/i915_gem_object_types.h"
++#include "i915_gem_object_types.h"
+ 
+ struct drm_i915_gem_object *i915_gem_object_alloc(void);
+ void i915_gem_object_free(struct drm_i915_gem_object *obj);
+@@ -192,6 +192,136 @@ i915_gem_object_get_tile_row_size(const struct drm_i915_gem_object *obj)
+ int i915_gem_object_set_tiling(struct drm_i915_gem_object *obj,
+ 			       unsigned int tiling, unsigned int stride);
+ 
++struct scatterlist *
++i915_gem_object_get_sg(struct drm_i915_gem_object *obj,
++		       unsigned int n, unsigned int *offset);
++
++struct page *
++i915_gem_object_get_page(struct drm_i915_gem_object *obj,
++			 unsigned int n);
++
++struct page *
++i915_gem_object_get_dirty_page(struct drm_i915_gem_object *obj,
++			       unsigned int n);
++
++dma_addr_t
++i915_gem_object_get_dma_address_len(struct drm_i915_gem_object *obj,
++				    unsigned long n,
++				    unsigned int *len);
++
++dma_addr_t
++i915_gem_object_get_dma_address(struct drm_i915_gem_object *obj,
++				unsigned long n);
++
++void __i915_gem_object_set_pages(struct drm_i915_gem_object *obj,
++				 struct sg_table *pages,
++				 unsigned int sg_page_sizes);
++int __i915_gem_object_get_pages(struct drm_i915_gem_object *obj);
++
++static inline int __must_check
++i915_gem_object_pin_pages(struct drm_i915_gem_object *obj)
++{
++	might_lock(&obj->mm.lock);
++
++	if (atomic_inc_not_zero(&obj->mm.pages_pin_count))
++		return 0;
++
++	return __i915_gem_object_get_pages(obj);
++}
++
++static inline bool
++i915_gem_object_has_pages(struct drm_i915_gem_object *obj)
++{
++	return !IS_ERR_OR_NULL(READ_ONCE(obj->mm.pages));
++}
++
++static inline void
++__i915_gem_object_pin_pages(struct drm_i915_gem_object *obj)
++{
++	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
++
++	atomic_inc(&obj->mm.pages_pin_count);
++}
++
++static inline bool
++i915_gem_object_has_pinned_pages(struct drm_i915_gem_object *obj)
++{
++	return atomic_read(&obj->mm.pages_pin_count);
++}
++
++static inline void
++__i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj)
++{
++	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
++	GEM_BUG_ON(!i915_gem_object_has_pinned_pages(obj));
++
++	atomic_dec(&obj->mm.pages_pin_count);
++}
++
++static inline void
++i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj)
++{
++	__i915_gem_object_unpin_pages(obj);
++}
++
++enum i915_mm_subclass { /* lockdep subclass for obj->mm.lock/struct_mutex */
++	I915_MM_NORMAL = 0,
++	I915_MM_SHRINKER /* called "recursively" from direct-reclaim-esque */
++};
++
++int __i915_gem_object_put_pages(struct drm_i915_gem_object *obj,
++				enum i915_mm_subclass subclass);
++void __i915_gem_object_truncate(struct drm_i915_gem_object *obj);
++
++enum i915_map_type {
++	I915_MAP_WB = 0,
++	I915_MAP_WC,
++#define I915_MAP_OVERRIDE BIT(31)
++	I915_MAP_FORCE_WB = I915_MAP_WB | I915_MAP_OVERRIDE,
++	I915_MAP_FORCE_WC = I915_MAP_WC | I915_MAP_OVERRIDE,
++};
++
++/**
++ * i915_gem_object_pin_map - return a contiguous mapping of the entire object
++ * @obj: the object to map into kernel address space
++ * @type: the type of mapping, used to select pgprot_t
++ *
++ * Calls i915_gem_object_pin_pages() to prevent reaping of the object's
++ * pages and then returns a contiguous mapping of the backing storage into
++ * the kernel address space. Based on the @type of mapping, the PTE will be
++ * set to either WriteBack or WriteCombine (via pgprot_t).
++ *
++ * The caller is responsible for calling i915_gem_object_unpin_map() when the
++ * mapping is no longer required.
++ *
++ * Returns the pointer through which to access the mapped object, or an
++ * ERR_PTR() on error.
++ */
++void *__must_check i915_gem_object_pin_map(struct drm_i915_gem_object *obj,
++					   enum i915_map_type type);
++
++void __i915_gem_object_flush_map(struct drm_i915_gem_object *obj,
++				 unsigned long offset,
++				 unsigned long size);
++static inline void i915_gem_object_flush_map(struct drm_i915_gem_object *obj)
++{
++	__i915_gem_object_flush_map(obj, 0, obj->base.size);
++}
++
++/**
++ * i915_gem_object_unpin_map - releases an earlier mapping
++ * @obj: the object to unmap
++ *
++ * After pinning the object and mapping its pages, once you are finished
++ * with your access, call i915_gem_object_unpin_map() to release the pin
++ * upon the mapping. Once the pin count reaches zero, that mapping may be
++ * removed.
++ */
++static inline void i915_gem_object_unpin_map(struct drm_i915_gem_object *obj)
++{
++	i915_gem_object_unpin_pages(obj);
++}
++
+ static inline struct intel_engine_cs *
+ i915_gem_object_last_write_engine(struct drm_i915_gem_object *obj)
+ {
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 189357a9c8c3..0b853643b5de 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2825,141 +2825,6 @@ static inline int __sg_page_count(const struct scatterlist *sg)
+ 	return sg->length >> PAGE_SHIFT;
+ }
+ 
+-struct scatterlist *
+-i915_gem_object_get_sg(struct drm_i915_gem_object *obj,
+-		       unsigned int n, unsigned int *offset);
+-
+-struct page *
+-i915_gem_object_get_page(struct drm_i915_gem_object *obj,
+-			 unsigned int n);
+-
+-struct page *
+-i915_gem_object_get_dirty_page(struct drm_i915_gem_object *obj,
+-			       unsigned int n);
+-
+-dma_addr_t
+-i915_gem_object_get_dma_address_len(struct drm_i915_gem_object *obj,
+-				    unsigned long n,
+-				    unsigned int *len);
+-dma_addr_t
+-i915_gem_object_get_dma_address(struct drm_i915_gem_object *obj,
+-				unsigned long n);
+-
+-void __i915_gem_object_set_pages(struct drm_i915_gem_object *obj,
+-				 struct sg_table *pages,
+-				 unsigned int sg_page_sizes);
+-int __i915_gem_object_get_pages(struct drm_i915_gem_object *obj);
+-
+-static inline int __must_check
+-i915_gem_object_pin_pages(struct drm_i915_gem_object *obj)
+-{
+-	might_lock(&obj->mm.lock);
+-
+-	if (atomic_inc_not_zero(&obj->mm.pages_pin_count))
+-		return 0;
+-
+-	return __i915_gem_object_get_pages(obj);
+-}
+-
+-static inline bool
+-i915_gem_object_has_pages(struct drm_i915_gem_object *obj)
+-{
+-	return !IS_ERR_OR_NULL(READ_ONCE(obj->mm.pages));
+-}
+-
+-static inline void
+-__i915_gem_object_pin_pages(struct drm_i915_gem_object *obj)
+-{
+-	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
+-
+-	atomic_inc(&obj->mm.pages_pin_count);
+-}
+-
+-static inline bool
+-i915_gem_object_has_pinned_pages(struct drm_i915_gem_object *obj)
+-{
+-	return atomic_read(&obj->mm.pages_pin_count);
+-}
+-
+-static inline void
+-__i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj)
+-{
+-	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
+-	GEM_BUG_ON(!i915_gem_object_has_pinned_pages(obj));
+-
+-	atomic_dec(&obj->mm.pages_pin_count);
+-}
+-
+-static inline void
+-i915_gem_object_unpin_pages(struct drm_i915_gem_object *obj)
+-{
+-	__i915_gem_object_unpin_pages(obj);
+-}
+-
+-enum i915_mm_subclass { /* lockdep subclass for obj->mm.lock/struct_mutex */
+-	I915_MM_NORMAL = 0,
+-	I915_MM_SHRINKER /* called "recursively" from direct-reclaim-esque */
+-};
+-
+-int __i915_gem_object_put_pages(struct drm_i915_gem_object *obj,
+-				enum i915_mm_subclass subclass);
+-void __i915_gem_object_truncate(struct drm_i915_gem_object *obj);
+-
+-enum i915_map_type {
+-	I915_MAP_WB = 0,
+-	I915_MAP_WC,
+-#define I915_MAP_OVERRIDE BIT(31)
+-	I915_MAP_FORCE_WB = I915_MAP_WB | I915_MAP_OVERRIDE,
+-	I915_MAP_FORCE_WC = I915_MAP_WC | I915_MAP_OVERRIDE,
+-};
+-
+-static inline enum i915_map_type
+-i915_coherent_map_type(struct drm_i915_private *i915)
+-{
+-	return HAS_LLC(i915) ? I915_MAP_WB : I915_MAP_WC;
+-}
+-
+-/**
+- * i915_gem_object_pin_map - return a contiguous mapping of the entire object
+- * @obj: the object to map into kernel address space
+- * @type: the type of mapping, used to select pgprot_t
+- *
+- * Calls i915_gem_object_pin_pages() to prevent reaping of the object's
+- * pages and then returns a contiguous mapping of the backing storage into
+- * the kernel address space. Based on the @type of mapping, the PTE will be
+- * set to either WriteBack or WriteCombine (via pgprot_t).
+- *
+- * The caller is responsible for calling i915_gem_object_unpin_map() when the
+- * mapping is no longer required.
+- *
+- * Returns the pointer through which to access the mapped object, or an
+- * ERR_PTR() on error.
+- */
+-void *__must_check i915_gem_object_pin_map(struct drm_i915_gem_object *obj,
+-					   enum i915_map_type type);
+-
+-void __i915_gem_object_flush_map(struct drm_i915_gem_object *obj,
+-				 unsigned long offset,
+-				 unsigned long size);
+-static inline void i915_gem_object_flush_map(struct drm_i915_gem_object *obj)
+-{
+-	__i915_gem_object_flush_map(obj, 0, obj->base.size);
+-}
+-
+-/**
+- * i915_gem_object_unpin_map - releases an earlier mapping
+- * @obj: the object to unmap
+- *
+- * After pinning the object and mapping its pages, once you are finished
+- * with your access, call i915_gem_object_unpin_map() to release the pin
+- * upon the mapping. Once the pin count reaches zero, that mapping may be
+- * removed.
+- */
+-static inline void i915_gem_object_unpin_map(struct drm_i915_gem_object *obj)
+-{
+-	i915_gem_object_unpin_pages(obj);
+-}
+-
+ int i915_gem_obj_prepare_shmem_read(struct drm_i915_gem_object *obj,
+ 				    unsigned int *needs_clflush);
+ int i915_gem_obj_prepare_shmem_write(struct drm_i915_gem_object *obj,
+@@ -3358,6 +3223,12 @@ static inline u32 i915_scratch_offset(const struct drm_i915_private *i915)
+ 	return i915_ggtt_offset(i915->gt.scratch);
+ }
+ 
++static inline enum i915_map_type
++i915_coherent_map_type(struct drm_i915_private *i915)
++{
++	return HAS_LLC(i915) ? I915_MAP_WB : I915_MAP_WC;
++}
++
+ static inline void add_taint_for_CI(unsigned int taint)
+ {
+ 	/*
+diff --git a/drivers/gpu/drm/i915/i915_globals.c b/drivers/gpu/drm/i915/i915_globals.c
+index 81e5c2ce336b..db52a58eadcc 100644
+--- a/drivers/gpu/drm/i915/i915_globals.c
++++ b/drivers/gpu/drm/i915/i915_globals.c
+@@ -9,7 +9,7 @@
+ 
+ #include "i915_active.h"
+ #include "i915_gem_context.h"
+-#include "i915_gem_object.h"
++#include "gem/i915_gem_object.h"
+ #include "i915_globals.h"
+ #include "i915_request.h"
+ #include "i915_scheduler.h"
+diff --git a/drivers/gpu/drm/i915/i915_vma.h b/drivers/gpu/drm/i915/i915_vma.h
+index 8543d2953cd1..754a762d90b4 100644
+--- a/drivers/gpu/drm/i915/i915_vma.h
++++ b/drivers/gpu/drm/i915/i915_vma.h
+@@ -32,7 +32,7 @@
+ 
+ #include "i915_gem_gtt.h"
+ #include "i915_gem_fence_reg.h"
+-#include "i915_gem_object.h"
++#include "gem/i915_gem_object.h"
+ 
+ #include "i915_active.h"
+ #include "i915_request.h"
+diff --git a/drivers/gpu/drm/i915/intel_frontbuffer.h b/drivers/gpu/drm/i915/intel_frontbuffer.h
+index d5894666f658..5727320c8084 100644
+--- a/drivers/gpu/drm/i915/intel_frontbuffer.h
++++ b/drivers/gpu/drm/i915/intel_frontbuffer.h
+@@ -24,7 +24,7 @@
+ #ifndef __INTEL_FRONTBUFFER_H__
+ #define __INTEL_FRONTBUFFER_H__
+ 
+-#include "i915_gem_object.h"
++#include "gem/i915_gem_object.h"
+ 
+ struct drm_i915_private;
+ struct drm_i915_gem_object;
+-- 
+2.17.1
+

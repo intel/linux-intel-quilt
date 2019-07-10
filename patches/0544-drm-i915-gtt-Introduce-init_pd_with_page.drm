@@ -1,0 +1,68 @@
+From 18369d97fe2e2e1376b249f4a4d43ac39a52bc00 Mon Sep 17 00:00:00 2001
+From: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Date: Fri, 14 Jun 2019 19:43:43 +0300
+Subject: [PATCH 544/733] drm/i915/gtt: Introduce init_pd_with_page
+
+We set the page directory entries to point into a page table.
+There is no gen specifics in here so make it simple and
+obvious.
+
+Signed-off-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190614164350.30415-3-mika.kuoppala@linux.intel.com
+---
+ drivers/gpu/drm/i915/i915_gem_gtt.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index bd3dbd4eb9e1..90a2cdc0b7d4 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -727,12 +727,12 @@ static void free_pd(struct i915_address_space *vm,
+ 	kfree(pd);
+ }
+ 
+-static void gen8_initialize_pd(struct i915_address_space *vm,
+-			       struct i915_page_directory *pd)
++static void init_pd_with_page(struct i915_address_space *vm,
++			      struct i915_page_directory * const pd,
++			      struct i915_page_table *pt)
+ {
+-	fill_px(vm, pd,
+-		gen8_pde_encode(px_dma(vm->scratch_pt), I915_CACHE_LLC));
+-	memset_p(pd->entry, vm->scratch_pt, I915_PDES);
++	fill_px(vm, pd, gen8_pde_encode(px_dma(pt), I915_CACHE_LLC));
++	memset_p(pd->entry, pt, 512);
+ }
+ 
+ static struct i915_page_directory *alloc_pdp(struct i915_address_space *vm)
+@@ -1265,7 +1265,7 @@ static int gen8_init_scratch(struct i915_address_space *vm)
+ 	}
+ 
+ 	gen8_initialize_pt(vm, vm->scratch_pt);
+-	gen8_initialize_pd(vm, vm->scratch_pd);
++	init_pd_with_page(vm, vm->scratch_pd, vm->scratch_pt);
+ 	if (i915_vm_is_4lvl(vm))
+ 		gen8_initialize_4lvl_pdp(vm, vm->scratch_pdp);
+ 
+@@ -1442,7 +1442,7 @@ static int gen8_ppgtt_alloc_pdp(struct i915_address_space *vm,
+ 			if (IS_ERR(pd))
+ 				goto unwind;
+ 
+-			gen8_initialize_pd(vm, pd);
++			init_pd_with_page(vm, pd, vm->scratch_pt);
+ 
+ 			old = cmpxchg(&pdp->entry[pdpe], vm->scratch_pd, pd);
+ 			if (old == vm->scratch_pd) {
+@@ -1564,7 +1564,7 @@ static int gen8_preallocate_top_level_pdp(struct i915_ppgtt *ppgtt)
+ 		if (IS_ERR(pd))
+ 			goto unwind;
+ 
+-		gen8_initialize_pd(vm, pd);
++		init_pd_with_page(vm, pd, vm->scratch_pt);
+ 		gen8_ppgtt_set_pdpe(vm, pdp, pd, pdpe);
+ 
+ 		atomic_inc(&pdp->used);
+-- 
+2.17.1
+

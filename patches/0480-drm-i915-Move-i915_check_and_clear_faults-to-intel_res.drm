@@ -1,0 +1,218 @@
+From 6650ec097b8a2fcf874c82e8aa9ac8f5afae8f58 Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Fri, 7 Jun 2019 12:59:32 +0100
+Subject: [PATCH 480/733] drm/i915: Move i915_check_and_clear_faults to
+ intel_reset.c
+
+The code is logically about reset so it makes sense.
+
+It also enables making i915_clear_error_registers static.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Suggested-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190607115932.20271-1-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/gt/intel_reset.c | 69 +++++++++++++++++++++++++--
+ drivers/gpu/drm/i915/gt/intel_reset.h |  3 +-
+ drivers/gpu/drm/i915/i915_gem_gtt.c   | 63 ------------------------
+ drivers/gpu/drm/i915/i915_gem_gtt.h   |  1 -
+ 4 files changed, 67 insertions(+), 69 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index a6ecfdc735c4..60d24110af80 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -1166,8 +1166,8 @@ static void gen8_clear_engine_error_register(struct intel_engine_cs *engine)
+ 	GEN6_RING_FAULT_REG_POSTING_READ(engine);
+ }
+ 
+-void i915_clear_error_registers(struct drm_i915_private *i915,
+-				intel_engine_mask_t engine_mask)
++static void clear_error_registers(struct drm_i915_private *i915,
++				  intel_engine_mask_t engine_mask)
+ {
+ 	struct intel_uncore *uncore = &i915->uncore;
+ 	u32 eir;
+@@ -1205,6 +1205,69 @@ void i915_clear_error_registers(struct drm_i915_private *i915,
+ 	}
+ }
+ 
++static void gen6_check_faults(struct drm_i915_private *dev_priv)
++{
++	struct intel_engine_cs *engine;
++	enum intel_engine_id id;
++	u32 fault;
++
++	for_each_engine(engine, dev_priv, id) {
++		fault = GEN6_RING_FAULT_REG_READ(engine);
++		if (fault & RING_FAULT_VALID) {
++			DRM_DEBUG_DRIVER("Unexpected fault\n"
++					 "\tAddr: 0x%08lx\n"
++					 "\tAddress space: %s\n"
++					 "\tSource ID: %d\n"
++					 "\tType: %d\n",
++					 fault & PAGE_MASK,
++					 fault & RING_FAULT_GTTSEL_MASK ? "GGTT" : "PPGTT",
++					 RING_FAULT_SRCID(fault),
++					 RING_FAULT_FAULT_TYPE(fault));
++		}
++	}
++}
++
++static void gen8_check_faults(struct drm_i915_private *dev_priv)
++{
++	u32 fault = I915_READ(GEN8_RING_FAULT_REG);
++
++	if (fault & RING_FAULT_VALID) {
++		u32 fault_data0, fault_data1;
++		u64 fault_addr;
++
++		fault_data0 = I915_READ(GEN8_FAULT_TLB_DATA0);
++		fault_data1 = I915_READ(GEN8_FAULT_TLB_DATA1);
++		fault_addr = ((u64)(fault_data1 & FAULT_VA_HIGH_BITS) << 44) |
++			     ((u64)fault_data0 << 12);
++
++		DRM_DEBUG_DRIVER("Unexpected fault\n"
++				 "\tAddr: 0x%08x_%08x\n"
++				 "\tAddress space: %s\n"
++				 "\tEngine ID: %d\n"
++				 "\tSource ID: %d\n"
++				 "\tType: %d\n",
++				 upper_32_bits(fault_addr),
++				 lower_32_bits(fault_addr),
++				 fault_data1 & FAULT_GTT_SEL ? "GGTT" : "PPGTT",
++				 GEN8_RING_FAULT_ENGINE_ID(fault),
++				 RING_FAULT_SRCID(fault),
++				 RING_FAULT_FAULT_TYPE(fault));
++	}
++}
++
++void i915_check_and_clear_faults(struct drm_i915_private *i915)
++{
++	/* From GEN8 onwards we only have one 'All Engine Fault Register' */
++	if (INTEL_GEN(i915) >= 8)
++		gen8_check_faults(i915);
++	else if (INTEL_GEN(i915) >= 6)
++		gen6_check_faults(i915);
++	else
++		return;
++
++	clear_error_registers(i915, ALL_ENGINES);
++}
++
+ /**
+  * i915_handle_error - handle a gpu error
+  * @i915: i915 device private
+@@ -1253,7 +1316,7 @@ void i915_handle_error(struct drm_i915_private *i915,
+ 
+ 	if (flags & I915_ERROR_CAPTURE) {
+ 		i915_capture_error_state(i915, engine_mask, msg);
+-		i915_clear_error_registers(i915, engine_mask);
++		clear_error_registers(i915, engine_mask);
+ 	}
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.h b/drivers/gpu/drm/i915/gt/intel_reset.h
+index 4f3c1acac1a3..580ebdb59eca 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.h
++++ b/drivers/gpu/drm/i915/gt/intel_reset.h
+@@ -25,8 +25,7 @@ void i915_handle_error(struct drm_i915_private *i915,
+ 		       const char *fmt, ...);
+ #define I915_ERROR_CAPTURE BIT(0)
+ 
+-void i915_clear_error_registers(struct drm_i915_private *i915,
+-				intel_engine_mask_t engine_mask);
++void i915_check_and_clear_faults(struct drm_i915_private *i915);
+ 
+ void i915_reset(struct drm_i915_private *i915,
+ 		intel_engine_mask_t stalled_mask,
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 87be9c1b6021..2e15850bd987 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -2300,69 +2300,6 @@ static bool needs_idle_maps(struct drm_i915_private *dev_priv)
+ 	return IS_GEN(dev_priv, 5) && IS_MOBILE(dev_priv) && intel_vtd_active();
+ }
+ 
+-static void gen6_check_faults(struct drm_i915_private *dev_priv)
+-{
+-	struct intel_engine_cs *engine;
+-	enum intel_engine_id id;
+-	u32 fault;
+-
+-	for_each_engine(engine, dev_priv, id) {
+-		fault = GEN6_RING_FAULT_REG_READ(engine);
+-		if (fault & RING_FAULT_VALID) {
+-			DRM_DEBUG_DRIVER("Unexpected fault\n"
+-					 "\tAddr: 0x%08lx\n"
+-					 "\tAddress space: %s\n"
+-					 "\tSource ID: %d\n"
+-					 "\tType: %d\n",
+-					 fault & PAGE_MASK,
+-					 fault & RING_FAULT_GTTSEL_MASK ? "GGTT" : "PPGTT",
+-					 RING_FAULT_SRCID(fault),
+-					 RING_FAULT_FAULT_TYPE(fault));
+-		}
+-	}
+-}
+-
+-static void gen8_check_faults(struct drm_i915_private *dev_priv)
+-{
+-	u32 fault = I915_READ(GEN8_RING_FAULT_REG);
+-
+-	if (fault & RING_FAULT_VALID) {
+-		u32 fault_data0, fault_data1;
+-		u64 fault_addr;
+-
+-		fault_data0 = I915_READ(GEN8_FAULT_TLB_DATA0);
+-		fault_data1 = I915_READ(GEN8_FAULT_TLB_DATA1);
+-		fault_addr = ((u64)(fault_data1 & FAULT_VA_HIGH_BITS) << 44) |
+-			     ((u64)fault_data0 << 12);
+-
+-		DRM_DEBUG_DRIVER("Unexpected fault\n"
+-				 "\tAddr: 0x%08x_%08x\n"
+-				 "\tAddress space: %s\n"
+-				 "\tEngine ID: %d\n"
+-				 "\tSource ID: %d\n"
+-				 "\tType: %d\n",
+-				 upper_32_bits(fault_addr),
+-				 lower_32_bits(fault_addr),
+-				 fault_data1 & FAULT_GTT_SEL ? "GGTT" : "PPGTT",
+-				 GEN8_RING_FAULT_ENGINE_ID(fault),
+-				 RING_FAULT_SRCID(fault),
+-				 RING_FAULT_FAULT_TYPE(fault));
+-	}
+-}
+-
+-void i915_check_and_clear_faults(struct drm_i915_private *dev_priv)
+-{
+-	/* From GEN8 onwards we only have one 'All Engine Fault Register' */
+-	if (INTEL_GEN(dev_priv) >= 8)
+-		gen8_check_faults(dev_priv);
+-	else if (INTEL_GEN(dev_priv) >= 6)
+-		gen6_check_faults(dev_priv);
+-	else
+-		return;
+-
+-	i915_clear_error_registers(dev_priv, ALL_ENGINES);
+-}
+-
+ void i915_gem_suspend_gtt_mappings(struct drm_i915_private *dev_priv)
+ {
+ 	struct i915_ggtt *ggtt = &dev_priv->ggtt;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index 12856f9dd1d1..97700a37c12b 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -646,7 +646,6 @@ int gen6_ppgtt_pin(struct i915_hw_ppgtt *base);
+ void gen6_ppgtt_unpin(struct i915_hw_ppgtt *base);
+ void gen6_ppgtt_unpin_all(struct i915_hw_ppgtt *base);
+ 
+-void i915_check_and_clear_faults(struct drm_i915_private *dev_priv);
+ void i915_gem_suspend_gtt_mappings(struct drm_i915_private *dev_priv);
+ void i915_gem_restore_gtt_mappings(struct drm_i915_private *dev_priv);
+ 
+-- 
+2.17.1
+

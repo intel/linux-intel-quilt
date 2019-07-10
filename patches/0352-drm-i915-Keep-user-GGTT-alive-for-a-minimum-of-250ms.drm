@@ -1,0 +1,233 @@
+From 074809f010db532d62249f22927e24794c2bac43 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 27 May 2019 12:51:14 +0100
+Subject: [PATCH 352/733] drm/i915: Keep user GGTT alive for a minimum of 250ms
+
+Do not allow runtime pm autosuspend to remove userspace GGTT mmaps too
+quickly. For example, igt sets the autosuspend delay to 0, and so we
+immediately attempt to perform runtime suspend upon releasing the
+wakeref. Unfortunately, that involves tearing down GGTT mmaps as they
+require an active device.
+
+Override the autosuspend for GGTT mmaps, by keeping the wakeref around
+for 250ms after populating the PTE for a fresh mmap.
+
+v2: Prefer refcount_t for its under/overflow error detection
+v3: Flush the user runtime autosuspend prior to system system.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190527115114.13448-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/Kconfig.profile | 14 +++++++
+ drivers/gpu/drm/i915/i915_drv.h      |  3 ++
+ drivers/gpu/drm/i915/i915_gem.c      |  7 ++++
+ drivers/gpu/drm/i915/i915_gem_pm.c   |  1 +
+ drivers/gpu/drm/i915/intel_wakeref.c | 63 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/intel_wakeref.h | 31 ++++++++++++++
+ 6 files changed, 119 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/Kconfig.profile b/drivers/gpu/drm/i915/Kconfig.profile
+index 0e5db98da8f3..4fd1ea639d0f 100644
+--- a/drivers/gpu/drm/i915/Kconfig.profile
++++ b/drivers/gpu/drm/i915/Kconfig.profile
+@@ -1,3 +1,17 @@
++config DRM_I915_USERFAULT_AUTOSUSPEND
++	int "Runtime autosuspend delay for userspace GGTT mmaps (ms)"
++	default 250 # milliseconds
++	help
++	  On runtime suspend, as we suspend the device, we have to revoke
++	  userspace GGTT mmaps and force userspace to take a pagefault on
++	  their next access. The revocation and subsequent recreation of
++	  the GGTT mmap can be very slow and so we impose a small hysteris
++	  that complements the runtime-pm autosuspend and provides a lower
++	  floor on the autosuspend delay.
++
++	  May be 0 to disable the extra delay and solely use the device level
++	  runtime pm autosuspend delay tunable.
++
+ config DRM_I915_SPIN_REQUEST
+ 	int
+ 	default 5 # microseconds
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 764347e7cf2d..87cc80c7b626 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -875,6 +875,9 @@ struct i915_gem_mm {
+ 	 */
+ 	struct list_head userfault_list;
+ 
++	/* Manual runtime pm autosuspend delay for user GGTT mmaps */
++	struct intel_wakeref_auto userfault_wakeref;
++
+ 	/**
+ 	 * List of objects which are pending destruction.
+ 	 */
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index d3b7dac527dc..902162c04d35 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1834,6 +1834,9 @@ vm_fault_t i915_gem_fault(struct vm_fault *vmf)
+ 	assert_rpm_wakelock_held(dev_priv);
+ 	if (!i915_vma_set_userfault(vma) && !obj->userfault_count++)
+ 		list_add(&obj->userfault_link, &dev_priv->mm.userfault_list);
++	if (CONFIG_DRM_I915_USERFAULT_AUTOSUSPEND)
++		intel_wakeref_auto(&dev_priv->mm.userfault_wakeref,
++				   msecs_to_jiffies_timeout(CONFIG_DRM_I915_USERFAULT_AUTOSUSPEND));
+ 	GEM_BUG_ON(!obj->userfault_count);
+ 
+ 	i915_vma_set_ggtt_write(vma);
+@@ -4671,6 +4674,8 @@ void i915_gem_fini(struct drm_i915_private *dev_priv)
+ {
+ 	GEM_BUG_ON(dev_priv->gt.awake);
+ 
++	intel_wakeref_auto_fini(&dev_priv->mm.userfault_wakeref);
++
+ 	i915_gem_suspend_late(dev_priv);
+ 	intel_disable_gt_powersave(dev_priv);
+ 
+@@ -4746,7 +4751,9 @@ static void i915_gem_init__mm(struct drm_i915_private *i915)
+ 	INIT_LIST_HEAD(&i915->mm.unbound_list);
+ 	INIT_LIST_HEAD(&i915->mm.bound_list);
+ 	INIT_LIST_HEAD(&i915->mm.fence_list);
++
+ 	INIT_LIST_HEAD(&i915->mm.userfault_list);
++	intel_wakeref_auto_init(&i915->mm.userfault_wakeref, i915);
+ 
+ 	INIT_WORK(&i915->mm.free_work, __i915_gem_free_work);
+ }
+diff --git a/drivers/gpu/drm/i915/i915_gem_pm.c b/drivers/gpu/drm/i915/i915_gem_pm.c
+index fa9c2ebd966a..c0ad19605297 100644
+--- a/drivers/gpu/drm/i915/i915_gem_pm.c
++++ b/drivers/gpu/drm/i915/i915_gem_pm.c
+@@ -126,6 +126,7 @@ void i915_gem_suspend(struct drm_i915_private *i915)
+ {
+ 	GEM_TRACE("\n");
+ 
++	intel_wakeref_auto(&i915->mm.userfault_wakeref, 0);
+ 	flush_workqueue(i915->wq);
+ 
+ 	mutex_lock(&i915->drm.struct_mutex);
+diff --git a/drivers/gpu/drm/i915/intel_wakeref.c b/drivers/gpu/drm/i915/intel_wakeref.c
+index 91196d9612bb..c2dda5a375f0 100644
+--- a/drivers/gpu/drm/i915/intel_wakeref.c
++++ b/drivers/gpu/drm/i915/intel_wakeref.c
+@@ -73,3 +73,66 @@ void __intel_wakeref_init(struct intel_wakeref *wf, struct lock_class_key *key)
+ 	atomic_set(&wf->count, 0);
+ 	wf->wakeref = 0;
+ }
++
++static void wakeref_auto_timeout(struct timer_list *t)
++{
++	struct intel_wakeref_auto *wf = from_timer(wf, t, timer);
++	intel_wakeref_t wakeref;
++	unsigned long flags;
++
++	if (!refcount_dec_and_lock_irqsave(&wf->count, &wf->lock, &flags))
++		return;
++
++	wakeref = fetch_and_zero(&wf->wakeref);
++	spin_unlock_irqrestore(&wf->lock, flags);
++
++	intel_runtime_pm_put(wf->i915, wakeref);
++}
++
++void intel_wakeref_auto_init(struct intel_wakeref_auto *wf,
++			     struct drm_i915_private *i915)
++{
++	spin_lock_init(&wf->lock);
++	timer_setup(&wf->timer, wakeref_auto_timeout, 0);
++	refcount_set(&wf->count, 0);
++	wf->wakeref = 0;
++	wf->i915 = i915;
++}
++
++void intel_wakeref_auto(struct intel_wakeref_auto *wf, unsigned long timeout)
++{
++	unsigned long flags;
++
++	if (!timeout) {
++		if (del_timer_sync(&wf->timer))
++			wakeref_auto_timeout(&wf->timer);
++		return;
++	}
++
++	/* Our mission is that we only extend an already active wakeref */
++	assert_rpm_wakelock_held(wf->i915);
++
++	if (!refcount_inc_not_zero(&wf->count)) {
++		spin_lock_irqsave(&wf->lock, flags);
++		if (!refcount_read(&wf->count)) {
++			GEM_BUG_ON(wf->wakeref);
++			wf->wakeref = intel_runtime_pm_get_if_in_use(wf->i915);
++		}
++		refcount_inc(&wf->count);
++		spin_unlock_irqrestore(&wf->lock, flags);
++	}
++
++	/*
++	 * If we extend a pending timer, we will only get a single timer
++	 * callback and so need to cancel the local inc by running the
++	 * elided callback to keep the wf->count balanced.
++	 */
++	if (mod_timer(&wf->timer, jiffies + timeout))
++		wakeref_auto_timeout(&wf->timer);
++}
++
++void intel_wakeref_auto_fini(struct intel_wakeref_auto *wf)
++{
++	intel_wakeref_auto(wf, 0);
++	GEM_BUG_ON(wf->wakeref);
++}
+diff --git a/drivers/gpu/drm/i915/intel_wakeref.h b/drivers/gpu/drm/i915/intel_wakeref.h
+index db742291211c..8a5f85c000ce 100644
+--- a/drivers/gpu/drm/i915/intel_wakeref.h
++++ b/drivers/gpu/drm/i915/intel_wakeref.h
+@@ -9,7 +9,9 @@
+ 
+ #include <linux/atomic.h>
+ #include <linux/mutex.h>
++#include <linux/refcount.h>
+ #include <linux/stackdepot.h>
++#include <linux/timer.h>
+ 
+ struct drm_i915_private;
+ 
+@@ -130,4 +132,33 @@ intel_wakeref_active(struct intel_wakeref *wf)
+ 	return READ_ONCE(wf->wakeref);
+ }
+ 
++struct intel_wakeref_auto {
++	struct drm_i915_private *i915;
++	struct timer_list timer;
++	intel_wakeref_t wakeref;
++	spinlock_t lock;
++	refcount_t count;
++};
++
++/**
++ * intel_wakeref_auto: Delay the runtime-pm autosuspend
++ * @wf: the wakeref
++ * @timeout: relative timeout in jiffies
++ *
++ * The runtime-pm core uses a suspend delay after the last wakeref
++ * is released before triggering runtime suspend of the device. That
++ * delay is configurable via sysfs with little regard to the device
++ * characteristics. Instead, we want to tune the autosuspend based on our
++ * HW knowledge. intel_wakeref_auto() delays the sleep by the supplied
++ * timeout.
++ *
++ * Pass @timeout = 0 to cancel a previous autosuspend by executing the
++ * suspend immediately.
++ */
++void intel_wakeref_auto(struct intel_wakeref_auto *wf, unsigned long timeout);
++
++void intel_wakeref_auto_init(struct intel_wakeref_auto *wf,
++			     struct drm_i915_private *i915);
++void intel_wakeref_auto_fini(struct intel_wakeref_auto *wf);
++
+ #endif /* INTEL_WAKEREF_H */
+-- 
+2.17.1
+

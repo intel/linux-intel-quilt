@@ -1,0 +1,106 @@
+From 58633e6f60280fe06f2c742c2cbfa90401b70b8c Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Fri, 21 Jun 2019 08:07:43 +0100
+Subject: [PATCH 599/733] drm/i915: Move intel_gt_pm_init under
+ intel_gt_init_early
+
+And also rename to intel_gt_pm_init_early and make it operate on gt.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Suggested-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190621070811.7006-5-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/gt/intel_gt.c               | 3 +++
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c            | 6 +++---
+ drivers/gpu/drm/i915/gt/intel_gt_pm.h            | 3 ++-
+ drivers/gpu/drm/i915/i915_gem.c                  | 2 --
+ drivers/gpu/drm/i915/selftests/mock_gem_device.c | 1 -
+ 5 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt.c b/drivers/gpu/drm/i915/gt/intel_gt.c
+index eccb52cf37b6..f760c2e0253e 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt.c
+@@ -6,6 +6,7 @@
+ #include "i915_drv.h"
+ 
+ #include "intel_gt.h"
++#include "intel_gt_pm.h"
+ 
+ void intel_gt_init_early(struct intel_gt *gt, struct drm_i915_private *i915)
+ {
+@@ -16,4 +17,6 @@ void intel_gt_init_early(struct intel_gt *gt, struct drm_i915_private *i915)
+ 	INIT_LIST_HEAD(&gt->closed_vma);
+ 
+ 	spin_lock_init(&gt->closed_lock);
++
++	intel_gt_pm_init_early(gt);
+ }
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index 7b5967751762..6062840b5b46 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -80,10 +80,10 @@ void intel_gt_pm_put(struct drm_i915_private *i915)
+ 	intel_wakeref_put(&i915->runtime_pm, &i915->gt.wakeref, intel_gt_park);
+ }
+ 
+-void intel_gt_pm_init(struct drm_i915_private *i915)
++void intel_gt_pm_init_early(struct intel_gt *gt)
+ {
+-	intel_wakeref_init(&i915->gt.wakeref);
+-	BLOCKING_INIT_NOTIFIER_HEAD(&i915->gt.pm_notifications);
++	intel_wakeref_init(&gt->wakeref);
++	BLOCKING_INIT_NOTIFIER_HEAD(&gt->pm_notifications);
+ }
+ 
+ static bool reset_engines(struct drm_i915_private *i915)
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.h b/drivers/gpu/drm/i915/gt/intel_gt_pm.h
+index 7dd1130a19a4..b6049a907890 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.h
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.h
+@@ -10,6 +10,7 @@
+ #include <linux/types.h>
+ 
+ struct drm_i915_private;
++struct intel_gt;
+ 
+ enum {
+ 	INTEL_GT_UNPARK,
+@@ -19,7 +20,7 @@ enum {
+ void intel_gt_pm_get(struct drm_i915_private *i915);
+ void intel_gt_pm_put(struct drm_i915_private *i915);
+ 
+-void intel_gt_pm_init(struct drm_i915_private *i915);
++void intel_gt_pm_init_early(struct intel_gt *gt);
+ 
+ void intel_gt_sanitize(struct drm_i915_private *i915, bool force);
+ void intel_gt_resume(struct drm_i915_private *i915);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index fc8fd41dd32e..9de1b1e88949 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1746,8 +1746,6 @@ int i915_gem_init_early(struct drm_i915_private *dev_priv)
+ {
+ 	int err;
+ 
+-	intel_gt_pm_init(dev_priv);
+-
+ 	i915_gem_init__mm(dev_priv);
+ 	i915_gem_init__pm(dev_priv);
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/mock_gem_device.c b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+index 2b87200477f6..021ba42a3a00 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_gem_device.c
++++ b/drivers/gpu/drm/i915/selftests/mock_gem_device.c
+@@ -181,7 +181,6 @@ struct drm_i915_private *mock_gem_device(void)
+ 	mock_uncore_init(&i915->uncore);
+ 	i915_gem_init__mm(i915);
+ 	intel_gt_init_early(&i915->gt, i915);
+-	intel_gt_pm_init(i915);
+ 	atomic_inc(&i915->gt.wakeref.count); /* disable; no hw support */
+ 
+ 	init_waitqueue_head(&i915->gpu_error.wait_queue);
+-- 
+2.17.1
+

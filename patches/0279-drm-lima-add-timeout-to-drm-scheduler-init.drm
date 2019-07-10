@@ -1,0 +1,74 @@
+From 15273301e807e9d1ed47422162c1364835ab63de Mon Sep 17 00:00:00 2001
+From: Erico Nunes <nunes.erico@gmail.com>
+Date: Tue, 21 May 2019 00:42:29 +0200
+Subject: [PATCH 279/733] drm/lima: add timeout to drm scheduler init
+
+After "5918045c4ed4 drm/scheduler: rework job destruction", lima started
+to leak memory due to buffers not being destroyed after job execution in
+the drm scheduler.
+
+This started happening because the drm scheduler only destroyed buffers
+after cancelling the job timeout handler, and for lima this handler was
+never started as lima specified a MAX_SCHEDULE_TIMEOUT timeout.
+
+Lima seems to run well in its current state with a real timeout, so to
+make it more aligned with the other drivers from now on, let's use a
+real default timeout.
+
+This also fixes the observed memory leaks.
+
+The 500ms value was chosen as it is the current value for all other
+embedded gpu drivers using drm sched.
+
+Signed-off-by: Erico Nunes <nunes.erico@gmail.com>
+Signed-off-by: Qiang Yu <yuq825@gmail.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190520224229.21111-1-nunes.erico@gmail.com
+---
+ drivers/gpu/drm/lima/lima_drv.c   |  2 +-
+ drivers/gpu/drm/lima/lima_sched.c | 11 ++++-------
+ 2 files changed, 5 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index f9a281a62083..b29c26cd13b2 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -17,7 +17,7 @@
+ 
+ int lima_sched_timeout_ms;
+ 
+-MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms (0 = no timeout (default))");
++MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+ 
+ static int lima_ioctl_get_param(struct drm_device *dev, void *data, struct drm_file *file)
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 58a15479d175..4127cacac454 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -329,19 +329,16 @@ static void lima_sched_error_work(struct work_struct *work)
+ 
+ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ {
+-	long timeout;
+-
+-	if (lima_sched_timeout_ms <= 0)
+-		timeout = MAX_SCHEDULE_TIMEOUT;
+-	else
+-		timeout = msecs_to_jiffies(lima_sched_timeout_ms);
++	unsigned int timeout = lima_sched_timeout_ms > 0 ?
++			       lima_sched_timeout_ms : 500;
+ 
+ 	pipe->fence_context = dma_fence_context_alloc(1);
+ 	spin_lock_init(&pipe->fence_lock);
+ 
+ 	INIT_WORK(&pipe->error_work, lima_sched_error_work);
+ 
+-	return drm_sched_init(&pipe->base, &lima_sched_ops, 1, 0, timeout, name);
++	return drm_sched_init(&pipe->base, &lima_sched_ops, 1, 0,
++			      msecs_to_jiffies(timeout), name);
+ }
+ 
+ void lima_sched_pipe_fini(struct lima_sched_pipe *pipe)
+-- 
+2.17.1
+

@@ -1,0 +1,1364 @@
+From 05158042e228ba91602ed8623d4b51af0baa2f27 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 11 Jun 2019 10:12:37 +0100
+Subject: [PATCH 490/733] drm/i915: Pull kref into i915_address_space
+
+Make the kref common to both derived structs (i915_ggtt and i915_ppgtt)
+so that we can safely reference count an abstract ctx->vm address space.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Matthew Auld
+Link: https://patchwork.freedesktop.org/patch/msgid/20190611091238.15808-1-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/gem/i915_gem_client_blt.c    |   4 +-
+ drivers/gpu/drm/i915/gem/i915_gem_context.c   | 132 +++++++++---------
+ .../gpu/drm/i915/gem/i915_gem_context_types.h |   6 +-
+ .../gpu/drm/i915/gem/i915_gem_execbuffer.c    |   4 +-
+ .../gpu/drm/i915/gem/i915_gem_object_blt.c    |   4 +-
+ drivers/gpu/drm/i915/gem/i915_gem_userptr.c   |   6 +-
+ .../gpu/drm/i915/gem/selftests/huge_pages.c   |  26 ++--
+ .../drm/i915/gem/selftests/i915_gem_context.c |  36 +++--
+ .../gpu/drm/i915/gem/selftests/mock_context.c |   3 +-
+ drivers/gpu/drm/i915/gt/intel_lrc.c           |   9 +-
+ drivers/gpu/drm/i915/gt/intel_ringbuffer.c    |  26 ++--
+ drivers/gpu/drm/i915/gt/selftest_hangcheck.c  |   7 +-
+ drivers/gpu/drm/i915/gt/selftest_lrc.c        |   2 +-
+ .../gpu/drm/i915/gt/selftest_workarounds.c    |  10 +-
+ drivers/gpu/drm/i915/gvt/scheduler.c          |   8 +-
+ drivers/gpu/drm/i915/i915_debugfs.c           |   2 +-
+ drivers/gpu/drm/i915/i915_drv.h               |   6 -
+ drivers/gpu/drm/i915/i915_gem_gtt.c           |  35 ++---
+ drivers/gpu/drm/i915/i915_gem_gtt.h           |  27 ++--
+ drivers/gpu/drm/i915/i915_gpu_error.c         |   2 +-
+ drivers/gpu/drm/i915/i915_trace.h             |   2 +-
+ drivers/gpu/drm/i915/selftests/i915_gem_gtt.c |  10 +-
+ drivers/gpu/drm/i915/selftests/i915_request.c |   3 +-
+ drivers/gpu/drm/i915/selftests/i915_vma.c     |   4 +-
+ drivers/gpu/drm/i915/selftests/igt_spinner.c  |   5 +-
+ drivers/gpu/drm/i915/selftests/mock_gtt.c     |   1 -
+ 26 files changed, 188 insertions(+), 192 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_client_blt.c b/drivers/gpu/drm/i915/gem/i915_gem_client_blt.c
+index 4899ca1dd76c..f253ec5765ad 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_client_blt.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_client_blt.c
+@@ -250,13 +250,11 @@ int i915_gem_schedule_fill_pages_blt(struct drm_i915_gem_object *obj,
+ {
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+ 	struct i915_gem_context *ctx = ce->gem_context;
+-	struct i915_address_space *vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct clear_pages_work *work;
+ 	struct i915_sleeve *sleeve;
+ 	int err;
+ 
+-	vm = ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
+-
+ 	sleeve = create_sleeve(vm, obj, pages, page_sizes);
+ 	if (IS_ERR(sleeve))
+ 		return PTR_ERR(sleeve);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context.c b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+index dd9aa77e38ae..75b0d1dbb215 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+@@ -309,7 +309,8 @@ static void i915_gem_context_free(struct i915_gem_context *ctx)
+ 	GEM_BUG_ON(!i915_gem_context_is_closed(ctx));
+ 
+ 	release_hw_id(ctx);
+-	i915_ppgtt_put(ctx->ppgtt);
++	if (ctx->vm)
++		i915_vm_put(ctx->vm);
+ 
+ 	free_engines(rcu_access_pointer(ctx->engines));
+ 	mutex_destroy(&ctx->engines_mutex);
+@@ -397,7 +398,7 @@ static void context_close(struct i915_gem_context *ctx)
+ }
+ 
+ static u32 default_desc_template(const struct drm_i915_private *i915,
+-				 const struct i915_hw_ppgtt *ppgtt)
++				 const struct i915_address_space *vm)
+ {
+ 	u32 address_mode;
+ 	u32 desc;
+@@ -405,7 +406,7 @@ static u32 default_desc_template(const struct drm_i915_private *i915,
+ 	desc = GEN8_CTX_VALID | GEN8_CTX_PRIVILEGE;
+ 
+ 	address_mode = INTEL_LEGACY_32B_CONTEXT;
+-	if (ppgtt && i915_vm_is_4lvl(&ppgtt->vm))
++	if (vm && i915_vm_is_4lvl(vm))
+ 		address_mode = INTEL_LEGACY_64B_CONTEXT;
+ 	desc |= address_mode << GEN8_CTX_ADDRESSING_MODE_SHIFT;
+ 
+@@ -421,7 +422,7 @@ static u32 default_desc_template(const struct drm_i915_private *i915,
+ }
+ 
+ static struct i915_gem_context *
+-__create_context(struct drm_i915_private *dev_priv)
++__create_context(struct drm_i915_private *i915)
+ {
+ 	struct i915_gem_context *ctx;
+ 	struct i915_gem_engines *e;
+@@ -433,8 +434,8 @@ __create_context(struct drm_i915_private *dev_priv)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	kref_init(&ctx->ref);
+-	list_add_tail(&ctx->link, &dev_priv->contexts.list);
+-	ctx->i915 = dev_priv;
++	list_add_tail(&ctx->link, &i915->contexts.list);
++	ctx->i915 = i915;
+ 	ctx->sched.priority = I915_USER_PRIORITY(I915_PRIORITY_NORMAL);
+ 	mutex_init(&ctx->mutex);
+ 
+@@ -452,14 +453,14 @@ __create_context(struct drm_i915_private *dev_priv)
+ 	/* NB: Mark all slices as needing a remap so that when the context first
+ 	 * loads it will restore whatever remap state already exists. If there
+ 	 * is no remap info, it will be a NOP. */
+-	ctx->remap_slice = ALL_L3_SLICES(dev_priv);
++	ctx->remap_slice = ALL_L3_SLICES(i915);
+ 
+ 	i915_gem_context_set_bannable(ctx);
+ 	i915_gem_context_set_recoverable(ctx);
+ 
+ 	ctx->ring_size = 4 * PAGE_SIZE;
+ 	ctx->desc_template =
+-		default_desc_template(dev_priv, dev_priv->mm.aliasing_ppgtt);
++		default_desc_template(i915, &i915->mm.aliasing_ppgtt->vm);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(ctx->hang_timestamp); i++)
+ 		ctx->hang_timestamp[i] = jiffies - CONTEXT_FAST_HANG_JIFFIES;
+@@ -471,26 +472,26 @@ __create_context(struct drm_i915_private *dev_priv)
+ 	return ERR_PTR(err);
+ }
+ 
+-static struct i915_hw_ppgtt *
+-__set_ppgtt(struct i915_gem_context *ctx, struct i915_hw_ppgtt *ppgtt)
++static struct i915_address_space *
++__set_ppgtt(struct i915_gem_context *ctx, struct i915_address_space *vm)
+ {
+-	struct i915_hw_ppgtt *old = ctx->ppgtt;
++	struct i915_address_space *old = ctx->vm;
+ 
+-	ctx->ppgtt = i915_ppgtt_get(ppgtt);
+-	ctx->desc_template = default_desc_template(ctx->i915, ppgtt);
++	ctx->vm = i915_vm_get(vm);
++	ctx->desc_template = default_desc_template(ctx->i915, vm);
+ 
+ 	return old;
+ }
+ 
+ static void __assign_ppgtt(struct i915_gem_context *ctx,
+-			   struct i915_hw_ppgtt *ppgtt)
++			   struct i915_address_space *vm)
+ {
+-	if (ppgtt == ctx->ppgtt)
++	if (vm == ctx->vm)
+ 		return;
+ 
+-	ppgtt = __set_ppgtt(ctx, ppgtt);
+-	if (ppgtt)
+-		i915_ppgtt_put(ppgtt);
++	vm = __set_ppgtt(ctx, vm);
++	if (vm)
++		i915_vm_put(vm);
+ }
+ 
+ static struct i915_gem_context *
+@@ -522,8 +523,8 @@ i915_gem_create_context(struct drm_i915_private *dev_priv, unsigned int flags)
+ 			return ERR_CAST(ppgtt);
+ 		}
+ 
+-		__assign_ppgtt(ctx, ppgtt);
+-		i915_ppgtt_put(ppgtt);
++		__assign_ppgtt(ctx, &ppgtt->vm);
++		i915_vm_put(&ppgtt->vm);
+ 	}
+ 
+ 	if (flags & I915_CONTEXT_CREATE_FLAGS_SINGLE_TIMELINE) {
+@@ -723,7 +724,7 @@ static int context_idr_cleanup(int id, void *p, void *data)
+ 
+ static int vm_idr_cleanup(int id, void *p, void *data)
+ {
+-	i915_ppgtt_put(p);
++	i915_vm_put(p);
+ 	return 0;
+ }
+ 
+@@ -733,8 +734,8 @@ static int gem_context_register(struct i915_gem_context *ctx,
+ 	int ret;
+ 
+ 	ctx->file_priv = fpriv;
+-	if (ctx->ppgtt)
+-		ctx->ppgtt->vm.file = fpriv;
++	if (ctx->vm)
++		ctx->vm->file = fpriv;
+ 
+ 	ctx->pid = get_task_pid(current, PIDTYPE_PID);
+ 	ctx->name = kasprintf(GFP_KERNEL, "%s[%d]",
+@@ -844,7 +845,7 @@ int i915_gem_vm_create_ioctl(struct drm_device *dev, void *data,
+ 	if (err)
+ 		goto err_put;
+ 
+-	err = idr_alloc(&file_priv->vm_idr, ppgtt, 0, 0, GFP_KERNEL);
++	err = idr_alloc(&file_priv->vm_idr, &ppgtt->vm, 0, 0, GFP_KERNEL);
+ 	if (err < 0)
+ 		goto err_unlock;
+ 
+@@ -858,7 +859,7 @@ int i915_gem_vm_create_ioctl(struct drm_device *dev, void *data,
+ err_unlock:
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+ err_put:
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ 	return err;
+ }
+ 
+@@ -867,7 +868,7 @@ int i915_gem_vm_destroy_ioctl(struct drm_device *dev, void *data,
+ {
+ 	struct drm_i915_file_private *file_priv = file->driver_priv;
+ 	struct drm_i915_gem_vm_control *args = data;
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 	int err;
+ 	u32 id;
+ 
+@@ -885,13 +886,13 @@ int i915_gem_vm_destroy_ioctl(struct drm_device *dev, void *data,
+ 	if (err)
+ 		return err;
+ 
+-	ppgtt = idr_remove(&file_priv->vm_idr, id);
++	vm = idr_remove(&file_priv->vm_idr, id);
+ 
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+-	if (!ppgtt)
++	if (!vm)
+ 		return -ENOENT;
+ 
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(vm);
+ 	return 0;
+ }
+ 
+@@ -981,10 +982,10 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
+ 		     struct i915_gem_context *ctx,
+ 		     struct drm_i915_gem_context_param *args)
+ {
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 	int ret;
+ 
+-	if (!ctx->ppgtt)
++	if (!ctx->vm)
+ 		return -ENODEV;
+ 
+ 	/* XXX rcu acquire? */
+@@ -992,19 +993,19 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
+ 	if (ret)
+ 		return ret;
+ 
+-	ppgtt = i915_ppgtt_get(ctx->ppgtt);
++	vm = i915_vm_get(ctx->vm);
+ 	mutex_unlock(&ctx->i915->drm.struct_mutex);
+ 
+ 	ret = mutex_lock_interruptible(&file_priv->vm_idr_lock);
+ 	if (ret)
+ 		goto err_put;
+ 
+-	ret = idr_alloc(&file_priv->vm_idr, ppgtt, 0, 0, GFP_KERNEL);
++	ret = idr_alloc(&file_priv->vm_idr, vm, 0, 0, GFP_KERNEL);
+ 	GEM_BUG_ON(!ret);
+ 	if (ret < 0)
+ 		goto err_unlock;
+ 
+-	i915_ppgtt_get(ppgtt);
++	i915_vm_get(vm);
+ 
+ 	args->size = 0;
+ 	args->value = ret;
+@@ -1013,29 +1014,30 @@ static int get_ppgtt(struct drm_i915_file_private *file_priv,
+ err_unlock:
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+ err_put:
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(vm);
+ 	return ret;
+ }
+ 
+ static void set_ppgtt_barrier(void *data)
+ {
+-	struct i915_hw_ppgtt *old = data;
++	struct i915_address_space *old = data;
+ 
+-	if (INTEL_GEN(old->vm.i915) < 8)
+-		gen6_ppgtt_unpin_all(old);
++	if (INTEL_GEN(old->i915) < 8)
++		gen6_ppgtt_unpin_all(i915_vm_to_ppgtt(old));
+ 
+-	i915_ppgtt_put(old);
++	i915_vm_put(old);
+ }
+ 
+ static int emit_ppgtt_update(struct i915_request *rq, void *data)
+ {
+-	struct i915_hw_ppgtt *ppgtt = rq->gem_context->ppgtt;
++	struct i915_address_space *vm = rq->gem_context->vm;
+ 	struct intel_engine_cs *engine = rq->engine;
+ 	u32 base = engine->mmio_base;
+ 	u32 *cs;
+ 	int i;
+ 
+-	if (i915_vm_is_4lvl(&ppgtt->vm)) {
++	if (i915_vm_is_4lvl(vm)) {
++		struct i915_hw_ppgtt *ppgtt = i915_vm_to_ppgtt(vm);
+ 		const dma_addr_t pd_daddr = px_dma(&ppgtt->pml4);
+ 
+ 		cs = intel_ring_begin(rq, 6);
+@@ -1052,6 +1054,8 @@ static int emit_ppgtt_update(struct i915_request *rq, void *data)
+ 		*cs++ = MI_NOOP;
+ 		intel_ring_advance(rq, cs);
+ 	} else if (HAS_LOGICAL_RING_CONTEXTS(engine->i915)) {
++		struct i915_hw_ppgtt *ppgtt = i915_vm_to_ppgtt(vm);
++
+ 		cs = intel_ring_begin(rq, 4 * GEN8_3LVL_PDPES + 2);
+ 		if (IS_ERR(cs))
+ 			return PTR_ERR(cs);
+@@ -1069,7 +1073,7 @@ static int emit_ppgtt_update(struct i915_request *rq, void *data)
+ 		intel_ring_advance(rq, cs);
+ 	} else {
+ 		/* ppGTT is not part of the legacy context image */
+-		gen6_ppgtt_pin(ppgtt);
++		gen6_ppgtt_pin(i915_vm_to_ppgtt(vm));
+ 	}
+ 
+ 	return 0;
+@@ -1087,13 +1091,13 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 		     struct i915_gem_context *ctx,
+ 		     struct drm_i915_gem_context_param *args)
+ {
+-	struct i915_hw_ppgtt *ppgtt, *old;
++	struct i915_address_space *vm, *old;
+ 	int err;
+ 
+ 	if (args->size)
+ 		return -EINVAL;
+ 
+-	if (!ctx->ppgtt)
++	if (!ctx->vm)
+ 		return -ENODEV;
+ 
+ 	if (upper_32_bits(args->value))
+@@ -1103,18 +1107,18 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 	if (err)
+ 		return err;
+ 
+-	ppgtt = idr_find(&file_priv->vm_idr, args->value);
+-	if (ppgtt)
+-		i915_ppgtt_get(ppgtt);
++	vm = idr_find(&file_priv->vm_idr, args->value);
++	if (vm)
++		i915_vm_get(vm);
+ 	mutex_unlock(&file_priv->vm_idr_lock);
+-	if (!ppgtt)
++	if (!vm)
+ 		return -ENOENT;
+ 
+ 	err = mutex_lock_interruptible(&ctx->i915->drm.struct_mutex);
+ 	if (err)
+ 		goto out;
+ 
+-	if (ppgtt == ctx->ppgtt)
++	if (vm == ctx->vm)
+ 		goto unlock;
+ 
+ 	/* Teardown the existing obj:vma cache, it will have to be rebuilt. */
+@@ -1122,7 +1126,7 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 	lut_close(ctx);
+ 	mutex_unlock(&ctx->mutex);
+ 
+-	old = __set_ppgtt(ctx, ppgtt);
++	old = __set_ppgtt(ctx, vm);
+ 
+ 	/*
+ 	 * We need to flush any requests using the current ppgtt before
+@@ -1135,16 +1139,16 @@ static int set_ppgtt(struct drm_i915_file_private *file_priv,
+ 				   set_ppgtt_barrier,
+ 				   old);
+ 	if (err) {
+-		ctx->ppgtt = old;
++		ctx->vm = old;
+ 		ctx->desc_template = default_desc_template(ctx->i915, old);
+-		i915_ppgtt_put(ppgtt);
++		i915_vm_put(vm);
+ 	}
+ 
+ unlock:
+ 	mutex_unlock(&ctx->i915->drm.struct_mutex);
+ 
+ out:
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(vm);
+ 	return err;
+ }
+ 
+@@ -2033,15 +2037,15 @@ static int clone_timeline(struct i915_gem_context *dst,
+ static int clone_vm(struct i915_gem_context *dst,
+ 		    struct i915_gem_context *src)
+ {
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 
+ 	rcu_read_lock();
+ 	do {
+-		ppgtt = READ_ONCE(src->ppgtt);
+-		if (!ppgtt)
++		vm = READ_ONCE(src->vm);
++		if (!vm)
+ 			break;
+ 
+-		if (!kref_get_unless_zero(&ppgtt->ref))
++		if (!kref_get_unless_zero(&vm->ref))
+ 			continue;
+ 
+ 		/*
+@@ -2059,16 +2063,16 @@ static int clone_vm(struct i915_gem_context *dst,
+ 		 * it cannot be reallocated elsewhere.
+ 		 */
+ 
+-		if (ppgtt == READ_ONCE(src->ppgtt))
++		if (vm == READ_ONCE(src->vm))
+ 			break;
+ 
+-		i915_ppgtt_put(ppgtt);
++		i915_vm_put(vm);
+ 	} while (1);
+ 	rcu_read_unlock();
+ 
+-	if (ppgtt) {
+-		__assign_ppgtt(dst, ppgtt);
+-		i915_ppgtt_put(ppgtt);
++	if (vm) {
++		__assign_ppgtt(dst, vm);
++		i915_vm_put(vm);
+ 	}
+ 
+ 	return 0;
+@@ -2293,8 +2297,8 @@ int i915_gem_context_getparam_ioctl(struct drm_device *dev, void *data,
+ 
+ 	case I915_CONTEXT_PARAM_GTT_SIZE:
+ 		args->size = 0;
+-		if (ctx->ppgtt)
+-			args->value = ctx->ppgtt->vm.total;
++		if (ctx->vm)
++			args->value = ctx->vm->total;
+ 		else if (to_i915(dev)->mm.aliasing_ppgtt)
+ 			args->value = to_i915(dev)->mm.aliasing_ppgtt->vm.total;
+ 		else
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context_types.h b/drivers/gpu/drm/i915/gem/i915_gem_context_types.h
+index 3db7448b9732..cc513410eeef 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context_types.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context_types.h
+@@ -25,7 +25,7 @@ struct pid;
+ 
+ struct drm_i915_private;
+ struct drm_i915_file_private;
+-struct i915_hw_ppgtt;
++struct i915_address_space;
+ struct i915_timeline;
+ struct intel_ring;
+ 
+@@ -80,7 +80,7 @@ struct i915_gem_context {
+ 	struct i915_timeline *timeline;
+ 
+ 	/**
+-	 * @ppgtt: unique address space (GTT)
++	 * @vm: unique address space (GTT)
+ 	 *
+ 	 * In full-ppgtt mode, each context has its own address space ensuring
+ 	 * complete seperation of one client from all others.
+@@ -88,7 +88,7 @@ struct i915_gem_context {
+ 	 * In other modes, this is a NULL pointer with the expectation that
+ 	 * the caller uses the shared global GTT.
+ 	 */
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 
+ 	/**
+ 	 * @pid: process id of creator
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index 2c4f3229361d..528eea44dccf 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -723,8 +723,8 @@ static int eb_select_context(struct i915_execbuffer *eb)
+ 		return -ENOENT;
+ 
+ 	eb->gem_context = ctx;
+-	if (ctx->ppgtt) {
+-		eb->vm = &ctx->ppgtt->vm;
++	if (ctx->vm) {
++		eb->vm = ctx->vm;
+ 		eb->invalid_flags |= EXEC_OBJECT_NEEDS_GTT;
+ 	} else {
+ 		eb->vm = &eb->i915->ggtt.vm;
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_object_blt.c b/drivers/gpu/drm/i915/gem/i915_gem_object_blt.c
+index fc8ee7ef3d69..cb42e3a312e2 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object_blt.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object_blt.c
+@@ -49,14 +49,12 @@ int i915_gem_object_fill_blt(struct drm_i915_gem_object *obj,
+ {
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+ 	struct i915_gem_context *ctx = ce->gem_context;
+-	struct i915_address_space *vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct i915_request *rq;
+ 	struct i915_vma *vma;
+ 	int err;
+ 
+ 	/* XXX: ce->vm please */
+-	vm = ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
+-
+ 	vma = i915_vma_instance(obj, vm, NULL);
+ 	if (IS_ERR(vma))
+ 		return PTR_ERR(vma);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_userptr.c b/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
+index cfa990edb351..528b61678334 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
+@@ -768,14 +768,14 @@ i915_gem_userptr_ioctl(struct drm_device *dev,
+ 		return -EFAULT;
+ 
+ 	if (args->flags & I915_USERPTR_READ_ONLY) {
+-		struct i915_hw_ppgtt *ppgtt;
++		struct i915_address_space *vm;
+ 
+ 		/*
+ 		 * On almost all of the older hw, we cannot tell the GPU that
+ 		 * a page is readonly.
+ 		 */
+-		ppgtt = dev_priv->kernel_context->ppgtt;
+-		if (!ppgtt || !ppgtt->vm.has_read_only)
++		vm = dev_priv->kernel_context->vm;
++		if (!vm || !vm->has_read_only)
+ 			return -ENODEV;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/i915/gem/selftests/huge_pages.c b/drivers/gpu/drm/i915/gem/selftests/huge_pages.c
+index ec2985c0a92e..232d5cf4396c 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/huge_pages.c
++++ b/drivers/gpu/drm/i915/gem/selftests/huge_pages.c
+@@ -1038,8 +1038,7 @@ static int __igt_write_huge(struct i915_gem_context *ctx,
+ 			    u32 dword, u32 val)
+ {
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	unsigned int flags = PIN_USER | PIN_OFFSET_FIXED;
+ 	struct i915_vma *vma;
+ 	int err;
+@@ -1092,8 +1091,7 @@ static int igt_write_huge(struct i915_gem_context *ctx,
+ 			  struct drm_i915_gem_object *obj)
+ {
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	static struct intel_engine_cs *engines[I915_NUM_ENGINES];
+ 	struct intel_engine_cs *engine;
+ 	I915_RND_STATE(prng);
+@@ -1419,7 +1417,7 @@ static int igt_ppgtt_pin_update(void *arg)
+ 	struct i915_gem_context *ctx = arg;
+ 	struct drm_i915_private *dev_priv = ctx->i915;
+ 	unsigned long supported = INTEL_INFO(dev_priv)->page_sizes;
+-	struct i915_hw_ppgtt *ppgtt = ctx->ppgtt;
++	struct i915_address_space *vm = ctx->vm;
+ 	struct drm_i915_gem_object *obj;
+ 	struct i915_vma *vma;
+ 	unsigned int flags = PIN_USER | PIN_OFFSET_FIXED;
+@@ -1434,7 +1432,7 @@ static int igt_ppgtt_pin_update(void *arg)
+ 	 * huge-gtt-pages.
+ 	 */
+ 
+-	if (!ppgtt || !i915_vm_is_4lvl(&ppgtt->vm)) {
++	if (!vm || !i915_vm_is_4lvl(vm)) {
+ 		pr_info("48b PPGTT not supported, skipping\n");
+ 		return 0;
+ 	}
+@@ -1449,7 +1447,7 @@ static int igt_ppgtt_pin_update(void *arg)
+ 		if (IS_ERR(obj))
+ 			return PTR_ERR(obj);
+ 
+-		vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
++		vma = i915_vma_instance(obj, vm, NULL);
+ 		if (IS_ERR(vma)) {
+ 			err = PTR_ERR(vma);
+ 			goto out_put;
+@@ -1503,7 +1501,7 @@ static int igt_ppgtt_pin_update(void *arg)
+ 	if (IS_ERR(obj))
+ 		return PTR_ERR(obj);
+ 
+-	vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, vm, NULL);
+ 	if (IS_ERR(vma)) {
+ 		err = PTR_ERR(vma);
+ 		goto out_put;
+@@ -1541,8 +1539,7 @@ static int igt_tmpfs_fallback(void *arg)
+ 	struct i915_gem_context *ctx = arg;
+ 	struct drm_i915_private *i915 = ctx->i915;
+ 	struct vfsmount *gemfs = i915->mm.gemfs;
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct drm_i915_gem_object *obj;
+ 	struct i915_vma *vma;
+ 	u32 *vaddr;
+@@ -1599,8 +1596,7 @@ static int igt_shrink_thp(void *arg)
+ {
+ 	struct i915_gem_context *ctx = arg;
+ 	struct drm_i915_private *i915 = ctx->i915;
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct drm_i915_gem_object *obj;
+ 	struct i915_vma *vma;
+ 	unsigned int flags = PIN_USER;
+@@ -1721,7 +1717,7 @@ int i915_gem_huge_page_mock_selftests(void)
+ 	err = i915_subtests(tests, ppgtt);
+ 
+ out_close:
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ 
+ out_unlock:
+ 	mutex_unlock(&dev_priv->drm.struct_mutex);
+@@ -1766,8 +1762,8 @@ int i915_gem_huge_page_live_selftests(struct drm_i915_private *dev_priv)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (ctx->ppgtt)
+-		ctx->ppgtt->vm.scrub_64K = true;
++	if (ctx->vm)
++		ctx->vm->scrub_64K = true;
+ 
+ 	err = i915_subtests(tests, ctx);
+ 
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+index 41105f6ed206..74b0e5871c4b 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_context.c
+@@ -248,8 +248,7 @@ static int gpu_fill(struct drm_i915_gem_object *obj,
+ 		    unsigned int dw)
+ {
+ 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct i915_request *rq;
+ 	struct i915_vma *vma;
+ 	struct i915_vma *batch;
+@@ -438,8 +437,7 @@ create_test_object(struct i915_gem_context *ctx,
+ 		   struct list_head *objects)
+ {
+ 	struct drm_i915_gem_object *obj;
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &ctx->i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &ctx->i915->ggtt.vm;
+ 	u64 size;
+ 	int err;
+ 
+@@ -541,7 +539,7 @@ static int igt_ctx_exec(void *arg)
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+ 				       ndwords, dw, max_dwords(obj),
+ 				       engine->name, ctx->hw_id,
+-				       yesno(!!ctx->ppgtt), err);
++				       yesno(!!ctx->vm), err);
+ 				goto out_unlock;
+ 			}
+ 
+@@ -612,7 +610,7 @@ static int igt_shared_ctx_exec(void *arg)
+ 		goto out_unlock;
+ 	}
+ 
+-	if (!parent->ppgtt) { /* not full-ppgtt; nothing to share */
++	if (!parent->vm) { /* not full-ppgtt; nothing to share */
+ 		err = 0;
+ 		goto out_unlock;
+ 	}
+@@ -643,7 +641,7 @@ static int igt_shared_ctx_exec(void *arg)
+ 				goto out_test;
+ 			}
+ 
+-			__assign_ppgtt(ctx, parent->ppgtt);
++			__assign_ppgtt(ctx, parent->vm);
+ 
+ 			if (!obj) {
+ 				obj = create_test_object(parent, file, &objects);
+@@ -661,7 +659,7 @@ static int igt_shared_ctx_exec(void *arg)
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+ 				       ndwords, dw, max_dwords(obj),
+ 				       engine->name, ctx->hw_id,
+-				       yesno(!!ctx->ppgtt), err);
++				       yesno(!!ctx->vm), err);
+ 				kernel_context_close(ctx);
+ 				goto out_test;
+ 			}
+@@ -758,7 +756,7 @@ emit_rpcs_query(struct drm_i915_gem_object *obj,
+ 
+ 	GEM_BUG_ON(!intel_engine_can_store_dword(ce->engine));
+ 
+-	vma = i915_vma_instance(obj, &ce->gem_context->ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, ce->gem_context->vm, NULL);
+ 	if (IS_ERR(vma))
+ 		return PTR_ERR(vma);
+ 
+@@ -1176,8 +1174,8 @@ static int igt_ctx_readonly(void *arg)
+ {
+ 	struct drm_i915_private *i915 = arg;
+ 	struct drm_i915_gem_object *obj = NULL;
++	struct i915_address_space *vm;
+ 	struct i915_gem_context *ctx;
+-	struct i915_hw_ppgtt *ppgtt;
+ 	unsigned long idx, ndwords, dw;
+ 	struct igt_live_test t;
+ 	struct drm_file *file;
+@@ -1208,8 +1206,8 @@ static int igt_ctx_readonly(void *arg)
+ 		goto out_unlock;
+ 	}
+ 
+-	ppgtt = ctx->ppgtt ?: i915->mm.aliasing_ppgtt;
+-	if (!ppgtt || !ppgtt->vm.has_read_only) {
++	vm = ctx->vm ?: &i915->mm.aliasing_ppgtt->vm;
++	if (!vm || !vm->has_read_only) {
+ 		err = 0;
+ 		goto out_unlock;
+ 	}
+@@ -1244,7 +1242,7 @@ static int igt_ctx_readonly(void *arg)
+ 				pr_err("Failed to fill dword %lu [%lu/%lu] with gpu (%s) in ctx %u [full-ppgtt? %s], err=%d\n",
+ 				       ndwords, dw, max_dwords(obj),
+ 				       engine->name, ctx->hw_id,
+-				       yesno(!!ctx->ppgtt), err);
++				       yesno(!!ctx->vm), err);
+ 				goto out_unlock;
+ 			}
+ 
+@@ -1288,7 +1286,7 @@ static int igt_ctx_readonly(void *arg)
+ static int check_scratch(struct i915_gem_context *ctx, u64 offset)
+ {
+ 	struct drm_mm_node *node =
+-		__drm_mm_interval_first(&ctx->ppgtt->vm.mm,
++		__drm_mm_interval_first(&ctx->vm->mm,
+ 					offset, offset + sizeof(u32) - 1);
+ 	if (!node || node->start > offset)
+ 		return 0;
+@@ -1336,7 +1334,7 @@ static int write_to_scratch(struct i915_gem_context *ctx,
+ 	__i915_gem_object_flush_map(obj, 0, 64);
+ 	i915_gem_object_unpin_map(obj);
+ 
+-	vma = i915_vma_instance(obj, &ctx->ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, ctx->vm, NULL);
+ 	if (IS_ERR(vma)) {
+ 		err = PTR_ERR(vma);
+ 		goto err;
+@@ -1433,7 +1431,7 @@ static int read_from_scratch(struct i915_gem_context *ctx,
+ 	i915_gem_object_flush_map(obj);
+ 	i915_gem_object_unpin_map(obj);
+ 
+-	vma = i915_vma_instance(obj, &ctx->ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, ctx->vm, NULL);
+ 	if (IS_ERR(vma)) {
+ 		err = PTR_ERR(vma);
+ 		goto err;
+@@ -1542,11 +1540,11 @@ static int igt_vm_isolation(void *arg)
+ 	}
+ 
+ 	/* We can only test vm isolation, if the vm are distinct */
+-	if (ctx_a->ppgtt == ctx_b->ppgtt)
++	if (ctx_a->vm == ctx_b->vm)
+ 		goto out_unlock;
+ 
+-	vm_total = ctx_a->ppgtt->vm.total;
+-	GEM_BUG_ON(ctx_b->ppgtt->vm.total != vm_total);
++	vm_total = ctx_a->vm->total;
++	GEM_BUG_ON(ctx_b->vm->total != vm_total);
+ 	vm_total -= I915_GTT_PAGE_SIZE;
+ 
+ 	wakeref = intel_runtime_pm_get(i915);
+diff --git a/drivers/gpu/drm/i915/gem/selftests/mock_context.c b/drivers/gpu/drm/i915/gem/selftests/mock_context.c
+index 6578f2f6c3f8..82371c60d4aa 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/mock_context.c
++++ b/drivers/gpu/drm/i915/gem/selftests/mock_context.c
+@@ -48,7 +48,8 @@ mock_context(struct drm_i915_private *i915,
+ 		if (!ppgtt)
+ 			goto err_put;
+ 
+-		__set_ppgtt(ctx, ppgtt);
++		__set_ppgtt(ctx, &ppgtt->vm);
++		i915_vm_put(&ppgtt->vm);
+ 	}
+ 
+ 	return ctx;
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 497ac036c4a9..579d605fbfc3 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1505,7 +1505,7 @@ __execlists_context_pin(struct intel_context *ce,
+ 	void *vaddr;
+ 	int ret;
+ 
+-	GEM_BUG_ON(!ce->gem_context->ppgtt);
++	GEM_BUG_ON(!ce->gem_context->vm);
+ 
+ 	ret = execlists_context_deferred_alloc(ce, engine);
+ 	if (ret)
+@@ -1621,7 +1621,8 @@ static int gen8_emit_init_breadcrumb(struct i915_request *rq)
+ static int emit_pdps(struct i915_request *rq)
+ {
+ 	const struct intel_engine_cs * const engine = rq->engine;
+-	struct i915_hw_ppgtt * const ppgtt = rq->gem_context->ppgtt;
++	struct i915_hw_ppgtt * const ppgtt =
++		i915_vm_to_ppgtt(rq->gem_context->vm);
+ 	int err, i;
+ 	u32 *cs;
+ 
+@@ -1694,7 +1695,7 @@ static int execlists_request_alloc(struct i915_request *request)
+ 	 */
+ 
+ 	/* Unconditionally invalidate GPU caches and TLBs. */
+-	if (i915_vm_is_4lvl(&request->gem_context->ppgtt->vm))
++	if (i915_vm_is_4lvl(request->gem_context->vm))
+ 		ret = request->engine->emit_flush(request, EMIT_INVALIDATE);
+ 	else
+ 		ret = emit_pdps(request);
+@@ -2824,7 +2825,7 @@ static void execlists_init_reg_state(u32 *regs,
+ 				     struct intel_engine_cs *engine,
+ 				     struct intel_ring *ring)
+ {
+-	struct i915_hw_ppgtt *ppgtt = ce->gem_context->ppgtt;
++	struct i915_hw_ppgtt *ppgtt = i915_vm_to_ppgtt(ce->gem_context->vm);
+ 	bool rcs = engine->class == RENDER_CLASS;
+ 	u32 base = engine->mmio_base;
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+index ff58d658e3e2..6369cc5e22b4 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
++++ b/drivers/gpu/drm/i915/gt/intel_ringbuffer.c
+@@ -1330,23 +1330,23 @@ static void ring_context_destroy(struct kref *ref)
+ 
+ static int __context_pin_ppgtt(struct i915_gem_context *ctx)
+ {
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 	int err = 0;
+ 
+-	ppgtt = ctx->ppgtt ?: ctx->i915->mm.aliasing_ppgtt;
+-	if (ppgtt)
+-		err = gen6_ppgtt_pin(ppgtt);
++	vm = ctx->vm ?: &ctx->i915->mm.aliasing_ppgtt->vm;
++	if (vm)
++		err = gen6_ppgtt_pin(i915_vm_to_ppgtt((vm)));
+ 
+ 	return err;
+ }
+ 
+ static void __context_unpin_ppgtt(struct i915_gem_context *ctx)
+ {
+-	struct i915_hw_ppgtt *ppgtt;
++	struct i915_address_space *vm;
+ 
+-	ppgtt = ctx->ppgtt ?: ctx->i915->mm.aliasing_ppgtt;
+-	if (ppgtt)
+-		gen6_ppgtt_unpin(ppgtt);
++	vm = ctx->vm ?: &ctx->i915->mm.aliasing_ppgtt->vm;
++	if (vm)
++		gen6_ppgtt_unpin(i915_vm_to_ppgtt(vm));
+ }
+ 
+ static int __context_pin(struct intel_context *ce)
+@@ -1704,14 +1704,16 @@ static int switch_context(struct i915_request *rq)
+ {
+ 	struct intel_engine_cs *engine = rq->engine;
+ 	struct i915_gem_context *ctx = rq->gem_context;
+-	struct i915_hw_ppgtt *ppgtt = ctx->ppgtt ?: rq->i915->mm.aliasing_ppgtt;
++	struct i915_address_space *vm =
++		ctx->vm ?: &rq->i915->mm.aliasing_ppgtt->vm;
+ 	unsigned int unwind_mm = 0;
+ 	u32 hw_flags = 0;
+ 	int ret, i;
+ 
+ 	GEM_BUG_ON(HAS_EXECLISTS(rq->i915));
+ 
+-	if (ppgtt) {
++	if (vm) {
++		struct i915_hw_ppgtt *ppgtt = i915_vm_to_ppgtt(vm);
+ 		int loops;
+ 
+ 		/*
+@@ -1758,7 +1760,7 @@ static int switch_context(struct i915_request *rq)
+ 			goto err_mm;
+ 	}
+ 
+-	if (ppgtt) {
++	if (vm) {
+ 		ret = engine->emit_flush(rq, EMIT_INVALIDATE);
+ 		if (ret)
+ 			goto err_mm;
+@@ -1801,7 +1803,7 @@ static int switch_context(struct i915_request *rq)
+ 
+ err_mm:
+ 	if (unwind_mm)
+-		ppgtt->pd_dirty_engines |= unwind_mm;
++		i915_vm_to_ppgtt(vm)->pd_dirty_engines |= unwind_mm;
+ err:
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+index 3be67e561c26..45379a63e013 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
++++ b/drivers/gpu/drm/i915/gt/selftest_hangcheck.c
+@@ -128,8 +128,7 @@ static struct i915_request *
+ hang_create_request(struct hang *h, struct intel_engine_cs *engine)
+ {
+ 	struct drm_i915_private *i915 = h->i915;
+-	struct i915_address_space *vm =
+-		h->ctx->ppgtt ? &h->ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = h->ctx->vm ?: &i915->ggtt.vm;
+ 	struct i915_request *rq = NULL;
+ 	struct i915_vma *hws, *vma;
+ 	unsigned int flags;
+@@ -1354,8 +1353,8 @@ static int igt_reset_evict_ppgtt(void *arg)
+ 	}
+ 
+ 	err = 0;
+-	if (ctx->ppgtt) /* aliasing == global gtt locking, covered above */
+-		err = __igt_reset_evict_vma(i915, &ctx->ppgtt->vm,
++	if (ctx->vm) /* aliasing == global gtt locking, covered above */
++		err = __igt_reset_evict_vma(i915, ctx->vm,
+ 					    evict_vma, EXEC_OBJECT_WRITE);
+ 
+ out:
+diff --git a/drivers/gpu/drm/i915/gt/selftest_lrc.c b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+index 06593254b7d6..f0ca2a09dabd 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_lrc.c
++++ b/drivers/gpu/drm/i915/gt/selftest_lrc.c
+@@ -1090,7 +1090,7 @@ static int smoke_submit(struct preempt_smoke *smoke,
+ 	int err = 0;
+ 
+ 	if (batch) {
+-		vma = i915_vma_instance(batch, &ctx->ppgtt->vm, NULL);
++		vma = i915_vma_instance(batch, ctx->vm, NULL);
+ 		if (IS_ERR(vma))
+ 			return PTR_ERR(vma);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/selftest_workarounds.c b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+index 2cb1519fde42..c8d335d63f9c 100644
+--- a/drivers/gpu/drm/i915/gt/selftest_workarounds.c
++++ b/drivers/gpu/drm/i915/gt/selftest_workarounds.c
+@@ -358,7 +358,7 @@ static struct i915_vma *create_batch(struct i915_gem_context *ctx)
+ 	if (IS_ERR(obj))
+ 		return ERR_CAST(obj);
+ 
+-	vma = i915_vma_instance(obj, &ctx->ppgtt->vm, NULL);
++	vma = i915_vma_instance(obj, ctx->vm, NULL);
+ 	if (IS_ERR(vma)) {
+ 		err = PTR_ERR(vma);
+ 		goto err_obj;
+@@ -442,7 +442,7 @@ static int check_dirty_whitelist(struct i915_gem_context *ctx,
+ 	int err = 0, i, v;
+ 	u32 *cs, *results;
+ 
+-	scratch = create_scratch(&ctx->ppgtt->vm, 2 * ARRAY_SIZE(values) + 1);
++	scratch = create_scratch(ctx->vm, 2 * ARRAY_SIZE(values) + 1);
+ 	if (IS_ERR(scratch))
+ 		return PTR_ERR(scratch);
+ 
+@@ -925,7 +925,7 @@ static int live_isolated_whitelist(void *arg)
+ 	if (!intel_engines_has_context_isolation(i915))
+ 		return 0;
+ 
+-	if (!i915->kernel_context->ppgtt)
++	if (!i915->kernel_context->vm)
+ 		return 0;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(client); i++) {
+@@ -937,14 +937,14 @@ static int live_isolated_whitelist(void *arg)
+ 			goto err;
+ 		}
+ 
+-		client[i].scratch[0] = create_scratch(&c->ppgtt->vm, 1024);
++		client[i].scratch[0] = create_scratch(c->vm, 1024);
+ 		if (IS_ERR(client[i].scratch[0])) {
+ 			err = PTR_ERR(client[i].scratch[0]);
+ 			kernel_context_close(c);
+ 			goto err;
+ 		}
+ 
+-		client[i].scratch[1] = create_scratch(&c->ppgtt->vm, 1024);
++		client[i].scratch[1] = create_scratch(c->vm, 1024);
+ 		if (IS_ERR(client[i].scratch[1])) {
+ 			err = PTR_ERR(client[i].scratch[1]);
+ 			i915_vma_unpin_and_release(&client[i].scratch[0], 0);
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 6cd72dd96a4b..922e13777d2e 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -368,7 +368,7 @@ static int set_context_ppgtt_from_shadow(struct intel_vgpu_workload *workload,
+ 					 struct i915_gem_context *ctx)
+ {
+ 	struct intel_vgpu_mm *mm = workload->shadow_mm;
+-	struct i915_hw_ppgtt *ppgtt = ctx->ppgtt;
++	struct i915_hw_ppgtt *ppgtt = i915_vm_to_ppgtt(ctx->vm);
+ 	int i = 0;
+ 
+ 	if (mm->type != INTEL_GVT_MM_PPGTT || !mm->ppgtt_mm.shadowed)
+@@ -1151,7 +1151,7 @@ void intel_vgpu_clean_submission(struct intel_vgpu *vgpu)
+ 
+ 	intel_vgpu_select_submission_ops(vgpu, ALL_ENGINES, 0);
+ 
+-	i915_context_ppgtt_root_restore(s, s->shadow[0]->gem_context->ppgtt);
++	i915_context_ppgtt_root_restore(s, i915_vm_to_ppgtt(s->shadow[0]->gem_context->vm));
+ 	for_each_engine(engine, vgpu->gvt->dev_priv, id)
+ 		intel_context_unpin(s->shadow[id]);
+ 
+@@ -1216,7 +1216,7 @@ int intel_vgpu_setup_submission(struct intel_vgpu *vgpu)
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+ 
+-	i915_context_ppgtt_root_save(s, ctx->ppgtt);
++	i915_context_ppgtt_root_save(s, i915_vm_to_ppgtt(ctx->vm));
+ 
+ 	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
+ 		struct intel_context *ce;
+@@ -1259,7 +1259,7 @@ int intel_vgpu_setup_submission(struct intel_vgpu *vgpu)
+ 	return 0;
+ 
+ out_shadow_ctx:
+-	i915_context_ppgtt_root_restore(s, ctx->ppgtt);
++	i915_context_ppgtt_root_restore(s, i915_vm_to_ppgtt(ctx->vm));
+ 	for_each_engine(engine, vgpu->gvt->dev_priv, i) {
+ 		if (IS_ERR(s->shadow[i]))
+ 			break;
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index 2e79f0e4c5af..b070e6f3780c 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -427,7 +427,7 @@ static void print_context_stats(struct seq_file *m,
+ 		i915_gem_context_unlock_engines(ctx);
+ 
+ 		if (!IS_ERR_OR_NULL(ctx->file_priv)) {
+-			struct file_stats stats = { .vm = &ctx->ppgtt->vm, };
++			struct file_stats stats = { .vm = ctx->vm, };
+ 			struct drm_file *file = ctx->file_priv->file;
+ 			struct task_struct *task;
+ 			char name[80];
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index d3c02e009a98..6e7e72ab5360 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2658,12 +2658,6 @@ struct drm_gem_object *i915_gem_prime_import(struct drm_device *dev,
+ struct dma_buf *i915_gem_prime_export(struct drm_device *dev,
+ 				struct drm_gem_object *gem_obj, int flags);
+ 
+-static inline struct i915_hw_ppgtt *
+-i915_vm_to_ppgtt(struct i915_address_space *vm)
+-{
+-	return container_of(vm, struct i915_hw_ppgtt, vm);
+-}
+-
+ /* i915_gem_fence_reg.c */
+ struct drm_i915_fence_reg *
+ i915_reserve_fence(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 2e15850bd987..69eb0bf7670b 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -483,6 +483,8 @@ static void vm_free_page(struct i915_address_space *vm, struct page *page)
+ 
+ static void i915_address_space_init(struct i915_address_space *vm, int subclass)
+ {
++	kref_init(&vm->ref);
++
+ 	/*
+ 	 * The vm->mutex must be reclaim safe (for use in the shrinker).
+ 	 * Do a dummy acquire now under fs_reclaim so that any allocation
+@@ -1230,9 +1232,8 @@ static int gen8_init_scratch(struct i915_address_space *vm)
+ 	 */
+ 	if (vm->has_read_only &&
+ 	    vm->i915->kernel_context &&
+-	    vm->i915->kernel_context->ppgtt) {
+-		struct i915_address_space *clone =
+-			&vm->i915->kernel_context->ppgtt->vm;
++	    vm->i915->kernel_context->vm) {
++		struct i915_address_space *clone = vm->i915->kernel_context->vm;
+ 
+ 		GEM_BUG_ON(!clone->has_read_only);
+ 
+@@ -1591,8 +1592,6 @@ static int gen8_preallocate_top_level_pdp(struct i915_hw_ppgtt *ppgtt)
+ static void ppgtt_init(struct drm_i915_private *i915,
+ 		       struct i915_hw_ppgtt *ppgtt)
+ {
+-	kref_init(&ppgtt->ref);
+-
+ 	ppgtt->vm.i915 = i915;
+ 	ppgtt->vm.dma = &i915->drm.pdev->dev;
+ 	ppgtt->vm.total = BIT_ULL(INTEL_INFO(i915)->ppgtt_size);
+@@ -2272,21 +2271,23 @@ static void ppgtt_destroy_vma(struct i915_address_space *vm)
+ 	}
+ }
+ 
+-void i915_ppgtt_release(struct kref *kref)
++void i915_vm_release(struct kref *kref)
+ {
+-	struct i915_hw_ppgtt *ppgtt =
+-		container_of(kref, struct i915_hw_ppgtt, ref);
++	struct i915_address_space *vm =
++		container_of(kref, struct i915_address_space, ref);
+ 
+-	trace_i915_ppgtt_release(&ppgtt->vm);
++	GEM_BUG_ON(i915_is_ggtt(vm));
++	trace_i915_ppgtt_release(vm);
+ 
+-	ppgtt_destroy_vma(&ppgtt->vm);
++	ppgtt_destroy_vma(vm);
+ 
+-	GEM_BUG_ON(!list_empty(&ppgtt->vm.bound_list));
+-	GEM_BUG_ON(!list_empty(&ppgtt->vm.unbound_list));
++	GEM_BUG_ON(!list_empty(&vm->bound_list));
++	GEM_BUG_ON(!list_empty(&vm->unbound_list));
+ 
+-	ppgtt->vm.cleanup(&ppgtt->vm);
+-	i915_address_space_fini(&ppgtt->vm);
+-	kfree(ppgtt);
++	vm->cleanup(vm);
++	i915_address_space_fini(vm);
++
++	kfree(vm);
+ }
+ 
+ /* Certain Gen5 chipsets require require idling the GPU before
+@@ -2788,7 +2789,7 @@ static int init_aliasing_ppgtt(struct drm_i915_private *i915)
+ 	return 0;
+ 
+ err_ppgtt:
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ 	return err;
+ }
+ 
+@@ -2801,7 +2802,7 @@ static void fini_aliasing_ppgtt(struct drm_i915_private *i915)
+ 	if (!ppgtt)
+ 		return;
+ 
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ 
+ 	ggtt->vm.vma_ops.bind_vma   = ggtt_bind_vma;
+ 	ggtt->vm.vma_ops.unbind_vma = ggtt_unbind_vma;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index 97700a37c12b..3b6336ef64f2 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -293,6 +293,8 @@ struct pagestash {
+ };
+ 
+ struct i915_address_space {
++	struct kref ref;
++
+ 	struct drm_mm mm;
+ 	struct drm_i915_private *i915;
+ 	struct device *dma;
+@@ -412,7 +414,6 @@ struct i915_ggtt {
+ 
+ struct i915_hw_ppgtt {
+ 	struct i915_address_space vm;
+-	struct kref ref;
+ 
+ 	intel_engine_mask_t pd_dirty_engines;
+ 	union {
+@@ -582,10 +583,19 @@ i915_page_dir_dma_addr(const struct i915_hw_ppgtt *ppgtt, const unsigned n)
+ static inline struct i915_ggtt *
+ i915_vm_to_ggtt(struct i915_address_space *vm)
+ {
++	BUILD_BUG_ON(offsetof(struct i915_ggtt, vm));
+ 	GEM_BUG_ON(!i915_is_ggtt(vm));
+ 	return container_of(vm, struct i915_ggtt, vm);
+ }
+ 
++static inline struct i915_hw_ppgtt *
++i915_vm_to_ppgtt(struct i915_address_space *vm)
++{
++	BUILD_BUG_ON(offsetof(struct i915_hw_ppgtt, vm));
++	GEM_BUG_ON(i915_is_ggtt(vm));
++	return container_of(vm, struct i915_hw_ppgtt, vm);
++}
++
+ #define INTEL_MAX_PPAT_ENTRIES 8
+ #define INTEL_PPAT_PERFECT_MATCH (~0U)
+ 
+@@ -628,18 +638,19 @@ void i915_ggtt_cleanup_hw(struct drm_i915_private *dev_priv);
+ int i915_ppgtt_init_hw(struct drm_i915_private *dev_priv);
+ 
+ struct i915_hw_ppgtt *i915_ppgtt_create(struct drm_i915_private *dev_priv);
+-void i915_ppgtt_release(struct kref *kref);
+ 
+-static inline struct i915_hw_ppgtt *i915_ppgtt_get(struct i915_hw_ppgtt *ppgtt)
++static inline struct i915_address_space *
++i915_vm_get(struct i915_address_space *vm)
+ {
+-	kref_get(&ppgtt->ref);
+-	return ppgtt;
++	kref_get(&vm->ref);
++	return vm;
+ }
+ 
+-static inline void i915_ppgtt_put(struct i915_hw_ppgtt *ppgtt)
++void i915_vm_release(struct kref *kref);
++
++static inline void i915_vm_put(struct i915_address_space *vm)
+ {
+-	if (ppgtt)
+-		kref_put(&ppgtt->ref, i915_ppgtt_release);
++	kref_put(&vm->ref, i915_vm_release);
+ }
+ 
+ int gen6_ppgtt_pin(struct i915_hw_ppgtt *base);
+diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
+index a523bf050a25..dc026d5cd7a0 100644
+--- a/drivers/gpu/drm/i915/i915_gpu_error.c
++++ b/drivers/gpu/drm/i915/i915_gpu_error.c
+@@ -1431,7 +1431,7 @@ static void gem_record_rings(struct i915_gpu_state *error)
+ 			struct i915_gem_context *ctx = request->gem_context;
+ 			struct intel_ring *ring;
+ 
+-			ee->vm = ctx->ppgtt ? &ctx->ppgtt->vm : &ggtt->vm;
++			ee->vm = ctx->vm ?: &ggtt->vm;
+ 
+ 			record_context(&ee->context, ctx);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index 83b389e34b50..5c8cfaa70d72 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -977,7 +977,7 @@ DECLARE_EVENT_CLASS(i915_context,
+ 			__entry->dev = ctx->i915->drm.primary->index;
+ 			__entry->ctx = ctx;
+ 			__entry->hw_id = ctx->hw_id;
+-			__entry->vm = ctx->ppgtt ? &ctx->ppgtt->vm : NULL;
++			__entry->vm = ctx->vm;
+ 	),
+ 
+ 	TP_printk("dev=%u, ctx=%p, ctx_vm=%p, hw_id=%u",
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c b/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
+index f1e95eaf6923..35db67757432 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem_gtt.c
+@@ -209,7 +209,7 @@ static int igt_ppgtt_alloc(void *arg)
+ 
+ err_ppgtt_cleanup:
+ 	mutex_lock(&dev_priv->drm.struct_mutex);
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ 	mutex_unlock(&dev_priv->drm.struct_mutex);
+ 	return err;
+ }
+@@ -1021,7 +1021,7 @@ static int exercise_ppgtt(struct drm_i915_private *dev_priv,
+ 
+ 	err = func(dev_priv, &ppgtt->vm, 0, ppgtt->vm.total, end_time);
+ 
+-	i915_ppgtt_put(ppgtt);
++	i915_vm_put(&ppgtt->vm);
+ out_unlock:
+ 	mutex_unlock(&dev_priv->drm.struct_mutex);
+ 
+@@ -1251,7 +1251,6 @@ static int exercise_mock(struct drm_i915_private *i915,
+ {
+ 	const u64 limit = totalram_pages() << PAGE_SHIFT;
+ 	struct i915_gem_context *ctx;
+-	struct i915_hw_ppgtt *ppgtt;
+ 	IGT_TIMEOUT(end_time);
+ 	int err;
+ 
+@@ -1259,10 +1258,7 @@ static int exercise_mock(struct drm_i915_private *i915,
+ 	if (!ctx)
+ 		return -ENOMEM;
+ 
+-	ppgtt = ctx->ppgtt;
+-	GEM_BUG_ON(!ppgtt);
+-
+-	err = func(i915, &ppgtt->vm, 0, min(ppgtt->vm.total, limit), end_time);
++	err = func(i915, ctx->vm, 0, min(ctx->vm->total, limit), end_time);
+ 
+ 	mock_context_close(ctx);
+ 	return err;
+diff --git a/drivers/gpu/drm/i915/selftests/i915_request.c b/drivers/gpu/drm/i915/selftests/i915_request.c
+index dfaa5bc52ecc..11278bac3a24 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_request.c
++++ b/drivers/gpu/drm/i915/selftests/i915_request.c
+@@ -754,8 +754,7 @@ static int live_empty_request(void *arg)
+ static struct i915_vma *recursive_batch(struct drm_i915_private *i915)
+ {
+ 	struct i915_gem_context *ctx = i915->kernel_context;
+-	struct i915_address_space *vm =
+-		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
++	struct i915_address_space *vm = ctx->vm ?: &i915->ggtt.vm;
+ 	struct drm_i915_gem_object *obj;
+ 	const int gen = INTEL_GEN(i915);
+ 	struct i915_vma *vma;
+diff --git a/drivers/gpu/drm/i915/selftests/i915_vma.c b/drivers/gpu/drm/i915/selftests/i915_vma.c
+index 6f3e41c0cb3f..a166d9405a94 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_vma.c
++++ b/drivers/gpu/drm/i915/selftests/i915_vma.c
+@@ -38,7 +38,7 @@ static bool assert_vma(struct i915_vma *vma,
+ {
+ 	bool ok = true;
+ 
+-	if (vma->vm != &ctx->ppgtt->vm) {
++	if (vma->vm != ctx->vm) {
+ 		pr_err("VMA created with wrong VM\n");
+ 		ok = false;
+ 	}
+@@ -113,7 +113,7 @@ static int create_vmas(struct drm_i915_private *i915,
+ 	list_for_each_entry(obj, objects, st_link) {
+ 		for (pinned = 0; pinned <= 1; pinned++) {
+ 			list_for_each_entry(ctx, contexts, link) {
+-				struct i915_address_space *vm = &ctx->ppgtt->vm;
++				struct i915_address_space *vm = ctx->vm;
+ 				struct i915_vma *vma;
+ 				int err;
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/igt_spinner.c b/drivers/gpu/drm/i915/selftests/igt_spinner.c
+index 3ea77c0ca678..1e59b543cf27 100644
+--- a/drivers/gpu/drm/i915/selftests/igt_spinner.c
++++ b/drivers/gpu/drm/i915/selftests/igt_spinner.c
+@@ -89,17 +89,16 @@ igt_spinner_create_request(struct igt_spinner *spin,
+ 			   struct intel_engine_cs *engine,
+ 			   u32 arbitration_command)
+ {
+-	struct i915_address_space *vm = &ctx->ppgtt->vm;
+ 	struct i915_request *rq = NULL;
+ 	struct i915_vma *hws, *vma;
+ 	u32 *batch;
+ 	int err;
+ 
+-	vma = i915_vma_instance(spin->obj, vm, NULL);
++	vma = i915_vma_instance(spin->obj, ctx->vm, NULL);
+ 	if (IS_ERR(vma))
+ 		return ERR_CAST(vma);
+ 
+-	hws = i915_vma_instance(spin->hws, vm, NULL);
++	hws = i915_vma_instance(spin->hws, ctx->vm, NULL);
+ 	if (IS_ERR(hws))
+ 		return ERR_CAST(hws);
+ 
+diff --git a/drivers/gpu/drm/i915/selftests/mock_gtt.c b/drivers/gpu/drm/i915/selftests/mock_gtt.c
+index cd83929fde8e..9e61c2f06cc9 100644
+--- a/drivers/gpu/drm/i915/selftests/mock_gtt.c
++++ b/drivers/gpu/drm/i915/selftests/mock_gtt.c
+@@ -65,7 +65,6 @@ mock_ppgtt(struct drm_i915_private *i915,
+ 	if (!ppgtt)
+ 		return NULL;
+ 
+-	kref_init(&ppgtt->ref);
+ 	ppgtt->vm.i915 = i915;
+ 	ppgtt->vm.total = round_down(U64_MAX, PAGE_SIZE);
+ 	ppgtt->vm.file = ERR_PTR(-ENODEV);
+-- 
+2.17.1
+

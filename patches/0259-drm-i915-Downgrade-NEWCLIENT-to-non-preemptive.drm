@@ -1,0 +1,64 @@
+From 96448c3ab35cfedf2411877808153d955c8b0d52 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 15 May 2019 14:00:51 +0100
+Subject: [PATCH 259/733] drm/i915: Downgrade NEWCLIENT to non-preemptive
+
+Commit 1413b2bc0717 ("drm/i915: Trim NEWCLIENT boosting") had the
+intended consequence of not allowing a sequence of work that merely
+crossed into a new engine the privilege to be promoted to NEWCLIENT
+status. It also had the unintended consequence of actually making
+NEWCLIENT effective on heavily oversubscribed transcode machines and
+impacting upon their throughput.
+
+If we consider a client packet composed of (rcsA, rcsB, vcs) and 30 of
+those clients, using the NEWCLIENT boost that will be scheduled as
+
+	rcsA x 30, (rcsB, vcs) x 30
+
+where as before it would have been
+
+	(rcsA, rcsB, vcs) x 30
+
+That is with NEWCLIENT only boosting the first request of each client,
+we would execute all rcsA requests prior to running on the vcs engines;
+acruing a lot of dead time as compared to the previous case where the
+vcs engine would be started in parallel to processing the second client.
+
+The previous patch has the effect of delaying submission until it is
+required by a third party (either the user with an explicit wait, or by
+another client/engine). We reduce the NEWCLIENT bump to a mere WAIT,
+which has the effect of removing its preemptive grant and reducing it to
+the same level as any other user interaction -- that it will not be
+promoted above the interengine dependencies, and so preventing NEWCLIENTS
+from starving other engines. This a large nerf to the rrul properties of
+the current NEWCLIENT, but it still does give prioritised submission to
+new requests from light workloads.
+
+References: b16c765122f9 ("drm/i915: Priority boost for new clients")
+Fixes: 1413b2bc0717 ("drm/i915: Trim NEWCLIENT boosting") # customer impact
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Dmitry Rogozhkin <dmitry.v.rogozhkin@intel.com>
+Cc: Dmitry Ermilov <dmitry.ermilov@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190515130052.4475-4-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_request.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 4899195e58c2..2fca0b59578d 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -1189,7 +1189,7 @@ struct i915_request *__i915_request_commit(struct i915_request *rq)
+ 		 * the bulk clients. (FQ_CODEL)
+ 		 */
+ 		if (list_empty(&rq->sched.signalers_list))
+-			attr.priority |= I915_PRIORITY_NEWCLIENT;
++			attr.priority |= I915_PRIORITY_WAIT;
+ 
+ 		engine->schedule(rq, &attr);
+ 	}
+-- 
+2.17.1
+
