@@ -1,0 +1,79 @@
+From 1a58fa933225fed865a44afdd603b39daf9683e0 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Wed, 12 Jun 2019 14:35:04 -0700
+Subject: [PATCH 12/14] x86/resctrl: Enable L3 CAT when platform 0x8C supports
+ it
+
+Some 0x8C platforms do support L3 CAT but when this is the case
+there is no CPUID enumeration to indicate this to the OS.
+
+To support L3 CAT on the 0x8C platforms that support this feature
+it is necessary to manually probe for this feature and hardcode the
+properties that would have been provided if CPUID enumeration was
+supported. When doing so take care to ensure that this is not used
+instead of CPUID enumeration, which is still used for the L2 CAT feature
+supported by these platforms.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+---
+ arch/x86/kernel/cpu/resctrl/core.c | 37 ++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/resctrl/core.c b/arch/x86/kernel/cpu/resctrl/core.c
+index e043074a88cc..cb48fd45b245 100644
+--- a/arch/x86/kernel/cpu/resctrl/core.c
++++ b/arch/x86/kernel/cpu/resctrl/core.c
+@@ -221,6 +221,38 @@ static inline void cache_alloc_hsw_probe(void)
+ 	rdt_alloc_capable = true;
+ }
+ 
++/*
++ * cache_alloc_8C_probe() - Have to probe for Intel 0x8C systems
++ * as they do not have CPUID enumeration support for L3 cache allocation
++ * (the L2 cache allocation does have CPUID enumeration support).
++ * Not all SKUs support L3 CAT so the test whether the first L3 CAT CBM can
++ * be written safely is required.
++ * Max CLOSids is 4 and max CBM length is 12. CDP is not supported.
++ *
++ * The global rdt_alloc_capable is not set here so that the enumeration of
++ * L2 CAT can proceed.
++ */
++static inline void cache_alloc_8C_probe(void)
++{
++	struct rdt_resource *r  = &rdt_resources_all[RDT_RESOURCE_L3];
++	u32 l, h, max_cbm = BIT_MASK(12) - 1;
++
++	if (wrmsr_safe(MSR_IA32_L3_CBM_BASE, max_cbm, 0))
++		return;
++	rdmsr(MSR_IA32_L3_CBM_BASE, l, h);
++
++	if (l != max_cbm)
++		return;
++
++	r->num_closid = 4;
++	r->default_ctrl = max_cbm;
++	r->cache.cbm_len = 12;
++	r->cache.shareable_bits = 0x400;
++	r->cache.min_cbm_bits = 1;
++	r->alloc_capable = true;
++	r->alloc_enabled = true;
++}
++
+ bool is_mba_sc(struct rdt_resource *r)
+ {
+ 	if (!r)
+@@ -882,6 +914,11 @@ static __init void __check_quirks_intel(void)
+ 			set_rdt_options("!cmt,!mbmtotal,!mbmlocal,!l3cat");
+ 		else
+ 			set_rdt_options("!l3cat");
++		break;
++	case 0x8C:
++		if (!rdt_options[RDT_FLAG_L3_CAT].force_off)
++			cache_alloc_8C_probe();
++		break;
+ 	}
+ }
+ 
+-- 
+2.17.1
+
