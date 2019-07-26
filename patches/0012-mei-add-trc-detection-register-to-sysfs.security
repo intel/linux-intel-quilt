@@ -1,0 +1,187 @@
+From 83abab7747011c495b2588b2660b3fe6d56a891e Mon Sep 17 00:00:00 2001
+From: Aviad nissel <aviad.nissel@intel.com>
+Date: Mon, 24 Jun 2019 13:52:45 +0300
+Subject: [PATCH 12/77] mei: add trc detection register to sysfs
+
+Change-Id: I5a655fb0f321f43d8e9037c512b5d47e99057fa3
+Signed-off-by: Aviad Nissel <aviad.nissel@intel.com>
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+---
+ drivers/misc/mei/hw-me-regs.h |  3 ++-
+ drivers/misc/mei/hw-me.c      | 26 ++++++++++++++++++++++++++
+ drivers/misc/mei/hw-me.h      |  4 ++++
+ drivers/misc/mei/main.c       | 10 ++++++++++
+ drivers/misc/mei/mei_dev.h    |  9 +++++++++
+ 5 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/mei/hw-me-regs.h b/drivers/misc/mei/hw-me-regs.h
+index 25a982163d51..14f672bc6fab 100644
+--- a/drivers/misc/mei/hw-me-regs.h
++++ b/drivers/misc/mei/hw-me-regs.h
+@@ -156,7 +156,8 @@ access to ME_CBD */
+ #define ME_IS_HRA         0x00000002
+ /* ME Interrupt Enable HRA - host read only access to ME_IE */
+ #define ME_IE_HRA         0x00000001
+-
++/* TRC control shadow register */
++#define ME_TRC           0x00000030
+ 
+ /* H_HPG_CSR register bits */
+ #define H_HPG_CSR_PGIHEXR 0x00000001
+diff --git a/drivers/misc/mei/hw-me.c b/drivers/misc/mei/hw-me.c
+index abe1b1f4362f..3c32cd88c24b 100644
+--- a/drivers/misc/mei/hw-me.c
++++ b/drivers/misc/mei/hw-me.c
+@@ -172,6 +172,20 @@ static inline void mei_me_d0i3c_write(struct mei_device *dev, u32 reg)
+ 	mei_me_reg_write(to_me_hw(dev), H_D0I3C, reg);
+ }
+ 
++static u32 mei_me_trc_status(struct mei_device *dev)
++{
++	struct mei_me_hw *hw = to_me_hw(dev);
++	u32 reg;
++
++	if (!hw->cfg->trc_supported)
++		return 0;
++
++	reg = mei_me_reg_read(hw, ME_TRC);
++	trace_mei_reg_read(dev->dev, "ME_TRC", ME_TRC, reg);
++
++	return reg;
++}
++
+ /**
+  * mei_me_fw_status - read fw status register from pci config space
+  *
+@@ -1294,6 +1308,7 @@ irqreturn_t mei_me_irq_thread_handler(int irq, void *dev_id)
+ 
+ static const struct mei_hw_ops mei_me_hw_ops = {
+ 
++	.trc_status = mei_me_trc_status,
+ 	.fw_status = mei_me_fw_status,
+ 	.pg_state  = mei_me_pg_state,
+ 
+@@ -1382,6 +1397,9 @@ static bool mei_me_fw_type_sps(struct pci_dev *pdev)
+ 	.dma_size[DMA_DSCR_DEVICE] = SZ_128K, \
+ 	.dma_size[DMA_DSCR_CTRL] = PAGE_SIZE
+ 
++#define MEI_CFG_TRC \
++	.trc_supported = true
++
+ /* ICH Legacy devices */
+ static const struct mei_cfg mei_me_ich_cfg = {
+ 	MEI_CFG_ICH_HFS,
+@@ -1420,6 +1438,13 @@ static const struct mei_cfg mei_me_pch12_cfg = {
+ 	MEI_CFG_DMA_128,
+ };
+ 
++/* Tiger Lake and newer devices */
++static const struct mei_cfg mei_me_pch15_cfg = {
++	MEI_CFG_PCH8_HFS,
++	MEI_CFG_DMA_128,
++	MEI_CFG_TRC,
++};
++
+ /*
+  * mei_cfg_list - A list of platform platform specific configurations.
+  * Note: has to be synchronized with  enum mei_cfg_idx.
+@@ -1433,6 +1458,7 @@ static const struct mei_cfg *const mei_cfg_list[] = {
+ 	[MEI_ME_PCH8_CFG] = &mei_me_pch8_cfg,
+ 	[MEI_ME_PCH8_SPS_CFG] = &mei_me_pch8_sps_cfg,
+ 	[MEI_ME_PCH12_CFG] = &mei_me_pch12_cfg,
++	[MEI_ME_PCH15_CFG] = &mei_me_pch15_cfg,
+ };
+ 
+ const struct mei_cfg *mei_me_get_cfg(kernel_ulong_t idx)
+diff --git a/drivers/misc/mei/hw-me.h b/drivers/misc/mei/hw-me.h
+index 08c84a0de4a8..f45a55e7904c 100644
+--- a/drivers/misc/mei/hw-me.h
++++ b/drivers/misc/mei/hw-me.h
+@@ -20,11 +20,13 @@
+  * @fw_status: FW status
+  * @quirk_probe: device exclusion quirk
+  * @dma_size: device DMA buffers size
++ * @trc_supported: does the device support trc register
+  */
+ struct mei_cfg {
+ 	const struct mei_fw_status fw_status;
+ 	bool (*quirk_probe)(struct pci_dev *pdev);
+ 	size_t dma_size[DMA_DSCR_NUM];
++	bool trc_supported;
+ };
+ 
+ 
+@@ -71,6 +73,7 @@ struct mei_me_hw {
+  *                         servers platforms with quirk for
+  *                         SPS firmware exclusion.
+  * @MEI_ME_PCH12_CFG:      Platform Controller Hub Gen12 and newer
++ * @MEI_ME_PCH15_CFG:      Platform Controller Hub Gen15 and newer
+  * @MEI_ME_NUM_CFG:        Upper Sentinel.
+  */
+ enum mei_cfg_idx {
+@@ -82,6 +85,7 @@ enum mei_cfg_idx {
+ 	MEI_ME_PCH8_CFG,
+ 	MEI_ME_PCH8_SPS_CFG,
+ 	MEI_ME_PCH12_CFG,
++	MEI_ME_PCH15_CFG,
+ 	MEI_ME_NUM_CFG,
+ };
+ 
+diff --git a/drivers/misc/mei/main.c b/drivers/misc/mei/main.c
+index ad02097d7fee..22141f3f8768 100644
+--- a/drivers/misc/mei/main.c
++++ b/drivers/misc/mei/main.c
+@@ -700,6 +700,15 @@ static int mei_fasync(int fd, struct file *file, int band)
+ 	return fasync_helper(fd, file, band, &cl->ev_async);
+ }
+ 
++static ssize_t trc_show(struct device *device,
++			struct device_attribute *attr, char *buf)
++{
++	struct mei_device *dev = dev_get_drvdata(device);
++
++	return sprintf(buf, "%u\n", mei_trc_status(dev));
++}
++static DEVICE_ATTR_RO(trc);
++
+ /**
+  * fw_status_show - mei device fw_status attribute show method
+  *
+@@ -894,6 +903,7 @@ static struct attribute *mei_attrs[] = {
+ 	&dev_attr_tx_queue_limit.attr,
+ 	&dev_attr_fw_ver.attr,
+ 	&dev_attr_dev_state.attr,
++	&dev_attr_trc.attr,
+ 	NULL
+ };
+ ATTRIBUTE_GROUPS(mei);
+diff --git a/drivers/misc/mei/mei_dev.h b/drivers/misc/mei/mei_dev.h
+index fca832fcac57..72b89215b5be 100644
+--- a/drivers/misc/mei/mei_dev.h
++++ b/drivers/misc/mei/mei_dev.h
+@@ -290,6 +290,8 @@ struct mei_hw_ops {
+ 	void (*hw_config)(struct mei_device *dev);
+ 
+ 	int (*fw_status)(struct mei_device *dev, struct mei_fw_status *fw_sts);
++	u32 (*trc_status)(struct mei_device *dev);
++
+ 	enum mei_pg_state (*pg_state)(struct mei_device *dev);
+ 	bool (*pg_in_transition)(struct mei_device *dev);
+ 	bool (*pg_is_enabled)(struct mei_device *dev);
+@@ -707,6 +709,13 @@ static inline int mei_count_full_read_slots(struct mei_device *dev)
+ 	return dev->ops->rdbuf_full_slots(dev);
+ }
+ 
++static inline u32 mei_trc_status(struct mei_device *dev)
++{
++	if (dev->ops->trc_status)
++		return dev->ops->trc_status(dev);
++	return 0;
++}
++
+ static inline int mei_fw_status(struct mei_device *dev,
+ 				struct mei_fw_status *fw_status)
+ {
+-- 
+2.17.1
+
