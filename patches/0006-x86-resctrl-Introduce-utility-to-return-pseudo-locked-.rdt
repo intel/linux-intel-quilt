@@ -1,0 +1,67 @@
+From cb09a3b3f07b10e8d7ad10bd191e4ac18d9cc0fb Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Tue, 23 Oct 2018 11:31:29 -0700
+Subject: [PATCH 06/13] x86/resctrl: Introduce utility to return pseudo-locked
+ cache portion
+
+To prevent eviction of pseudo-locked memory it is required that no
+other resource group uses any portion of a cache that is in use by
+a cache pseudo-locked region.
+
+Introduce a utility that will return a Capacity BitMask (CBM) indicating
+all portions of a provided cache instance being used for cache
+pseudo-locking. This CBM can be used in overlap checking as well as
+cache usage reporting.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+---
+ arch/x86/kernel/cpu/resctrl/internal.h    |  1 +
+ arch/x86/kernel/cpu/resctrl/pseudo_lock.c | 23 +++++++++++++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/resctrl/internal.h b/arch/x86/kernel/cpu/resctrl/internal.h
+index 65f558a2e806..f17633cf4776 100644
+--- a/arch/x86/kernel/cpu/resctrl/internal.h
++++ b/arch/x86/kernel/cpu/resctrl/internal.h
+@@ -568,6 +568,7 @@ int rdtgroup_tasks_assigned(struct rdtgroup *r);
+ int rdtgroup_locksetup_enter(struct rdtgroup *rdtgrp);
+ int rdtgroup_locksetup_exit(struct rdtgroup *rdtgrp);
+ bool rdtgroup_cbm_overlaps_pseudo_locked(struct rdt_domain *d, unsigned long cbm);
++u32 rdtgroup_pseudo_locked_bits(struct rdt_resource *r, struct rdt_domain *d);
+ bool rdtgroup_pseudo_locked_in_hierarchy(struct rdt_domain *d);
+ int rdt_pseudo_lock_init(void);
+ void rdt_pseudo_lock_release(void);
+diff --git a/arch/x86/kernel/cpu/resctrl/pseudo_lock.c b/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
+index e7d1fdd76161..f16702a076a3 100644
+--- a/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
++++ b/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
+@@ -1626,3 +1626,26 @@ void rdt_pseudo_lock_release(void)
+ 	unregister_chrdev(pseudo_lock_major, "pseudo_lock");
+ 	pseudo_lock_major = 0;
+ }
++
++/**
++ * rdt_pseudo_locked_bits - Portions of cache instance used for pseudo-locking
++ * @r:		RDT resource to which cache instance belongs
++ * @d:		Cache instance
++ *
++ * Return: bits in CBM of @d that are used for cache pseudo-locking
++ */
++u32 rdtgroup_pseudo_locked_bits(struct rdt_resource *r, struct rdt_domain *d)
++{
++	struct rdtgroup *rdtgrp;
++	u32 pseudo_locked = 0;
++
++	list_for_each_entry(rdtgrp, &rdt_all_groups, rdtgroup_list) {
++		if (!rdtgrp->plr)
++			continue;
++		if (rdtgrp->plr->r && rdtgrp->plr->r->rid == r->rid &&
++		    rdtgrp->plr->d_id == d->id)
++			pseudo_locked |= rdtgrp->plr->cbm;
++	}
++
++	return pseudo_locked;
++}
+-- 
+2.22.0.545.g9c9b961d7e
+
