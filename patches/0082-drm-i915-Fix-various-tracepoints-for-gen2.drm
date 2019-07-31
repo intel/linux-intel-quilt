@@ -1,0 +1,239 @@
+From 0ef31c66034bfbf213b842936a890619fe44ecf2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Wed, 19 Jun 2019 20:08:39 +0300
+Subject: [PATCH 082/370] drm/i915: Fix various tracepoints for gen2
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Gen2 doesn't have a frame counter and apparently we no longer provide
+a fake .get_vblank_counter() hook for it. That means all tracepoints
+calling that hook will oops. Update the tracepoints to use
+intel_crtc_get_vblank_counter() which will gracefully fall back to
+using the software counter. This is actually a better approach since
+we now get (hopefully accurate) frame numbers in the traces.
+
+This also gets rid of the raw driver->get_vblank_counter() calls, which
+we need to do in order to switch to the per-crtc vblank vfuncs.
+
+v2: Deal with new tracepoints
+v3: Use a distinct variable name for the internal crtc iterator (Chris)
+
+Cc: Shawn Guo <shawn.guo@linaro.org>
+Cc: Daniel Vetter <daniel.vetter@ffwll.ch>
+Fixes: 967dd4841787 ("drm: remove drm_vblank_no_hw_counter assignment from driver code")
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190619170842.20579-2-ville.syrjala@linux.intel.com
+---
+ drivers/gpu/drm/i915/display/intel_display.c |  4 +-
+ drivers/gpu/drm/i915/i915_trace.h            | 76 +++++++++-----------
+ 2 files changed, 35 insertions(+), 45 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 8592a7d422de..5f30f348b0c0 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -1839,7 +1839,7 @@ static void intel_enable_pipe(const struct intel_crtc_state *new_crtc_state)
+ 		/* FIXME: assert CPU port conditions for SNB+ */
+ 	}
+ 
+-	trace_intel_pipe_enable(dev_priv, pipe);
++	trace_intel_pipe_enable(crtc);
+ 
+ 	reg = PIPECONF(cpu_transcoder);
+ 	val = I915_READ(reg);
+@@ -1880,7 +1880,7 @@ static void intel_disable_pipe(const struct intel_crtc_state *old_crtc_state)
+ 	 */
+ 	assert_planes_disabled(crtc);
+ 
+-	trace_intel_pipe_disable(dev_priv, pipe);
++	trace_intel_pipe_disable(crtc);
+ 
+ 	reg = PIPECONF(cpu_transcoder);
+ 	val = I915_READ(reg);
+diff --git a/drivers/gpu/drm/i915/i915_trace.h b/drivers/gpu/drm/i915/i915_trace.h
+index f4ce643b3bc3..cce426b23a24 100644
+--- a/drivers/gpu/drm/i915/i915_trace.h
++++ b/drivers/gpu/drm/i915/i915_trace.h
+@@ -21,24 +21,22 @@
+ /* watermark/fifo updates */
+ 
+ TRACE_EVENT(intel_pipe_enable,
+-	    TP_PROTO(struct drm_i915_private *dev_priv, enum pipe pipe),
+-	    TP_ARGS(dev_priv, pipe),
++	    TP_PROTO(struct intel_crtc *crtc),
++	    TP_ARGS(crtc),
+ 
+ 	    TP_STRUCT__entry(
+ 			     __array(u32, frame, 3)
+ 			     __array(u32, scanline, 3)
+ 			     __field(enum pipe, pipe)
+ 			     ),
+-
+ 	    TP_fast_assign(
+-			   enum pipe _pipe;
+-			   for_each_pipe(dev_priv, _pipe) {
+-				   __entry->frame[_pipe] =
+-					   dev_priv->drm.driver->get_vblank_counter(&dev_priv->drm, _pipe);
+-				   __entry->scanline[_pipe] =
+-					   intel_get_crtc_scanline(intel_get_crtc_for_pipe(dev_priv, _pipe));
++			   struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
++			   struct intel_crtc *it__;
++			   for_each_intel_crtc(&dev_priv->drm, it__) {
++				   __entry->frame[it__->pipe] = intel_crtc_get_vblank_counter(it__);
++				   __entry->scanline[it__->pipe] = intel_get_crtc_scanline(it__);
+ 			   }
+-			   __entry->pipe = pipe;
++			   __entry->pipe = crtc->pipe;
+ 			   ),
+ 
+ 	    TP_printk("pipe %c enable, pipe A: frame=%u, scanline=%u, pipe B: frame=%u, scanline=%u, pipe C: frame=%u, scanline=%u",
+@@ -49,8 +47,8 @@ TRACE_EVENT(intel_pipe_enable,
+ );
+ 
+ TRACE_EVENT(intel_pipe_disable,
+-	    TP_PROTO(struct drm_i915_private *dev_priv, enum pipe pipe),
+-	    TP_ARGS(dev_priv, pipe),
++	    TP_PROTO(struct intel_crtc *crtc),
++	    TP_ARGS(crtc),
+ 
+ 	    TP_STRUCT__entry(
+ 			     __array(u32, frame, 3)
+@@ -59,14 +57,13 @@ TRACE_EVENT(intel_pipe_disable,
+ 			     ),
+ 
+ 	    TP_fast_assign(
+-			   enum pipe _pipe;
+-			   for_each_pipe(dev_priv, _pipe) {
+-				   __entry->frame[_pipe] =
+-					   dev_priv->drm.driver->get_vblank_counter(&dev_priv->drm, _pipe);
+-				   __entry->scanline[_pipe] =
+-					   intel_get_crtc_scanline(intel_get_crtc_for_pipe(dev_priv, _pipe));
++			   struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
++			   struct intel_crtc *it__;
++			   for_each_intel_crtc(&dev_priv->drm, it__) {
++				   __entry->frame[it__->pipe] = intel_crtc_get_vblank_counter(it__);
++				   __entry->scanline[it__->pipe] = intel_get_crtc_scanline(it__);
+ 			   }
+-			   __entry->pipe = pipe;
++			   __entry->pipe = crtc->pipe;
+ 			   ),
+ 
+ 	    TP_printk("pipe %c disable, pipe A: frame=%u, scanline=%u, pipe B: frame=%u, scanline=%u, pipe C: frame=%u, scanline=%u",
+@@ -89,8 +86,7 @@ TRACE_EVENT(intel_pipe_crc,
+ 
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   memcpy(__entry->crcs, crcs, sizeof(__entry->crcs));
+ 			   ),
+@@ -112,9 +108,10 @@ TRACE_EVENT(intel_cpu_fifo_underrun,
+ 			     ),
+ 
+ 	    TP_fast_assign(
++			    struct intel_crtc *crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
+ 			   __entry->pipe = pipe;
+-			   __entry->frame = dev_priv->drm.driver->get_vblank_counter(&dev_priv->drm, pipe);
+-			   __entry->scanline = intel_get_crtc_scanline(intel_get_crtc_for_pipe(dev_priv, pipe));
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
++			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   ),
+ 
+ 	    TP_printk("pipe %c, frame=%u, scanline=%u",
+@@ -134,9 +131,10 @@ TRACE_EVENT(intel_pch_fifo_underrun,
+ 
+ 	    TP_fast_assign(
+ 			   enum pipe pipe = pch_transcoder;
++			   struct intel_crtc *crtc = intel_get_crtc_for_pipe(dev_priv, pipe);
+ 			   __entry->pipe = pipe;
+-			   __entry->frame = dev_priv->drm.driver->get_vblank_counter(&dev_priv->drm, pipe);
+-			   __entry->scanline = intel_get_crtc_scanline(intel_get_crtc_for_pipe(dev_priv, pipe));
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
++			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   ),
+ 
+ 	    TP_printk("pch transcoder %c, frame=%u, scanline=%u",
+@@ -156,12 +154,10 @@ TRACE_EVENT(intel_memory_cxsr,
+ 			     ),
+ 
+ 	    TP_fast_assign(
+-			   enum pipe pipe;
+-			   for_each_pipe(dev_priv, pipe) {
+-				   __entry->frame[pipe] =
+-					   dev_priv->drm.driver->get_vblank_counter(&dev_priv->drm, pipe);
+-				   __entry->scanline[pipe] =
+-					   intel_get_crtc_scanline(intel_get_crtc_for_pipe(dev_priv, pipe));
++			   struct intel_crtc *crtc;
++			   for_each_intel_crtc(&dev_priv->drm, crtc) {
++				   __entry->frame[crtc->pipe] = intel_crtc_get_vblank_counter(crtc);
++				   __entry->scanline[crtc->pipe] = intel_get_crtc_scanline(crtc);
+ 			   }
+ 			   __entry->old = old;
+ 			   __entry->new = new;
+@@ -198,8 +194,7 @@ TRACE_EVENT(g4x_wm,
+ 
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   __entry->primary = wm->pipe[crtc->pipe].plane[PLANE_PRIMARY];
+ 			   __entry->sprite = wm->pipe[crtc->pipe].plane[PLANE_SPRITE0];
+@@ -243,8 +238,7 @@ TRACE_EVENT(vlv_wm,
+ 
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   __entry->level = wm->level;
+ 			   __entry->cxsr = wm->cxsr;
+@@ -278,8 +272,7 @@ TRACE_EVENT(vlv_fifo_size,
+ 
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   __entry->sprite0_start = sprite0_start;
+ 			   __entry->sprite1_start = sprite1_start;
+@@ -310,8 +303,7 @@ TRACE_EVENT(intel_update_plane,
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+ 			   __entry->name = plane->name;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   memcpy(__entry->src, &plane->state->src, sizeof(__entry->src));
+ 			   memcpy(__entry->dst, &plane->state->dst, sizeof(__entry->dst));
+@@ -338,8 +330,7 @@ TRACE_EVENT(intel_disable_plane,
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+ 			   __entry->name = plane->name;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   ),
+ 
+@@ -364,8 +355,7 @@ TRACE_EVENT(i915_pipe_update_start,
+ 
+ 	    TP_fast_assign(
+ 			   __entry->pipe = crtc->pipe;
+-			   __entry->frame = crtc->base.dev->driver->get_vblank_counter(crtc->base.dev,
+-										       crtc->pipe);
++			   __entry->frame = intel_crtc_get_vblank_counter(crtc);
+ 			   __entry->scanline = intel_get_crtc_scanline(crtc);
+ 			   __entry->min = crtc->debug.min_vbl;
+ 			   __entry->max = crtc->debug.max_vbl;
+-- 
+2.22.0.545.g9c9b961d7e
+

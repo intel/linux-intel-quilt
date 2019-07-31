@@ -1,0 +1,77 @@
+From c61c02d45cd1ebc47694f530edcfb962bec20f12 Mon Sep 17 00:00:00 2001
+From: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Date: Fri, 21 Jun 2019 08:07:54 +0100
+Subject: [PATCH 034/370] drm/i915: Move intel_engines_resume into common init
+
+Since this part still operates on i915 and not intel_gt, move it to the
+common (top-level) function.
+
+Signed-off-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Chris Wilson <chris@chris-wilson.co.uk>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190621070811.7006-16-tvrtko.ursulin@linux.intel.com
+---
+ drivers/gpu/drm/i915/i915_gem.c | 29 ++++++++++++++++++++++-------
+ 1 file changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 989d987c42d4..1760a0761130 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1287,17 +1287,10 @@ static int init_hw(struct intel_gt *gt)
+ 
+ 	intel_mocs_init_l3cc_table(gt);
+ 
+-	/* Only when the HW is re-initialised, can we replay the requests */
+-	ret = intel_engines_resume(i915);
+-	if (ret)
+-		goto cleanup_uc;
+-
+ 	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
+ 
+ 	return 0;
+ 
+-cleanup_uc:
+-	intel_uc_fini_hw(i915);
+ out:
+ 	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
+ 
+@@ -1306,6 +1299,7 @@ static int init_hw(struct intel_gt *gt)
+ 
+ int i915_gem_init_hw(struct drm_i915_private *i915)
+ {
++	struct intel_uncore *uncore = &i915->uncore;
+ 	int ret;
+ 
+ 	BUG_ON(!i915->kernel_context);
+@@ -1313,7 +1307,28 @@ int i915_gem_init_hw(struct drm_i915_private *i915)
+ 	if (ret)
+ 		return ret;
+ 
++	/* Double layer security blanket, see i915_gem_init() */
++	intel_uncore_forcewake_get(uncore, FORCEWAKE_ALL);
++
+ 	ret = init_hw(&i915->gt);
++	if (ret)
++		goto err_init;
++
++	/* Only when the HW is re-initialised, can we replay the requests */
++	ret = intel_engines_resume(i915);
++	if (ret)
++		goto err_engines;
++
++	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
++
++	intel_engines_set_scheduler_caps(i915);
++
++	return 0;
++
++err_engines:
++	intel_uc_fini_hw(i915);
++err_init:
++	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
+ 
+ 	intel_engines_set_scheduler_caps(i915);
+ 
+-- 
+2.22.0.545.g9c9b961d7e
+
