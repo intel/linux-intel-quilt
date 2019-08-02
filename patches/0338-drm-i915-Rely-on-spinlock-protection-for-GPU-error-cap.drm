@@ -1,4 +1,4 @@
-From 33e28db0d17d984f35d9dd279265cf336bd10087 Mon Sep 17 00:00:00 2001
+From a653dcbfd85a0693c7fc050feb2f0bd71577ff16 Mon Sep 17 00:00:00 2001
 From: Chris Wilson <chris@chris-wilson.co.uk>
 Date: Mon, 22 Jul 2019 23:28:47 +0100
 Subject: [PATCH 338/370] drm/i915: Rely on spinlock protection for GPU error
@@ -46,7 +46,7 @@ index 5a7e66b332a6..4dd1fa956143 100644
  
  	ggtt->invalidate = gen6_ggtt_invalidate;
 diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
-index c5b89bf4d616..2193687eac72 100644
+index 86791251296b..f3bb0db8e9ba 100644
 --- a/drivers/gpu/drm/i915/i915_gpu_error.c
 +++ b/drivers/gpu/drm/i915/i915_gpu_error.c
 @@ -29,8 +29,8 @@
@@ -535,7 +535,7 @@ index c5b89bf4d616..2193687eac72 100644
  /*
   * Generate a semi-unique error code. The code is not meant to have meaning, The
   * code's only purpose is to try to prevent false duplicated bug reports by
-@@ -1281,7 +1234,7 @@ static void engine_record_requests(struct intel_engine_cs *engine,
+@@ -1282,7 +1235,7 @@ static void engine_record_requests(struct intel_engine_cs *engine,
  	if (!count)
  		return;
  
@@ -544,7 +544,7 @@ index c5b89bf4d616..2193687eac72 100644
  	if (!ee->requests)
  		return;
  
-@@ -1349,8 +1302,10 @@ static void record_context(struct drm_i915_error_context *e,
+@@ -1350,8 +1303,10 @@ static void record_context(struct drm_i915_error_context *e,
  	e->active = atomic_read(&ctx->active_count);
  }
  
@@ -557,7 +557,7 @@ index c5b89bf4d616..2193687eac72 100644
  {
  	struct i915_capture_list *c;
  	struct drm_i915_error_object **bo;
-@@ -1362,18 +1317,20 @@ static void request_record_user_bo(struct i915_request *request,
+@@ -1363,18 +1318,20 @@ static void request_record_user_bo(struct i915_request *request,
  	if (!max)
  		return;
  
@@ -581,7 +581,7 @@ index c5b89bf4d616..2193687eac72 100644
  		if (!bo[count])
  			break;
  		if (++count == max)
-@@ -1386,7 +1343,8 @@ static void request_record_user_bo(struct i915_request *request,
+@@ -1387,7 +1344,8 @@ static void request_record_user_bo(struct i915_request *request,
  
  static struct drm_i915_error_object *
  capture_object(struct drm_i915_private *dev_priv,
@@ -591,7 +591,7 @@ index c5b89bf4d616..2193687eac72 100644
  {
  	if (obj && i915_gem_object_has_pages(obj)) {
  		struct i915_vma fake = {
-@@ -1396,13 +1354,14 @@ capture_object(struct drm_i915_private *dev_priv,
+@@ -1397,13 +1355,14 @@ capture_object(struct drm_i915_private *dev_priv,
  			.obj = obj,
  		};
  
@@ -608,7 +608,7 @@ index c5b89bf4d616..2193687eac72 100644
  {
  	struct drm_i915_private *i915 = error->i915;
  	int i;
-@@ -1420,6 +1379,9 @@ static void gem_record_rings(struct i915_gpu_state *error)
+@@ -1421,6 +1380,9 @@ static void gem_record_rings(struct i915_gpu_state *error)
  
  		ee->engine_id = i;
  
@@ -618,7 +618,7 @@ index c5b89bf4d616..2193687eac72 100644
  		error_record_engine_registers(error, engine, ee);
  		error_record_engine_execlists(engine, ee);
  
-@@ -1429,8 +1391,6 @@ static void gem_record_rings(struct i915_gpu_state *error)
+@@ -1430,8 +1392,6 @@ static void gem_record_rings(struct i915_gpu_state *error)
  			struct i915_gem_context *ctx = request->gem_context;
  			struct intel_ring *ring = request->ring;
  
@@ -627,7 +627,7 @@ index c5b89bf4d616..2193687eac72 100644
  			record_context(&ee->context, ctx);
  
  			/* We need to copy these to an anonymous buffer
-@@ -1438,17 +1398,21 @@ static void gem_record_rings(struct i915_gpu_state *error)
+@@ -1439,17 +1399,21 @@ static void gem_record_rings(struct i915_gpu_state *error)
  			 * by userspace.
  			 */
  			ee->batchbuffer =
@@ -653,7 +653,7 @@ index c5b89bf4d616..2193687eac72 100644
  
  			error->simulated |=
  				i915_gem_context_no_error_capture(ctx);
-@@ -1460,7 +1424,9 @@ static void gem_record_rings(struct i915_gpu_state *error)
+@@ -1461,7 +1425,9 @@ static void gem_record_rings(struct i915_gpu_state *error)
  			ee->cpu_ring_head = ring->head;
  			ee->cpu_ring_tail = ring->tail;
  			ee->ringbuffer =
@@ -664,7 +664,7 @@ index c5b89bf4d616..2193687eac72 100644
  
  			engine_record_requests(engine, request, ee);
  		}
-@@ -1468,89 +1434,21 @@ static void gem_record_rings(struct i915_gpu_state *error)
+@@ -1469,89 +1435,21 @@ static void gem_record_rings(struct i915_gpu_state *error)
  
  		ee->hws_page =
  			i915_error_object_create(i915,
@@ -764,7 +764,7 @@ index c5b89bf4d616..2193687eac72 100644
  {
  	struct drm_i915_private *i915 = error->i915;
  	struct i915_error_uc *error_uc = &error->uc;
-@@ -1567,9 +1465,11 @@ static void capture_uc_state(struct i915_gpu_state *error)
+@@ -1568,9 +1466,11 @@ static void capture_uc_state(struct i915_gpu_state *error)
  	 * As modparams are generally accesible from the userspace make
  	 * explicit copies of the firmware paths.
  	 */
@@ -779,7 +779,7 @@ index c5b89bf4d616..2193687eac72 100644
  }
  
  /* Capture all registers which don't fit into another category. */
-@@ -1753,56 +1653,53 @@ static void capture_finish(struct i915_gpu_state *error)
+@@ -1754,56 +1654,53 @@ static void capture_finish(struct i915_gpu_state *error)
  	ggtt->vm.clear_range(&ggtt->vm, slot, PAGE_SIZE);
  }
  
@@ -899,5 +899,5 @@ index 85f06bc5da05..a24c35107d16 100644
  };
  
 -- 
-2.22.0.545.g9c9b961d7e
+2.17.1
 
