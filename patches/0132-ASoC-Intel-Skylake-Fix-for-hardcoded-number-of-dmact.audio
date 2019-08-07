@@ -1,0 +1,324 @@
+From c364179a93093f61e36b2c90e863a7bb25730cf5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pawe=C5=82=20Har=C5=82ozi=C5=84ski?=
+ <pawel.harlozinski@intel.com>
+Date: Fri, 22 Mar 2019 08:20:14 -0100
+Subject: [PATCH 132/163] ASoC: Intel: Skylake: Fix for hardcoded number of
+ dmactrl config
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Number of clock configurations shouldn't be limited
+so fixed-size array of skl_dmctrl_hdr hdr[SKL_MAX_DMACTRL]
+has been replaced by dynamic list.
+
+Removed doubled call of skl_dsp_set_dma_clk_controls from skl_init_dsp.
+
+Let try to configure all endpoints even if one of them failed.
+
+Change-Id: I5d642deb0618c51e4161cfd40135806055dcdb96
+Signed-off-by: Paweł Harłoziński <pawel.harlozinski@intel.com>
+Reviewed-on:
+Tested-by: gkblditp <gkblditp@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c | 82 +++++++++++++-------------
+ sound/soc/intel/skylake/skl-topology.c | 77 ++++++++++++++++--------
+ sound/soc/intel/skylake/skl.h          | 15 ++---
+ 3 files changed, 97 insertions(+), 77 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index c6783a713f3d..22290861a9ff 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -286,11 +286,8 @@ int skl_init_dsp(struct skl_dev *skl)
+ 	dev_dbg(bus->dev, "dsp registration status=%d\n", ret);
+ 
+ 	INIT_LIST_HEAD(&skl->notify_kctls);
++	INIT_LIST_HEAD(&skl->cfg.dmactrl_list);
+ 
+-	/* Set DMA clock controls */
+-	ret = skl_dsp_set_dma_clk_controls(skl);
+-	if (ret < 0)
+-		return ret;
+ 	return 0;
+ 
+ unmap_mmio:
+@@ -668,65 +665,66 @@ static u32 skl_prepare_i2s_node_id(u32 instance, u8 dev_type,
+ int skl_dsp_set_dma_clk_controls(struct skl_dev *skl)
+ {
+ 	struct nhlt_specific_cfg *cfg = NULL;
+-	struct skl_dmactrl_config *dmactrl_cfg = &skl->cfg.dmactrl_cfg;
+ 	struct skl_dmctrl_hdr *hdr;
++	struct skl_dmactrl_node *dmactrl;
+ 	u8 *dma_ctrl_config;
+ 	void *i2s_config = NULL;
+ 	u32 i2s_config_size, node_id;
+-	int i, ret = 0;
+-
+-	if (!skl->cfg.dmactrl_cfg.size)
+-		return 0;
++	int ret = 0;
+ 
+-	for (i = 0; i < SKL_MAX_DMACTRL; i++) {
+-		hdr = &dmactrl_cfg->hdr[i];
++	list_for_each_entry_reverse(dmactrl,
++			&skl->cfg.dmactrl_list, node) {
++		hdr = &dmactrl->hdr;
+ 
+ 		/* get nhlt specific config info */
+ 		cfg = skl_get_nhlt_specific_cfg(skl, hdr->vbus_id,
+ 					NHLT_LINK_SSP, hdr->fmt,
+ 					hdr->ch, hdr->freq,
+ 					hdr->direction, NHLT_DEVICE_I2S);
++		if (!cfg || !hdr->data_size) {
++			dev_warn(skl->dev,
++				"Failed to get NHLT config: dma_cfg_idx=%u vbusi_id=%u ch=%d fmt=%u s_rate=%u\n",
++				dmactrl->idx, hdr->vbus_id,
++				hdr->ch, hdr->fmt, hdr->freq);
++				continue;
++		}
++		print_hex_dump(KERN_DEBUG, "NHLT blob Info:",
++				DUMP_PREFIX_OFFSET, 8, 4,
++				cfg->caps, cfg->size, false);
+ 
+-		if (cfg && hdr->data_size) {
+-			print_hex_dump(KERN_DEBUG, "NHLT blob Info:",
+-					DUMP_PREFIX_OFFSET, 8, 4,
+-					cfg->caps, cfg->size, false);
+-
+-			i2s_config_size = cfg->size + hdr->data_size;
+-			i2s_config = kzalloc(i2s_config_size, GFP_KERNEL);
+-			if (!i2s_config)
+-				return -ENOMEM;
++		i2s_config_size = cfg->size + hdr->data_size;
++		i2s_config = kzalloc(i2s_config_size, GFP_KERNEL);
++		if (!i2s_config)
++			return -ENOMEM;
+ 
+-			/* copy blob */
+-			memcpy(i2s_config, cfg->caps, cfg->size);
++		/* copy blob */
++		memcpy(i2s_config, cfg->caps, cfg->size);
+ 
+-			/* copy additional dma controls informatioin */
+-			dma_ctrl_config = (u8 *)i2s_config + cfg->size;
+-			memcpy(dma_ctrl_config, hdr->data, hdr->data_size);
++		/* copy additional dma controls informatioin */
++		dma_ctrl_config = (u8 *)i2s_config + cfg->size;
++		memcpy(dma_ctrl_config, hdr->data, hdr->data_size);
+ 
+-			print_hex_dump(KERN_DEBUG, "Blob + DMA Control Info:",
+-					DUMP_PREFIX_OFFSET, 8, 4,
+-					i2s_config, i2s_config_size, false);
++		print_hex_dump(KERN_DEBUG, "Blob + DMA Control Info:",
++				DUMP_PREFIX_OFFSET, 8, 4,
++				i2s_config, i2s_config_size, false);
+ 
+-			/* get node id */
+-			node_id = skl_prepare_i2s_node_id(hdr->vbus_id,
+-							SKL_DEVICE_I2S,
+-							hdr->direction,
+-							hdr->tdm_slot);
++		/* get node id */
++		node_id = skl_prepare_i2s_node_id(hdr->vbus_id,
++						SKL_DEVICE_I2S,
++						hdr->direction,
++						hdr->tdm_slot);
+ 
+-			ret = skl_dsp_set_dma_control(skl, (u32 *)i2s_config,
++		ret = skl_dsp_set_dma_control(skl, (u32 *)i2s_config,
+ 						i2s_config_size, node_id);
+ 
+-			kfree(i2s_config);
++		kfree(i2s_config);
+ 
+-			if (ret < 0)
+-				return ret;
++		if (ret < 0)
++			dev_err(skl->dev,
++				"Failed to set dma_clk_cfg, errno[%d]: dma_cfg_idx=%u vbusi_id=%u ch=%d fmt=%u s_rate=%u\n",
++				ret, dmactrl->idx, hdr->vbus_id,
++				hdr->ch, hdr->fmt, hdr->freq);
+ 
+-		} else {
+-			dev_err(skl->dev, "Failed to get NHLT config: vbusi_id=%d ch=%d fmt=%d s_rate=%d\n",
+-				hdr->vbus_id, hdr->ch, hdr->fmt, hdr->freq);
+-			return -EIO;
+-		}
+ 	}
+ 
+ 	return 0;
+diff --git a/sound/soc/intel/skylake/skl-topology.c b/sound/soc/intel/skylake/skl-topology.c
+index e47c76240f3a..56960cb3707e 100644
+--- a/sound/soc/intel/skylake/skl-topology.c
++++ b/sound/soc/intel/skylake/skl-topology.c
+@@ -3946,12 +3946,31 @@ static int skl_tplg_get_str_tkn(struct device *dev,
+ }
+ 
+ static int skl_tplg_mfest_fill_dmactrl(struct device *dev,
+-		struct skl_dmactrl_config *dmactrl_cfg,
+ 		struct snd_soc_tplg_vendor_value_elem *tkn_elem)
+ {
++	struct skl_dmactrl_node *hdr_entry;
++	struct skl_dmctrl_hdr *hdr;
++	struct skl_dev *skl = get_skl_ctx(dev);
++	struct list_head *dmactrl_cfg = &skl->cfg.dmactrl_list;
++
++	// cfg_idx is used like preamble - allocate memory for next entry
++	if (tkn_elem->token == SKL_TKN_U32_DMACTRL_CFG_IDX) {
++
++		hdr_entry = devm_kzalloc(dev, sizeof(*hdr_entry), GFP_KERNEL);
++
++		if (!hdr_entry)
++			return -ENOMEM;
++		list_add(&hdr_entry->node, dmactrl_cfg);
++	} else {
+ 
+-	u32 cfg_idx = dmactrl_cfg->idx;
+-	struct skl_dmctrl_hdr *hdr = &dmactrl_cfg->hdr[cfg_idx];
++		hdr_entry = list_first_entry_or_null(
++				dmactrl_cfg, typeof(*hdr_entry), node);
++
++		if (!hdr_entry)
++			return -EINVAL;
++	}
++
++	hdr = &hdr_entry->hdr;
+ 
+ 	switch (tkn_elem->token) {
+ 	case SKL_TKN_U32_FMT_CH:
+@@ -3979,22 +3998,13 @@ static int skl_tplg_mfest_fill_dmactrl(struct device *dev,
+ 		break;
+ 
+ 	case SKL_TKN_U32_DMACTRL_CFG_IDX:
+-		dmactrl_cfg->idx  = tkn_elem->value;
++		hdr_entry->idx = tkn_elem->value;
+ 		break;
+ 
+ 	case SKL_TKN_U32_DMACTRL_CFG_SIZE:
+-		if (tkn_elem->value && !hdr->data) {
+-			hdr->data = devm_kzalloc(dev,
+-				tkn_elem->value, GFP_KERNEL);
+-			if (!hdr->data)
+-				return -ENOMEM;
+-			hdr->data_size = tkn_elem->value;
+-			dmactrl_cfg->size = hdr->data_size;
+-		} else {
+-			hdr->data_size = 0;
+-			dev_err(dev, "Invalid dmactrl info \n");
+-		}
++		hdr->data_size = tkn_elem->value;
+ 		break;
++
+ 	default:
+ 		dev_err(dev, "Invalid token %d\n", tkn_elem->token);
+ 		return -EINVAL;
+@@ -4302,8 +4312,7 @@ static int skl_tplg_get_int_tkn(struct device *dev,
+ 			ret = skl_tplg_manifest_fill_fmt(dev, fmt, tkn_elem,
+ 							 dir, pin_idx);
+ 		else
+-			ret = skl_tplg_mfest_fill_dmactrl(dev, &skl->cfg.dmactrl_cfg,
+-					 tkn_elem);
++			ret = skl_tplg_mfest_fill_dmactrl(dev, tkn_elem);
+ 		if (ret < 0)
+ 			return ret;
+ 		break;
+@@ -4406,8 +4415,7 @@ static int skl_tplg_get_manifest_data(struct snd_soc_tplg_manifest *manifest,
+ {
+ 	struct snd_soc_tplg_vendor_array *array;
+ 	int num_blocks, block_size = 0, block_type, off = 0;
+-	struct skl_dmctrl_hdr *dmactrl_hdr;
+-	int cfg_idx, ret;
++	int ret;
+ 	char *data;
+ 
+ 	/* Read the NUM_DATA_BLOCKS descriptor */
+@@ -4453,15 +4461,32 @@ static int skl_tplg_get_manifest_data(struct snd_soc_tplg_manifest *manifest,
+ 
+ 			--num_blocks;
+ 		} else {
+-			cfg_idx = skl->cfg.dmactrl_cfg.idx;
+-			if (cfg_idx < SKL_MAX_DMACTRL) {
+-				dmactrl_hdr = &skl->cfg.dmactrl_cfg.hdr[cfg_idx];
+-				if (dmactrl_hdr->data && (dmactrl_hdr->data_size == block_size))
+-					memcpy(dmactrl_hdr->data, data, block_size);
+-			} else {
+-				dev_err(dev, "error block_idx value exceeding %d\n", cfg_idx);
++			struct skl_dmctrl_hdr *hdr;
++			struct skl_dmactrl_node  *hdr_entry = NULL;
++
++			hdr_entry = list_first_entry_or_null(
++					&skl->cfg.dmactrl_list,
++					typeof(*hdr_entry), node);
++
++			if (!hdr_entry) {
++				dev_err(dev, "error no entry for dmactrl_hdr\n");
+ 				return -EINVAL;
+ 			}
++			hdr = &hdr_entry->hdr;
++			if (hdr->data_size == block_size) {
++				hdr->data = devm_kmemdup(dev, data,
++						block_size, GFP_KERNEL);
++				if (!hdr->data) {
++					list_del(&hdr_entry->node);
++					devm_kfree(dev, hdr_entry);
++					return -ENOMEM;
++				}
++			} else {
++				dev_err(dev, "error dmactrl cfg_idx=%u data size not matching\n",
++						hdr_entry->idx);
++				list_del(&hdr_entry->node);
++				devm_kfree(dev, hdr_entry);
++			}
+ 			ret = block_size;
+ 			--num_blocks;
+ 		}
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index bba6b05226e6..d74d7a7c5a8a 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -33,14 +33,12 @@
+ /* D0I3C Register fields */
+ #define AZX_REG_VS_D0I3C_CIP      0x1 /* Command in progress */
+ #define AZX_REG_VS_D0I3C_I3       0x4 /* D0i3 enable */
+-#define SKL_MAX_DMACTRL_CFG	18
+ #define DMA_CLK_CONTROLS	1
+ #define DMA_TRANSMITION_START	2
+ #define DMA_TRANSMITION_STOP	3
+ 
+ #define AZX_VS_EM2_DUM			BIT(23)
+ #define AZX_REG_VS_EM2_L1SEN		BIT(13)
+-#define SKL_MAX_DMACTRL		7
+ #define SKL_MAX_DMA_CFG		24
+ #define BXT_INSTANCE_ID		0
+ #define BXT_BASE_FW_MODULE_ID	0
+@@ -87,19 +85,18 @@ struct skl_dmctrl_hdr {
+ 	u32 ch;
+ 	u32 data_size;
+ 	u32 *data;
+-} __packed;
++};
+ 
+-struct skl_dmactrl_config {
+-	u32 type;
+-	u32 size;
++struct skl_dmactrl_node {
+ 	u32 idx;
+-	struct skl_dmctrl_hdr hdr[SKL_MAX_DMACTRL];
+-} __packed;
++	struct skl_dmctrl_hdr hdr;
++	struct list_head node;
++};
+ 
+ struct skl_fw_config {
+ 	struct skl_dma_buff_cfg dmacfg;
+ 	struct skl_sch_config sch_cfg;
+-	struct skl_dmactrl_config dmactrl_cfg;
++	struct list_head dmactrl_list;
+ 	struct skl_astate_config *astate_cfg;
+ };
+ 
+-- 
+2.17.1
+

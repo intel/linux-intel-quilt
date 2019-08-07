@@ -1,0 +1,348 @@
+From ae9c67c728f291a7c40656aa3be6006124dbcaaa Mon Sep 17 00:00:00 2001
+From: Marcin Janczara <marcinx.janczara@intel.com>
+Date: Fri, 21 Dec 2018 13:43:26 +0100
+Subject: [PATCH 158/163] ASoC: Intel: Skylake: Move NHLT to list_head
+
+NHLT now uses dynamic memory allocation and the pointers
+to the NHLT endpoints are stored in list_head in order
+to facilitate access to them.
+
+Change-Id: Ic2721ec3497fd8ae4c00b4fad0d014b9ba73ce35
+Signed-off-by: Marcin Janczara
+Signed-off-by: Gustaw Lewandowski <gustaw.lewandowski@linux.intel.com>
+Reviewed-on:
+Tested-by: gkblditp <gkblditp@intel.com>
+---
+ sound/soc/intel/skylake/skl-nhlt.c | 123 ++++++++++++++++++-----------
+ sound/soc/intel/skylake/skl-nhlt.h |   5 ++
+ sound/soc/intel/skylake/skl.c      |  18 +++--
+ sound/soc/intel/skylake/skl.h      |   2 +-
+ 4 files changed, 94 insertions(+), 54 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-nhlt.c b/sound/soc/intel/skylake/skl-nhlt.c
+index 34e5b8dd1073..8dce6af059b8 100644
+--- a/sound/soc/intel/skylake/skl-nhlt.c
++++ b/sound/soc/intel/skylake/skl-nhlt.c
+@@ -11,6 +11,7 @@
+ #include <linux/pci.h>
+ #include "skl.h"
+ #include "skl-i2s.h"
++#include "skl-topology.h"
+ 
+ #define NHLT_ACPI_HEADER_SIG	"NHLT"
+ 
+@@ -40,7 +41,12 @@ struct nhlt_acpi_table *skl_nhlt_init(struct device *dev)
+ 	acpi_handle handle;
+ 	union acpi_object *obj;
+ 	struct nhlt_resource_desc  *nhlt_ptr = NULL;
+-	struct nhlt_acpi_table *nhlt_table = NULL;
++	struct nhlt_acpi_table *nhlt = NULL;
++	struct nhlt_acpi_table *tmp;
++	struct nhlt_endpoint_list *entries;
++	struct nhlt_endpoint *epnt_tmp;
++	struct skl_dev *skl = get_skl_ctx(dev);
++	int i;
+ 
+ 	handle = ACPI_HANDLE(dev);
+ 	if (!handle) {
+@@ -49,30 +55,65 @@ struct nhlt_acpi_table *skl_nhlt_init(struct device *dev)
+ 	}
+ 
+ 	obj = acpi_evaluate_dsm(handle, &osc_guid, 1, 1, NULL);
+-	if (obj && obj->type == ACPI_TYPE_BUFFER) {
+-		nhlt_ptr = (struct nhlt_resource_desc  *)obj->buffer.pointer;
+-		if (nhlt_ptr->length)
+-			nhlt_table = (struct nhlt_acpi_table *)
+-				memremap(nhlt_ptr->min_addr, nhlt_ptr->length,
+-				MEMREMAP_WB);
+-		ACPI_FREE(obj);
+-		if (nhlt_table && (strncmp(nhlt_table->header.signature,
+-					NHLT_ACPI_HEADER_SIG,
+-					strlen(NHLT_ACPI_HEADER_SIG)) != 0)) {
+-			memunmap(nhlt_table);
+-			dev_err(dev, "NHLT ACPI header signature incorrect\n");
+-			return NULL;
+-		}
+-		return nhlt_table;
++	if (!obj) {
++		dev_err(dev, "Failed evaluate ACPI device\n");
++		return NULL;
+ 	}
+ 
+-	dev_err(dev, "device specific method to extract NHLT blob failed\n");
+-	return NULL;
+-}
++	if (obj->type != ACPI_TYPE_BUFFER) {
++		dev_err(dev, "Wrong type of ACPI buffer\n");
++		goto out;
++	}
+ 
+-void skl_nhlt_free(struct nhlt_acpi_table *nhlt)
+-{
+-	memunmap((void *) nhlt);
++	nhlt_ptr = (struct nhlt_resource_desc  *)obj->buffer.pointer;
++	if (!nhlt_ptr || !nhlt_ptr->length)
++		goto out;
++
++	tmp = memremap(nhlt_ptr->min_addr, nhlt_ptr->length,
++			MEMREMAP_WB);
++	if (!tmp) {
++		dev_err(dev, "Failed to map memory for NHLT\n");
++		goto out;
++	}
++
++	if (strncmp(tmp->header.signature, NHLT_ACPI_HEADER_SIG,
++			strlen(NHLT_ACPI_HEADER_SIG)) != 0) {
++		dev_err(dev, "NHLT ACPI header signature incorrect\n");
++		memunmap(tmp);
++		goto out;
++	}
++
++	nhlt = devm_kmemdup(dev, tmp, nhlt_ptr->length, GFP_KERNEL);
++	memunmap(tmp);
++
++	if (!nhlt)
++		goto out;
++
++	INIT_LIST_HEAD(&skl->nhlt_endpoint_list);
++	entries = devm_kmalloc_array(dev, nhlt->endpoint_count,
++				sizeof(struct nhlt_endpoint_list), GFP_KERNEL);
++
++	if (!entries)
++		goto out;
++
++	epnt_tmp = (struct nhlt_endpoint *)nhlt->desc;
++
++	for (i = 0; i < nhlt->endpoint_count; i++) {
++		entries[i].endpoint = epnt_tmp;
++
++		list_add_tail(&entries[i].list, &skl->nhlt_endpoint_list);
++		epnt_tmp = (struct nhlt_endpoint *)((u8 *)epnt_tmp +
++							epnt_tmp->length);
++
++		if (((u8 *)epnt_tmp + epnt_tmp->length) >
++			((u8 *)nhlt->desc + nhlt_ptr->length)) {
++			dev_err(dev, "pointer to nhlt_endpoint is out of range NHLT data\n");
++			break;
++		}
++	}
++out:
++	ACPI_FREE(obj);
++	return nhlt;
+ }
+ 
+ static struct nhlt_specific_cfg *skl_get_specific_cfg(
+@@ -172,16 +213,16 @@ struct nhlt_specific_cfg
+ 	struct device *dev = bus->dev;
+ 	struct nhlt_specific_cfg *sp_config;
+ 	struct nhlt_acpi_table *nhlt = skl->nhlt;
++	struct nhlt_endpoint_list *epnt_lst;
+ 	u16 bps = (s_fmt == 16) ? 16 : 32;
+-	u8 j;
+ 
+ 	dump_config(dev, instance, link_type, s_fmt, num_ch, s_rate, dirn, bps);
+ 
+-	epnt = (struct nhlt_endpoint *)nhlt->desc;
+-
+ 	dev_dbg(dev, "endpoint count =%d\n", nhlt->endpoint_count);
+ 
+-	for (j = 0; j < nhlt->endpoint_count; j++) {
++	list_for_each_entry(epnt_lst, &skl->nhlt_endpoint_list, list) {
++		epnt = epnt_lst->endpoint;
++
+ 		if (skl_check_ep_match(dev, epnt, instance, link_type,
+ 						dirn, dev_type)) {
+ 			fmt = (struct nhlt_fmt *)(epnt->config.caps +
+@@ -191,8 +232,6 @@ struct nhlt_specific_cfg
+ 			if (sp_config)
+ 				return sp_config;
+ 		}
+-
+-		epnt = (struct nhlt_endpoint *)((u8 *)epnt + epnt->length);
+ 	}
+ 
+ 	return NULL;
+@@ -200,19 +239,15 @@ struct nhlt_specific_cfg
+ 
+ int skl_get_dmic_geo(struct skl_dev *skl)
+ {
+-	struct nhlt_acpi_table *nhlt = (struct nhlt_acpi_table *)skl->nhlt;
+ 	struct nhlt_endpoint *epnt;
++	struct nhlt_endpoint_list *epnt_lst;
+ 	struct nhlt_dmic_array_config *cfg;
+ 	struct device *dev = &skl->pci->dev;
+ 	unsigned int dmic_geo = 0;
+-	u8 j;
+ 
+-	if (!nhlt)
+-		return 0;
+-
+-	epnt = (struct nhlt_endpoint *)nhlt->desc;
++	list_for_each_entry(epnt_lst, &skl->nhlt_endpoint_list, list) {
++		epnt = epnt_lst->endpoint;
+ 
+-	for (j = 0; j < nhlt->endpoint_count; j++) {
+ 		if (epnt->linktype == NHLT_LINK_DMIC) {
+ 			cfg = (struct nhlt_dmic_array_config  *)
+ 					(epnt->config.caps);
+@@ -234,7 +269,6 @@ int skl_get_dmic_geo(struct skl_dev *skl)
+ 
+ 			}
+ 		}
+-		epnt = (struct nhlt_endpoint *)((u8 *)epnt + epnt->length);
+ 	}
+ 
+ 	return dmic_geo;
+@@ -459,14 +493,14 @@ static void skl_get_mclk(struct skl_dev *skl, struct skl_ssp_clk *mclk,
+ 
+ void skl_get_clks(struct skl_dev *skl, struct skl_ssp_clk *ssp_clks)
+ {
+-	struct nhlt_acpi_table *nhlt = (struct nhlt_acpi_table *)skl->nhlt;
+ 	struct nhlt_endpoint *epnt;
++	struct nhlt_endpoint_list *epnt_lst;
+ 	struct nhlt_fmt *fmt;
+-	int i;
+ 	u8 id;
+ 
+-	epnt = (struct nhlt_endpoint *)nhlt->desc;
+-	for (i = 0; i < nhlt->endpoint_count; i++) {
++	list_for_each_entry(epnt_lst, &skl->nhlt_endpoint_list, list) {
++		epnt = epnt_lst->endpoint;
++
+ 		if (epnt->linktype == NHLT_LINK_SSP) {
+ 			id = epnt->virtual_bus_id;
+ 
+@@ -476,7 +510,6 @@ void skl_get_clks(struct skl_dev *skl, struct skl_ssp_clk *ssp_clks)
+ 			skl_get_ssp_clks(skl, ssp_clks, fmt, id);
+ 			skl_get_mclk(skl, ssp_clks, fmt, id);
+ 		}
+-		epnt = (struct nhlt_endpoint *)((u8 *)epnt + epnt->length);
+ 	}
+ }
+ 
+@@ -498,20 +531,20 @@ static bool is_vbus_id_exist(struct skl_dev *skl, int vbus_id)
+  */
+ void skl_nhlt_get_ep_cnt(struct skl_dev *skl, int link_type)
+ {
+-	struct nhlt_endpoint *epnt = (struct nhlt_endpoint *) skl->nhlt->desc;
+-	int i;
++	struct nhlt_endpoint *epnt;
++	struct nhlt_endpoint_list *epnt_lst;
+ 
+ 	skl->grp_cnt.cnt = 0;
+ 	memset(skl->grp_cnt.vbus_id, 0xff,
+ 		(sizeof(int) * skl->nhlt->endpoint_count));
+ 
+-	for (i = 0; i < skl->nhlt->endpoint_count; i++) {
++	list_for_each_entry(epnt_lst, &skl->nhlt_endpoint_list, list) {
++		epnt = epnt_lst->endpoint;
+ 
+ 		if (epnt->linktype == link_type) {
+ 			if (!is_vbus_id_exist(skl, epnt->virtual_bus_id))
+ 				skl->grp_cnt.vbus_id[skl->grp_cnt.cnt++] =
+ 						epnt->virtual_bus_id;
+ 		}
+-		epnt = (struct nhlt_endpoint *)((u8 *)epnt + epnt->length);
+ 	}
+ }
+diff --git a/sound/soc/intel/skylake/skl-nhlt.h b/sound/soc/intel/skylake/skl-nhlt.h
+index 751f316ceb40..23c56ce0650b 100644
+--- a/sound/soc/intel/skylake/skl-nhlt.h
++++ b/sound/soc/intel/skylake/skl-nhlt.h
+@@ -90,6 +90,11 @@ struct nhlt_acpi_table {
+ 	struct nhlt_endpoint desc[0];
+ } __packed;
+ 
++struct nhlt_endpoint_list {
++	struct nhlt_endpoint *endpoint;
++	struct list_head list;
++};
++
+ struct nhlt_resource_desc  {
+ 	u32 extra;
+ 	u16 flags;
+diff --git a/sound/soc/intel/skylake/skl.c b/sound/soc/intel/skylake/skl.c
+index 171668637072..d9c7e118e069 100644
+--- a/sound/soc/intel/skylake/skl.c
++++ b/sound/soc/intel/skylake/skl.c
+@@ -1107,6 +1107,8 @@ static int skl_probe(struct pci_dev *pci,
+ 
+ 	device_disable_async_suspend(bus->dev);
+ 
++	pci_set_drvdata(skl->pci, bus);
++
+ 	skl->nhlt = skl_nhlt_init(bus->dev);
+ 
+ 	if (skl->nhlt == NULL) {
+@@ -1121,8 +1123,10 @@ static int skl_probe(struct pci_dev *pci,
+ 
+ 		err = skl_nhlt_create_sysfs(skl);
+ 		if (err < 0) {
+-			dev_err(bus->dev, "skl_nhlt_create_sysfs failed with err: %d\n", err);
+-			goto out_nhlt_free;
++			dev_err(bus->dev,
++				"skl_nhlt_create_sysfs failed with err: %d\n",
++				err);
++			goto out_free;
+ 		}
+ 
+ 		if (!tplg_name || strlen(tplg_name) >= sizeof(skl->tplg_name))
+@@ -1143,14 +1147,15 @@ static int skl_probe(struct pci_dev *pci,
+ 
+ 	err = skl_find_machine(skl, (void *)pci_id->driver_data);
+ 	if (err < 0) {
+-		dev_err(bus->dev, "skl_find_machine failed with err: %d\n", err);
+-		goto out_nhlt_free;
++		dev_err(bus->dev, "skl_find_machine failed with err: %d\n",
++			err);
++		goto out_free;
+ 	}
+ 
+ 	err = skl_init_dsp(skl);
+ 	if (err < 0) {
+ 		dev_dbg(bus->dev, "error failed to register dsp\n");
+-		goto out_nhlt_free;
++		goto out_free;
+ 	}
+ 	skl->enable_miscbdcge = skl_enable_miscbdcge;
+ 	skl->clock_power_gating = skl_clock_power_gating;
+@@ -1175,8 +1180,6 @@ static int skl_probe(struct pci_dev *pci,
+ 	skl_free_dsp(skl);
+ out_clk_free:
+ 	skl_clock_device_unregister(skl);
+-out_nhlt_free:
+-	skl_nhlt_free(skl->nhlt);
+ out_free:
+ 	skl_free(bus);
+ 
+@@ -1235,7 +1238,6 @@ static void skl_remove(struct pci_dev *pci)
+ 	skl_dmic_device_unregister(skl);
+ 	skl_clock_device_unregister(skl);
+ 	skl_nhlt_remove_sysfs(skl);
+-	skl_nhlt_free(skl->nhlt);
+ 	skl_free(bus);
+ 	dev_set_drvdata(&pci->dev, NULL);
+ }
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index 7e3a0438e8a6..231a166a3b18 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -194,6 +194,7 @@ struct skl_dev {
+ 	struct skl_sysfs_tree *sysfs_tree;
+ 
+ 	struct ep_group_cnt grp_cnt;
++	struct list_head nhlt_endpoint_list;
+ 
+ 	struct snd_kcontrol *kcontrol;
+ 	struct list_head notify_kctls;
+@@ -242,7 +243,6 @@ int skl_platform_register(struct device *dev);
+ int skl_get_nhlt_version(struct device *dev);
+ void skl_nhlt_get_ep_cnt(struct skl_dev *skl, int link_type);
+ struct nhlt_acpi_table *skl_nhlt_init(struct device *dev);
+-void skl_nhlt_free(struct nhlt_acpi_table *addr);
+ struct nhlt_specific_cfg *skl_get_ep_blob(struct skl_dev *skl, u32 instance,
+ 					u8 link_type, u8 s_fmt, u8 no_ch,
+ 					u32 s_rate, u8 dirn, u8 dev_type);
+-- 
+2.17.1
+

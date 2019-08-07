@@ -1,0 +1,293 @@
+From 171754595c0f3c02f3625f36da6b510782cab1fe Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 25 Jun 2019 14:01:10 +0100
+Subject: [PATCH 068/408] drm/i915/gt: Pass intel_gt to pm routines
+
+Switch from passing the i915 container to newly named struct intel_gt.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Matthew Auld
+Link: https://patchwork.freedesktop.org/patch/msgid/20190625130128.11009-2-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/gem/i915_gem_execbuffer.c    |  4 +--
+ drivers/gpu/drm/i915/gem/i915_gem_pm.c        |  4 ++-
+ .../drm/i915/gem/selftests/i915_gem_mman.c    |  4 +--
+ drivers/gpu/drm/i915/gt/intel_engine_pm.c     | 28 +++++++++++++++++--
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c         | 25 +++++++++--------
+ drivers/gpu/drm/i915/gt/intel_gt_pm.h         |  9 +++---
+ drivers/gpu/drm/i915/gt/intel_reset.c         |  2 +-
+ drivers/gpu/drm/i915/i915_drv.c               |  2 +-
+ drivers/gpu/drm/i915/i915_gem.c               |  2 +-
+ drivers/gpu/drm/i915/selftests/i915_gem.c     |  2 +-
+ 10 files changed, 55 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index cf8edb6822ee..1c5dfbfad71b 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -2437,7 +2437,7 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ 	 * wakeref that we hold until the GPU has been idle for at least
+ 	 * 100ms.
+ 	 */
+-	intel_gt_pm_get(eb.i915);
++	intel_gt_pm_get(&eb.i915->gt);
+ 
+ 	err = i915_mutex_lock_interruptible(dev);
+ 	if (err)
+@@ -2607,7 +2607,7 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ err_unlock:
+ 	mutex_unlock(&dev->struct_mutex);
+ err_rpm:
+-	intel_gt_pm_put(eb.i915);
++	intel_gt_pm_put(&eb.i915->gt);
+ 	i915_gem_context_put(eb.gem_context);
+ err_destroy:
+ 	eb_destroy(&eb);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_pm.c b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+index 2b782117d799..4b36b8d69920 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_pm.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_pm.c
+@@ -261,7 +261,9 @@ void i915_gem_resume(struct drm_i915_private *i915)
+ 	 * guarantee that the context image is complete. So let's just reset
+ 	 * it and start again.
+ 	 */
+-	if (intel_gt_resume(i915))
++	intel_gt_resume(&i915->gt);
++
++	if (i915_gem_init_hw(i915))
+ 		goto err_wedged;
+ 
+ 	intel_uc_resume(i915);
+diff --git a/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c b/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
+index 24a3c677ccd5..a1f0b235f56b 100644
+--- a/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
++++ b/drivers/gpu/drm/i915/gem/selftests/i915_gem_mman.c
+@@ -379,7 +379,7 @@ static void disable_retire_worker(struct drm_i915_private *i915)
+ {
+ 	i915_gem_shrinker_unregister(i915);
+ 
+-	intel_gt_pm_get(i915);
++	intel_gt_pm_get(&i915->gt);
+ 
+ 	cancel_delayed_work_sync(&i915->gem.retire_work);
+ 	flush_work(&i915->gem.idle_work);
+@@ -387,7 +387,7 @@ static void disable_retire_worker(struct drm_i915_private *i915)
+ 
+ static void restore_retire_worker(struct drm_i915_private *i915)
+ {
+-	intel_gt_pm_put(i915);
++	intel_gt_pm_put(&i915->gt);
+ 
+ 	mutex_lock(&i915->drm.struct_mutex);
+ 	igt_flush_test(i915, I915_WAIT_LOCKED);
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.c b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+index ae5b6baf6dff..5253c382034d 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+@@ -18,7 +18,7 @@ static int __engine_unpark(struct intel_wakeref *wf)
+ 
+ 	GEM_TRACE("%s\n", engine->name);
+ 
+-	intel_gt_pm_get(engine->i915);
++	intel_gt_pm_get(engine->gt);
+ 
+ 	/* Pin the default state for fast resets from atomic context. */
+ 	map = NULL;
+@@ -129,7 +129,7 @@ static int __engine_park(struct intel_wakeref *wf)
+ 
+ 	engine->execlists.no_priolist = false;
+ 
+-	intel_gt_pm_put(engine->i915);
++	intel_gt_pm_put(engine->gt);
+ 	return 0;
+ }
+ 
+@@ -142,3 +142,27 @@ void intel_engine_init__pm(struct intel_engine_cs *engine)
+ {
+ 	intel_wakeref_init(&engine->wakeref);
+ }
++
++int intel_engines_resume(struct drm_i915_private *i915)
++{
++	struct intel_engine_cs *engine;
++	enum intel_engine_id id;
++	int err = 0;
++
++	intel_gt_pm_get(&i915->gt);
++	for_each_engine(engine, i915, id) {
++		intel_engine_pm_get(engine);
++		engine->serial++; /* kernel context lost */
++		err = engine->resume(engine);
++		intel_engine_pm_put(engine);
++		if (err) {
++			dev_err(i915->drm.dev,
++				"Failed to restart %s (%d)\n",
++				engine->name, err);
++			break;
++		}
++	}
++	intel_gt_pm_put(&i915->gt);
++
++	return err;
++}
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index ea918bb80ca8..578831e80bf7 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -51,9 +51,11 @@ static int intel_gt_unpark(struct intel_wakeref *wf)
+ 	return 0;
+ }
+ 
+-void intel_gt_pm_get(struct drm_i915_private *i915)
++void intel_gt_pm_get(struct intel_gt *gt)
+ {
+-	intel_wakeref_get(&i915->runtime_pm, &i915->gt.wakeref, intel_gt_unpark);
++	struct intel_runtime_pm *rpm = &gt->i915->runtime_pm;
++
++	intel_wakeref_get(rpm, &gt->wakeref, intel_gt_unpark);
+ }
+ 
+ static int intel_gt_park(struct intel_wakeref *wf)
+@@ -76,9 +78,11 @@ static int intel_gt_park(struct intel_wakeref *wf)
+ 	return 0;
+ }
+ 
+-void intel_gt_pm_put(struct drm_i915_private *i915)
++void intel_gt_pm_put(struct intel_gt *gt)
+ {
+-	intel_wakeref_put(&i915->runtime_pm, &i915->gt.wakeref, intel_gt_park);
++	struct intel_runtime_pm *rpm = &gt->i915->runtime_pm;
++
++	intel_wakeref_put(rpm, &gt->wakeref, intel_gt_park);
+ }
+ 
+ void intel_gt_pm_init_early(struct intel_gt *gt)
+@@ -97,7 +101,7 @@ static bool reset_engines(struct drm_i915_private *i915)
+ 
+ /**
+  * intel_gt_sanitize: called after the GPU has lost power
+- * @i915: the i915 device
++ * @gt: the i915 GT container
+  * @force: ignore a failed reset and sanitize engine state anyway
+  *
+  * Anytime we reset the GPU, either with an explicit GPU reset or through a
+@@ -105,21 +109,21 @@ static bool reset_engines(struct drm_i915_private *i915)
+  * to match. Note that calling intel_gt_sanitize() if the GPU has not
+  * been reset results in much confusion!
+  */
+-void intel_gt_sanitize(struct drm_i915_private *i915, bool force)
++void intel_gt_sanitize(struct intel_gt *gt, bool force)
+ {
+ 	struct intel_engine_cs *engine;
+ 	enum intel_engine_id id;
+ 
+ 	GEM_TRACE("\n");
+ 
+-	if (!reset_engines(i915) && !force)
++	if (!reset_engines(gt->i915) && !force)
+ 		return;
+ 
+-	for_each_engine(engine, i915, id)
++	for_each_engine(engine, gt->i915, id)
+ 		intel_engine_reset(engine, false);
+ }
+ 
+-int intel_gt_resume(struct drm_i915_private *i915)
++void intel_gt_resume(struct intel_gt *gt)
+ {
+ 	struct intel_engine_cs *engine;
+ 	enum intel_engine_id id;
+@@ -131,8 +135,7 @@ int intel_gt_resume(struct drm_i915_private *i915)
+ 	 * Only the kernel contexts should remain pinned over suspend,
+ 	 * allowing us to fixup the user contexts on their first pin.
+ 	 */
+-	intel_gt_pm_get(i915);
+-	for_each_engine(engine, i915, id) {
++	for_each_engine(engine, gt->i915, id) {
+ 		struct intel_context *ce;
+ 
+ 		intel_engine_pm_get(engine);
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.h b/drivers/gpu/drm/i915/gt/intel_gt_pm.h
+index 1fbfe0a6c039..4dbb92cf58d7 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.h
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.h
+@@ -9,7 +9,6 @@
+ 
+ #include <linux/types.h>
+ 
+-struct drm_i915_private;
+ struct intel_gt;
+ 
+ enum {
+@@ -17,12 +16,12 @@ enum {
+ 	INTEL_GT_PARK,
+ };
+ 
+-void intel_gt_pm_get(struct drm_i915_private *i915);
+-void intel_gt_pm_put(struct drm_i915_private *i915);
++void intel_gt_pm_get(struct intel_gt *gt);
++void intel_gt_pm_put(struct intel_gt *gt);
+ 
+ void intel_gt_pm_init_early(struct intel_gt *gt);
+ 
+-void intel_gt_sanitize(struct drm_i915_private *i915, bool force);
+-int intel_gt_resume(struct drm_i915_private *i915);
++void intel_gt_sanitize(struct intel_gt *gt, bool force);
++void intel_gt_resume(struct intel_gt *gt);
+ 
+ #endif /* INTEL_GT_PM_H */
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index 6f2668e13c63..adfdb908587f 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -898,7 +898,7 @@ static bool __i915_gem_unset_wedged(struct drm_i915_private *i915)
+ 	}
+ 	mutex_unlock(&i915->gt.timelines.mutex);
+ 
+-	intel_gt_sanitize(i915, false);
++	intel_gt_sanitize(&i915->gt, false);
+ 
+ 	/*
+ 	 * Undo nop_submit_request. We prevent all new i915 requests from
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 6241a4615501..f5b7c37c165f 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -2377,7 +2377,7 @@ static int i915_drm_resume_early(struct drm_device *dev)
+ 
+ 	intel_power_domains_resume(dev_priv);
+ 
+-	intel_gt_sanitize(dev_priv, true);
++	intel_gt_sanitize(&dev_priv->gt, true);
+ 
+ 	enable_rpm_wakeref_asserts(&dev_priv->runtime_pm);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index bda77d796186..7c213c5ba79e 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -1157,7 +1157,7 @@ void i915_gem_sanitize(struct drm_i915_private *i915)
+ 	 * it may impact the display and we are uncertain about the stability
+ 	 * of the reset, so this could be applied to even earlier gen.
+ 	 */
+-	intel_gt_sanitize(i915, false);
++	intel_gt_sanitize(&i915->gt, false);
+ 
+ 	intel_uncore_forcewake_put(&i915->uncore, FORCEWAKE_ALL);
+ 	intel_runtime_pm_put(&i915->runtime_pm, wakeref);
+diff --git a/drivers/gpu/drm/i915/selftests/i915_gem.c b/drivers/gpu/drm/i915/selftests/i915_gem.c
+index c6a01a6e87f1..ed0c17bf6613 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_gem.c
++++ b/drivers/gpu/drm/i915/selftests/i915_gem.c
+@@ -115,7 +115,7 @@ static void pm_resume(struct drm_i915_private *i915)
+ 	 * that runtime-pm just works.
+ 	 */
+ 	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
+-		intel_gt_sanitize(i915, false);
++		intel_gt_sanitize(&i915->gt, false);
+ 		i915_gem_sanitize(i915);
+ 		i915_gem_resume(i915);
+ 	}
+-- 
+2.17.1
+

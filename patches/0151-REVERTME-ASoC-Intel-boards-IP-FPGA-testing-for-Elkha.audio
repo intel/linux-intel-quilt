@@ -1,0 +1,145 @@
+From 93d9c063a31021e0f498988ceb1ebcbccde37265 Mon Sep 17 00:00:00 2001
+From: "Lai, Poey Seng" <poey.seng.lai@intel.com>
+Date: Wed, 15 May 2019 15:29:09 +0800
+Subject: [PATCH 151/163] [REVERTME]ASoC: Intel: boards: IP FPGA testing for
+ Elkhart Lake rt5660 machine driver
+
+Add support for testing Elkhart Lake ALC5660 audio
+machine driver using IP FPGA with KBL RVP board.
+
+Change-Id: I77f684984bd9660213840546ecd65a01fb169686
+Signed-off-by: Lai, Poey Seng <poey.seng.lai@intel.com>
+Reviewed-on:
+Tested-by: gkblditp <gkblditp@intel.com>
+Reviewed-by: Lewandowski, Gustaw <gustaw.lewandowski@intel.com>
+---
+ sound/soc/codecs/rt5660.c                     |  1 +
+ sound/soc/intel/boards/Kconfig                |  9 +++++++
+ sound/soc/intel/boards/ehl_rt5660.c           | 27 ++++++++++++-------
+ .../intel/common/soc-acpi-intel-ehl-match.c   | 14 ++++++++++
+ 4 files changed, 42 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/codecs/rt5660.c b/sound/soc/codecs/rt5660.c
+index b6a616547543..b4c22d4feed0 100644
+--- a/sound/soc/codecs/rt5660.c
++++ b/sound/soc/codecs/rt5660.c
+@@ -1245,6 +1245,7 @@ static const struct acpi_device_id rt5660_acpi_match[] = {
+ 	{ "10EC5660", 0 },
+ 	{ "10EC3277", 0 },
+ 	{ "INTC1027", 0 },
++	{ "INT34C2", 0 },
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(acpi, rt5660_acpi_match);
+diff --git a/sound/soc/intel/boards/Kconfig b/sound/soc/intel/boards/Kconfig
+index e62004e0ac0f..02b20adead76 100644
+--- a/sound/soc/intel/boards/Kconfig
++++ b/sound/soc/intel/boards/Kconfig
+@@ -515,6 +515,15 @@ config SND_SOC_INTEL_EHL_RT5660_MACH
+ 	  Say Y or m if you have such a device. This is a recommended option.
+ 	  If unsure select "N".
+ 
++config SND_SOC_INTEL_EHL_RT5660_FPGA
++	tristate "RT5660 on IP FPGA"
++	depends on SND_SOC_INTEL_EHL_RT5660_MACH
++	help
++	 This option will be reverded after power on.
++	 It's only for testing purposes.
++	 Select this option if testing RT5660 on IP FPGA
++	 If unsure select "N".
++
+ config SND_SOC_INTEL_SSP_TEST_MACH
+ 	tristate "SSP-TEST mode"
+ 	depends on MFD_INTEL_LPSS && ACPI
+diff --git a/sound/soc/intel/boards/ehl_rt5660.c b/sound/soc/intel/boards/ehl_rt5660.c
+index d6722a8856c6..454cec47a614 100644
+--- a/sound/soc/intel/boards/ehl_rt5660.c
++++ b/sound/soc/intel/boards/ehl_rt5660.c
+@@ -177,35 +177,44 @@ static const struct snd_soc_ops ehl_rt5660_fe_ops = {
+ 	.startup = ehl_fe_startup,
+ };
+ 
++#if IS_ENABLED(CONFIG_SND_SOC_INTEL_EHL_RT5660_FPGA)
++static const char pname[] = "0000:02:1f.3";
++static const char cname[] = "i2c-INT34C2:00";
++#else
+ static const char pname[] = "0000:00:1f.3";
+ static const char cname[] = "i2c-INTC1027:00"; /* EHL Board */
++#endif
+ 
+-static struct snd_soc_dai_link ehl_rt5660_msic_dailink[] = {
++SND_SOC_DAILINK_DEF(ssp0_pin,
++	DAILINK_COMP_ARRAY(COMP_CPU("SSP0 Pin")));
++
++SND_SOC_DAILINK_DEF(rt5660_codec,
++	DAILINK_COMP_ARRAY(COMP_CODEC(cname, RT5660_CODEC_DAI)));
+ 
++SND_SOC_DAILINK_DEF(platform,
++	DAILINK_COMP_ARRAY(COMP_PLATFORM(pname)));
++
++static struct snd_soc_dai_link ehl_rt5660_msic_dailink[] = {
+ 	/* back ends */
+ 	{
+-		/* SSP0 - Codec */
+ 		.name = "SSP0-Codec",
+ 		.id = 0,
+-		.cpu_dai_name = "SSP0 Pin",
+-		.codec_name = cname,
+-		.codec_dai_name = RT5660_CODEC_DAI,
+-		.platform_name = pname,
+-		.be_hw_params_fixup = ehl_be_fixup,
++		.init = NULL,
+ 		.no_pcm = 1,
+ 		.dai_fmt = SND_SOC_DAIFMT_I2S |
+ 			SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBS_CFS,
+ 		.dpcm_playback = 1,
+ 		.dpcm_capture = 1,
+-		.init = NULL,
+ 		.ops = &ehl_rt5660_ops,
++		.be_hw_params_fixup = ehl_be_fixup,
++		SND_SOC_DAILINK_REG(ssp0_pin, rt5660_codec, platform),
+ 	},
+ };
+ 
+ static int
+ ehl_add_dai_link(struct snd_soc_card *card, struct snd_soc_dai_link *link)
+ {
+-	link->platform_name = pname;
++	link->platforms->name = pname;
+ 	link->nonatomic = 1;
+ 
+ 	return 0;
+diff --git a/sound/soc/intel/common/soc-acpi-intel-ehl-match.c b/sound/soc/intel/common/soc-acpi-intel-ehl-match.c
+index 1ff90957938f..7c33b392a8f6 100644
+--- a/sound/soc/intel/common/soc-acpi-intel-ehl-match.c
++++ b/sound/soc/intel/common/soc-acpi-intel-ehl-match.c
+@@ -8,12 +8,26 @@
+ #include <sound/soc-acpi-intel-match.h>
+ #include "../skylake/skl.h"
+ 
++static int imr_alloc = 1;
++
++static struct skl_machine_pdata ehl_pdata_fpga = {
++	.use_tplg_pcm = true,
++	.imr_alloc = &imr_alloc,
++};
++
+ static struct skl_machine_pdata ehl_pdata = {
+ 	.use_tplg_pcm = true,
+ };
+ 
+ struct snd_soc_acpi_mach snd_soc_acpi_intel_ehl_machines[] = {
+ 
++	{
++		.id = "INT34C2", /* Using KBL RVP with IP FPGA */
++		.drv_name = "ehl_rt5660",
++		.fw_filename = "intel/dsp_fw_ehl.bin",
++		.pdata = &ehl_pdata_fpga,
++	},
++
+ 	{
+ 		.id = "INTC1027", /* EHL board */
+ 		.drv_name = "ehl_rt5660",
+-- 
+2.17.1
+
