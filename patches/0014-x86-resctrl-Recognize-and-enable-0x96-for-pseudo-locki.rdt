@@ -1,0 +1,106 @@
+From 885d825b6513943d9bf6059fe01586a5aaec29f4 Mon Sep 17 00:00:00 2001
+From: Reinette Chatre <reinette.chatre@intel.com>
+Date: Thu, 1 Nov 2018 14:26:46 -0700
+Subject: [PATCH 14/14] x86/resctrl: Recognize and enable 0x96 for
+ pseudo-locking support
+
+0x96 is added to the list of platforms for which Cache
+Pseudo-Locking is supported. The assumption here is that it supports the
+same prefetch disable register and bits as Apollo Lake and also the same
+performance events.
+
+The 0x96 platform supports CAT on both L2 and L3 cache. Only the
+L2 CAT feature supports enumeration via CPUID. In order to enable CAT on
+the 0x96 platform the L3 CAT properties needs to be hardcoded.
+
+Signed-off-by: Reinette Chatre <reinette.chatre@intel.com>
+---
+ arch/x86/kernel/cpu/resctrl/core.c        | 36 +++++++++++++++++++++++
+ arch/x86/kernel/cpu/resctrl/pseudo_lock.c |  3 ++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/arch/x86/kernel/cpu/resctrl/core.c b/arch/x86/kernel/cpu/resctrl/core.c
+index b6adc0c51d20..5340d2d5677d 100644
+--- a/arch/x86/kernel/cpu/resctrl/core.c
++++ b/arch/x86/kernel/cpu/resctrl/core.c
+@@ -253,6 +253,38 @@ static inline void cache_alloc_8C_probe(void)
+ 	r->alloc_enabled = true;
+ }
+ 
++/*
++ * cache_alloc_96_probe() - Have to probe for Intel 0x96 systems
++ * as they do not have CPUID enumeration support for L3 cache allocation
++ * (the L2 cache allocation does have CPUID enumeration support).
++ * All SKUs should support L3 CAT but the probe is maintained as a
++ * verification of the support. Max CLOSids is 4 and max CBM length is 16.
++ * CDP is not supported.
++ *
++ * The global rdt_alloc_capable is not set here so that the enumeration of
++ * L2 CAT can proceed.
++ */
++static inline void cache_alloc_96_probe(void)
++{
++	struct rdt_resource *r  = &rdt_resources_all[RDT_RESOURCE_L3];
++	u32 l, h, max_cbm = BIT_MASK(16) - 1;
++
++	if (wrmsr_safe(MSR_IA32_L3_CBM_BASE, max_cbm, 0))
++		return;
++	rdmsr(MSR_IA32_L3_CBM_BASE, l, h);
++
++	if (l != max_cbm)
++		return;
++
++	r->num_closid = 4;
++	r->default_ctrl = max_cbm;
++	r->cache.cbm_len = 16;
++	r->cache.shareable_bits = 0x0;
++	r->cache.min_cbm_bits = 1;
++	r->alloc_capable = true;
++	r->alloc_enabled = true;
++}
++
+ bool is_mba_sc(struct rdt_resource *r)
+ {
+ 	if (!r)
+@@ -937,6 +969,10 @@ static __init void __check_quirks_intel(void)
+ 		if (!rdt_options[RDT_FLAG_L3_CAT].force_off)
+ 			cache_alloc_8C_probe();
+ 		break;
++	case 0x96:
++		if (!rdt_options[RDT_FLAG_L3_CAT].force_off)
++			cache_alloc_96_probe();
++		break;
+ 	}
+ }
+ 
+diff --git a/arch/x86/kernel/cpu/resctrl/pseudo_lock.c b/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
+index c777946cb40a..40f0049aa782 100644
+--- a/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
++++ b/arch/x86/kernel/cpu/resctrl/pseudo_lock.c
+@@ -89,6 +89,7 @@ static u64 get_prefetch_disable_bits(void)
+ 		return 0xF;
+ 	case INTEL_FAM6_ATOM_GOLDMONT:
+ 	case INTEL_FAM6_ATOM_GOLDMONT_PLUS:
++	case 0x96:
+ 		/*
+ 		 * SDM defines bits of MSR_MISC_FEATURE_CONTROL register
+ 		 * as:
+@@ -1360,6 +1361,7 @@ static int measure_l2_residency(void *_plr)
+ 	switch (boot_cpu_data.x86_model) {
+ 	case INTEL_FAM6_ATOM_GOLDMONT:
+ 	case INTEL_FAM6_ATOM_GOLDMONT_PLUS:
++	case 0x96:
+ 	case 0x8C:
+ 		perf_miss_attr.config = X86_CONFIG(.event = 0xd1,
+ 						   .umask = 0x10);
+@@ -1406,6 +1408,7 @@ static int measure_l3_residency(void *_plr)
+ 						   .umask = 0x41);
+ 		break;
+ 	case 0x8C:
++	case 0x96:
+ 		perf_miss_attr.config = X86_CONFIG(.event = 0xd1,
+ 						   .umask = 0x20);
+ 		perf_hit_attr.config = X86_CONFIG(.event = 0xd1,
+-- 
+2.17.1
+

@@ -1,0 +1,200 @@
+From 08f14307eea98d6071e099db41eb295586f54f2f Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 20 Mar 2019 20:59:28 +0100
+Subject: [PATCH 016/163] ASoC: Intel: Skylake: Add HARDWARE_CONFIG IPC request
+
+Driver requests this property to discover underlying HW configuration.
+Internally hw config is split between core config followed by
+capabilities e.g.: i2s, gpdma.
+
+Most params are currently unused. In time driver dependency on hw config
+will increase, and with it, more parsing will be unveiled.
+
+Change-Id: Ic6c9967613c0c0e4e5c64584b6757aea9438b162
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-sst-ipc.c | 87 +++++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h | 46 ++++++++++++++
+ sound/soc/intel/skylake/skl.h         |  1 +
+ 3 files changed, 134 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 5d38ff263575..7633913fb005 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -1189,3 +1189,90 @@ int skl_ipc_fw_cfg_get(struct sst_generic_ipc *ipc, struct skl_fw_cfg *cfg)
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(skl_ipc_fw_cfg_get);
++
++int skl_ipc_hw_cfg_get(struct sst_generic_ipc *ipc, struct skl_hw_cfg *cfg)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++	struct skl_tlv *tlv;
++	size_t size, bytes = 0, offset = 0;
++	u8 *payload = NULL;
++	int ret;
++
++	msg.module_id = 0;
++	msg.instance_id = 0;
++	msg.large_param_id = HARDWARE_CONFIG;
++
++	ret = skl_ipc_get_large_config(ipc, &msg, (u32 **)&payload, &bytes);
++	if (ret)
++		goto exit;
++
++	while (offset < bytes) {
++		tlv = (struct skl_tlv *)(payload + offset);
++
++		switch (tlv->type) {
++		case SKL_HW_CFG_CAVS_VER:
++			cfg->cavs_version = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_DSP_CORES:
++			cfg->dsp_cores = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_MEM_PAGE_BYTES:
++			cfg->mem_page_bytes = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_TOTAL_PHYS_MEM_PAGES:
++			cfg->total_phys_mem_pages = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_I2S_CAPS:
++			cfg->i2s_caps.version = tlv->value[0];
++			size = tlv->value[1];
++			cfg->i2s_caps.ctrl_count = size;
++			if (!size)
++				break;
++
++			size *= sizeof(*cfg->i2s_caps.ctrl_base_addr);
++			cfg->i2s_caps.ctrl_base_addr = devm_kmemdup(ipc->dev,
++					&tlv->value[2], size, GFP_KERNEL);
++			if (!cfg->i2s_caps.ctrl_base_addr) {
++				ret = -ENOMEM;
++				goto exit;
++			}
++			break;
++
++		case SKL_HW_CFG_GATEWAY_COUNT:
++			cfg->gateway_count = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_HP_EBB_COUNT:
++			cfg->hp_ebb_count = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_LP_EBB_COUNT:
++			cfg->lp_ebb_count = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_EBB_SIZE_BYTES:
++			cfg->ebb_size_bytes = *tlv->value;
++			break;
++
++		case SKL_HW_CFG_GPDMA_CAPS:
++		case SKL_HW_CFG_UAOL_CAPS:
++			break;
++
++		default:
++			dev_info(ipc->dev, "Unrecognized hw param: %d\n",
++				tlv->type);
++			break;
++		}
++
++		offset += sizeof(*tlv) + tlv->length;
++	}
++
++exit:
++	kfree(payload);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(skl_ipc_hw_cfg_get);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index ab9099ed417c..f75f17dc2719 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -197,6 +197,7 @@ enum skl_basefw_runtime_param {
+ 	ASTATE_TABLE = 4,
+ 	DMA_CONTROL = 5,
+ 	FIRMWARE_CONFIG = 7,
++	HARDWARE_CONFIG = 8,
+ 	MODULES_INFO = 9,
+ 	PIPELINE_LIST_INFO = 10,
+ 	PIPELINE_PROPS = 11,
+@@ -272,6 +273,50 @@ struct skl_fw_cfg {
+ 	u32 power_gating_policy;
+ };
+ 
++enum skl_hw_cfg_params {
++	SKL_HW_CFG_CAVS_VER,
++	SKL_HW_CFG_DSP_CORES,
++	SKL_HW_CFG_MEM_PAGE_BYTES,
++	SKL_HW_CFG_TOTAL_PHYS_MEM_PAGES,
++	SKL_HW_CFG_I2S_CAPS,
++	SKL_HW_CFG_GPDMA_CAPS,
++	SKL_HW_CFG_GATEWAY_COUNT,
++	SKL_HW_CFG_HP_EBB_COUNT,
++	SKL_HW_CFG_LP_EBB_COUNT,
++	SKL_HW_CFG_EBB_SIZE_BYTES,
++	SKL_HW_CFG_UAOL_CAPS
++};
++
++enum skl_cavs_version {
++	SKL_CAVS_VER_1_5 = 0x10005,
++	SKL_CAVS_VER_1_8 = 0x10008,
++};
++
++enum skl_i2s_version {
++	SKL_I2S_VER_15_SKYLAKE   = 0x00000,
++	SKL_I2S_VER_15_BROXTON   = 0x10000,
++	SKL_I2S_VER_15_BROXTON_P = 0x20000,
++	SKL_I2S_VER_18_KBL_CNL   = 0x30000,
++};
++
++struct skl_i2s_caps {
++	enum skl_i2s_version version;
++	u32 ctrl_count;
++	u32 *ctrl_base_addr;
++};
++
++struct skl_hw_cfg {
++	enum skl_cavs_version cavs_version;
++	u32 dsp_cores;
++	u32 mem_page_bytes;
++	u32 total_phys_mem_pages;
++	struct skl_i2s_caps i2s_caps;
++	u32 gateway_count;
++	u32 hp_ebb_count;
++	u32 lp_ebb_count;
++	u32 ebb_size_bytes;
++};
++
+ struct skl_ipc_init_instance_msg {
+ 	u32 module_id;
+ 	u32 instance_id;
+@@ -373,5 +418,6 @@ void skl_ipc_tx_data_copy(struct ipc_message *msg, char *tx_data,
+ 		size_t tx_size);
+ 
+ int skl_ipc_fw_cfg_get(struct sst_generic_ipc *ipc, struct skl_fw_cfg *cfg);
++int skl_ipc_hw_cfg_get(struct sst_generic_ipc *ipc, struct skl_hw_cfg *cfg);
+ 
+ #endif /* __SKL_IPC_H */
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index deec565bda99..b30472346d2c 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -112,6 +112,7 @@ struct skl_dev {
+ 	/* Populate module information */
+ 	struct list_head module_list;
+ 	struct skl_fw_cfg fw_cfg;
++	struct skl_hw_cfg hw_cfg;
+ 
+ 	/* Is firmware loaded */
+ 	bool fw_loaded;
+-- 
+2.17.1
+

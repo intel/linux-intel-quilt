@@ -1,0 +1,353 @@
+From a54e395b036c5baef2f9055ce94d686e349e7f58 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Thu, 4 Apr 2019 14:08:30 +0200
+Subject: [PATCH 144/163] ASoC: Intel: Skylake: Handle LOG_BUFFER_STATUS
+ notification
+
+Add handlers for LOG_BUFFER_STATUS message for Skylake family. Due to
+non-backward compatible implementation across different FW versions,
+each received its own buffer-filling mechanism. Data is copied directly
+from mmio into kfifo and stored for later use when requested by user.
+
+Change-Id: I008961cbd1e3c9cef82e24b3eda5ed708459dfb1
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Reviewed-on:
+Reviewed-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c       | 16 +++++++
+ sound/soc/intel/skylake/cnl-sst.c       |  2 +
+ sound/soc/intel/skylake/icl-sst.c       | 23 ++++++++++
+ sound/soc/intel/skylake/skl-sst-dsp.h   |  4 ++
+ sound/soc/intel/skylake/skl-sst-ipc.c   | 37 ++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h   | 57 +++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-utils.c |  1 +
+ sound/soc/intel/skylake/skl-sst.c       | 32 ++++++++++++++
+ sound/soc/intel/skylake/skl.h           |  4 ++
+ 9 files changed, 176 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 0f65425c5fd0..ac492fb68230 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -576,6 +576,20 @@ int bxt_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
+ 	return ret;
+ }
+ 
++int bxt_log_buffer_status(struct sst_dsp *dsp, struct skl_notify_msg notif)
++{
++	struct skl_dev *skl = dsp->thread_context;
++	int ret;
++
++	ret = dsp->fw_ops.log_buffer_offset(dsp, notif.log.core);
++	if (ret < 0)
++		return ret;
++
++	skl_copy_from_sram2(skl, dsp->addr.sram2 + ret);
++	wake_up(&skl->trace_waitq);
++	return 0;
++}
++
+ static const struct skl_dsp_fw_ops bxt_fw_ops = {
+ 	.set_state_D0 = bxt_set_dsp_D0,
+ 	.set_state_D3 = bxt_set_dsp_D3,
+@@ -585,6 +599,8 @@ static const struct skl_dsp_fw_ops bxt_fw_ops = {
+ 	.get_fw_errcode = bxt_get_errorcode,
+ 	.load_library = bxt_load_library,
+ 	.enable_logs = bxt_enable_logs,
++	.log_buffer_offset = skl_log_buffer_offset,
++	.log_buffer_status = bxt_log_buffer_status,
+ };
+ 
+ static struct sst_ops skl_ops = {
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index 7d7b75cad821..25f5615a8651 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -355,6 +355,8 @@ static const struct skl_dsp_fw_ops cnl_fw_ops = {
+ 	.get_fw_errcode = cnl_get_errno,
+ 	.load_library = bxt_load_library,
+ 	.enable_logs = bxt_enable_logs,
++	.log_buffer_offset = skl_log_buffer_offset,
++	.log_buffer_status = bxt_log_buffer_status,
+ };
+ 
+ static struct sst_ops cnl_ops = {
+diff --git a/sound/soc/intel/skylake/icl-sst.c b/sound/soc/intel/skylake/icl-sst.c
+index 25255546bcd0..e7f0887d348a 100644
+--- a/sound/soc/intel/skylake/icl-sst.c
++++ b/sound/soc/intel/skylake/icl-sst.c
+@@ -36,3 +36,26 @@ icl_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
+ 	kfree(info);
+ 	return ret;
+ }
++
++static int icl_slot_offset(struct skl_dev *skl,
++		union icl_memwnd2_slot_type slot_type)
++{
++	struct icl_memwnd2_desc desc[ICL_MEMWND2_SLOTS_COUNT];
++	int i;
++
++	memcpy_fromio(&desc, skl->dsp->addr.sram2, sizeof(desc));
++
++	for (i = 0; i < ICL_MEMWND2_SLOTS_COUNT; i++)
++		if (desc[i].slot_id.val == slot_type.val)
++			return offsetof(struct icl_memwnd2, slot_array) +
++				skl_log_buffer_offset(skl->dsp, i);
++	return -ENXIO;
++}
++
++__maybe_unused static int icl_log_buffer_offset(struct sst_dsp *dsp, u32 core)
++{
++	union icl_memwnd2_slot_type slot_type = ICL_SLOT_DEBUG_LOG;
++
++	slot_type.resource_id = core;
++	return icl_slot_offset(dsp->thread_context, slot_type);
++}
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 4791f9d99fc4..842f0751dc6d 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -19,6 +19,7 @@ struct sst_dsp;
+ struct sst_dsp_device;
+ struct skl_lib_info;
+ struct skl_dev;
++struct skl_notify_msg;
+ enum skl_log_enable;
+ 
+ /* Intel HD Audio General DSP Registers */
+@@ -159,6 +160,9 @@ struct skl_dsp_fw_ops {
+ 	int (*enable_logs)(struct sst_dsp *dsp, enum skl_log_enable enable,
+ 		u32 aging_period, u32 fifo_full_period,
+ 		unsigned long resource_mask, u32 *priorities);
++	int (*log_buffer_offset)(struct sst_dsp *dsp, u32 core);
++	int (*log_buffer_status)(struct sst_dsp *dsp,
++		struct skl_notify_msg notif);
+ };
+ 
+ struct skl_dsp_loader_ops {
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 969ad8097207..94f1de968a3a 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -473,6 +473,7 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 		struct skl_ipc_header header)
+ {
+ 	struct skl_dev *skl = container_of(ipc, struct skl_dev, ipc);
++	struct skl_notify_msg notif = *(struct skl_notify_msg *)&header;
+ 	int ret;
+ 
+ 	if (IPC_GLB_NOTIFY_MSG_TYPE(header.primary)) {
+@@ -486,6 +487,10 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 			skl_parse_resource_event(skl, header);
+ 			break;
+ 
++		case IPC_GLB_NOTIFY_LOG_BUFFER_STATUS:
++			skl->dsp->fw_ops.log_buffer_status(skl->dsp, notif);
++			break;
++
+ 		case IPC_GLB_NOTIFY_FW_READY:
+ 			skl->boot_complete = true;
+ 			wake_up(&skl->boot_wait);
+@@ -1494,3 +1499,35 @@ skl_kfifo_fromio_locked(struct kfifo *fifo, const void __iomem *src,
+ 
+ 	return len;
+ }
++
++static void copy_from_sram2(struct skl_dev *skl, void __iomem *addr,
++		struct bxt_log_buffer_layout layout)
++{
++	struct kfifo *fifo = &skl->trace_fifo;
++	spinlock_t *lock = &skl->trace_lock;
++	void __iomem *buf;
++
++	if (!kfifo_initialized(fifo))
++		/* consume the logs regardless of consumer presence */
++		goto update_read_ptr;
++	buf = addr + sizeof(layout);
++
++	if (layout.read_ptr > layout.write_ptr) {
++		skl_kfifo_fromio_locked(fifo, buf + layout.read_ptr,
++			bxt_log_payload_size(skl) - layout.read_ptr, lock);
++		layout.read_ptr = 0;
++	}
++	skl_kfifo_fromio_locked(fifo, buf + layout.read_ptr,
++		layout.write_ptr - layout.read_ptr, lock);
++
++update_read_ptr:
++	writel(layout.write_ptr, addr);
++}
++
++void skl_copy_from_sram2(struct skl_dev *skl, void __iomem *addr)
++{
++	struct bxt_log_buffer_layout layout;
++
++	memcpy_fromio(&layout, addr, sizeof(layout));
++	copy_from_sram2(skl, addr, layout);
++}
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 3aa5fa3e3c5f..f27ee785322f 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -598,6 +598,47 @@ struct icl_log_state_info {
+ 	u32 logs_priorities_mask[0];
+ } __packed;
+ 
++struct bxt_log_buffer_layout {
++	u32 read_ptr;
++	u32 write_ptr;
++	u8 buffer[0];
++} __packed;
++
++union icl_memwnd2_slot_type {
++	u32 val;
++	struct {
++		u32 resource_id:8;
++		u32 type:24;
++	};
++};
++
++struct icl_memwnd2_desc {
++	u32 resource_id;
++	union icl_memwnd2_slot_type slot_id;
++	u32 vma;
++} __packed;
++
++#define ICL_SLOT_UNUSED \
++	((union icl_memwnd2_slot_type) { 0x00000000U })
++#define ICL_SLOT_CRITICAL_LOG \
++	((union icl_memwnd2_slot_type) { 0x54524300U })
++#define ICL_SLOT_DEBUG_LOG \
++	((union icl_memwnd2_slot_type) { 0x474f4c00U })
++#define ICL_SLOT_GDB_STUB \
++	((union icl_memwnd2_slot_type) { 0x42444700U })
++#define ICL_SLOT_BROKEN \
++	((union icl_memwnd2_slot_type) { 0x44414544U })
++
++#define ICL_MEMWND2_SLOTS_COUNT	15
++
++struct icl_memwnd2 {
++	union {
++		struct icl_memwnd2_desc slot_desc[ICL_MEMWND2_SLOTS_COUNT];
++		u8 rsvd[PAGE_SIZE];
++	};
++	u8 slot_array[ICL_MEMWND2_SLOTS_COUNT][PAGE_SIZE];
++} __packed;
++
+ struct skl_notify_kctrl_info {
+ 	struct list_head list;
+ 	u32 notify_id;
+@@ -737,4 +778,20 @@ unsigned int
+ skl_kfifo_fromio_locked(struct kfifo *fifo, const void __iomem *src,
+ 		unsigned int len, spinlock_t *lock);
+ 
++#define skl_log_buffer_size(s) \
++({ \
++	struct skl_dev *__skl = (s); \
++	__skl->fw_cfg.trace_log_bytes / __skl->hw_cfg.dsp_cores; \
++})
++
++#define bxt_log_payload_size(s) \
++	(skl_log_buffer_size(s) - sizeof(struct bxt_log_buffer_layout))
++
++int skl_log_buffer_offset(struct sst_dsp *dsp, u32 core);
++
++#define FW_REGS_SZ	PAGE_SIZE
++
++void skl_copy_from_sram2(struct skl_dev *skl, void __iomem *addr);
++int bxt_log_buffer_status(struct sst_dsp *dsp, struct skl_notify_msg notif);
++
+ #endif /* __SKL_IPC_H */
+diff --git a/sound/soc/intel/skylake/skl-sst-utils.c b/sound/soc/intel/skylake/skl-sst-utils.c
+index b74e92764644..95a99b544cb8 100644
+--- a/sound/soc/intel/skylake/skl-sst-utils.c
++++ b/sound/soc/intel/skylake/skl-sst-utils.c
+@@ -449,6 +449,7 @@ int skl_sst_ctx_init(struct device *dev, int irq, const char *fw_name,
+ 	skl->dev = dev;
+ 	skl_dev->thread_context = skl;
+ 	INIT_LIST_HEAD(&skl->module_list);
++	spin_lock_init(&skl->trace_lock);
+ 	skl->dsp = skl_dsp_ctx_init(dev, skl_dev, irq);
+ 	if (!skl->dsp) {
+ 		dev_err(skl->dev, "%s: no device\n", __func__);
+diff --git a/sound/soc/intel/skylake/skl-sst.c b/sound/soc/intel/skylake/skl-sst.c
+index 57602092edc9..3c1bb45c39b8 100644
+--- a/sound/soc/intel/skylake/skl-sst.c
++++ b/sound/soc/intel/skylake/skl-sst.c
+@@ -28,6 +28,9 @@
+ 
+ #define SKL_NUM_MODULES		1
+ 
++/* fw DbgLogWp registers */
++#define FW_REGS_DBG_LOG_WP(core) (0x30 + 0x4 * core)
++
+ static bool skl_check_fw_status(struct sst_dsp *ctx, u32 status)
+ {
+ 	u32 cur_sts;
+@@ -520,6 +523,33 @@ static int skl_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
+ 	return ret;
+ }
+ 
++int skl_log_buffer_offset(struct sst_dsp *dsp, u32 core)
++{
++	return core * skl_log_buffer_size(dsp->thread_context);
++}
++
++static int
++skl_log_buffer_status(struct sst_dsp *dsp, struct skl_notify_msg notif)
++{
++	struct skl_dev *skl = dsp->thread_context;
++	void __iomem *buf;
++	u32 size, write, offset;
++
++	if (!kfifo_initialized(&skl->trace_fifo))
++		return 0;
++	size = skl_log_buffer_size(skl) / 2;
++	write = readl(dsp->addr.sram0 + FW_REGS_DBG_LOG_WP(notif.log.core));
++	/* determine buffer half */
++	offset = (write < size) ? size : 0;
++
++	buf = dsp->addr.sram2 +
++		dsp->fw_ops.log_buffer_offset(dsp, notif.log.core) + offset;
++	skl_kfifo_fromio_locked(&skl->trace_fifo, buf, size, &skl->trace_lock);
++	wake_up(&skl->trace_waitq);
++
++	return 0;
++}
++
+ static const struct skl_dsp_fw_ops skl_fw_ops = {
+ 	.set_state_D0 = skl_set_dsp_D0,
+ 	.set_state_D3 = skl_set_dsp_D3,
+@@ -529,6 +559,8 @@ static const struct skl_dsp_fw_ops skl_fw_ops = {
+ 	.load_mod = skl_load_module,
+ 	.unload_mod = skl_unload_module,
+ 	.enable_logs = skl_enable_logs,
++	.log_buffer_offset = skl_log_buffer_offset,
++	.log_buffer_status = skl_log_buffer_status,
+ };
+ 
+ static struct sst_ops skl_ops = {
+diff --git a/sound/soc/intel/skylake/skl.h b/sound/soc/intel/skylake/skl.h
+index d74d7a7c5a8a..0ec6b00bd1db 100644
+--- a/sound/soc/intel/skylake/skl.h
++++ b/sound/soc/intel/skylake/skl.h
+@@ -12,6 +12,7 @@
+ #ifndef __SOUND_SOC_SKL_H
+ #define __SOUND_SOC_SKL_H
+ 
++#include <linux/kfifo.h>
+ #include <sound/hda_register.h>
+ #include <sound/hdaudio_ext.h>
+ #include <sound/hda_codec.h>
+@@ -200,6 +201,9 @@ struct skl_dev {
+ 	/* probe stream management */
+ 	struct hdac_ext_stream *extractor;
+ 	unsigned int num_probe_streams;
++	/* firmware logging */
++	struct kfifo trace_fifo;
++	spinlock_t trace_lock;
+ };
+ 
+ #define skl_to_bus(s)  (&(s)->hbus.core)
+-- 
+2.17.1
+
