@@ -1,0 +1,142 @@
+From e9e345fae2220e02b0688577bf5e666c2743944c Mon Sep 17 00:00:00 2001
+From: Yonghua Huang <yonghua.huang@intel.com>
+Date: Fri, 24 May 2019 15:33:09 +0800
+Subject: [PATCH 2/8] vhm:Expose ACRN IOCTL interface to get platform
+ information
+
+ -  add new IOCTL interface to get platform information
+    based on the GET_PLATFORM_INFO hypercall.
+
+Change-Id: I5f04447fdda504b2004dde5c853ce56796a6d1a6
+Tracked-On: projectacrn/acrn-hypervisor#2538
+Signed-off-by: Yonghua Huang <yonghua.huang@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+Acked-by: Eddie Dong <eddie.dong@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c         | 18 +++++++++++++++---
+ drivers/vhm/vhm_hypercall.c        |  5 +++++
+ include/linux/vhm/acrn_hv_defs.h   | 16 ++++++++++++++++
+ include/linux/vhm/vhm_hypercall.h  |  1 +
+ include/linux/vhm/vhm_ioctl_defs.h |  1 +
+ 5 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index f7fb72aa2947..7018e7654de2 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -188,6 +188,18 @@ static long vhm_dev_ioctl(struct file *filep,
+ 			return -EFAULT;
+ 		}
+ 		return 0;
++	} else if (ioctl_num == IC_GET_PLATFORM_INFO) {
++		struct hc_platform_info platform_info;
++
++		ret = hcall_get_platform_info(virt_to_phys(&platform_info));
++		if (ret < 0)
++			return -EFAULT;
++
++		if (copy_to_user((void *)ioctl_param,
++			&platform_info, sizeof(platform_info)))
++			return -EFAULT;
++
++		return 0;
+ 	}
+ 
+ 	memset(&hc_pt_irq, 0, sizeof(hc_pt_irq));
+@@ -661,7 +673,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 
+ 	default:
+ 		pr_warn("Unknown IOCTL 0x%x\n", ioctl_num);
+-		ret = 0;
++		ret = -EINVAL;
+ 		break;
+ 	}
+ 
+@@ -765,8 +777,8 @@ static int __init vhm_init(void)
+ 		return -EINVAL;
+ 	}
+ 
+-	if (api_version.major_version == SUPPORT_HV_API_VERSION_MAJOR &&
+-		api_version.minor_version == SUPPORT_HV_API_VERSION_MINOR) {
++	if (api_version.major_version >= SUPPORT_HV_API_VERSION_MAJOR &&
++		api_version.minor_version >= SUPPORT_HV_API_VERSION_MINOR) {
+ 		pr_info("vhm: hv api version %d.%d\n",
+ 			api_version.major_version, api_version.minor_version);
+ 	} else {
+diff --git a/drivers/vhm/vhm_hypercall.c b/drivers/vhm/vhm_hypercall.c
+index 4f6a133cd6d0..7f4b68a0d555 100644
+--- a/drivers/vhm/vhm_hypercall.c
++++ b/drivers/vhm/vhm_hypercall.c
+@@ -63,6 +63,11 @@ inline long hcall_get_api_version(unsigned long api_version)
+ 	return acrn_hypercall1(HC_GET_API_VERSION, api_version);
+ }
+ 
++inline long hcall_get_platform_info(unsigned long platform_info)
++{
++	return acrn_hypercall1(HC_GET_PLATFORM_INFO, platform_info);
++}
++
+ inline long hcall_create_vm(unsigned long vminfo)
+ {
+ 	return acrn_hypercall1(HC_CREATE_VM, vminfo);
+diff --git a/include/linux/vhm/acrn_hv_defs.h b/include/linux/vhm/acrn_hv_defs.h
+index 0dec250bb47b..3f9d56d35fc2 100644
+--- a/include/linux/vhm/acrn_hv_defs.h
++++ b/include/linux/vhm/acrn_hv_defs.h
+@@ -74,6 +74,7 @@
+  * this will be removed.
+  */
+ #define HC_SET_CALLBACK_VECTOR		_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x02)
++#define HC_GET_PLATFORM_INFO        _HC_ID(HC_ID, HC_ID_GEN_BASE + 0x03)
+ 
+ /* VM management */
+ #define HC_ID_VM_BASE               0x10UL
+@@ -249,6 +250,21 @@ struct hc_api_version {
+ 	uint32_t minor_version;
+ } __aligned(8);
+ 
++struct hc_platform_info {
++	/** Hardware Information */
++	/** Physical CPU number */
++	uint16_t cpu_num;
++
++	/** Align the size of version & hardware info to 128Bytes. */
++	uint8_t reserved0[126];
++
++	/** Configuration Information */
++	/** Maximum vCPU number for one VM. */
++	uint16_t max_vcpus_per_vm;
++
++	/** Align the size of Configuration info to 128Bytes. */
++	uint8_t reserved1[126];
++} __aligned(8);
+ 
+ enum profiling_cmd_type {
+ 	PROFILING_MSR_OPS = 0,
+diff --git a/include/linux/vhm/vhm_hypercall.h b/include/linux/vhm/vhm_hypercall.h
+index 33acc64a4cbf..8e5e732e40d2 100644
+--- a/include/linux/vhm/vhm_hypercall.h
++++ b/include/linux/vhm/vhm_hypercall.h
+@@ -139,6 +139,7 @@ static inline long acrn_hypercall4(unsigned long hcall_id, unsigned long param1,
+ 
+ inline long hcall_sos_offline_cpu(unsigned long cpu);
+ inline long hcall_get_api_version(unsigned long api_version);
++inline long hcall_get_platform_info(unsigned long platform_info);
+ inline long hcall_set_callback_vector(unsigned long intr_vector);
+ inline long hcall_create_vm(unsigned long vminfo);
+ inline long hcall_start_vm(unsigned long vmid);
+diff --git a/include/linux/vhm/vhm_ioctl_defs.h b/include/linux/vhm/vhm_ioctl_defs.h
+index a98b003762b5..f359de8cdc19 100644
+--- a/include/linux/vhm/vhm_ioctl_defs.h
++++ b/include/linux/vhm/vhm_ioctl_defs.h
+@@ -64,6 +64,7 @@
+ /* General */
+ #define IC_ID_GEN_BASE                  0x0UL
+ #define IC_GET_API_VERSION             _IC_ID(IC_ID, IC_ID_GEN_BASE + 0x00)
++#define IC_GET_PLATFORM_INFO           _IC_ID(IC_ID, IC_ID_GEN_BASE + 0x03)
+ 
+ /* VM management */
+ #define IC_ID_VM_BASE                  0x10UL
+-- 
+2.17.1
+
