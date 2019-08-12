@@ -1,0 +1,108 @@
+From 000d6bc39e92d73244855e2711972dcc1a76fe71 Mon Sep 17 00:00:00 2001
+From: "Chuah, Kim Tatt" <kim.tatt.chuah@intel.com>
+Date: Tue, 26 Jun 2018 09:05:05 +0800
+Subject: [PATCH 27/52] net: stmmac: Add support for VLAN promiscuous mode
+
+For dwmac4, enable VLAN promiscuity when MAC controller is requested to
+enter promiscuous mode.
+
+Change-Id: I6d876f4134fb4e4ddb078e81d1713ea0580f8ba4
+Signed-off-by: Chuah, Kim Tatt <kim.tatt.chuah@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/common.h  |  1 +
+ .../net/ethernet/stmicro/stmmac/dwmac4_core.c | 45 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
+index 66aa51d78fd4..4223bf9efba9 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/common.h
++++ b/drivers/net/ethernet/stmicro/stmmac/common.h
+@@ -446,6 +446,7 @@ struct mac_device_info {
+ 	wait_queue_head_t mdio_busy_wait;
+ 	unsigned int num_vlan;
+ 	u32 vlan_filter[32];
++	unsigned int promisc;
+ };
+ 
+ struct stmmac_rx_routing {
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+index 73fa742d7a73..d43f7fac0f53 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+@@ -467,6 +467,12 @@ static int dwmac4_add_hw_vlan_rx_fltr(struct net_device *dev,
+ 	if (vid > 4095)
+ 		return -EINVAL;
+ 
++	if (hw->promisc) {
++		netdev_err(dev,
++			   "Adding VLAN in promisc mode not supported\n");
++		return -EPERM;
++	}
++
+ 	/* Single Rx VLAN Filter */
+ 	if (hw->num_vlan == 1) {
+ 		/* For single VLAN filter, VID 0 means VLAN promiscuous */
+@@ -516,6 +522,12 @@ static int dwmac4_del_hw_vlan_rx_fltr(struct net_device *dev,
+ {
+ 	int i, ret = 0;
+ 
++	if (hw->promisc) {
++		netdev_err(dev,
++			   "Deleting VLAN in promisc mode not supported\n");
++		return -EPERM;
++	}
++
+ 	/* Single Rx VLAN Filter */
+ 	if (hw->num_vlan == 1) {
+ 		if ((hw->vlan_filter[0] & GMAC_VLAN_TAG_VID) == vid) {
+@@ -540,6 +552,27 @@ static int dwmac4_del_hw_vlan_rx_fltr(struct net_device *dev,
+ 	return ret;
+ }
+ 
++static void dwmac4_vlan_promisc_enable(struct net_device *dev,
++				       struct mac_device_info *hw)
++{
++	u32 val;
++	int i;
++
++	/* Single Rx VLAN Filter */
++	if (hw->num_vlan == 1) {
++		dwmac4_write_single_vlan(dev, 0);
++		return;
++	}
++
++	/* Extended Rx VLAN Filter Enable */
++	for (i = 0; i < hw->num_vlan; i++) {
++		if (hw->vlan_filter[i] & GMAC_VLAN_TAG_DATA_VEN) {
++			val = hw->vlan_filter[i] & ~GMAC_VLAN_TAG_DATA_VEN;
++			dwmac4_write_vlan_filter(dev, hw, i, val);
++		}
++	}
++}
++
+ static void dwmac4_restore_hw_vlan_rx_fltr(struct net_device *dev,
+ 					   struct mac_device_info *hw)
+ {
+@@ -640,6 +673,18 @@ static void dwmac4_set_filter(struct mac_device_info *hw,
+ 		value |= GMAC_PACKET_FILTER_VTFE;
+ 
+ 	writel(value, ioaddr + GMAC_PACKET_FILTER);
++
++	if (dev->flags & IFF_PROMISC) {
++		if (!hw->promisc) {
++			hw->promisc = 1;
++			dwmac4_vlan_promisc_enable(dev, hw);
++		}
++	} else {
++		if (hw->promisc) {
++			hw->promisc = 0;
++			dwmac4_restore_hw_vlan_rx_fltr(dev, hw);
++		}
++	}
+ }
+ 
+ static void dwmac4_flow_ctrl(struct mac_device_info *hw, unsigned int duplex,
+-- 
+2.17.1
+

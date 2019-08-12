@@ -1,0 +1,111 @@
+From 5a15ea2d8a119a466aba7e36d751d0fc605d7238 Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Wed, 5 Jun 2019 19:08:54 +0800
+Subject: [PATCH 11/52] net: stmmac: setup higher frequency clk support for EHL
+ & TGL
+
+EHL DW EQOS is running on a 200MHz clock. Setting up stmmac-clk,
+ptp clock and ptp_max_adj to 200MHz.
+
+Change-Id: Idf78eec4e76fe56848f9c84eb7f439b7dbc2eb41
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c  | 21 +++++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_ptp.c  |  3 +++
+ include/linux/stmmac.h                        |  1 +
+ 3 files changed, 25 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 7c72b37cb99c..627f9eb550f4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -9,6 +9,7 @@
+   Author: Giuseppe Cavallaro <peppe.cavallaro@st.com>
+ *******************************************************************************/
+ 
++#include <linux/clk-provider.h>
+ #include <linux/pci.h>
+ #include <linux/dmi.h>
+ 
+@@ -173,6 +174,19 @@ static int intel_mgbe_common_data(struct pci_dev *pdev,
+ 	plat->axi->axi_blen[1] = 8;
+ 	plat->axi->axi_blen[2] = 16;
+ 
++	plat->ptp_max_adj = plat->clk_ptp_rate;
++
++	/* Set system clock */
++	plat->stmmac_clk = clk_register_fixed_rate(&pdev->dev,
++						   "stmmac-clk", NULL, 0,
++						   plat->clk_ptp_rate);
++
++	if (IS_ERR(plat->stmmac_clk)) {
++		dev_warn(&pdev->dev, "Fail to register stmmac-clk\n");
++		plat->stmmac_clk = NULL;
++	}
++	clk_prepare_enable(plat->stmmac_clk);
++
+ 	/* Set default value for multicast hash bins */
+ 	plat->multicast_filter_bins = HASH_TABLE_SIZE;
+ 
+@@ -192,6 +206,7 @@ static int ehl_common_data(struct pci_dev *pdev,
+ 
+ 	plat->rx_queues_to_use = 8;
+ 	plat->tx_queues_to_use = 8;
++	plat->clk_ptp_rate = 200000000;
+ 	ret = intel_mgbe_common_data(pdev, plat);
+ 	if (ret)
+ 		return ret;
+@@ -219,6 +234,7 @@ static int tgl_common_data(struct pci_dev *pdev,
+ 
+ 	plat->rx_queues_to_use = 6;
+ 	plat->tx_queues_to_use = 4;
++	plat->clk_ptp_rate = 200000000;
+ 	ret = intel_mgbe_common_data(pdev, plat);
+ 	if (ret)
+ 		return ret;
+@@ -424,10 +440,15 @@ static int stmmac_pci_probe(struct pci_dev *pdev,
+  */
+ static void stmmac_pci_remove(struct pci_dev *pdev)
+ {
++	struct net_device *ndev = dev_get_drvdata(&pdev->dev);
++	struct stmmac_priv *priv = netdev_priv(ndev);
+ 	int i;
+ 
+ 	stmmac_dvr_remove(&pdev->dev);
+ 
++	if (priv->plat->stmmac_clk)
++		clk_unregister_fixed_rate(priv->plat->stmmac_clk);
++
+ 	for (i = 0; i <= PCI_STD_RESOURCE_END; i++) {
+ 		if (pci_resource_len(pdev, i) == 0)
+ 			continue;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index c48224973a37..173493db038c 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -194,6 +194,9 @@ void stmmac_ptp_register(struct stmmac_priv *priv)
+ 		priv->pps[i].available = true;
+ 	}
+ 
++	if (priv->plat->ptp_max_adj)
++		stmmac_ptp_clock_ops.max_adj = priv->plat->ptp_max_adj;
++
+ 	stmmac_ptp_clock_ops.n_per_out = priv->dma_cap.pps_out_num;
+ 
+ 	spin_lock_init(&priv->ptp_lock);
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index 7d06241582dd..d089b7e55851 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -167,6 +167,7 @@ struct plat_stmmacenet_data {
+ 	struct clk *clk_ptp_ref;
+ 	unsigned int clk_ptp_rate;
+ 	unsigned int clk_ref_rate;
++	s32 ptp_max_adj;
+ 	struct reset_control *stmmac_rst;
+ 	struct stmmac_axi *axi;
+ 	int has_gmac4;
+-- 
+2.17.1
+

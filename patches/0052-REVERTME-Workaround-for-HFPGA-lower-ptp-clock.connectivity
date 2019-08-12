@@ -1,0 +1,150 @@
+From a6ff584a895047cf54d1316d2dcb5cb2d658f0ff Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Thu, 4 Apr 2019 05:58:57 +0800
+Subject: [PATCH 52/52] REVERTME: Workaround for HFPGA lower ptp clock speed
+
+HFPGA PTP clock is 20MHz and fine tune method clock is 12.5MHz
+
+Change-Id: I2b1c72517d721203aff36d6935a8160e5fe8501a
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/hwif.h          |  3 ++-
+ .../net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c   |  7 +++++--
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c   |  2 +-
+ drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c    | 13 +++++++++----
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c    |  3 +++
+ include/linux/stmmac.h                              |  1 +
+ 6 files changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+index 3b7230c5b575..15590552b9e9 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
++++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+@@ -530,7 +530,8 @@ struct stmmac_serdes_ops {
+ struct stmmac_hwtimestamp {
+ 	void (*config_hw_tstamping) (void __iomem *ioaddr, u32 data);
+ 	void (*config_sub_second_increment)(void __iomem *ioaddr, u32 ptp_clock,
+-					   int gmac4, u32 *ssinc);
++					   int gmac4, u32 *ssinc,
++					   bool is_hfpga);
+ 	int (*init_systime) (void __iomem *ioaddr, u32 sec, u32 nsec);
+ 	int (*config_addend) (void __iomem *ioaddr, u32 addend);
+ 	int (*adjust_systime) (void __iomem *ioaddr, u32 sec, u32 nsec,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+index 020159622559..1bd1b4a6da78 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+@@ -20,7 +20,7 @@ static void config_hw_tstamping(void __iomem *ioaddr, u32 data)
+ }
+ 
+ static void config_sub_second_increment(void __iomem *ioaddr,
+-		u32 ptp_clock, int gmac4, u32 *ssinc)
++		u32 ptp_clock, int gmac4, u32 *ssinc, bool is_hfpga)
+ {
+ 	u32 value = readl(ioaddr + PTP_TCR);
+ 	unsigned long data;
+@@ -31,7 +31,10 @@ static void config_sub_second_increment(void __iomem *ioaddr,
+ 	 * where ptp_clock is 50MHz if fine method is used to update system
+ 	 */
+ 	if (value & PTP_TCR_TSCFUPDT)
+-		data = (1000000000ULL / 50000000);
++		if (is_hfpga)
++			data = (1000000000ULL / 12500000);
++		else
++			data = (1000000000ULL / 50000000);
+ 	else
+ 		data = (1000000000ULL / ptp_clock);
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 31f4730c9bca..6260d374dc17 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -701,7 +701,7 @@ static int stmmac_hwtstamp_set(struct net_device *dev, struct ifreq *ifr)
+ 		/* program Sub Second Increment reg */
+ 		stmmac_config_sub_second_increment(priv,
+ 				priv->ptpaddr, priv->plat->clk_ptp_rate,
+-				xmac, &sec_inc);
++				xmac, &sec_inc, priv->plat->is_hfpga);
+ 		temp = div_u64(1000000000ULL, sec_inc);
+ 
+ 		/* Store sub second increment and flags for later use */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index fca5efb7aa39..03ea7e1e5a27 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -270,7 +270,10 @@ static int ehl_common_data(struct pci_dev *pdev,
+ 
+ 	plat->rx_queues_to_use = 8;
+ 	plat->tx_queues_to_use = 8;
+-	plat->clk_ptp_rate = 200000000;
++	if (plat->is_hfpga)
++		plat->clk_ptp_rate = 20000000;
++	else
++		plat->clk_ptp_rate = 200000000;
+ 	ret = intel_mgbe_common_data(pdev, plat);
+ 	if (ret)
+ 		return ret;
+@@ -307,7 +310,8 @@ static struct stmmac_pci_info ehl_rgmii1g_pci_info = {
+ #define EHL_PSE_ETH_DMA_MISC_OFFSET	0x10000
+ #define EHL_PSE_ETH_DMA_MISC_DTM_DRAM	3
+ #define EHL_PSE_ETH_DMA_TOTAL_CH	16
+-static void ehl_pse_work_around(struct pci_dev *pdev)
++static void ehl_pse_work_around(struct pci_dev *pdev,
++				struct plat_stmmacenet_data *plat)
+ {
+ 	void __iomem *tempaddr = pcim_iomap_table(pdev)[0];
+ 	int i;
+@@ -316,6 +320,7 @@ static void ehl_pse_work_around(struct pci_dev *pdev)
+ 		writel(EHL_PSE_ETH_DMA_MISC_DTM_DRAM, tempaddr
+ 		       + EHL_PSE_ETH_DMA_MISC_OFFSET + i * sizeof(u32));
+ 	}
++	plat->is_hfpga = 1;
+ }
+ 
+ static int ehl_pse0_common_data(struct pci_dev *pdev,
+@@ -323,7 +328,7 @@ static int ehl_pse0_common_data(struct pci_dev *pdev,
+ {
+ 	plat->bus_id = 2;
+ 	plat->phy_addr = 1;
+-	ehl_pse_work_around(pdev);
++	ehl_pse_work_around(pdev, plat);
+ 	return ehl_common_data(pdev, plat);
+ }
+ 
+@@ -354,7 +359,7 @@ static int ehl_pse1_common_data(struct pci_dev *pdev,
+ {
+ 	plat->bus_id = 3;
+ 	plat->phy_addr = 1;
+-	ehl_pse_work_around(pdev);
++	ehl_pse_work_around(pdev, plat);
+ 	return ehl_common_data(pdev, plat);
+ }
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index 173493db038c..17073c293c55 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -202,6 +202,9 @@ void stmmac_ptp_register(struct stmmac_priv *priv)
+ 	spin_lock_init(&priv->ptp_lock);
+ 	priv->ptp_clock_ops = stmmac_ptp_clock_ops;
+ 
++	if (priv->plat->ptp_max_adj)
++		stmmac_ptp_clock_ops.max_adj = priv->plat->ptp_max_adj;
++
+ 	priv->ptp_clock = ptp_clock_register(&priv->ptp_clock_ops,
+ 					     priv->device);
+ 	if (IS_ERR(priv->ptp_clock)) {
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index 07202d8c496f..948a00306a2a 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -200,5 +200,6 @@ struct plat_stmmacenet_data {
+ 	u32 ctov;
+ 	u32 tils;
+ 	bool has_safety_feat;
++	bool is_hfpga;
+ };
+ #endif
+-- 
+2.17.1
+
