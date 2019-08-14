@@ -1,0 +1,112 @@
+From c5f1369f8c7544f4bf1edd8f53faac80016ccd58 Mon Sep 17 00:00:00 2001
+From: Rusaimi Amira Ruslan <rusaimi.amira.ruslan@intel.com>
+Date: Mon, 11 Jun 2018 15:55:03 +0800
+Subject: [PATCH 02/52] net: stmmac: Fix ethtool tx_lpi_timer implementation
+ for EEE
+
+According to description in ethtool_eee, tx_lpi_timer is in microseconds
+the interface delays prior to asserting its tx lpi, so we fix the
+implementation within dwmac4_set_eee_timer() to program LPIET field
+in MAC_LPI_Entry_Timer. It was using TWT field in MAC_LPI_Timers_Control
+which is the minimum time (in microseconds) for MAC to wait after it
+stops transmitting LPI pattern before resuming normal transmission, which
+is incorrect.
+
+To use LPIET field, we need to enable both LPIATE and LPITXA field of
+MAC_LPI_Control_Status register.
+
+Fixes: afbb16741584 stmmac: adding EEE to GMAC4
+
+Change-Id: Idbf00799715e7b043bcc1afbcf379f671290f320
+Signed-off-by: Rusaimi Amira Ruslan
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac4.h   |  2 ++
+ .../net/ethernet/stmicro/stmmac/dwmac4_core.c  | 18 ++++++++++++------
+ drivers/net/ethernet/stmicro/stmmac/hwif.h     |  2 +-
+ 3 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+index 2ed11a581d80..ef1665fc214f 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+@@ -125,9 +125,11 @@ enum power_event {
+  */
+ #define GMAC4_LPI_CTRL_STATUS	0xd0
+ #define GMAC4_LPI_TIMER_CTRL	0xd4
++#define GMAC4_LPI_ENTRY_TIMER	0xd8
+ 
+ /* LPI control and status defines */
+ #define GMAC4_LPI_CTRL_STATUS_LPITCSE	BIT(21)	/* LPI Tx Clock Stop Enable */
++#define GMAC4_LPI_CTRL_STATUS_LPIATE	BIT(20)	/* LPI Timer Enable */
+ #define GMAC4_LPI_CTRL_STATUS_LPITXA	BIT(19)	/* Enable LPI TX Automate */
+ #define GMAC4_LPI_CTRL_STATUS_PLS	BIT(17) /* PHY Link Status */
+ #define GMAC4_LPI_CTRL_STATUS_LPIEN	BIT(16)	/* LPI Enable */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+index fc9954e4a772..2c89d2b3064d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+@@ -352,7 +352,8 @@ static void dwmac4_set_eee_mode(struct mac_device_info *hw,
+ 	 * state.
+ 	 */
+ 	value = readl(ioaddr + GMAC4_LPI_CTRL_STATUS);
+-	value |= GMAC4_LPI_CTRL_STATUS_LPIEN | GMAC4_LPI_CTRL_STATUS_LPITXA;
++	value |= GMAC4_LPI_CTRL_STATUS_LPIEN | GMAC4_LPI_CTRL_STATUS_LPITXA |
++		 GMAC4_LPI_CTRL_STATUS_LPIATE;
+ 
+ 	if (en_tx_lpi_clockgating)
+ 		value |= GMAC4_LPI_CTRL_STATUS_LPITCSE;
+@@ -366,7 +367,8 @@ static void dwmac4_reset_eee_mode(struct mac_device_info *hw)
+ 	u32 value;
+ 
+ 	value = readl(ioaddr + GMAC4_LPI_CTRL_STATUS);
+-	value &= ~(GMAC4_LPI_CTRL_STATUS_LPIEN | GMAC4_LPI_CTRL_STATUS_LPITXA);
++	value &= ~(GMAC4_LPI_CTRL_STATUS_LPIEN | GMAC4_LPI_CTRL_STATUS_LPITXA |
++		   GMAC4_LPI_CTRL_STATUS_LPIATE);
+ 	writel(value, ioaddr + GMAC4_LPI_CTRL_STATUS);
+ }
+ 
+@@ -385,19 +387,23 @@ static void dwmac4_set_eee_pls(struct mac_device_info *hw, int link)
+ 	writel(value, ioaddr + GMAC4_LPI_CTRL_STATUS);
+ }
+ 
+-static void dwmac4_set_eee_timer(struct mac_device_info *hw, int ls, int tw)
++static void dwmac4_set_eee_timer(struct mac_device_info *hw, int ls, int et)
+ {
+ 	void __iomem *ioaddr = hw->pcsr;
+-	int value = ((tw & 0xffff)) | ((ls & 0x3ff) << 16);
++	int value;
+ 
+ 	/* Program the timers in the LPI timer control register:
+ 	 * LS: minimum time (ms) for which the link
+ 	 *  status from PHY should be ok before transmitting
+ 	 *  the LPI pattern.
+-	 * TW: minimum time (us) for which the core waits
+-	 *  after it has stopped transmitting the LPI pattern.
++	 * ET: entry time (us) for which the core waits
++	 *  to enter LPI mode after it has transmitted all frames.
+ 	 */
++	value = (ls & 0x3ff) << 16;
+ 	writel(value, ioaddr + GMAC4_LPI_TIMER_CTRL);
++
++	value = (et & 0xffff8) << 3;
++	writel(value, ioaddr + GMAC4_LPI_ENTRY_TIMER);
+ }
+ 
+ static void dwmac4_set_filter(struct mac_device_info *hw,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+index 278c0dbec9d9..6070abdccb9b 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
++++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+@@ -302,7 +302,7 @@ struct stmmac_ops {
+ 	void (*set_eee_mode)(struct mac_device_info *hw,
+ 			     bool en_tx_lpi_clockgating);
+ 	void (*reset_eee_mode)(struct mac_device_info *hw);
+-	void (*set_eee_timer)(struct mac_device_info *hw, int ls, int tw);
++	void (*set_eee_timer)(struct mac_device_info *hw, int ls, int et);
+ 	void (*set_eee_pls)(struct mac_device_info *hw, int link);
+ 	void (*debug)(void __iomem *ioaddr, struct stmmac_extra_stats *x,
+ 		      u32 rx_queues, u32 tx_queues);
+-- 
+2.17.1
+
