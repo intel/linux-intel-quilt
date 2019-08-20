@@ -1,0 +1,102 @@
+From ecf0274a7014102511994f9776bf1a3321e7375c Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Wed, 18 Jul 2018 16:04:19 +0300
+Subject: [PATCH 45/82] serial: 8250_exar: Extract PM routine from 8250_port
+
+There are Exar quirks in 8250_port which belong to 8250_exar module.
+Extract PM routine to the correct module and do not contaminate generic code
+with it.
+
+Cc: Aaron Sierra <asierra@xes-inc.com>
+Cc: Jan Kiszka <jan.kiszka@siemens.com>
+Cc: Sudip Mukherjee <sudip.mukherjee@codethink.co.uk>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/tty/serial/8250/8250_exar.c | 14 ++++++++++++++
+ drivers/tty/serial/8250/8250_port.c | 16 ++--------------
+ 2 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_exar.c b/drivers/tty/serial/8250/8250_exar.c
+index 94212d9bf73f..1bf9adea2e61 100644
+--- a/drivers/tty/serial/8250/8250_exar.c
++++ b/drivers/tty/serial/8250/8250_exar.c
+@@ -36,6 +36,7 @@
+ 
+ #define UART_EXAR_INT0		0x80
+ #define UART_EXAR_8XMODE	0x88	/* 8X sampling rate select */
++#define UART_EXAR_SLEEP		0x8b	/* Sleep mode */
+ #define UART_EXAR_DVID		0x8d	/* Device identification */
+ 
+ #define UART_EXAR_FCTR		0x08	/* Feature Control Register */
+@@ -128,6 +129,17 @@ struct exar8250 {
+ 	int			line[0];
+ };
+ 
++static void exar_pm(struct uart_port *port, unsigned int state, unsigned int old)
++{
++	/*
++	 * Exar UARTs have a SLEEP register that enables or disables each UART
++	 * to enter sleep mode separately. On the XR17V35x the register
++	 * is accessible to each UART at the UART_EXAR_SLEEP offset, but
++	 * the UART channel may only write to the corresponding bit.
++	 */
++	serial_port_out(port, UART_EXAR_SLEEP, state ? 0xff : 0);
++}
++
+ static int default_setup(struct exar8250 *priv, struct pci_dev *pcidev,
+ 			 int idx, unsigned int offset,
+ 			 struct uart_8250_port *port)
+@@ -155,6 +167,8 @@ static int default_setup(struct exar8250 *priv, struct pci_dev *pcidev,
+ 		port->port.type = PORT_XR17D15X;
+ 	}
+ 
++	port->port.pm = exar_pm;
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/tty/serial/8250/8250_port.c b/drivers/tty/serial/8250/8250_port.c
+index 6729b82ed2e3..c3ba4c794fee 100644
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -44,7 +44,6 @@
+  * These are definitions for the Exar XR17V35X and XR17(C|D)15X
+  */
+ #define UART_EXAR_INT0		0x80
+-#define UART_EXAR_SLEEP		0x8b	/* Sleep mode */
+ 
+ /* Nuvoton NPCM timeout register */
+ #define UART_NPCM_TOR          7
+@@ -708,19 +707,8 @@ EXPORT_SYMBOL_GPL(serial8250_rpm_put_tx);
+ static void serial8250_set_sleep(struct uart_8250_port *p, int sleep)
+ {
+ 	unsigned char lcr = 0, efr = 0;
+-	/*
+-	 * Exar UARTs have a SLEEP register that enables or disables
+-	 * each UART to enter sleep mode separately.  On the XR17V35x the
+-	 * register is accessible to each UART at the UART_EXAR_SLEEP
+-	 * offset but the UART channel may only write to the corresponding
+-	 * bit.
+-	 */
++
+ 	serial8250_rpm_get(p);
+-	if ((p->port.type == PORT_XR17V35X) ||
+-	   (p->port.type == PORT_XR17D15X)) {
+-		serial_out(p, UART_EXAR_SLEEP, sleep ? 0xff : 0);
+-		goto out;
+-	}
+ 
+ 	if (p->capabilities & UART_CAP_SLEEP) {
+ 		if (p->capabilities & UART_CAP_EFR) {
+@@ -737,7 +725,7 @@ static void serial8250_set_sleep(struct uart_8250_port *p, int sleep)
+ 			serial_out(p, UART_LCR, lcr);
+ 		}
+ 	}
+-out:
++
+ 	serial8250_rpm_put(p);
+ }
+ 
+-- 
+2.17.1
+

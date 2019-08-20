@@ -1,0 +1,98 @@
+From d2b8e021d32fe29b509954add3c1d06bbcd9101b Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Tue, 30 Oct 2018 16:15:05 +0200
+Subject: [PATCH 71/82] ACPI / scan: Create platform device for BOSC0200 ACPI
+ nodes
+
+On some laptops the ACPI device with BOSC0200 _HID is representing
+two accelerometers under one node.
+
+We add an ID to the I2C multi instantiate list to enumerate
+all I2C slaves correctly.
+
+For reference here is the relevant DSDT blurb from the Yoga 11e:
+
+Device (ACC)
+{
+	Name (_ADR, Zero)  // _ADR: Address
+	Name (_HID, "BOSC0200")  // _HID: Hardware ID
+	Name (_CID, "BOSC0200")  // _CID: Compatible ID
+	Name (_DDN, "Accelerometer")  // _DDN: DOS Device Name
+	Name (_UID, One)  // _UID: Unique ID
+	Method (_CRS, 0, NotSerialized)  // _CRS: Current Resource Settings
+	{
+		Name (RBUF, ResourceTemplate ()
+		{
+			I2cSerialBusV2 (0x0019, ControllerInitiated, 0x00061A80,
+				AddressingMode7Bit, "\\_SB.PCI0.I2C3",
+				0x00, ResourceConsumer, , Exclusive,
+			)
+			I2cSerialBusV2 (0x0018, ControllerInitiated, 0x00061A80,
+				AddressingMode7Bit, "\\_SB.PCI0.I2C3",
+				0x00, ResourceConsumer, , Exclusive,
+			)
+		})
+		Return (RBUF) /* \_SB_.PCI0.I2C3.ACC_._CRS.RBUF */
+	}
+
+Reported-by: Jeremy Cline <jeremy@jcline.org>
+Cc: Steven Presser <steve@pressers.name>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/acpi/scan.c                          | 1 +
+ drivers/iio/accel/bmc150-accel-i2c.c         | 1 -
+ drivers/platform/x86/i2c-multi-instantiate.c | 7 +++++++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/acpi/scan.c b/drivers/acpi/scan.c
+index aad6be5c0af0..6478ec49cbc0 100644
+--- a/drivers/acpi/scan.c
++++ b/drivers/acpi/scan.c
+@@ -1542,6 +1542,7 @@ static bool acpi_device_enumeration_by_parent(struct acpi_device *device)
+ 	 * which i2c_device_id to use for each resource.
+ 	 */
+ 	static const struct acpi_device_id i2c_multi_instantiate_ids[] = {
++		{"BOSC0200", },
+ 		{"BSG1160", },
+ 		{"BSG2150", },
+ 		{"INT33FE", },
+diff --git a/drivers/iio/accel/bmc150-accel-i2c.c b/drivers/iio/accel/bmc150-accel-i2c.c
+index 06021c8685a7..e2237b24c5a2 100644
+--- a/drivers/iio/accel/bmc150-accel-i2c.c
++++ b/drivers/iio/accel/bmc150-accel-i2c.c
+@@ -56,7 +56,6 @@ static const struct acpi_device_id bmc150_accel_acpi_match[] = {
+ 	{"BMA250E",	bma250e},
+ 	{"BMA222E",	bma222e},
+ 	{"BMA0280",	bma280},
+-	{"BOSC0200"},
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(acpi, bmc150_accel_acpi_match);
+diff --git a/drivers/platform/x86/i2c-multi-instantiate.c b/drivers/platform/x86/i2c-multi-instantiate.c
+index 197d8a192721..1cbc576f726b 100644
+--- a/drivers/platform/x86/i2c-multi-instantiate.c
++++ b/drivers/platform/x86/i2c-multi-instantiate.c
+@@ -152,6 +152,12 @@ static int i2c_multi_inst_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++static const struct i2c_inst_data bosc0200_data[]  = {
++	{ "bmc150_accel" },
++	{ "bmc150_accel" },
++	{}
++};
++
+ static const struct i2c_inst_data bsg1160_data[]  = {
+ 	{ "bmc150_accel", IRQ_RESOURCE_GPIO, 0 },
+ 	{ "bmc150_magn" },
+@@ -180,6 +186,7 @@ static const struct i2c_inst_data int3515_data[]  = {
+  * drivers/acpi/scan.c: acpi_device_enumeration_by_parent().
+  */
+ static const struct acpi_device_id i2c_multi_inst_acpi_ids[] = {
++	{ "BOSC0200", (unsigned long)bosc0200_data },
+ 	{ "BSG1160", (unsigned long)bsg1160_data },
+ 	{ "BSG2150", (unsigned long)bsg2150_data },
+ 	{ "INT3515", (unsigned long)int3515_data },
+-- 
+2.17.1
+

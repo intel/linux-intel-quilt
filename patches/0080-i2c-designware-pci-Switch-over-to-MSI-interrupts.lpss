@@ -1,0 +1,77 @@
+From 47ac3b3c810f8ece86189d1bd0ec5a46b7d2dc22 Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Thu, 2 May 2019 08:30:38 +0300
+Subject: [PATCH 80/82] i2c: designware: pci: Switch over to MSI interrupts
+
+Some devices support MSI interrupts. Let's at least try to use them in
+platforms that provide MSI capability.
+
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Signed-off-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+---
+ drivers/i2c/busses/i2c-designware-pcidrv.c | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/i2c/busses/i2c-designware-pcidrv.c b/drivers/i2c/busses/i2c-designware-pcidrv.c
+index 76810deb2de6..1f97d3b89a53 100644
+--- a/drivers/i2c/busses/i2c-designware-pcidrv.c
++++ b/drivers/i2c/busses/i2c-designware-pcidrv.c
+@@ -227,6 +227,8 @@ static int i2c_dw_pci_probe(struct pci_dev *pdev,
+ 		return r;
+ 	}
+ 
++	pci_set_master(pdev);
++
+ 	r = pcim_iomap_regions(pdev, 1 << 0, pci_name(pdev));
+ 	if (r) {
+ 		dev_err(&pdev->dev, "I/O memory remapping failed\n");
+@@ -237,18 +239,24 @@ static int i2c_dw_pci_probe(struct pci_dev *pdev,
+ 	if (!dev)
+ 		return -ENOMEM;
+ 
++	r = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
++	if (r < 0)
++		return r;
++
+ 	dev->clk = NULL;
+ 	dev->controller = controller;
+ 	dev->get_clk_rate_khz = i2c_dw_get_clk_rate_khz;
+ 	dev->base = pcim_iomap_table(pdev)[0];
+ 	dev->dev = &pdev->dev;
+-	dev->irq = pdev->irq;
++	dev->irq = pci_irq_vector(pdev, 0);
+ 	dev->flags |= controller->flags;
+ 
+ 	if (controller->setup) {
+ 		r = controller->setup(pdev, controller);
+-		if (r)
++		if (r) {
++			pci_free_irq_vectors(pdev);
+ 			return r;
++		}
+ 	}
+ 
+ 	dev->functionality = controller->functionality |
+@@ -276,8 +284,10 @@ static int i2c_dw_pci_probe(struct pci_dev *pdev,
+ 	adap->nr = controller->bus_num;
+ 
+ 	r = i2c_dw_probe(dev);
+-	if (r)
++	if (r) {
++		pci_free_irq_vectors(pdev);
+ 		return r;
++	}
+ 
+ 	pm_runtime_set_autosuspend_delay(&pdev->dev, 1000);
+ 	pm_runtime_use_autosuspend(&pdev->dev);
+@@ -296,6 +306,7 @@ static void i2c_dw_pci_remove(struct pci_dev *pdev)
+ 	pm_runtime_get_noresume(&pdev->dev);
+ 
+ 	i2c_del_adapter(&dev->adapter);
++	pci_free_irq_vectors(pdev);
+ }
+ 
+ /* work with hotplug and coldplug */
+-- 
+2.17.1
+
