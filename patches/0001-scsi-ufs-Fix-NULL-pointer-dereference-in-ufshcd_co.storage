@@ -1,0 +1,59 @@
+From f2cd59c01c85be36047c72011ab05c1306bcd1cc Mon Sep 17 00:00:00 2001
+From: Adrian Hunter <adrian.hunter@intel.com>
+Date: Mon, 22 Jul 2019 10:38:34 +0300
+Subject: [PATCH 1/3] scsi: ufs: Fix NULL pointer dereference in
+ ufshcd_config_vreg_hpm()
+
+Fix the following BUG:
+
+  [ 187.065689] BUG: kernel NULL pointer dereference, address: 000000000000001c
+  [ 187.065790] RIP: 0010:ufshcd_vreg_set_hpm+0x3c/0x110 [ufshcd_core]
+  [ 187.065938] Call Trace:
+  [ 187.065959] ufshcd_resume+0x72/0x290 [ufshcd_core]
+  [ 187.065980] ufshcd_system_resume+0x54/0x140 [ufshcd_core]
+  [ 187.065993] ? pci_pm_restore+0xb0/0xb0
+  [ 187.066005] ufshcd_pci_resume+0x15/0x20 [ufshcd_pci]
+  [ 187.066017] pci_pm_thaw+0x4c/0x90
+  [ 187.066030] dpm_run_callback+0x5b/0x150
+  [ 187.066043] device_resume+0x11b/0x220
+
+Voltage regulators are optional, so functions must check they exist
+before dereferencing.
+
+Note this issue is hidden if CONFIG_REGULATORS is not set, because the
+offending code is optimised away.
+
+Notes for stable:
+
+The issue first appears in commit 57d104c153d3 ("ufs: add UFS power
+management support") but is inadvertently fixed in commit 60f0187031c0
+("scsi: ufs: disable vccq if it's not needed by UFS device") which in
+turn was reverted by commit 730679817d83 ("Revert "scsi: ufs: disable vccq
+if it's not needed by UFS device""). So fix applies v3.18 to v4.5 and
+v5.1+
+
+Signed-off-by: Adrian Hunter <adrian.hunter@intel.com>
+Fixes: 57d104c153d3 ("ufs: add UFS power management support")
+Fixes: 730679817d83 ("Revert "scsi: ufs: disable vccq if it's not needed by UFS device"")
+Cc: stable@vger.kernel.org
+---
+ drivers/scsi/ufs/ufshcd.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/scsi/ufs/ufshcd.c b/drivers/scsi/ufs/ufshcd.c
+index e274053109d0..029da74bb2f5 100644
+--- a/drivers/scsi/ufs/ufshcd.c
++++ b/drivers/scsi/ufs/ufshcd.c
+@@ -7062,6 +7062,9 @@ static inline int ufshcd_config_vreg_lpm(struct ufs_hba *hba,
+ static inline int ufshcd_config_vreg_hpm(struct ufs_hba *hba,
+ 					 struct ufs_vreg *vreg)
+ {
++	if (!vreg)
++		return 0;
++
+ 	return ufshcd_config_vreg_load(hba->dev, vreg, vreg->max_uA);
+ }
+ 
+-- 
+2.17.1
+

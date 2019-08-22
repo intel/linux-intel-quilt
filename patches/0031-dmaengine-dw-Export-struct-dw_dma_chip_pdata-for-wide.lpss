@@ -1,0 +1,169 @@
+From 889066ef11cec5f887c7a65c3fe5a27eaf005bef Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Mon, 5 Aug 2019 19:37:31 +0300
+Subject: [PATCH 31/82] dmaengine: dw: Export struct dw_dma_chip_pdata for
+ wider use
+
+We are expecting some devices can be enumerated either as PCI or ACPI.
+Nevertheless, they will share same information, thus, provide a generic
+struct dw_dma_chip_pdata for all glue drivers.
+
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/dma/dw/internal.h | 28 ++++++++++++++++++
+ drivers/dma/dw/pci.c      | 60 +++++++++++----------------------------
+ 2 files changed, 44 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/dma/dw/internal.h b/drivers/dma/dw/internal.h
+index 1dd7a4e6dd23..df5c84e2a4fd 100644
+--- a/drivers/dma/dw/internal.h
++++ b/drivers/dma/dw/internal.h
+@@ -23,4 +23,32 @@ int do_dw_dma_enable(struct dw_dma_chip *chip);
+ 
+ extern bool dw_dma_filter(struct dma_chan *chan, void *param);
+ 
++struct dw_dma_chip_pdata {
++	const struct dw_dma_platform_data *pdata;
++	int (*probe)(struct dw_dma_chip *chip);
++	int (*remove)(struct dw_dma_chip *chip);
++	struct dw_dma_chip *chip;
++};
++
++static __maybe_unused const struct dw_dma_chip_pdata dw_dma_chip_pdata = {
++	.probe = dw_dma_probe,
++	.remove = dw_dma_remove,
++};
++
++static const struct dw_dma_platform_data idma32_pdata = {
++	.nr_channels = 8,
++	.chan_allocation_order = CHAN_ALLOCATION_ASCENDING,
++	.chan_priority = CHAN_PRIORITY_ASCENDING,
++	.block_size = 131071,
++	.nr_masters = 1,
++	.data_width = {4},
++	.multi_block = {1, 1, 1, 1, 1, 1, 1, 1},
++};
++
++static __maybe_unused const struct dw_dma_chip_pdata idma32_chip_pdata = {
++	.pdata = &idma32_pdata,
++	.probe = idma32_dma_probe,
++	.remove = idma32_dma_remove,
++};
++
+ #endif /* _DMA_DW_INTERNAL_H */
+diff --git a/drivers/dma/dw/pci.c b/drivers/dma/dw/pci.c
+index 8de87b15a988..084ce3b70710 100644
+--- a/drivers/dma/dw/pci.c
++++ b/drivers/dma/dw/pci.c
+@@ -12,38 +12,10 @@
+ 
+ #include "internal.h"
+ 
+-struct dw_dma_pci_data {
+-	const struct dw_dma_platform_data *pdata;
+-	int (*probe)(struct dw_dma_chip *chip);
+-	int (*remove)(struct dw_dma_chip *chip);
+-	struct dw_dma_chip *chip;
+-};
+-
+-static const struct dw_dma_pci_data dw_pci_data = {
+-	.probe = dw_dma_probe,
+-	.remove = dw_dma_remove,
+-};
+-
+-static const struct dw_dma_platform_data idma32_pdata = {
+-	.nr_channels = 8,
+-	.chan_allocation_order = CHAN_ALLOCATION_ASCENDING,
+-	.chan_priority = CHAN_PRIORITY_ASCENDING,
+-	.block_size = 131071,
+-	.nr_masters = 1,
+-	.data_width = {4},
+-	.multi_block = {1, 1, 1, 1, 1, 1, 1, 1},
+-};
+-
+-static const struct dw_dma_pci_data idma32_pci_data = {
+-	.pdata = &idma32_pdata,
+-	.probe = idma32_dma_probe,
+-	.remove = idma32_dma_remove,
+-};
+-
+ static int dw_pci_probe(struct pci_dev *pdev, const struct pci_device_id *pid)
+ {
+-	const struct dw_dma_pci_data *drv_data = (void *)pid->driver_data;
+-	struct dw_dma_pci_data *data;
++	const struct dw_dma_chip_pdata *drv_data = (void *)pid->driver_data;
++	struct dw_dma_chip_pdata *data;
+ 	struct dw_dma_chip *chip;
+ 	int ret;
+ 
+@@ -95,7 +67,7 @@ static int dw_pci_probe(struct pci_dev *pdev, const struct pci_device_id *pid)
+ 
+ static void dw_pci_remove(struct pci_dev *pdev)
+ {
+-	struct dw_dma_pci_data *data = pci_get_drvdata(pdev);
++	struct dw_dma_chip_pdata *data = pci_get_drvdata(pdev);
+ 	struct dw_dma_chip *chip = data->chip;
+ 	int ret;
+ 
+@@ -108,7 +80,7 @@ static void dw_pci_remove(struct pci_dev *pdev)
+ 
+ static int dw_pci_suspend_late(struct device *dev)
+ {
+-	struct dw_dma_pci_data *data = dev_get_drvdata(dev);
++	struct dw_dma_chip_pdata *data = dev_get_drvdata(dev);
+ 	struct dw_dma_chip *chip = data->chip;
+ 
+ 	return do_dw_dma_disable(chip);
+@@ -116,7 +88,7 @@ static int dw_pci_suspend_late(struct device *dev)
+ 
+ static int dw_pci_resume_early(struct device *dev)
+ {
+-	struct dw_dma_pci_data *data = dev_get_drvdata(dev);
++	struct dw_dma_chip_pdata *data = dev_get_drvdata(dev);
+ 	struct dw_dma_chip *chip = data->chip;
+ 
+ 	return do_dw_dma_enable(chip);
+@@ -130,29 +102,29 @@ static const struct dev_pm_ops dw_pci_dev_pm_ops = {
+ 
+ static const struct pci_device_id dw_pci_id_table[] = {
+ 	/* Medfield (GPDMA) */
+-	{ PCI_VDEVICE(INTEL, 0x0827), (kernel_ulong_t)&dw_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x0827), (kernel_ulong_t)&dw_dma_chip_pdata },
+ 
+ 	/* BayTrail */
+-	{ PCI_VDEVICE(INTEL, 0x0f06), (kernel_ulong_t)&dw_pci_data },
+-	{ PCI_VDEVICE(INTEL, 0x0f40), (kernel_ulong_t)&dw_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x0f06), (kernel_ulong_t)&dw_dma_chip_pdata },
++	{ PCI_VDEVICE(INTEL, 0x0f40), (kernel_ulong_t)&dw_dma_chip_pdata },
+ 
+ 	/* Merrifield */
+-	{ PCI_VDEVICE(INTEL, 0x11a2), (kernel_ulong_t)&idma32_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x11a2), (kernel_ulong_t)&idma32_chip_pdata },
+ 
+ 	/* Braswell */
+-	{ PCI_VDEVICE(INTEL, 0x2286), (kernel_ulong_t)&dw_pci_data },
+-	{ PCI_VDEVICE(INTEL, 0x22c0), (kernel_ulong_t)&dw_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x2286), (kernel_ulong_t)&dw_dma_chip_pdata },
++	{ PCI_VDEVICE(INTEL, 0x22c0), (kernel_ulong_t)&dw_dma_chip_pdata },
+ 
+ 	/* Elkhart Lake iDMA 32-bit (OSE DMA) */
+-	{ PCI_VDEVICE(INTEL, 0x4bb4), (kernel_ulong_t)&idma32_pci_data },
+-	{ PCI_VDEVICE(INTEL, 0x4bb5), (kernel_ulong_t)&idma32_pci_data },
+-	{ PCI_VDEVICE(INTEL, 0x4bb6), (kernel_ulong_t)&idma32_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x4bb4), (kernel_ulong_t)&idma32_chip_pdata },
++	{ PCI_VDEVICE(INTEL, 0x4bb5), (kernel_ulong_t)&idma32_chip_pdata },
++	{ PCI_VDEVICE(INTEL, 0x4bb6), (kernel_ulong_t)&idma32_chip_pdata },
+ 
+ 	/* Haswell */
+-	{ PCI_VDEVICE(INTEL, 0x9c60), (kernel_ulong_t)&dw_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x9c60), (kernel_ulong_t)&dw_dma_chip_pdata },
+ 
+ 	/* Broadwell */
+-	{ PCI_VDEVICE(INTEL, 0x9ce0), (kernel_ulong_t)&dw_pci_data },
++	{ PCI_VDEVICE(INTEL, 0x9ce0), (kernel_ulong_t)&dw_dma_chip_pdata },
+ 
+ 	{ }
+ };
+-- 
+2.17.1
+
