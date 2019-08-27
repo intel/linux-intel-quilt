@@ -1,7 +1,7 @@
-From 7e03cdae768ac920de1c301eb2b302145b185758 Mon Sep 17 00:00:00 2001
+From 16186a1d61a65627af3d41be1e44c24618ef76dc Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Fri, 6 Jul 2018 06:16:28 +0800
-Subject: [PATCH 37/86] net: stmmac: introduce IEEE 802.1Qbv configuration
+Subject: [PATCH 37/89] net: stmmac: introduce IEEE 802.1Qbv configuration
  functionalities
 
 IEEE 802.1Qbv Enhancements for Scheduled Traffics (EST) is available in
@@ -11,11 +11,9 @@ a) EST initialization with hardware capabilities detection.
 b) Setting Gate Control List (GCL), i.e. gate open/close & time intervals,
    and all GC Related Registers (GCRR), e.g., base time (BTR), cycle time
    (CTR), time extension (TER) and GC List Length (LLR).
-c) Setting time interval left shift (TILS), PTP time offset (PTOV) and
-   current time offset (CTOV).
-d) Enable/disable EST.
-e) Getting TSN hardware capabilities.
-f) Getting Gate Control configuration either from driver data store or
+c) Enable/disable EST.
+d) Getting TSN hardware capabilities.
+e) Getting Gate Control configuration either from driver data store or
    hardware.
 
 We extend the main driver logic to include basic TSN capability discovery,
@@ -29,7 +27,6 @@ a) The set of tsnif_xxx APIs are for IP-specific and dwmac5_tsn.c contains
 b) The set of stmmac_xxx_tsn_yyy APIs are for IP-agnostic logics that are
    called by stmmac_main.c and other high-level interface such as tc.
 
-Reviewed-by: Chuah Kim Tatt <kim.tatt.chuah@intel.com>
 Reviewed-by: Voon Weifeng <weifeng.voon@intel.com>
 Reviewed-by: Kweh Hock Leong <hock.leong.kweh@intel.com>
 Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
@@ -37,15 +34,15 @@ Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
 ---
  drivers/net/ethernet/stmicro/stmmac/Makefile  |   2 +-
  drivers/net/ethernet/stmicro/stmmac/common.h  |   3 +
- .../net/ethernet/stmicro/stmmac/dwmac4_core.c |  13 +
- drivers/net/ethernet/stmicro/stmmac/dwmac5.h  |  64 +-
- .../net/ethernet/stmicro/stmmac/dwmac5_tsn.c  | 289 ++++++++
- drivers/net/ethernet/stmicro/stmmac/hwif.h    | 148 ++++
+ .../net/ethernet/stmicro/stmmac/dwmac4_core.c |  11 +
+ drivers/net/ethernet/stmicro/stmmac/dwmac5.h  |  56 +-
+ .../net/ethernet/stmicro/stmmac/dwmac5_tsn.c  | 249 ++++++++
+ drivers/net/ethernet/stmicro/stmmac/hwif.h    | 131 ++++
  .../net/ethernet/stmicro/stmmac/stmmac_main.c |  15 +
- .../net/ethernet/stmicro/stmmac/stmmac_tsn.c  | 677 ++++++++++++++++++
- .../net/ethernet/stmicro/stmmac/stmmac_tsn.h  | 122 ++++
+ .../net/ethernet/stmicro/stmmac/stmmac_tsn.c  | 574 ++++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_tsn.h  | 106 ++++
  include/linux/stmmac.h                        |   1 +
- 10 files changed, 1332 insertions(+), 2 deletions(-)
+ 10 files changed, 1146 insertions(+), 2 deletions(-)
  create mode 100644 drivers/net/ethernet/stmicro/stmmac/dwmac5_tsn.c
  create mode 100644 drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
  create mode 100644 drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.h
@@ -85,10 +82,10 @@ index db167adbf08e..4ef66574ae13 100644
  
  struct stmmac_rx_routing {
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
-index eaea83783b7a..dfda0bef2be5 100644
+index eaea83783b7a..d21439b1811e 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
-@@ -1102,6 +1102,19 @@ const struct stmmac_ops dwmac510_ops = {
+@@ -1102,6 +1102,17 @@ const struct stmmac_ops dwmac510_ops = {
  	.add_hw_vlan_rx_fltr = dwmac4_add_hw_vlan_rx_fltr,
  	.del_hw_vlan_rx_fltr = dwmac4_del_hw_vlan_rx_fltr,
  	.restore_hw_vlan_rx_fltr = dwmac4_restore_hw_vlan_rx_fltr,
@@ -96,8 +93,6 @@ index eaea83783b7a..dfda0bef2be5 100644
 +	.init_tsn = tsn_init,
 +	.set_tsn_feat = tsn_feat_set,
 +	.has_tsn_feat = tsn_has_feat,
-+	.set_tsn_hwtunable = tsn_hwtunable_set,
-+	.get_tsn_hwtunable = tsn_hwtunable_get,
 +	.set_est_enable = tsn_est_enable_set,
 +	.get_est_bank = tsn_est_bank_get,
 +	.set_est_gce = tsn_est_gce_set,
@@ -109,7 +104,7 @@ index eaea83783b7a..dfda0bef2be5 100644
  
  static u32 dwmac4_get_num_vlan(void __iomem *ioaddr)
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac5.h b/drivers/net/ethernet/stmicro/stmmac/dwmac5.h
-index e62181bf50ec..40ba7f86b521 100644
+index e62181bf50ec..0b71ae6f592d 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac5.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac5.h
 @@ -1,5 +1,6 @@
@@ -119,7 +114,7 @@ index e62181bf50ec..40ba7f86b521 100644
  // stmmac Support for 5.xx Ethernet QoS cores
  
  #ifndef __DWMAC5_H__
-@@ -81,6 +82,67 @@
+@@ -81,6 +82,59 @@
  #define GMAC_RXQCTRL_VFFQ_SHIFT		17
  #define GMAC_RXQCTRL_VFFQE		BIT(16)
  
@@ -136,12 +131,6 @@ index e62181bf50ec..40ba7f86b521 100644
 +
 +/* MTL EST control register */
 +#define MTL_EST_CTRL			0x00000c50
-+#define MTL_EST_CTRL_PTOV		GENMASK(31, 24)
-+#define MTL_EST_CTRL_PTOV_SHIFT		24
-+#define MTL_EST_CTRL_CTOV		GENMASK(23, 12)
-+#define MTL_EST_CTRL_CTOV_SHIFT		12
-+#define MTL_EST_CTRL_TILS		GENMASK(10, 8)
-+#define MTL_EST_CTRL_TILS_SHIFT		8
 +#define MTL_EST_CTRL_SSWL		BIT(1)	/* Switch to SWOL */
 +#define MTL_EST_CTRL_EEST		BIT(0)	/* Enable EST */
 +
@@ -178,8 +167,6 @@ index e62181bf50ec..40ba7f86b521 100644
 +
 +/* EST Global defines */
 +#define EST_CTR_HI_MAX			0xff	/* CTR Hi is 8-bit only */
-+#define EST_PTOV_MAX			0xff	/* Max PTP time offset */
-+#define EST_CTOV_MAX			0xfff	/* Max Current time offset */
 +
 +/* MAC Core Version */
 +#define TSN_VER_MASK		0xFF
@@ -187,7 +174,7 @@ index e62181bf50ec..40ba7f86b521 100644
  int dwmac5_safety_feat_config(void __iomem *ioaddr, unsigned int asp);
  int dwmac5_safety_feat_irq_status(struct net_device *ndev,
  		void __iomem *ioaddr, unsigned int asp,
-@@ -92,5 +154,5 @@ int dwmac5_rxp_config(void __iomem *ioaddr, struct stmmac_tc_entry *entries,
+@@ -92,5 +146,5 @@ int dwmac5_rxp_config(void __iomem *ioaddr, struct stmmac_tc_entry *entries,
  int dwmac5_flex_pps_config(void __iomem *ioaddr, int index,
  			   struct stmmac_pps_cfg *cfg, bool enable,
  			   u32 sub_second_inc, u32 systime_flags);
@@ -196,10 +183,10 @@ index e62181bf50ec..40ba7f86b521 100644
  #endif /* __DWMAC5_H__ */
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac5_tsn.c b/drivers/net/ethernet/stmicro/stmmac/dwmac5_tsn.c
 new file mode 100644
-index 000000000000..85fc7c638d17
+index 000000000000..64b263336b87
 --- /dev/null
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac5_tsn.c
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,249 @@
 +// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 +/* Copyright (c) 2019, Intel Corporation.
 + * DW EQoS v5.00 TSN IP Implementation
@@ -323,12 +310,8 @@ index 000000000000..85fc7c638d17
 +	return ((hw_cap2 & GMAC_HW_FEAT_TXQCNT) >> 6) + 1;
 +}
 +
-+static void dwmac5_est_get_max(u32 *ptov_max,
-+			       u32 *ctov_max,
-+			       u32 *cycle_max)
++static void dwmac5_est_get_max(u32 *cycle_max)
 +{
-+	*ptov_max = EST_PTOV_MAX;
-+	*ctov_max = EST_CTOV_MAX;
 +	*cycle_max = EST_CTR_HI_MAX;
 +}
 +
@@ -384,39 +367,6 @@ index 000000000000..85fc7c638d17
 +	*gates = (value >> ti_wid) & gates_mask;
 +
 +	return ret;
-+}
-+
-+static void dwmac5_est_set_tils(void __iomem *ioaddr, const u32 tils)
-+{
-+	u32 value;
-+
-+	value = readl(ioaddr + MTL_EST_CTRL);
-+	value &= ~(MTL_EST_CTRL_SSWL | MTL_EST_CTRL_TILS);
-+	value |= (tils << MTL_EST_CTRL_TILS_SHIFT);
-+
-+	writel(value, ioaddr + MTL_EST_CTRL);
-+}
-+
-+static void dwmac5_est_set_ptov(void __iomem *ioaddr, const u32 ptov)
-+{
-+	u32 value;
-+
-+	value = readl(ioaddr + MTL_EST_CTRL);
-+	value &= ~(MTL_EST_CTRL_SSWL | MTL_EST_CTRL_PTOV);
-+	value |= (ptov << MTL_EST_CTRL_PTOV_SHIFT);
-+
-+	writel(value, ioaddr + MTL_EST_CTRL);
-+}
-+
-+static void dwmac5_est_set_ctov(void __iomem *ioaddr, const u32 ctov)
-+{
-+	u32 value;
-+
-+	value = readl(ioaddr + MTL_EST_CTRL);
-+	value &= ~(MTL_EST_CTRL_SSWL | MTL_EST_CTRL_CTOV);
-+	value |= (ctov << MTL_EST_CTRL_CTOV_SHIFT);
-+
-+	writel(value, ioaddr + MTL_EST_CTRL);
 +}
 +
 +static int dwmac5_est_set_enable(void __iomem *ioaddr, bool enable)
@@ -476,9 +426,6 @@ index 000000000000..85fc7c638d17
 +	.est_write_gcl_config = dwmac5_est_write_gcl_config,
 +	.est_read_gcl_config = dwmac5_est_read_gcl_config,
 +	.est_read_gce = dwmac5_est_read_gce,
-+	.est_set_tils = dwmac5_est_set_tils,
-+	.est_set_ptov = dwmac5_est_set_ptov,
-+	.est_set_ctov = dwmac5_est_set_ctov,
 +	.est_set_enable = dwmac5_est_set_enable,
 +	.est_get_enable = dwmac5_est_get_enable,
 +	.est_get_bank = dwmac5_est_get_bank,
@@ -490,22 +437,21 @@ index 000000000000..85fc7c638d17
 +	mac->tsnif = &dwmac510_tsnif_ops;
 +}
 diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
-index c644ddd83eb1..aa3e89ef068a 100644
+index c644ddd83eb1..5e796f714b02 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
-@@ -257,6 +257,11 @@ struct rgmii_adv;
+@@ -257,6 +257,10 @@ struct rgmii_adv;
  struct stmmac_safety_stats;
  struct stmmac_tc_entry;
  struct stmmac_pps_cfg;
 +enum tsn_feat_id;
-+enum tsn_hwtunable_id;
 +struct est_gc_entry;
 +struct est_gcrr;
 +struct est_gc_config;
  
  /* Helpers to program the MAC core */
  struct stmmac_ops {
-@@ -348,6 +353,40 @@ struct stmmac_ops {
+@@ -348,6 +352,33 @@ struct stmmac_ops {
  				   __be16 proto, u16 vid);
  	void (*restore_hw_vlan_rx_fltr)(struct net_device *dev,
  					struct mac_device_info *hw);
@@ -517,13 +463,6 @@ index c644ddd83eb1..aa3e89ef068a 100644
 +			    enum tsn_feat_id featid, bool enable);
 +	bool (*has_tsn_feat)(struct mac_device_info *hw, struct net_device *dev,
 +			     enum tsn_feat_id featid);
-+	int (*set_tsn_hwtunable)(struct mac_device_info *hw,
-+				 struct net_device *dev,
-+				 enum tsn_hwtunable_id id,
-+				 const u32 data);
-+	int (*get_tsn_hwtunable)(struct mac_device_info *hw,
-+				 struct net_device *dev,
-+				 enum tsn_hwtunable_id id, u32 *data);
 +	int (*set_est_enable)(struct mac_device_info *hw,
 +			      struct net_device *dev, bool enable);
 +	int (*get_est_bank)(struct mac_device_info *hw, struct net_device *dev,
@@ -546,7 +485,7 @@ index c644ddd83eb1..aa3e89ef068a 100644
  };
  
  #define stmmac_core_init(__priv, __args...) \
-@@ -428,6 +467,32 @@ struct stmmac_ops {
+@@ -428,6 +459,32 @@ struct stmmac_ops {
  	stmmac_do_callback(__priv, mac, del_hw_vlan_rx_fltr, __args)
  #define stmmac_restore_hw_vlan_rx_fltr(__priv, __args...) \
  	stmmac_do_void_callback(__priv, mac, restore_hw_vlan_rx_fltr, __args)
@@ -579,7 +518,7 @@ index c644ddd83eb1..aa3e89ef068a 100644
  
  /* Helpers for serdes */
  struct stmmac_serdes_ops {
-@@ -555,4 +620,87 @@ extern const struct stmmac_mmc_ops dwmac_mmc_ops;
+@@ -555,4 +612,78 @@ extern const struct stmmac_mmc_ops dwmac_mmc_ops;
  
  int stmmac_hwif_init(struct stmmac_priv *priv);
  
@@ -613,7 +552,7 @@ index c644ddd83eb1..aa3e89ef068a 100644
 +	u32 (*est_get_gcl_depth)(void __iomem *ioaddr);
 +	u32 (*est_get_ti_width)(void __iomem *ioaddr);
 +	u32 (*est_get_txqcnt)(void __iomem *ioaddr);
-+	void (*est_get_max)(u32 *ptov_max, u32 *ctov_max, u32 *ct_max);
++	void (*est_get_max)(u32 *ct_max);
 +	int (*est_write_gcl_config)(void __iomem *ioaddr, u32 data, u32 addr,
 +				    bool is_gcrr,
 +				    u32 dbgb, bool is_dbgm);
@@ -624,9 +563,6 @@ index c644ddd83eb1..aa3e89ef068a 100644
 +			    u32 *gates, u32 *ti_nsec,
 +			    u32 ti_wid, u32 txqcnt,
 +			    u32 dbgb, bool is_dbgm);
-+	void (*est_set_tils)(void __iomem *ioaddr, const u32 tils);
-+	void (*est_set_ptov)(void __iomem *ioaddr, const u32 ptov);
-+	void (*est_set_ctov)(void __iomem *ioaddr, const u32 ctov);
 +	int (*est_set_enable)(void __iomem *ioaddr, bool enable);
 +	bool (*est_get_enable)(void __iomem *ioaddr);
 +	u32 (*est_get_bank)(void __iomem *ioaddr, bool is_own);
@@ -651,12 +587,6 @@ index c644ddd83eb1..aa3e89ef068a 100644
 +	tsnif_do_callback(__hw, est_read_gcl_config, __args)
 +#define tsnif_est_read_gce(__hw, __args...) \
 +	tsnif_do_callback(__hw, est_read_gce, __args)
-+#define tsnif_est_set_tils(__hw, __args...) \
-+	tsnif_do_void_callback(__hw, est_set_tils, __args)
-+#define tsnif_est_set_ptov(__hw, __args...) \
-+	tsnif_do_void_callback(__hw, est_set_ptov, __args)
-+#define tsnif_est_set_ctov(__hw, __args...) \
-+	tsnif_do_void_callback(__hw, est_set_ctov, __args)
 +#define tsnif_est_set_enable(__hw, __args...) \
 +	tsnif_do_callback(__hw, est_set_enable, __args)
 +#define tsnif_est_get_enable(__hw, __args...) \
@@ -668,7 +598,7 @@ index c644ddd83eb1..aa3e89ef068a 100644
 +
  #endif /* __STMMAC_HWIF_H__ */
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 026d2533ca5c..2cb30e259db7 100644
+index 62ae8485770c..02e953ee1639 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -45,6 +45,7 @@
@@ -679,7 +609,7 @@ index 026d2533ca5c..2cb30e259db7 100644
  
  #define	STMMAC_ALIGN(x)		__ALIGN_KERNEL(x, SMP_CACHE_BYTES)
  #define	TSO_MAX_BUFF_SIZE	(SZ_16K - 1)
-@@ -4513,6 +4514,12 @@ static int stmmac_hw_init(struct stmmac_priv *priv)
+@@ -4512,6 +4513,12 @@ static int stmmac_hw_init(struct stmmac_priv *priv)
  	if (ret)
  		return ret;
  
@@ -692,7 +622,7 @@ index 026d2533ca5c..2cb30e259db7 100644
  	/* Get the HW capability (new GMAC newer than 3.50a) */
  	priv->hw_cap_support = stmmac_get_hw_features(priv);
  	if (priv->hw_cap_support) {
-@@ -4716,6 +4723,14 @@ int stmmac_dvr_probe(struct device *device,
+@@ -4715,6 +4722,14 @@ int stmmac_dvr_probe(struct device *device,
  
  	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
  	ndev->watchdog_timeo = msecs_to_jiffies(watchdog);
@@ -709,10 +639,10 @@ index 026d2533ca5c..2cb30e259db7 100644
  	ndev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_STAG_RX;
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
 new file mode 100644
-index 000000000000..b69f831a651b
+index 000000000000..582552d5506b
 --- /dev/null
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,574 @@
 +// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 +/* Copyright (c) 2019, Intel Corporation.
 + * TSN General APIs
@@ -746,7 +676,6 @@ index 000000000000..b69f831a651b
 +	struct est_gc_entry *gcl;
 +	struct tsn_hw_cap *cap;
 +	u32 gcl_depth;
-+	u32 tils_max;
 +	u32 ti_wid;
 +	u32 bank;
 +	u32 hwid;
@@ -804,17 +733,13 @@ index 000000000000..b69f831a651b
 +	cap->ti_wid = ti_wid;
 +	cap->gcl_depth = gcl_depth;
 +
-+	tils_max = (tsnif_has_tsn_cap(hw, ioaddr, TSN_FEAT_ID_EST) ? 3 : 0);
-+	tils_max = (1 << tils_max) - 1;
-+	cap->tils_max = tils_max;
-+
 +	cap->ext_max = EST_TIWID_TO_EXTMAX(ti_wid);
 +	cap->txqcnt = tsnif_est_get_txqcnt(hw, ioaddr);
-+	tsnif_est_get_max(hw, &cap->ptov_max, &cap->ctov_max, &cap->cycle_max);
++	tsnif_est_get_max(hw, &cap->cycle_max);
 +	cap->est_support = 1;
 +
-+	dev_info(pdev, "EST: depth=%u, ti_wid=%u, tils_max=%u, tqcnt=%u\n",
-+		 gcl_depth, ti_wid, tils_max, cap->txqcnt);
++	dev_info(pdev, "EST: depth=%u, ti_wid=%u, ter_max=%uns, tqcnt=%u\n",
++		 gcl_depth, ti_wid, cap->ext_max, cap->txqcnt);
 +
 +	return 0;
 +}
@@ -841,104 +766,6 @@ index 000000000000..b69f831a651b
 +	}
 +
 +	return hw->tsn_info.feat_en[featid];
-+}
-+
-+int tsn_hwtunable_set(struct mac_device_info *hw, struct net_device *dev,
-+		      enum tsn_hwtunable_id id,
-+		      const u32 data)
-+{
-+	struct tsnif_info *info = &hw->tsn_info;
-+	struct tsn_hw_cap *cap = &info->cap;
-+	void __iomem *ioaddr = hw->pcsr;
-+	int ret = 0;
-+
-+	switch (id) {
-+	case TSN_HWTUNA_TX_EST_TILS:
-+	case TSN_HWTUNA_TX_EST_PTOV:
-+	case TSN_HWTUNA_TX_EST_CTOV:
-+		if (!tsn_has_feat(hw, dev, TSN_FEAT_ID_EST)) {
-+			netdev_info(dev, "EST: feature unsupported\n");
-+			return -ENOTSUPP;
-+		}
-+		break;
-+	default:
-+		netdev_warn(dev, "TSN: invalid tunable id(%u)\n", id);
-+		return -EINVAL;
-+	};
-+
-+	switch (id) {
-+	case TSN_HWTUNA_TX_EST_TILS:
-+		if (data > cap->tils_max) {
-+			netdev_warn(dev, "EST: invalid tils(%u), max=%u\n",
-+				    data, cap->tils_max);
-+
-+			return -EINVAL;
-+		}
-+		if (data != info->hwtunable[TSN_HWTUNA_TX_EST_TILS]) {
-+			tsnif_est_set_tils(hw, ioaddr, data);
-+			info->hwtunable[TSN_HWTUNA_TX_EST_TILS] = data;
-+			netdev_info(dev, "EST: Set TILS = %u\n", data);
-+		}
-+		break;
-+	case TSN_HWTUNA_TX_EST_PTOV:
-+		if (data > cap->ptov_max) {
-+			netdev_warn(dev,
-+				    "EST: invalid PTOV(%u), max=%u\n",
-+				    data, cap->ptov_max);
-+
-+			return -EINVAL;
-+		}
-+		if (data != info->hwtunable[TSN_HWTUNA_TX_EST_PTOV]) {
-+			tsnif_est_set_ptov(hw, ioaddr, data);
-+			info->hwtunable[TSN_HWTUNA_TX_EST_PTOV] = data;
-+			netdev_info(dev, "EST: Set PTOV = %u\n", data);
-+		}
-+		break;
-+	case TSN_HWTUNA_TX_EST_CTOV:
-+		if (data > cap->ctov_max) {
-+			netdev_warn(dev,
-+				    "EST: invalid CTOV(%u), max=%u\n",
-+				    data, cap->ctov_max);
-+
-+			return -EINVAL;
-+		}
-+		if (data != info->hwtunable[TSN_HWTUNA_TX_EST_CTOV]) {
-+			tsnif_est_set_ctov(hw, ioaddr, data);
-+			info->hwtunable[TSN_HWTUNA_TX_EST_CTOV] = data;
-+			netdev_info(dev, "EST: Set CTOV = %u\n", data);
-+		}
-+		break;
-+	default:
-+		netdev_warn(dev, "TSN: invalid tunable id(%u)\n", id);
-+		ret = -EINVAL;
-+	};
-+
-+	return ret;
-+}
-+
-+int tsn_hwtunable_get(struct mac_device_info *hw, struct net_device *dev,
-+		      enum tsn_hwtunable_id id, u32 *data)
-+{
-+	struct tsnif_info *info = &hw->tsn_info;
-+
-+	switch (id) {
-+	case TSN_HWTUNA_TX_EST_TILS:
-+	case TSN_HWTUNA_TX_EST_PTOV:
-+	case TSN_HWTUNA_TX_EST_CTOV:
-+		if (!tsn_has_feat(hw, dev, TSN_FEAT_ID_EST)) {
-+			netdev_info(dev, "EST: feature unsupported\n");
-+			return -ENOTSUPP;
-+		}
-+		break;
-+	default:
-+		netdev_warn(dev, "TSN: invalid tunable id(%u)\n", id);
-+		return -EINVAL;
-+	};
-+
-+	*data = info->hwtunable[id];
-+	netdev_info(dev, "TSN: Get HW tunable[%d] = %u\n", id, *data);
-+
-+	return 0;
 +}
 +
 +int tsn_est_enable_set(struct mac_device_info *hw, struct net_device *dev,
@@ -1392,10 +1219,10 @@ index 000000000000..b69f831a651b
 +}
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.h b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.h
 new file mode 100644
-index 000000000000..b678c35763c0
+index 000000000000..e70ee6eea0d0
 --- /dev/null
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,106 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* Copyright (c) 2019, Intel Corporation.
 + * Time-Sensitive Networking (TSN) Header
@@ -1407,14 +1234,6 @@ index 000000000000..b678c35763c0
 +#define MIN_TSN_CORE_VER	0x50
 +#define EST_GCL_BANK_MAX		(2)
 +#define EST_TIWID_TO_EXTMAX(ti_wid)	((1 << ((ti_wid) + 7)) - 1)
-+
-+/* Hardware Tunable Enum */
-+enum tsn_hwtunable_id {
-+	TSN_HWTUNA_TX_EST_TILS = 0,
-+	TSN_HWTUNA_TX_EST_PTOV,
-+	TSN_HWTUNA_TX_EST_CTOV,
-+	TSN_HWTUNA_MAX,
-+};
 +
 +/* TSN Feature Enabled List */
 +enum tsn_feat_id {
@@ -1443,11 +1262,8 @@ index 000000000000..b678c35763c0
 +	u32 txqcnt;		/* Number of TxQ (control gate) */
 +	u32 gcl_depth;		/* GCL depth. */
 +	u32 ti_wid;		/* time interval width */
-+	u32 tils_max;		/* Max time interval left shift */
 +	u32 ext_max;		/* Max time extension */
 +	u32 cycle_max;		/* Max Cycle Time */
-+	u32 ptov_max;		/* Max PTP Offset */
-+	u32 ctov_max;		/* Max Current Time Offset */
 +};
 +
 +/* EST Gate Control Entry */
@@ -1483,7 +1299,6 @@ index 000000000000..b678c35763c0
 +struct tsnif_info {
 +	struct tsn_hw_cap cap;
 +	bool feat_en[TSN_FEAT_ID_MAX];
-+	u32 hwtunable[TSN_HWTUNA_MAX];
 +	struct est_gc_config est_gcc;
 +};
 +
@@ -1495,10 +1310,6 @@ index 000000000000..b678c35763c0
 +		 enum tsn_feat_id featid, bool enable);
 +bool tsn_has_feat(struct mac_device_info *hw, struct net_device *dev,
 +		  enum tsn_feat_id featid);
-+int tsn_hwtunable_set(struct mac_device_info *hw, struct net_device *dev,
-+		      enum tsn_hwtunable_id id, const u32 data);
-+int tsn_hwtunable_get(struct mac_device_info *hw, struct net_device *dev,
-+		      enum tsn_hwtunable_id id, u32 *data);
 +int tsn_est_enable_set(struct mac_device_info *hw, struct net_device *dev,
 +		       bool enable);
 +int tsn_est_bank_get(struct mac_device_info *hw, struct net_device *dev,
@@ -1531,5 +1342,5 @@ index 870a6ba7e387..f9832f3be04b 100644
  	bool en_tx_lpi_clockgating;
  	int has_xgmac;
 -- 
-2.17.1
+2.22.0.545.g9c9b961d7e
 

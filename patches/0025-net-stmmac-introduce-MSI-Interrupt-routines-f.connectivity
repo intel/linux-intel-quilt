@@ -1,7 +1,7 @@
-From 8347f2232992d2ed93fa0d8a54f2355fd109aa9a Mon Sep 17 00:00:00 2001
+From 46b5ca74c0862d1d697f0115bd32d91d1faf286d Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Fri, 26 Jul 2019 10:30:21 +0800
-Subject: [PATCH 25/86] net: stmmac: introduce MSI Interrupt routines for mac,
+Subject: [PATCH 25/89] net: stmmac: introduce MSI Interrupt routines for mac,
  safety, RX & TX
 
 Now we introduce MSI interrupt service routines and hook these routines
@@ -20,9 +20,9 @@ Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
 ---
  drivers/net/ethernet/stmicro/stmmac/common.h  |  12 +
  drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  16 +
- .../net/ethernet/stmicro/stmmac/stmmac_main.c | 420 ++++++++++++++++--
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 419 ++++++++++++++++--
  include/linux/stmmac.h                        |   1 +
- 4 files changed, 404 insertions(+), 45 deletions(-)
+ 4 files changed, 403 insertions(+), 45 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
 index 3643e7dc80d2..5177e49a9ff6 100644
@@ -82,7 +82,7 @@ index ef7a54cd5155..d3ce4d941a2b 100644
  #ifdef CONFIG_DEBUG_FS
  	struct dentry *dbgfs_dir;
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 9fed18556086..3506368a8288 100644
+index 9fed18556086..d851d2e3f52c 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -104,6 +104,11 @@ module_param(chain_mode, int, 0444);
@@ -97,7 +97,7 @@ index 9fed18556086..3506368a8288 100644
  
  #ifdef CONFIG_DEBUG_FS
  static int stmmac_init_fs(struct net_device *dev);
-@@ -2596,6 +2601,239 @@ static void stmmac_hw_teardown(struct net_device *dev)
+@@ -2596,6 +2601,238 @@ static void stmmac_hw_teardown(struct net_device *dev)
  	clk_disable_unprepare(priv->plat->clk_ptp_ref);
  }
  
@@ -105,19 +105,18 @@ index 9fed18556086..3506368a8288 100644
 +			    enum request_irq_err irq_err, int irq_idx)
 +{
 +	struct stmmac_priv *priv = netdev_priv(dev);
-+	int i, j;
++	int j;
 +
 +	switch (irq_err) {
 +	case REQ_IRQ_ERR_ALL:
-+		irq_idx = MTL_MAX_TX_QUEUES;
++		irq_idx = priv->plat->tx_queues_to_use;
 +		/* fall through */
 +	case REQ_IRQ_ERR_TX:
 +		for (j = irq_idx - 1; j >= 0; j--) {
 +			if (priv->tx_irq[j] > 0)
 +				free_irq(priv->tx_irq[j], &priv->tx_queue[j]);
 +		}
-+		/* Reinit i to fall through works correctly for Rx MSI freeing */
-+		i = MTL_MAX_RX_QUEUES;
++		irq_idx = priv->plat->rx_queues_to_use;
 +		/* fall through */
 +	case REQ_IRQ_ERR_RX:
 +		for (j = irq_idx - 1; j >= 0; j--) {
@@ -248,7 +247,7 @@ index 9fed18556086..3506368a8288 100644
 +		}
 +
 +		/* Request Rx MSI irq */
-+		for (i = 0; i < MTL_MAX_RX_QUEUES; i++) {
++		for (i = 0; i < priv->plat->rx_queues_to_use; i++) {
 +			if (priv->rx_irq[i] == 0)
 +				continue;
 +
@@ -268,7 +267,7 @@ index 9fed18556086..3506368a8288 100644
 +		}
 +
 +		/* Request Tx MSI irq */
-+		for (i = 0; i < MTL_MAX_TX_QUEUES; i++) {
++		for (i = 0; i < priv->plat->tx_queues_to_use; i++) {
 +			if (priv->tx_irq[i] == 0)
 +				continue;
 +
@@ -291,8 +290,8 @@ index 9fed18556086..3506368a8288 100644
 +				  IRQF_SHARED, dev->name, dev);
 +		if (unlikely(ret < 0)) {
 +			netdev_err(priv->dev,
-+				"%s: ERROR: allocating the IRQ %d (error: %d)\n",
-+				__func__, dev->irq, ret);
++				   "%s: ERROR: allocating the IRQ %d (error: %d)\n",
++				   __func__, dev->irq, ret);
 +			irq_err = REQ_IRQ_ERR_MAC;
 +			goto irq_error;
 +		}
@@ -326,7 +325,7 @@ index 9fed18556086..3506368a8288 100644
 +		}
 +	}
 +
-+	netdev_info(priv->dev, "PASS: requesting IRQs \n");
++	netdev_info(priv->dev, "PASS: requesting IRQs\n");
 +	return ret;
 +
 +irq_error:
@@ -337,7 +336,7 @@ index 9fed18556086..3506368a8288 100644
  /**
   *  stmmac_open - open entry point of the driver
   *  @dev : pointer to the device structure.
-@@ -2654,39 +2892,9 @@ static int stmmac_open(struct net_device *dev)
+@@ -2654,39 +2891,9 @@ static int stmmac_open(struct net_device *dev)
  
  	phylink_start(priv->phylink);
  
@@ -379,7 +378,7 @@ index 9fed18556086..3506368a8288 100644
  
  	/* Start phy converter after MDIO bus IRQ handling is up */
  	if (priv->plat->setup_phy_conv) {
-@@ -2705,11 +2913,9 @@ static int stmmac_open(struct net_device *dev)
+@@ -2705,11 +2912,9 @@ static int stmmac_open(struct net_device *dev)
  	return 0;
  
  phy_conv_error:
@@ -394,7 +393,7 @@ index 9fed18556086..3506368a8288 100644
  irq_error:
  	phylink_stop(priv->phylink);
  
-@@ -2751,11 +2957,7 @@ static int stmmac_release(struct net_device *dev)
+@@ -2751,11 +2956,7 @@ static int stmmac_release(struct net_device *dev)
  		del_timer_sync(&priv->tx_queue[chan].txtimer);
  
  	/* Free the IRQ lines */
@@ -407,7 +406,7 @@ index 9fed18556086..3506368a8288 100644
  
  	/* Start phy converter after MDIO bus IRQ handling is up */
  	if (priv->plat->remove_phy_conv) {
-@@ -3749,15 +3951,136 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
+@@ -3749,15 +3950,136 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
  	return IRQ_HANDLED;
  }
  
@@ -547,7 +546,7 @@ index 9fed18556086..3506368a8288 100644
  }
  #endif
  
-@@ -4225,6 +4548,7 @@ int stmmac_dvr_probe(struct device *device,
+@@ -4225,6 +4547,7 @@ int stmmac_dvr_probe(struct device *device,
  	struct stmmac_priv *priv;
  	u32 queue, maxq;
  	int ret = 0;
@@ -555,7 +554,7 @@ index 9fed18556086..3506368a8288 100644
  
  	ndev = devm_alloc_etherdev_mqs(device, sizeof(struct stmmac_priv),
  				       MTL_MAX_TX_QUEUES, MTL_MAX_RX_QUEUES);
-@@ -4247,6 +4571,12 @@ int stmmac_dvr_probe(struct device *device,
+@@ -4247,6 +4570,12 @@ int stmmac_dvr_probe(struct device *device,
  	priv->wol_irq = res->wol_irq;
  	priv->lpi_irq = res->lpi_irq;
  	priv->phy_conv_irq = res->phy_conv_irq;
@@ -580,5 +579,5 @@ index 099fdcef6b3e..ee0f4be4daf7 100644
  };
  #endif
 -- 
-2.17.1
+2.22.0.545.g9c9b961d7e
 

@@ -1,0 +1,65 @@
+From 3285b1c954f36ddcf2194ffc63d8024e92795f9f Mon Sep 17 00:00:00 2001
+From: Mateusz Gorski <mateusz.gorski@intel.com>
+Date: Fri, 9 Aug 2019 10:44:20 +0200
+Subject: [PATCH 06/15] ASoC: Intel: Skylake: Workaround for SPA for EHL
+ platforms
+
+For cAVS 2.5 platforms we are no longer able to control powering up/down
+DSP cores higher that core0, it is now done in firmware. Workaround
+patch to adjust our power flow for these platforms.
+
+Change-Id: I06d1fd47c84c2fb648357f6400036fa7e7fb079f
+Signed-off-by: Mateusz Gorski <mateusz.gorski@intel.com>
+Reviewed-on:
+Reviewed-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+Tested-by: gkblditp <gkblditp@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ include/sound/hda_codec.h             |  1 +
+ sound/soc/intel/skylake/cnl-sst-dsp.c | 12 ++++++++++++
+ 2 files changed, 13 insertions(+)
+
+--- a/include/sound/hda_codec.h
++++ b/include/sound/hda_codec.h
+@@ -20,6 +20,7 @@
+ 
+ #define IS_BXT(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x5a98)
+ #define IS_CFL(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0xa348)
++#define IS_EHL(pci) ((pci)->vendor == 0x8086 && (pci)->device == 0x4b55)
+ 
+ /*
+  * Structures
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.c
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.c
+@@ -18,6 +18,8 @@
+ #include "../common/sst-dsp-priv.h"
+ #include "cnl-sst-dsp.h"
+ #include "skl.h"
++#include <linux/pci.h>
++#include <sound/hda_codec.h>
+ 
+ /* various timeout values */
+ #define CNL_DSP_PU_TO		50
+@@ -142,6 +144,10 @@
+ int cnl_dsp_enable_core(struct sst_dsp *ctx, unsigned int core_mask)
+ {
+ 	int ret;
++	struct skl_dev *skl = ctx->thread_context;
++
++	if (IS_EHL(skl->pci) &&	core_mask != SKL_DSP_CORE0_MASK)
++		return 0;
+ 
+ 	/* power up */
+ 	ret = cnl_dsp_core_power_up(ctx, core_mask);
+@@ -158,6 +164,11 @@
+ {
+ 	int ret;
+ 
++	struct skl_dev *skl = ctx->thread_context;
++
++	if (IS_EHL(skl->pci) && core_mask != SKL_DSP_CORE0_MASK)
++		return 0;
++
+ 	ret = cnl_dsp_reset_core(ctx, core_mask);
+ 	if (ret < 0) {
+ 		dev_err(ctx->dev, "DSP core mask %#x reset failed\n",
