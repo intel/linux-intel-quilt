@@ -1,0 +1,150 @@
+From 16a54d46df779be240db91c386258ca7c3a9f8d8 Mon Sep 17 00:00:00 2001
+From: Kris Pan <kris.pan@intel.com>
+Date: Wed, 22 May 2019 17:22:53 +0800
+Subject: [PATCH 2321/2345] x86/cpu: fix FAM6_ATOM naming
+
+Since commit 1f1bc8222ce7db38bbdc734d2e321a4b75d5b625,
+The INTEL_FAM6_ATOM_GEMINI_LAKE have been replaced by
+INTEL_FAM6_ATOM_GOLDMONT_PLUS, fix it to pass allyesconfig.
+
+Change-Id: I7afbe17dd1089f0e425a52dfcbe8ce0d0d88996b
+Signed-off-by: Kris Pan <kris.pan@intel.com>
+
+ASoC: intel: skylake: isolate mark_pages_uc from sound core framework
+
+05dffb7ec39b408b7c45ff89e7a9abaef6b8f734
+The commit try to add a callback function whick is only used by skylake
+audio driver, and the implementation is for x86 arch only.
+Using CONFIG_SND_SOC_INTEL_SKYLAKE can isolate this WA code and
+make it pass with arm64 allyesconfig.
+
+Change-Id: I2d17f49c3215fc881048a205a80b029c95d38f87
+Signed-off-by: Kris Pan <kris.pan@intel.com>
+
+ALSA: memalloc: declare snd_sgbuf_aligned_pages() unconditionally
+
+Make this helper inline function available for all platforms. This
+helps solve 0-day compilation issues when CONFIG_SND_DMA_SGBUF is not
+defined.
+
+Reported-by: kbuild test robot <lkp@intel.com>
+Signed-off-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Reviewed-by: Takashi Iwai <tiwai@suse.de>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ include/sound/memalloc.h     | 16 ++++++++--------
+ sound/hda/ext/hdac_ext_bus.c | 10 ++++++++++
+ sound/soc/intel/Kconfig      |  2 +-
+ 3 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/include/sound/memalloc.h b/include/sound/memalloc.h
+index 782d1df..9a1b4db 100644
+--- a/include/sound/memalloc.h
++++ b/include/sound/memalloc.h
+@@ -69,6 +69,14 @@ struct snd_dma_buffer {
+ 	void *private_data;	/* private for allocator; don't touch */
+ };
+ 
++/*
++ * return the pages matching with the given byte size
++ */
++static inline unsigned int snd_sgbuf_aligned_pages(size_t size)
++{
++	return (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
++}
++
+ #ifdef CONFIG_SND_DMA_SGBUF
+ /*
+  * Scatter-Gather generic device pages
+@@ -93,14 +101,6 @@ struct snd_sg_buf {
+ };
+ 
+ /*
+- * return the pages matching with the given byte size
+- */
+-static inline unsigned int snd_sgbuf_aligned_pages(size_t size)
+-{
+-	return (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+-}
+-
+-/*
+  * return the physical address at the corresponding offset
+  */
+ static inline dma_addr_t snd_sgbuf_get_addr(struct snd_dma_buffer *dmab,
+diff --git a/sound/hda/ext/hdac_ext_bus.c b/sound/hda/ext/hdac_ext_bus.c
+index 964a41e..1cd01c8 100644
+--- a/sound/hda/ext/hdac_ext_bus.c
++++ b/sound/hda/ext/hdac_ext_bus.c
+@@ -20,8 +20,10 @@
+ #include <linux/module.h>
+ #include <linux/slab.h>
+ #include <linux/io.h>
++#ifdef CONFIG_SND_SOC_INTEL_SKYLAKE
+ #include <asm/pgtable.h>
+ #include <asm/set_memory.h>
++#endif
+ #include <sound/hdaudio_ext.h>
+ 
+ MODULE_DESCRIPTION("HDA extended core");
+@@ -57,6 +59,7 @@ static u8 hdac_ext_readb(u8 __iomem *addr)
+ 	return readb(addr);
+ }
+ 
++#ifdef CONFIG_SND_SOC_INTEL_SKYLAKE
+ static void hdac_ext_mark_pages_uc(struct snd_dma_buffer *dmab, bool enable)
+ {
+ 	int pages;
+@@ -81,6 +84,7 @@ static void hdac_ext_mark_pages_uc(struct snd_dma_buffer *dmab, bool enable)
+ 	else
+ 		set_memory_wb((unsigned long)dmab->area, pages);
+ }
++#endif
+ 
+ static int hdac_ext_dma_alloc_pages(struct hdac_bus *bus, int type,
+ 			   size_t size, struct snd_dma_buffer *buf)
+@@ -88,15 +92,19 @@ static int hdac_ext_dma_alloc_pages(struct hdac_bus *bus, int type,
+ 	int ret;
+ 
+ 	ret = snd_dma_alloc_pages(type, bus->dev, size, buf);
++#ifdef CONFIG_SND_SOC_INTEL_SKYLAKE
+ 	if (ret < 0)
+ 		return ret;
+ 	hdac_ext_mark_pages_uc(buf, true);
++#endif
+ 	return ret;
+ }
+ 
+ static void hdac_ext_dma_free_pages(struct hdac_bus *bus, struct snd_dma_buffer *buf)
+ {
++#ifdef CONFIG_SND_SOC_INTEL_SKYLAKE
+ 	hdac_ext_mark_pages_uc(buf, false);
++#endif
+ 	snd_dma_free_pages(buf);
+ }
+ 
+@@ -109,7 +117,9 @@ static const struct hdac_io_ops hdac_ext_default_io = {
+ 	.reg_readb = hdac_ext_readb,
+ 	.dma_alloc_pages = hdac_ext_dma_alloc_pages,
+ 	.dma_free_pages = hdac_ext_dma_free_pages,
++#ifdef CONFIG_SND_SOC_INTEL_SKYLAKE
+ 	.mark_pages_uc = hdac_ext_mark_pages_uc,
++#endif
+ };
+ 
+ /**
+diff --git a/sound/soc/intel/Kconfig b/sound/soc/intel/Kconfig
+index 545ec59..6a3e3f8 100644
+--- a/sound/soc/intel/Kconfig
++++ b/sound/soc/intel/Kconfig
+@@ -103,7 +103,7 @@ config SND_SST_ATOM_HIFI2_PLATFORM_ACPI
+ 
+ config SND_SOC_INTEL_SKYLAKE
+ 	tristate "SKL/BXT/KBL/GLK/CNL... Platforms"
+-	depends on PCI && ACPI
++	depends on PCI && ACPI && X86
+ 	select SND_HDA_EXT_CORE
+ 	select SND_HDA_DSP_LOADER
+ 	select SND_SOC_TOPOLOGY
+-- 
+2.7.4
+
