@@ -1,0 +1,67 @@
+From 7d10eb72d0b5490530ab445a57aa05a7b06c73de Mon Sep 17 00:00:00 2001
+From: Lewis Huang <Lewis.Huang@amd.com>
+Date: Tue, 2 Jul 2019 22:33:34 -0500
+Subject: [PATCH 0740/1606] drm/amd/display: Add debug entry to destroy
+ disconnected edp link
+
+Add a flag to dc_debug_options to determine if a disconnected edp link
+should be destroyed.
+
+Signed-off-by: Lewis Huang <Lewis.Huang@amd.com>
+Reviewed-by: Yongqiang Sun <yongqiang.sun@amd.com>
+Acked-by: Leo Li <sunpeng.li@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/display/dc/core/dc.c | 20 ++++++++++++++++----
+ drivers/gpu/drm/amd/display/dc/dc.h      |  1 +
+ 2 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/display/dc/core/dc.c b/drivers/gpu/drm/amd/display/dc/core/dc.c
+index 94bfccdba1c6..79160e47c328 100644
+--- a/drivers/gpu/drm/amd/display/dc/core/dc.c
++++ b/drivers/gpu/drm/amd/display/dc/core/dc.c
+@@ -181,13 +181,25 @@ static bool create_links(
+ 		link = link_create(&link_init_params);
+ 
+ 		if (link) {
+-			if (dc->config.edp_not_connected &&
+-					link->connector_signal == SIGNAL_TYPE_EDP) {
+-				link_destroy(&link);
+-			} else {
++			bool should_destory_link = false;
++
++			if (link->connector_signal == SIGNAL_TYPE_EDP) {
++				if (dc->config.edp_not_connected)
++					should_destory_link = true;
++				else if (dc->debug.remove_disconnect_edp) {
++					enum dc_connection_type type;
++					dc_link_detect_sink(link, &type);
++					if (type == dc_connection_none)
++						should_destory_link = true;
++				}
++			}
++
++			if (!should_destory_link) {
+ 				dc->links[dc->link_count] = link;
+ 				link->dc = dc;
+ 				++dc->link_count;
++			} else {
++				link_destroy(&link);
+ 			}
+ 		}
+ 	}
+diff --git a/drivers/gpu/drm/amd/display/dc/dc.h b/drivers/gpu/drm/amd/display/dc/dc.h
+index 6da0a6fe2973..c585e16bc9f1 100644
+--- a/drivers/gpu/drm/amd/display/dc/dc.h
++++ b/drivers/gpu/drm/amd/display/dc/dc.h
+@@ -378,6 +378,7 @@ struct dc_debug_options {
+ 	bool scl_reset_length10;
+ 	bool hdmi20_disable;
+ 	bool skip_detection_link_training;
++	bool remove_disconnect_edp;
+ 	unsigned int force_odm_combine; //bit vector based on otg inst
+ 	unsigned int force_fclk_khz;
+ 	bool disable_tri_buf;
+-- 
+2.17.1
+

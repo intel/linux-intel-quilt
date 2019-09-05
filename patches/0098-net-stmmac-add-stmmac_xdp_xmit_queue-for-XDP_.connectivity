@@ -1,0 +1,102 @@
+From f3473bb17a04cce75c9b2d035d2d7d2543cf7c24 Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Tue, 27 Aug 2019 20:55:48 +0800
+Subject: [PATCH 098/104] net: stmmac: add stmmac_xdp_xmit_queue for XDP_TX
+
+This function is to be used for XDP_TX cases whether its from
+Native or Zero Copy cases.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 63 +++++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.h  |  2 +
+ 2 files changed, 65 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 825844da9444..7304bb6caf78 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -4209,6 +4209,69 @@ static int stmmac_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
+ 	return 0;
+ }
+ 
++/**
++ * stmmac_xdp_xmit_queue - takes an xdp_frame and transmit
++ *  @priv : private device structure
++ *  @queue: queue id
++ *  @xdpf: XDP frame to transmit
++ **/
++int stmmac_xdp_xmit_queue(struct stmmac_priv *priv, u32 queue,
++			  struct xdp_frame *xdpf)
++{
++	struct stmmac_tx_queue *tx_q = &priv->tx_queue[queue];
++	struct dma_desc *tx_desc;
++	u16 entry = tx_q->cur_tx;
++	void *data = xdpf->data;
++	u32 size = xdpf->len;
++	dma_addr_t dma;
++
++	if (!unlikely(stmmac_tx_avail(priv, queue)))
++		return STMMAC_XDP_DROP;
++
++	/* TODO: Add driver XDP statistics */
++
++	dma = dma_map_single(priv->device, data, size, DMA_TO_DEVICE);
++	if (dma_mapping_error(priv->device, dma))
++		return STMMAC_XDP_DROP;
++
++	tx_q->tx_skbuff_dma[entry].buf = dma;
++	tx_q->tx_skbuff_dma[entry].len = size;
++	tx_q->tx_skbuff_dma[entry].last_segment = true;
++	tx_q->tx_skbuff_dma[entry].map_as_page = false;
++	tx_q->tx_skbuff_dma[entry].is_jumbo = false;
++	tx_q->xdpf[entry] = xdpf;
++
++	if (priv->extend_desc)
++		tx_desc = (void *)tx_q->dma_etx;
++	else if (priv->enhanced_tx_desc)
++		tx_desc = (void *)tx_q->dma_enhtx;
++	else
++		tx_desc = (void *)tx_q->dma_tx;
++
++	/* Write Tx desc dma buffer address */
++	stmmac_set_desc_addr(priv, tx_desc, dma);
++
++	/* Prepare the descriptor and set the own bit too */
++	stmmac_prepare_tx_desc(priv, tx_desc,
++			       1, /* First Segment */
++			       size,
++			       0, /* No checksum offload */
++			       priv->mode,
++			       1, /* OWN bit */
++			       1, /* Last Segment */
++			       size);
++
++	/* The own bit must be the latest setting done when preparing the
++	 * descriptor and then barrier is needed to make sure that
++	 * all is coherent before granting the DMA engine the packet.
++	 */
++	wmb();
++
++	tx_q->cur_tx = STMMAC_GET_ENTRY(entry, priv->dma_tx_size);
++
++	return STMMAC_XDP_TX;
++}
++
+ /**
+  * stmmac_xdp - implements ndo_bpf
+  * @dev: device pointer
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.h b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.h
+index fbd59c156caf..776a7eee27c0 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.h
+@@ -18,4 +18,6 @@ static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
+ 	return !!priv->xdp_prog;
+ }
+ 
++int stmmac_xdp_xmit_queue(struct stmmac_priv *priv, u32 queue,
++			  struct xdp_frame *xdpf);
+ #endif /* __STMMAC_XSK_H__ */
+-- 
+2.17.1
+
