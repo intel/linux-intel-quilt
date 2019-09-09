@@ -1,0 +1,297 @@
+From ca73a56eaf1dbf9d9181cdaa0827ab0076449fc7 Mon Sep 17 00:00:00 2001
+From: Chen Meng J <meng.j.chen@intel.com>
+Date: Tue, 26 Mar 2019 10:55:42 +0800
+Subject: [PATCH 02/21] media: intel-ipu4: pdata change for sensors connected
+ via TI960
+
+specify reset pin, powerup sequence, if init serializer, in pdata.
+add pdata for ox03a10 ficosa.
+complement pdata for ox03a10 and ov495.
+
+Change-Id: I3b40b918a08c6bf89acff3d1b26700233b18934a
+Tracked-On: #JIIAP-736
+Tracked-On: PKT-2588
+Signed-off-by: Chen Meng J <meng.j.chen@intel.com>
+Signed-off-by: Meng Wei <wei.meng@intel.com>
+---
+ drivers/media/platform/intel/Kconfig          |   6 +
+ .../media/platform/intel/ipu4-bxt-p-pdata.c   | 147 ++++++++++++++----
+ include/media/crlmodule.h                     |  27 +++-
+ 3 files changed, 146 insertions(+), 34 deletions(-)
+
+diff --git a/drivers/media/platform/intel/Kconfig b/drivers/media/platform/intel/Kconfig
+index 95e15c58cfef..2585e97ec71f 100644
+--- a/drivers/media/platform/intel/Kconfig
++++ b/drivers/media/platform/intel/Kconfig
+@@ -94,6 +94,12 @@ config INTEL_IPU4_OX03A10
+ 	---help---
+ 	"ox03a10 camera sensor"
+ 
++config INTEL_IPU4_OX03A10_FICOSA
++	bool "Compile platorm data for OX03A10 FICOSA"
++	depends on INTEL_IPU4_BXT_P_PDATA
++	---help---
++	"ox03a10 ficosa camera sensor"
++
+ config INTEL_IPU4_OV495
+ 	bool "Compile platorm data for OV495"
+ 	depends on INTEL_IPU4_BXT_P_PDATA
+diff --git a/drivers/media/platform/intel/ipu4-bxt-p-pdata.c b/drivers/media/platform/intel/ipu4-bxt-p-pdata.c
+index 53db12e98b80..8394143c3d29 100644
+--- a/drivers/media/platform/intel/ipu4-bxt-p-pdata.c
++++ b/drivers/media/platform/intel/ipu4-bxt-p-pdata.c
+@@ -1205,6 +1205,28 @@ static struct crlmodule_platform_data ox03a10_pdata = {
+ 	 * please specify xshutdown, fsin as needed.
+ 	 */
+ 	.fsin = 0, /* gpio 0 used for FSIN */
++	.gpio_powerup_seq = {0, 3, -1, -1},
++	.module_flags = CRL_MODULE_FL_INIT_SER | CRL_MODULE_FL_POWERUP,
++};
++#endif
++
++#ifdef CONFIG_INTEL_IPU4_OX03A10_FICOSA
++#define OX03A10_FICOSA_LANES		4
++#define OX03A10_FICOSA_I2C_PHY_ADDR	0x6c
++#define OX03A10_FICOSAA_I2C_ADDRESS	0x30
++#define OX03A10_FICOSAB_I2C_ADDRESS	0x31
++
++#define OX03A10_FICOSAA_SER_ADDRESS	0x58
++#define OX03A10_FICOSAB_SER_ADDRESS	0x59
++
++static struct crlmodule_platform_data ox03a10_ficosa_pdata = {
++	.lanes = OX03A10_FICOSA_LANES,
++	.ext_clk = 27000000,
++	.op_sys_clock = (uint64_t[]){ 87750000 },
++	.module_name = "OX03A10_FICOSA",
++	.id_string = "0x58 0x3 0x41",
++	.gpio_powerup_seq = {0x2, 0xa, 0xe, -1},
++	.module_flags = CRL_MODULE_FL_INIT_SER | CRL_MODULE_FL_POWERUP,
+ };
+ #endif
+ 
+@@ -1233,6 +1255,8 @@ static struct crlmodule_platform_data ov495_pdata = {
+ 	 * please specify xshutdown, fsin as needed.
+ 	 */
+ 	.fsin = 2, /* gpio 2 used for FSIN */
++	.reset = 0, /* gpio 0 used for RESET */
++	.module_flags = CRL_MODULE_FL_RESET,
+ };
+ #endif
+ 
+@@ -1252,33 +1276,12 @@ static struct ipu_isys_csi2_config ti960_csi2_cfg_2 = {
+ };
+ 
+ static struct ti960_subdev_info ti960_subdevs[] = {
+-#ifdef CONFIG_INTEL_IPU4_OX03A10
+-	{
+-		.board_info = {
+-			.type = CRLMODULE_NAME,
+-			.addr = OX03A10A_I2C_ADDRESS,
+-			.platform_data = &ox03a10_pdata,
+-		},
+-		.i2c_adapter_id = TI960_I2C_ADAPTER,
+-		.rx_port = 0,
+-		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
+-		.ser_alias = OX03A10A_SER_ADDRESS,
+-		.suffix = 'a',
+-	},
+-	{
+-		.board_info = {
+-			.type = CRLMODULE_NAME,
+-			.addr = OX03A10B_I2C_ADDRESS,
+-			.platform_data = &ox03a10_pdata,
+-		},
+-		.i2c_adapter_id = TI960_I2C_ADAPTER,
+-		.rx_port = 1,
+-		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
+-		.ser_alias = OX03A10B_SER_ADDRESS,
+-		.suffix = 'b',
+-	},
+-#endif
+ #ifdef CONFIG_INTEL_IPU4_OV495
++/*
++ * FIXME: ov495 need to be detected first.
++ * it causes side effect on ov495, that initial sequence
++ * of serializer TI953 for other sensors.
++ */
+ 	{
+ 		.board_info = {
+ 			.type = CRLMODULE_NAME,
+@@ -1328,9 +1331,6 @@ static struct ti960_subdev_info ti960_subdevs[] = {
+ 		.suffix = 'd',
+ 	},
+ #endif
+-};
+-
+-static struct ti960_subdev_info ti960_subdevs_2[] = {
+ #ifdef CONFIG_INTEL_IPU4_OX03A10
+ 	{
+ 		.board_info = {
+@@ -1338,11 +1338,11 @@ static struct ti960_subdev_info ti960_subdevs_2[] = {
+ 			.addr = OX03A10A_I2C_ADDRESS,
+ 			.platform_data = &ox03a10_pdata,
+ 		},
+-		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.i2c_adapter_id = TI960_I2C_ADAPTER,
+ 		.rx_port = 0,
+ 		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
+ 		.ser_alias = OX03A10A_SER_ADDRESS,
+-		.suffix = 'e',
++		.suffix = 'a',
+ 	},
+ 	{
+ 		.board_info = {
+@@ -1350,13 +1350,42 @@ static struct ti960_subdev_info ti960_subdevs_2[] = {
+ 			.addr = OX03A10B_I2C_ADDRESS,
+ 			.platform_data = &ox03a10_pdata,
+ 		},
+-		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.i2c_adapter_id = TI960_I2C_ADAPTER,
+ 		.rx_port = 1,
+ 		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
+ 		.ser_alias = OX03A10B_SER_ADDRESS,
+-		.suffix = 'f',
++		.suffix = 'b',
++	},
++#endif
++#ifdef CONFIG_INTEL_IPU4_OX03A10_FICOSA
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10_FICOSAA_I2C_ADDRESS,
++			.platform_data = &ox03a10_ficosa_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER,
++		.rx_port = 0,
++		.phy_i2c_addr = OX03A10_FICOSA_I2C_PHY_ADDR,
++		.ser_alias = OX03A10_FICOSAA_SER_ADDRESS,
++		.suffix = 'a',
++	},
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10_FICOSAB_I2C_ADDRESS,
++			.platform_data = &ox03a10_ficosa_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER,
++		.rx_port = 1,
++		.phy_i2c_addr = OX03A10_FICOSA_I2C_PHY_ADDR,
++		.ser_alias = OX03A10_FICOSAB_SER_ADDRESS,
++		.suffix = 'b',
+ 	},
+ #endif
++};
++
++static struct ti960_subdev_info ti960_subdevs_2[] = {
+ #ifdef CONFIG_INTEL_IPU4_OV495
+ 	{
+ 		.board_info = {
+@@ -1407,6 +1436,58 @@ static struct ti960_subdev_info ti960_subdevs_2[] = {
+ 		.suffix = 'h',
+ 	},
+ #endif
++#ifdef CONFIG_INTEL_IPU4_OX03A10
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10A_I2C_ADDRESS,
++			.platform_data = &ox03a10_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.rx_port = 0,
++		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
++		.ser_alias = OX03A10A_SER_ADDRESS,
++		.suffix = 'e',
++	},
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10B_I2C_ADDRESS,
++			.platform_data = &ox03a10_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.rx_port = 1,
++		.phy_i2c_addr = OX03A10_I2C_PHY_ADDR,
++		.ser_alias = OX03A10B_SER_ADDRESS,
++		.suffix = 'f',
++	},
++#endif
++#ifdef CONFIG_INTEL_IPU4_OX03A10_FICOSA
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10_FICOSAA_I2C_ADDRESS,
++			.platform_data = &ox03a10_ficosa_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.rx_port = 0,
++		.phy_i2c_addr = OX03A10_FICOSA_I2C_PHY_ADDR,
++		.ser_alias = OX03A10_FICOSAA_SER_ADDRESS,
++		.suffix = 'e',
++	},
++	{
++		.board_info = {
++			.type = CRLMODULE_NAME,
++			.addr = OX03A10_FICOSAB_I2C_ADDRESS,
++			.platform_data = &ox03a10_ficosa_pdata,
++		},
++		.i2c_adapter_id = TI960_I2C_ADAPTER_2,
++		.rx_port = 1,
++		.phy_i2c_addr = OX03A10_FICOSA_I2C_PHY_ADDR,
++		.ser_alias = OX03A10_FICOSAB_SER_ADDRESS,
++		.suffix = 'f',
++	},
++#endif
+ };
+ 
+ static struct ti960_pdata ti960_pdata = {
+diff --git a/include/media/crlmodule.h b/include/media/crlmodule.h
+index 91650c1a992a..f27917d722af 100644
+--- a/include/media/crlmodule.h
++++ b/include/media/crlmodule.h
+@@ -12,6 +12,14 @@
+ #define CRLMODULE_NAME		"crlmodule"
+ 
+ #define CRL_MAX_CUSTOM_GPIO_AMOUNT 3
++#define CRL_MAX_GPIO_POWERUP_SEQ	4
++
++/* set this flag if this module needs serializer initialization */
++#define CRL_MODULE_FL_INIT_SER	BIT(0)
++/* set this flag if this module has extra powerup sequence */
++#define CRL_MODULE_FL_POWERUP	BIT(1)
++/* set this flag if this module needs reset signal */
++#define CRL_MODULE_FL_RESET	BIT(2)
+ 
+ struct crl_custom_gpio {
+ 	char name[16];
+@@ -29,9 +37,26 @@ struct crlmodule_platform_data {
+ 	unsigned int lanes;		/* Number of CSI-2 lanes */
+ 	const s64 *op_sys_clock;
+ 
+-	/* specify gpio pins of Deser for PWDN, FSIN. */
++	/* specify gpio pins of Deser for PWDN, FSIN, RESET. */
+ 	int xshutdown;
+ 	int fsin;
++	int reset;
++
++	/* specify gpio pins boot timing. */
++	/* Bit 3 write 0/1 on GPIO3
++	 * Bit 2 write 0/1 on GPIO2
++	 * Bit 1 write 0/1 on GPIO1
++	 * Bit 0 write 0/1 on GPIO0
++	 */
++	char gpio_powerup_seq[CRL_MAX_GPIO_POWERUP_SEQ];
++
++	/* module_flags can be:
++	 * CRL_MODULE_FL_INIT_SER
++	 * CRL_MODULE_FL_POWERUP
++	 * CRL_MODULE_FL_RESET
++	 */
++	unsigned int module_flags;
++
+ 	struct crl_custom_gpio custom_gpio[CRL_MAX_CUSTOM_GPIO_AMOUNT];
+ 	char module_name[16]; /* module name from ACPI */
+ 	int crl_irq_pin;
+-- 
+2.17.1
+
