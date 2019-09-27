@@ -1,7 +1,7 @@
-From ec94d1b70b63f37e58581d288c7783802a56444e Mon Sep 17 00:00:00 2001
+From a671970cd4f6f55ea6b3c24e2cdc017ee7183c53 Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 26 Oct 2012 18:50:54 +0100
-Subject: [PATCH 0239/1443] sched: Add support for lazy preemption
+Subject: [PATCH 0239/1494] sched: Add support for lazy preemption
 
 It has become an obsession to mitigate the determinism vs. throughput
 loss of RT. Looking at the mainline semantics of preemption points
@@ -143,10 +143,10 @@ index ed8413e..9c74a01 100644
  } while (0)
  
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 0445d5c..dd95bd6 100644
+index 4559d80..d2386fa 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -1725,6 +1725,44 @@ static inline int test_tsk_need_resched(struct task_struct *tsk)
+@@ -1733,6 +1733,44 @@ static inline int test_tsk_need_resched(struct task_struct *tsk)
  	return unlikely(test_tsk_thread_flag(tsk,TIF_NEED_RESCHED));
  }
  
@@ -244,7 +244,7 @@ index 907d72b..306567f 100644
  	prompt "Preemption Model"
  	default PREEMPT_NONE
 diff --git a/kernel/cpu.c b/kernel/cpu.c
-index 0523f2f..3857a0a 100644
+index 69b5853..efa687c 100644
 --- a/kernel/cpu.c
 +++ b/kernel/cpu.c
 @@ -304,11 +304,13 @@ void pin_current_cpu(void)
@@ -262,7 +262,7 @@ index 0523f2f..3857a0a 100644
  		__read_rt_unlock(cpuhp_pin);
  		goto again;
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index 33e81e7..7831756 100644
+index 0615087..d5e220c 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -493,6 +493,48 @@ void resched_curr(struct rq *rq)
@@ -419,10 +419,10 @@ index 33e81e7..7831756 100644
  }
  EXPORT_SYMBOL(migrate_enable);
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
-index 0048a32..2cca09d 100644
+index a7497d78..38ff12c 100644
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
-@@ -4021,7 +4021,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+@@ -4075,7 +4075,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
  	ideal_runtime = sched_slice(cfs_rq, curr);
  	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
  	if (delta_exec > ideal_runtime) {
@@ -431,7 +431,7 @@ index 0048a32..2cca09d 100644
  		/*
  		 * The current task ran long enough, ensure it doesn't get
  		 * re-elected due to buddy favours.
-@@ -4045,7 +4045,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+@@ -4099,7 +4099,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
  		return;
  
  	if (delta > ideal_runtime)
@@ -440,7 +440,7 @@ index 0048a32..2cca09d 100644
  }
  
  static void
-@@ -4187,7 +4187,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+@@ -4241,7 +4241,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
  	 * validating it and just reschedule.
  	 */
  	if (queued) {
@@ -449,7 +449,7 @@ index 0048a32..2cca09d 100644
  		return;
  	}
  	/*
-@@ -4371,7 +4371,7 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
+@@ -4425,7 +4425,7 @@ static void __account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec)
  	 * hierarchy can be throttled
  	 */
  	if (!assign_cfs_rq_runtime(cfs_rq) && likely(cfs_rq->curr))
@@ -458,7 +458,7 @@ index 0048a32..2cca09d 100644
  }
  
  static __always_inline
-@@ -5067,7 +5067,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *p)
+@@ -5121,7 +5121,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *p)
  
  		if (delta < 0) {
  			if (rq->curr == p)
@@ -467,7 +467,7 @@ index 0048a32..2cca09d 100644
  			return;
  		}
  		hrtick_start(rq, delta);
-@@ -6643,7 +6643,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
+@@ -6697,7 +6697,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
  	return;
  
  preempt:
@@ -476,7 +476,7 @@ index 0048a32..2cca09d 100644
  	/*
  	 * Only set the backward buddy when the current task is still
  	 * on the rq. This can happen when a wakeup gets interleaved
-@@ -9734,7 +9734,7 @@ static void task_fork_fair(struct task_struct *p)
+@@ -9788,7 +9788,7 @@ static void task_fork_fair(struct task_struct *p)
  		 * 'current' within the tree based on its new key value.
  		 */
  		swap(curr->vruntime, se->vruntime);
@@ -485,7 +485,7 @@ index 0048a32..2cca09d 100644
  	}
  
  	se->vruntime -= cfs_rq->min_vruntime;
-@@ -9758,7 +9758,7 @@ prio_changed_fair(struct rq *rq, struct task_struct *p, int oldprio)
+@@ -9812,7 +9812,7 @@ prio_changed_fair(struct rq *rq, struct task_struct *p, int oldprio)
  	 */
  	if (rq->curr == p) {
  		if (p->prio > oldprio)

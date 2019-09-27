@@ -1,7 +1,7 @@
-From 810113c992c4652742650d6ba333a43acdb439de Mon Sep 17 00:00:00 2001
+From 307c96a1bca954464b35404556e85588b4e2ff1e Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 12 Oct 2017 17:11:19 +0200
-Subject: [PATCH 0143/1443] rtmutex: add sleeping lock implementation
+Subject: [PATCH 0143/1494] rtmutex: add sleeping lock implementation
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
@@ -22,10 +22,10 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  create mode 100644 include/linux/spinlock_types_rt.h
 
 diff --git a/include/linux/kernel.h b/include/linux/kernel.h
-index 3d83ebb..d81a153 100644
+index f6f94e5..78f30d5 100644
 --- a/include/linux/kernel.h
 +++ b/include/linux/kernel.h
-@@ -259,6 +259,9 @@ extern int _cond_resched(void);
+@@ -260,6 +260,9 @@ extern int _cond_resched(void);
   */
  # define might_sleep() \
  	do { __might_sleep(__FILE__, __LINE__, 0); might_resched(); } while (0)
@@ -35,7 +35,7 @@ index 3d83ebb..d81a153 100644
  # define sched_annotate_sleep()	(current->task_state_change = 0)
  #else
    static inline void ___might_sleep(const char *file, int line,
-@@ -266,6 +269,7 @@ extern int _cond_resched(void);
+@@ -267,6 +270,7 @@ extern int _cond_resched(void);
    static inline void __might_sleep(const char *file, int line,
  				   int preempt_offset) { }
  # define might_sleep() do { might_resched(); } while (0)
@@ -102,7 +102,7 @@ index a355289..138bd1e 100644
   * rt_mutex_is_locked - is the mutex locked
   * @lock: the mutex to be queried
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 7eccccc..1797fd3 100644
+index baa5fce..f25c956 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -134,6 +134,9 @@ struct task_group;
@@ -180,7 +180,7 @@ index 10b19a1..ce3ccff 100644
  #endif /* _LINUX_SCHED_WAKE_Q_H */
 diff --git a/include/linux/spinlock_rt.h b/include/linux/spinlock_rt.h
 new file mode 100644
-index 0000000..3696a77
+index 00000000..3696a77
 --- /dev/null
 +++ b/include/linux/spinlock_rt.h
 @@ -0,0 +1,156 @@
@@ -342,7 +342,7 @@ index 0000000..3696a77
 +#endif
 diff --git a/include/linux/spinlock_types_rt.h b/include/linux/spinlock_types_rt.h
 new file mode 100644
-index 0000000..3e3d8c5
+index 00000000..3e3d8c5
 --- /dev/null
 +++ b/include/linux/spinlock_types_rt.h
 @@ -0,0 +1,48 @@
@@ -395,7 +395,7 @@ index 0000000..3e3d8c5
 +
 +#endif
 diff --git a/kernel/fork.c b/kernel/fork.c
-index 247b08e..96297e7 100644
+index 35f304d..0a46072 100644
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
 @@ -895,6 +895,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
@@ -1143,7 +1143,7 @@ index 5955ad2..6fcf0a3 100644
  #ifdef CONFIG_DEBUG_RT_MUTEXES
  # include "rtmutex-debug.h"
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index a8e9283..868d3395 100644
+index d725fd0..384bc53 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -401,9 +401,15 @@ static bool set_nr_if_polling(struct task_struct *p)
