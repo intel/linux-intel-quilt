@@ -1,7 +1,7 @@
-From f427a5ae0ebd78c5d4685ffa8af28cb8d4106d54 Mon Sep 17 00:00:00 2001
+From 108c93a7500976eb3ed93e0915b79ff416281ad0 Mon Sep 17 00:00:00 2001
 From: Adrian Hunter <adrian.hunter@intel.com>
 Date: Tue, 26 Feb 2019 14:49:18 +0200
-Subject: [PATCH 03/75] scsi: ufs: Add UME support
+Subject: [PATCH 03/62] scsi: ufs: Add UME support
 
 Add support for UFS Unified Memory Extension.
 
@@ -14,7 +14,6 @@ This patch assumes memory is allocated which means using CMA e.g.
 	Kernel command line:
 		cma=128M@4G
 
-Change-Id: I0b99e0daf4a056b1f793ae942ef5f8c4de9fc5db
 Signed-off-by: Adrian Hunter <adrian.hunter@intel.com>
 ---
  drivers/scsi/ufs/ufs-sysfs.c |   2 +-
@@ -25,7 +24,7 @@ Signed-off-by: Adrian Hunter <adrian.hunter@intel.com>
  5 files changed, 281 insertions(+), 12 deletions(-)
 
 diff --git a/drivers/scsi/ufs/ufs-sysfs.c b/drivers/scsi/ufs/ufs-sysfs.c
-index f478685122ff..a6be49a59b94 100644
+index 969a36b15897..0926b1c0c3f7 100644
 --- a/drivers/scsi/ufs/ufs-sysfs.c
 +++ b/drivers/scsi/ufs/ufs-sysfs.c
 @@ -129,7 +129,7 @@ static void ufshcd_auto_hibern8_update(struct ufs_hba *hba, u32 ahit)
@@ -38,7 +37,7 @@ index f478685122ff..a6be49a59b94 100644
  out_unlock:
  	spin_unlock_irqrestore(hba->host->host_lock, flags);
 diff --git a/drivers/scsi/ufs/ufs.h b/drivers/scsi/ufs/ufs.h
-index 99a9c4d16f6b..81e6884d4ea9 100644
+index 3327981ef894..ed54eac4e6d7 100644
 --- a/drivers/scsi/ufs/ufs.h
 +++ b/drivers/scsi/ufs/ufs.h
 @@ -139,8 +139,10 @@ enum flag_idn {
@@ -91,13 +90,13 @@ index 99a9c4d16f6b..81e6884d4ea9 100644
 +	u8 subclass;
 +	u32 min_uma_sz;
  	u16 wmanufacturerid;
- 	char model[MAX_MODEL_LEN + 1];
+ 	u8 *model;
  };
 diff --git a/drivers/scsi/ufs/ufshcd.c b/drivers/scsi/ufs/ufshcd.c
-index 029da74bb2f5..327a39fb7126 100644
+index 11a87f51c442..7789b6f9ad1b 100644
 --- a/drivers/scsi/ufs/ufshcd.c
 +++ b/drivers/scsi/ufs/ufshcd.c
-@@ -412,7 +412,13 @@ static void ufshcd_print_uic_err_hist(struct ufs_hba *hba,
+@@ -403,7 +403,13 @@ static void ufshcd_print_err_hist(struct ufs_hba *hba,
  
  static void ufshcd_print_host_regs(struct ufs_hba *hba)
  {
@@ -112,7 +111,7 @@ index 029da74bb2f5..327a39fb7126 100644
  	dev_err(hba->dev, "hba->ufs_version = 0x%x, hba->capabilities = 0x%x\n",
  		hba->ufs_version, hba->capabilities);
  	dev_err(hba->dev,
-@@ -2837,11 +2843,13 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
+@@ -2839,11 +2845,13 @@ int ufshcd_query_flag(struct ufs_hba *hba, enum query_opcode opcode,
   * @index: index field
   * @selector: selector field
   * @attr_val: the attribute value after the query request completes
@@ -128,7 +127,7 @@ index 029da74bb2f5..327a39fb7126 100644
  {
  	struct ufs_query_req *request = NULL;
  	struct ufs_query_res *response = NULL;
-@@ -2879,7 +2887,8 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
+@@ -2881,7 +2889,8 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
  	err = ufshcd_exec_dev_cmd(hba, DEV_CMD_TYPE_QUERY, QUERY_REQ_TIMEOUT);
  
  	if (err) {
@@ -138,7 +137,7 @@ index 029da74bb2f5..327a39fb7126 100644
  				__func__, opcode, idn, index, err);
  		goto out_unlock;
  	}
-@@ -2893,6 +2902,13 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
+@@ -2895,6 +2904,13 @@ int ufshcd_query_attr(struct ufs_hba *hba, enum query_opcode opcode,
  	return err;
  }
  
@@ -152,7 +151,7 @@ index 029da74bb2f5..327a39fb7126 100644
  /**
   * ufshcd_query_attr_retry() - API function for sending query
   * attribute with retries
-@@ -3834,6 +3850,39 @@ static int ufshcd_link_recovery(struct ufs_hba *hba)
+@@ -3871,6 +3887,39 @@ static int ufshcd_link_recovery(struct ufs_hba *hba)
  	return ret;
  }
  
@@ -192,7 +191,7 @@ index 029da74bb2f5..327a39fb7126 100644
  static int __ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
  {
  	int ret;
-@@ -3867,6 +3916,15 @@ static int __ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
+@@ -3904,6 +3953,15 @@ static int __ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
  static int ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
  {
  	int ret = 0, retries;
@@ -208,7 +207,7 @@ index 029da74bb2f5..327a39fb7126 100644
  
  	for (retries = UIC_HIBERN8_ENTER_RETRIES; retries > 0; retries--) {
  		ret = __ufshcd_uic_hibern8_enter(hba);
-@@ -3874,6 +3932,9 @@ static int ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
+@@ -3911,6 +3969,9 @@ static int ufshcd_uic_hibern8_enter(struct ufs_hba *hba)
  			goto out;
  	}
  out:
@@ -218,7 +217,7 @@ index 029da74bb2f5..327a39fb7126 100644
  	return ret;
  }
  
-@@ -3894,28 +3955,50 @@ static int ufshcd_uic_hibern8_exit(struct ufs_hba *hba)
+@@ -3931,28 +3992,50 @@ static int ufshcd_uic_hibern8_exit(struct ufs_hba *hba)
  		dev_err(hba->dev, "%s: hibern8 exit failed. ret = %d\n",
  			__func__, ret);
  		ret = ufshcd_link_recovery(hba);
@@ -272,11 +271,14 @@ index 029da74bb2f5..327a39fb7126 100644
   /**
   * ufshcd_init_pwr_info - setting the POR (power on reset)
   * values in hba power info
-@@ -6452,10 +6535,11 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
+@@ -6499,13 +6582,14 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
  	size_t buff_len;
  	u8 model_index;
  	u8 *desc_buf;
 +	__be32 val;
+ 
+ 	if (!dev_desc)
+ 		return -EINVAL;
  
  	buff_len = max_t(size_t, hba->desc_size.dev_desc,
  			 QUERY_DESC_MAX_SIZE + 1);
@@ -285,7 +287,7 @@ index 029da74bb2f5..327a39fb7126 100644
  	if (!desc_buf) {
  		err = -ENOMEM;
  		goto out;
-@@ -6468,6 +6552,11 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
+@@ -6518,6 +6602,11 @@ static int ufs_get_device_desc(struct ufs_hba *hba,
  		goto out;
  	}
  
@@ -297,7 +299,7 @@ index 029da74bb2f5..327a39fb7126 100644
  	/*
  	 * getting vendor (manufacturerID) and Bank Index in big endian
  	 * format
-@@ -6813,6 +6902,129 @@ static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
+@@ -6855,6 +6944,129 @@ static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
  	return err;
  }
  
@@ -427,8 +429,8 @@ index 029da74bb2f5..327a39fb7126 100644
  /**
   * ufshcd_probe_hba - probe hba to detect device and initialize
   * @hba: per-adapter instance
-@@ -6863,6 +7075,12 @@ static int ufshcd_probe_hba(struct ufs_hba *hba)
- 	ufs_fixup_device_setup(hba, &card);
+@@ -6907,6 +7119,12 @@ static int ufshcd_probe_hba(struct ufs_hba *hba)
+ 
  	ufshcd_tune_unipro_params(hba);
  
 +	ret = ufshcd_uma_enable(hba, &card);
@@ -440,7 +442,7 @@ index 029da74bb2f5..327a39fb7126 100644
  	/* UFS device is also active now */
  	ufshcd_set_ufs_dev_active(hba);
  	ufshcd_force_reset_auto_bkops(hba);
-@@ -7493,6 +7711,9 @@ ufshcd_send_request_sense(struct ufs_hba *hba, struct scsi_device *sdp)
+@@ -7537,6 +7755,9 @@ ufshcd_send_request_sense(struct ufs_hba *hba, struct scsi_device *sdp)
   *
   * Returns 0 if requested power mode is set successfully
   * Returns non-zero if failed to set the requested power mode
@@ -450,7 +452,7 @@ index 029da74bb2f5..327a39fb7126 100644
   */
  static int ufshcd_set_dev_pwr_mode(struct ufs_hba *hba,
  				     enum ufs_dev_pwr_mode pwr_mode)
-@@ -7767,6 +7988,13 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+@@ -7811,6 +8032,13 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
  	       !ufshcd_is_runtime_pm(pm_op))) {
  		/* ensure that bkops is disabled */
  		ufshcd_disable_auto_bkops(hba);
@@ -464,7 +466,7 @@ index 029da74bb2f5..327a39fb7126 100644
  		ret = ufshcd_set_dev_pwr_mode(hba, req_dev_pwr_mode);
  		if (ret)
  			goto enable_gating;
-@@ -7821,6 +8049,8 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+@@ -7865,6 +8093,8 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
  		ufshcd_resume_clkscaling(hba);
  	hba->clk_gating.is_suspended = false;
  	ufshcd_release(hba);
@@ -472,8 +474,8 @@ index 029da74bb2f5..327a39fb7126 100644
 +		ufshcd_auto_hibern8_enable(hba);
  out:
  	hba->pm_op_in_progress = 0;
- 	return ret;
-@@ -7840,6 +8070,7 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+ 	if (ret)
+@@ -7886,6 +8116,7 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
  {
  	int ret;
  	enum uic_link_state old_link_state;
@@ -481,7 +483,7 @@ index 029da74bb2f5..327a39fb7126 100644
  
  	hba->pm_op_in_progress = 1;
  	old_link_state = hba->uic_link_state;
-@@ -7882,8 +8113,12 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+@@ -7928,8 +8159,12 @@ static int ufshcd_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
  		 */
  		if (ret || !ufshcd_is_link_active(hba))
  			goto vendor_suspend;
@@ -495,10 +497,10 @@ index 029da74bb2f5..327a39fb7126 100644
  		ret = ufshcd_set_dev_pwr_mode(hba, UFS_ACTIVE_PWR_MODE);
  		if (ret)
 diff --git a/drivers/scsi/ufs/ufshcd.h b/drivers/scsi/ufs/ufshcd.h
-index 994d73d03207..cf2b8723b129 100644
+index c94cfda52829..3b9a3b56c6b9 100644
 --- a/drivers/scsi/ufs/ufshcd.h
 +++ b/drivers/scsi/ufs/ufshcd.h
-@@ -535,6 +535,13 @@ struct ufs_hba {
+@@ -559,6 +559,13 @@ struct ufs_hba {
  
  	/* Auto-Hibernate Idle Timer register value */
  	u32 ahit;
@@ -512,7 +514,7 @@ index 994d73d03207..cf2b8723b129 100644
  
  	struct ufshcd_lrb *lrb;
  	unsigned long lrb_in_use;
-@@ -887,6 +894,9 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
+@@ -911,6 +918,9 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
  			   u8 param_offset,
  			   u8 *param_read_buf,
  			   u8 param_size);

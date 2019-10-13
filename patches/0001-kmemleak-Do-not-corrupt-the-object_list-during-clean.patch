@@ -1,0 +1,85 @@
+From bcb166b53a3b0d16b03cb33daff9b94820644c4b Mon Sep 17 00:00:00 2001
+From: Catalin Marinas <catalin.marinas@arm.com>
+Date: Fri, 4 Oct 2019 14:46:24 +0100
+Subject: [PATCH] kmemleak: Do not corrupt the object_list during clean-up
+
+In case of an error (e.g. memory pool too small), kmemleak disables
+itself and cleans up the already allocated metadata objects. However, if
+this happens early before the RCU callback mechanism is available,
+put_object() skips call_rcu() and frees the object directly. This is not
+safe with the RCU list traversal in __kmemleak_do_cleanup().
+
+Change the list traversal in __kmemleak_do_cleanup() to
+list_for_each_entry_safe() and remove the rcu_read_{lock,unlock} since
+the kmemleak is already disabled at this point. In addition, avoid an
+unnecessary metadata object rb-tree look-up since it already has the
+struct kmemleak_object pointer.
+
+Fixes: c5665868183f ("mm: kmemleak: use the memory pool for early allocations")
+Reported-by: Alexey Kardashevskiy <aik@ozlabs.ru>
+Reported-by: Marc Dionne <marc.c.dionne@gmail.com>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+---
+ mm/kmemleak.c | 30 +++++++++++++++++++++---------
+ 1 file changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/mm/kmemleak.c b/mm/kmemleak.c
+index 03a8d84badad..244607663363 100644
+--- a/mm/kmemleak.c
++++ b/mm/kmemleak.c
+@@ -526,6 +526,16 @@ static struct kmemleak_object *find_and_get_object(unsigned long ptr, int alias)
+ 	return object;
+ }
+ 
++/*
++ * Remove an object from the object_tree_root and object_list. Must be called
++ * with the kmemleak_lock held _if_ kmemleak is still enabled.
++ */
++static void __remove_object(struct kmemleak_object *object)
++{
++	rb_erase(&object->rb_node, &object_tree_root);
++	list_del_rcu(&object->object_list);
++}
++
+ /*
+  * Look up an object in the object search tree and remove it from both
+  * object_tree_root and object_list. The returned object's use_count should be
+@@ -538,10 +548,8 @@ static struct kmemleak_object *find_and_remove_object(unsigned long ptr, int ali
+ 
+ 	write_lock_irqsave(&kmemleak_lock, flags);
+ 	object = lookup_object(ptr, alias);
+-	if (object) {
+-		rb_erase(&object->rb_node, &object_tree_root);
+-		list_del_rcu(&object->object_list);
+-	}
++	if (object)
++		__remove_object(object);
+ 	write_unlock_irqrestore(&kmemleak_lock, flags);
+ 
+ 	return object;
+@@ -1834,12 +1842,16 @@ static const struct file_operations kmemleak_fops = {
+ 
+ static void __kmemleak_do_cleanup(void)
+ {
+-	struct kmemleak_object *object;
++	struct kmemleak_object *object, *tmp;
+ 
+-	rcu_read_lock();
+-	list_for_each_entry_rcu(object, &object_list, object_list)
+-		delete_object_full(object->pointer);
+-	rcu_read_unlock();
++	/*
++	 * Kmemleak has already been disabled, no need for RCU list traversal
++	 * or kmemleak_lock held.
++	 */
++	list_for_each_entry_safe(object, tmp, &object_list, object_list) {
++		__remove_object(object);
++		__delete_object(object);
++	}
+ }
+ 
+ /*
+-- 
+2.17.1
+
