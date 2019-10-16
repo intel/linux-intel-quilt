@@ -1,0 +1,86 @@
+From 4e1e7e3a4c00f11c63cf5ddd15d3b79fdefbb239 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 23 Sep 2019 12:00:56 +0100
+Subject: [PATCH 212/367] drm/i915/execlists: Refactor -EIO markup of hung
+ requests
+
+Pull setting -EIO on the hung requests into its own utility function.
+Having allowed ourselves to short-circuit submission of completed
+requests, we can now do the mark_eio() prior to submission and avoid
+some redundant operations.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20190923110056.15176-4-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 31 ++++++++++++++++-------------
+ 1 file changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 3d3b278b6c3a..ae740bad73dc 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -234,6 +234,13 @@ static void execlists_init_reg_state(u32 *reg_state,
+ 				     struct intel_engine_cs *engine,
+ 				     struct intel_ring *ring);
+ 
++static void mark_eio(struct i915_request *rq)
++{
++	if (!i915_request_signaled(rq))
++		dma_fence_set_error(&rq->fence, -EIO);
++	i915_request_mark_complete(rq);
++}
++
+ static inline u32 intel_hws_preempt_address(struct intel_engine_cs *engine)
+ {
+ 	return (i915_ggtt_offset(engine->status_page.vma) +
+@@ -2524,12 +2531,8 @@ static void execlists_cancel_requests(struct intel_engine_cs *engine)
+ 	__execlists_reset(engine, true);
+ 
+ 	/* Mark all executing requests as skipped. */
+-	list_for_each_entry(rq, &engine->active.requests, sched.link) {
+-		if (!i915_request_signaled(rq))
+-			dma_fence_set_error(&rq->fence, -EIO);
+-
+-		i915_request_mark_complete(rq);
+-	}
++	list_for_each_entry(rq, &engine->active.requests, sched.link)
++		mark_eio(rq);
+ 
+ 	/* Flush the queued requests to the timeline list (for retiring). */
+ 	while ((rb = rb_first_cached(&execlists->queue))) {
+@@ -2537,9 +2540,8 @@ static void execlists_cancel_requests(struct intel_engine_cs *engine)
+ 		int i;
+ 
+ 		priolist_for_each_request_consume(rq, rn, p, i) {
++			mark_eio(rq);
+ 			__i915_request_submit(rq);
+-			dma_fence_set_error(&rq->fence, -EIO);
+-			i915_request_mark_complete(rq);
+ 		}
+ 
+ 		rb_erase_cached(&p->node, &execlists->queue);
+@@ -2555,13 +2557,14 @@ static void execlists_cancel_requests(struct intel_engine_cs *engine)
+ 		RB_CLEAR_NODE(rb);
+ 
+ 		spin_lock(&ve->base.active.lock);
+-		if (ve->request) {
+-			ve->request->engine = engine;
+-			__i915_request_submit(ve->request);
+-			dma_fence_set_error(&ve->request->fence, -EIO);
+-			i915_request_mark_complete(ve->request);
++		rq = fetch_and_zero(&ve->request);
++		if (rq) {
++			mark_eio(rq);
++
++			rq->engine = engine;
++			__i915_request_submit(rq);
++
+ 			ve->base.execlists.queue_priority_hint = INT_MIN;
+-			ve->request = NULL;
+ 		}
+ 		spin_unlock(&ve->base.active.lock);
+ 	}
+-- 
+2.17.1
+
