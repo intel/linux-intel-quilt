@@ -1,0 +1,70 @@
+From ae7eacfb234beb09da3d699a63c8631ef7fee0b0 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Wed, 6 Mar 2019 19:39:45 +0100
+Subject: [PATCH 049/193] ASoC: Intel: Skylake: Account for compress streams
+ when servicing IRQs
+
+Update skl_stream_update definition to correctly set hdac_stream current
+position when servicing stream interrupts for compress streams.
+
+Change-Id: I1d3773ccebbe698721fc621e45d9fe5b7776c5e6
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Signed-off-by: Divya Prakash
+---
+ include/sound/hdaudio.h       |  1 +
+ sound/soc/intel/skylake/skl.c | 24 +++++++++++++++++++++++-
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/include/sound/hdaudio.h b/include/sound/hdaudio.h
+index afb3d04f699d..f420be11d618 100644
+--- a/include/sound/hdaudio.h
++++ b/include/sound/hdaudio.h
+@@ -495,6 +495,7 @@ struct hdac_stream {
+ 	bool no_period_wakeup:1;
+ 	bool locked:1;
+ 
++	unsigned long curr_pos;
+ 	/* timestamp */
+ 	unsigned long start_wallclk;	/* start + minimum wallclk */
+ 	unsigned long period_wallclk;	/* wallclk for period */
+diff --git a/sound/soc/intel/skylake/skl.c b/sound/soc/intel/skylake/skl.c
+index 3225f4f8793e..1ad69cce4bf0 100644
+--- a/sound/soc/intel/skylake/skl.c
++++ b/sound/soc/intel/skylake/skl.c
+@@ -206,10 +206,32 @@ static void skl_dum_set(struct hdac_bus *bus)
+ 	snd_hdac_chip_updatel(bus, VS_EM2, AZX_VS_EM2_DUM, AZX_VS_EM2_DUM);
+ }
+ 
++static void skl_set_total_bytes_transferred(struct hdac_stream *hstream)
++{
++	int pos, no_of_bytes;
++	unsigned int prev_pos;
++	u64 buffer_size = hstream->cstream->runtime->buffer_size;
++
++	div_u64_rem(hstream->curr_pos, buffer_size, &prev_pos);
++	pos = snd_hdac_stream_get_pos_posbuf(hstream);
++
++	if (pos < prev_pos)
++		no_of_bytes = (buffer_size - prev_pos) +  pos;
++	else
++		no_of_bytes = pos - prev_pos;
++
++	hstream->curr_pos += no_of_bytes;
++}
++
+ /* called from IRQ */
+ static void skl_stream_update(struct hdac_bus *bus, struct hdac_stream *hstr)
+ {
+-	snd_pcm_period_elapsed(hstr->substream);
++	if (hstr->substream) {
++		snd_pcm_period_elapsed(hstr->substream);
++	} else if (hstr->cstream) {
++		skl_set_total_bytes_transferred(hstr);
++		snd_compr_fragment_elapsed(hstr->cstream);
++	}
+ }
+ 
+ static irqreturn_t skl_interrupt(int irq, void *dev_id)
+-- 
+2.17.1
+
