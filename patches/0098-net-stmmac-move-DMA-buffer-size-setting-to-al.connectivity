@@ -1,0 +1,82 @@
+From a20a3d939c1f665fabc82acafa6189ab9abe38d4 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Fri, 4 Oct 2019 23:40:22 +0800
+Subject: [PATCH 098/108] net: stmmac: move DMA buffer size setting to
+ alloc_dma_rx_desc_resources
+
+The current calculation of RX DMA buffer size is done in
+init_dma_rx_desc_rings after the creation of driver page_pool for RX buffer.
+This is incorrect as this will not support the RX buffer size if there is
+change of mtu size.
+
+Fixes: 2c520b1c9cfa net: stmmac: Switch stmmac_mode_ops to generic HW Interface Helpers
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 23 +++++++++----------
+ 1 file changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index cbbec1f6b7f3..2f9b4dbd44ca 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1364,19 +1364,9 @@ static int init_dma_rx_desc_rings(struct net_device *dev, gfp_t flags)
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+ 	u32 rx_count = priv->plat->rx_queues_to_use;
+ 	int ret = -ENOMEM;
+-	int bfsize = 0;
+ 	u32 queue;
+ 	int i;
+ 
+-	bfsize = stmmac_set_16kib_bfsize(priv, dev->mtu);
+-	if (bfsize < 0)
+-		bfsize = 0;
+-
+-	if (bfsize < BUF_SIZE_16KiB)
+-		bfsize = stmmac_set_bfsize(dev->mtu, priv->dma_buf_sz);
+-
+-	priv->dma_buf_sz = bfsize;
+-
+ 	/* RX INITIALIZATION */
+ 	netif_dbg(priv, probe, priv->dev,
+ 		  "SKB addresses:\nskb\t\tskb data\tdma data\n");
+@@ -1387,8 +1377,6 @@ static int init_dma_rx_desc_rings(struct net_device *dev, gfp_t flags)
+ 			goto err_init_rx_q;
+ 	}
+ 
+-	buf_sz = bfsize;
+-
+ 	return 0;
+ 
+ err_init_rx_q:
+@@ -1676,15 +1664,26 @@ static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
+ static int alloc_dma_rx_desc_resources(struct stmmac_priv *priv)
+ {
+ 	u32 rx_count = priv->plat->rx_queues_to_use;
++	int bfsize = 0;
+ 	u32 queue;
+ 	int ret;
+ 
++	bfsize = stmmac_set_16kib_bfsize(priv, priv->dev->mtu);
++	if (bfsize < 0)
++		bfsize = 0;
++
++	if (bfsize < BUF_SIZE_16KiB)
++		bfsize = stmmac_set_bfsize(priv->dev->mtu, priv->dma_buf_sz);
++
++	priv->dma_buf_sz = bfsize;
++
+ 	/* RX queues buffers and DMA */
+ 	for (queue = 0; queue < rx_count; queue++) {
+ 		ret = alloc_dma_rx_desc_resources_q(priv, queue);
+ 		if (ret)
+ 			return ret;
+ 	}
++	buf_sz = bfsize;
+ 
+ 	return 0;
+ }
+-- 
+2.17.1
+
