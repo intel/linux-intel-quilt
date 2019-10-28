@@ -1,0 +1,106 @@
+From c89bb24546a617e571277f1c54833a072a9c6447 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Tue, 13 Aug 2019 20:55:48 +0200
+Subject: [PATCH 039/193] ASoC: Intel: Skylake: Merge skl_sst_ctx_init into
+ skl_init_dsp
+
+skl_init_dsp and skl_sst_ctx_init share the exact same purpose: trigger
+for sst_dsp creation. Merge them together. While adding code, change
+reorders certain blocks, so skl_dev instance is always initialized
+before sst_dsp_new cascade begins.
+
+Change-Id: I001b76a63047ae299341726c546c511bab8d41a6
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c  | 21 +++++++++++++++------
+ sound/soc/intel/skylake/skl-sst-dsp.h   |  1 -
+ sound/soc/intel/skylake/skl-sst-utils.c | 23 -----------------------
+ 3 files changed, 15 insertions(+), 30 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 4680352d473a..d4127fed12ad 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -142,18 +142,27 @@ int skl_dsp_cleanup(struct device *dev,
+ 
+ int skl_init_dsp(struct skl_dev *skl, struct sst_pdata *pdata)
+ {
++	struct sst_dsp *dsp;
+ 	struct hdac_bus *bus = skl_to_bus(skl);
+-	int ret;
++	struct device *dev = skl->dev;
+ 
+ 	/* enable ppcap interrupt */
+ 	snd_hdac_ext_bus_ppcap_enable(bus, true);
+ 	snd_hdac_ext_bus_ppcap_int_enable(bus, true);
+ 
+-	ret = skl_sst_ctx_init(skl, pdata);
+-	if (ret < 0)
+-		return ret;
+-
+-	dev_dbg(bus->dev, "dsp registration status=%d\n", ret);
++	skl->is_first_boot = true;
++	INIT_LIST_HEAD(&skl->module_list);
++	init_waitqueue_head(&skl->mod_load_wait);
++
++	pdata->id = skl->pci->device;
++	pdata->irq = skl->pci->irq;
++	pdata->dma_base = -1;
++	pdata->dsp = skl;
++	dsp = sst_dsp_new(dev, pdata);
++	if (!dsp) {
++		dev_err(dev, "%s: no device\n", __func__);
++		return -ENODEV;
++	}
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 4bbf3ba3f788..bb2ccb0f449e 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -236,7 +236,6 @@ int skl_dsp_strip_extended_manifest(struct firmware *fw);
+ 
+ void skl_dsp_set_astate_cfg(struct skl_dev *skl, u32 cnt, void *data);
+ 
+-int skl_sst_ctx_init(struct skl_dev *skl, struct sst_pdata *pdata);
+ int skl_prepare_lib_load(struct skl_dev *skl, struct skl_lib_info *linfo,
+ 			struct firmware *stripped_fw,
+ 			unsigned int hdr_offset, int index);
+diff --git a/sound/soc/intel/skylake/skl-sst-utils.c b/sound/soc/intel/skylake/skl-sst-utils.c
+index 2d333ecf1016..7c3596f1f74b 100644
+--- a/sound/soc/intel/skylake/skl-sst-utils.c
++++ b/sound/soc/intel/skylake/skl-sst-utils.c
+@@ -394,29 +394,6 @@ int skl_dsp_strip_extended_manifest(struct firmware *fw)
+ 	return 0;
+ }
+ 
+-int skl_sst_ctx_init(struct skl_dev *skl, struct sst_pdata *pdata)
+-{
+-	struct sst_dsp *sst;
+-	struct device *dev = skl->dev;
+-
+-	pdata->id = skl->pci->device;
+-	pdata->irq = skl->pci->irq;
+-	pdata->dma_base = -1;
+-	pdata->dsp = skl;
+-	INIT_LIST_HEAD(&skl->module_list);
+-	sst = sst_dsp_new(dev, pdata);
+-	if (!sst) {
+-		dev_err(dev, "%s: no device\n", __func__);
+-		return -ENODEV;
+-	}
+-
+-	skl->dsp = sst;
+-	init_waitqueue_head(&skl->mod_load_wait);
+-	skl->is_first_boot = true;
+-
+-	return 0;
+-}
+-
+ int skl_prepare_lib_load(struct skl_dev *skl, struct skl_lib_info *linfo,
+ 		struct firmware *stripped_fw,
+ 		unsigned int hdr_offset, int index)
+-- 
+2.17.1
+

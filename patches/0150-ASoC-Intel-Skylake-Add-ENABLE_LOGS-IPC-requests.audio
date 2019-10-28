@@ -1,0 +1,270 @@
+From 1891cf59feab67f947864dfa0f440dc3276e0fc2 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Thu, 4 Apr 2019 14:03:39 +0200
+Subject: [PATCH 150/193] ASoC: Intel: Skylake: Add ENABLE_LOGS IPC requests
+
+Driver sets ENABLE_LOGS parameter to control state of FW logging.
+log_state_info structure describes timer periods, resource mask -
+resources for which to enable logging - and priorities for said
+resources. FW implementation has changed multiple times over the years.
+This patch adds support for all currently available DSP FW targets,
+ranging from 1.5 up to 2.5 cAVS.
+
+Change-Id: Icebd684fa4d3cedc0cf55b0986164cd9b931295c
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Reviewed-on:
+Reviewed-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+---
+ sound/soc/intel/skylake/bxt-sst.c      | 32 ++++++++++++++
+ sound/soc/intel/skylake/cnl-sst.c      |  1 +
+ sound/soc/intel/skylake/skl-messages.c | 11 +++++
+ sound/soc/intel/skylake/skl-sst-dsp.h  |  4 ++
+ sound/soc/intel/skylake/skl-sst-ipc.h  | 59 ++++++++++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst.c      | 31 ++++++++++++++
+ 6 files changed, 138 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/bxt-sst.c b/sound/soc/intel/skylake/bxt-sst.c
+index 92350f9a9f1c..d288bda11d35 100644
+--- a/sound/soc/intel/skylake/bxt-sst.c
++++ b/sound/soc/intel/skylake/bxt-sst.c
+@@ -538,6 +538,37 @@ static int bxt_set_dsp_D3(struct sst_dsp *ctx, unsigned int core_id)
+ 	return 0;
+ }
+ 
++int bxt_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
++		u32 aging_period, u32 fifo_full_period,
++		unsigned long resource_mask, u32 *priorities)
++{
++	struct skl_dev *skl = dsp->thread_context;
++	struct bxt_log_state_info *info;
++	u32 size, num_cores = skl->hw_cfg.dsp_cores;
++	int ret, i;
++
++	size = struct_size(info, logs_core, num_cores);
++	info = kzalloc(size, GFP_KERNEL);
++	if (!info)
++		return -ENOMEM;
++
++	info->aging_timer_period = aging_period;
++	info->fifo_full_timer_period = fifo_full_period;
++	info->core_mask = resource_mask;
++	if (enable)
++		for_each_set_bit(i, &resource_mask, GENMASK(num_cores, 0)) {
++			info->logs_core[i].enable = enable;
++			info->logs_core[i].min_priority = *priorities++;
++		}
++	else
++		for_each_set_bit(i, &resource_mask, GENMASK(num_cores, 0))
++			info->logs_core[i].enable = enable;
++
++	ret = skl_enable_logs_set(&skl->ipc, (u32 *)info, size);
++	kfree(info);
++	return ret;
++}
++
+ static const struct skl_dsp_fw_ops bxt_fw_ops = {
+ 	.set_state_D0 = bxt_set_dsp_D0,
+ 	.set_state_D3 = bxt_set_dsp_D3,
+@@ -546,6 +577,7 @@ static const struct skl_dsp_fw_ops bxt_fw_ops = {
+ 	.load_fw = bxt_load_base_firmware,
+ 	.get_fw_errcode = bxt_get_errorcode,
+ 	.load_library = bxt_load_library,
++	.enable_logs = bxt_enable_logs,
+ };
+ 
+ static int bxt_sst_init(struct sst_dsp *sst, struct sst_pdata *pdata)
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index c0b9de460f69..8662416f010e 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -356,6 +356,7 @@ static const struct skl_dsp_fw_ops cnl_fw_ops = {
+ 	.load_fw = cnl_load_base_firmware,
+ 	.get_fw_errcode = cnl_get_errno,
+ 	.load_library = bxt_load_library,
++	.enable_logs = bxt_enable_logs,
+ };
+ 
+ #define CNL_IPC_GLB_NOTIFY_RSP_SHIFT	29
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index 3b27660b1af2..81f1785bef1f 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1599,3 +1599,14 @@ int skl_system_time_set(struct sst_generic_ipc *ipc)
+ 	return skl_ipc_set_large_config(ipc, &msg, (u32 *)&sys_time);
+ }
+ EXPORT_SYMBOL_GPL(skl_system_time_set);
++
++int skl_enable_logs_set(struct sst_generic_ipc *ipc, u32 *info, size_t size)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++
++	msg.param_data_size = size;
++	msg.large_param_id = SKL_BASEFW_ENABLE_LOGS;
++
++	return skl_ipc_set_large_config(ipc, &msg, info);
++}
++EXPORT_SYMBOL_GPL(skl_enable_logs_set);
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.h b/sound/soc/intel/skylake/skl-sst-dsp.h
+index 0a1b0ea07c02..a506f96cef09 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.h
++++ b/sound/soc/intel/skylake/skl-sst-dsp.h
+@@ -18,6 +18,7 @@ struct sst_dsp;
+ struct sst_pdata;
+ struct skl_lib_info;
+ struct skl_dev;
++enum skl_log_enable;
+ 
+ /* Intel HD Audio General DSP Registers */
+ #define SKL_ADSP_GEN_BASE		0x0
+@@ -145,6 +146,9 @@ struct skl_dsp_fw_ops {
+ 	unsigned int (*get_fw_errcode)(struct sst_dsp *ctx);
+ 	int (*load_mod)(struct sst_dsp *ctx, u16 mod_id, u8 *mod_name);
+ 	int (*unload_mod)(struct sst_dsp *ctx, u16 mod_id);
++	int (*enable_logs)(struct sst_dsp *dsp, enum skl_log_enable enable,
++		u32 aging_period, u32 fifo_full_period,
++		unsigned long resource_mask, u32 *priorities);
+ };
+ 
+ struct adsp_module_config {
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 5f2368c00f8e..a4562b53864e 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -273,6 +273,7 @@ struct skl_lib_info {
+ enum skl_basefw_runtime_param {
+ 	SKL_BASEFW_ASTATE_TABLE = 4,
+ 	SKL_BASEFW_DMA_CONTROL = 5,
++	SKL_BASEFW_ENABLE_LOGS = 6,
+ 	SKL_BASEFW_FIRMWARE_CONFIG = 7,
+ 	SKL_BASEFW_HARDWARE_CONFIG = 8,
+ 	SKL_BASEFW_SYSTEM_TIME = 20,
+@@ -389,6 +390,60 @@ struct skl_sys_time {
+ 	u32 val_u;
+ } __packed;
+ 
++enum skl_log_enable {
++	SKL_LOG_DISABLE = 0,
++	SKL_LOG_ENABLE = 1
++};
++
++enum skl_log_priority {
++	SKL_LOG_CRITICAL = 1,
++	SKL_LOG_HIGH,
++	SKL_LOG_MEDIUM,
++	SKL_LOG_LOW,
++	SKL_LOG_VERBOSE
++};
++
++enum icl_log_priority {
++	ICL_LOG_CRITICAL = 0,
++	ICL_LOG_HIGH,
++	ICL_LOG_MEDIUM,
++	ICL_LOG_LOW,
++	ICL_LOG_VERBOSE
++};
++
++enum icl_log_source {
++	ICL_LOG_INFRA = 0,
++	ICL_LOG_HAL,
++	ICL_LOG_MODULE,
++	ICL_LOG_AUDIO,
++	ICL_LOG_SENSING,
++	ICL_LOG_ULP_INFRA
++};
++
++struct skl_log_state {
++	enum skl_log_enable enable __aligned(4);
++	enum skl_log_priority min_priority __aligned(4);
++} __packed;
++
++struct skl_log_state_info {
++	u32 core_mask;
++	struct skl_log_state logs_core[0];
++} __packed;
++
++struct bxt_log_state_info {
++	u32 aging_timer_period;
++	u32 fifo_full_timer_period;
++	u32 core_mask;
++	struct skl_log_state logs_core[0];
++} __packed;
++
++struct icl_log_state_info {
++	u32 aging_timer_period;
++	u32 fifo_full_timer_period;
++	enum skl_log_enable enable __aligned(4);
++	u32 logs_priorities_mask[0];
++} __packed;
++
+ struct skl_notify_kctrl_info {
+ 	struct list_head list;
+ 	u32 notify_id;
+@@ -516,5 +571,9 @@ int skl_probe_points_connect(struct skl_dev *skl,
+ int skl_probe_points_disconnect(struct skl_dev *skl,
+ 		union skl_probe_point_id *id, size_t num_id);
+ int skl_system_time_set(struct sst_generic_ipc *ipc);
++int skl_enable_logs_set(struct sst_generic_ipc *ipc, u32 *info, size_t size);
++int bxt_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
++		u32 aging_period, u32 fifo_full_period,
++		unsigned long resource_mask, u32 *priorities);
+ 
+ #endif /* __SKL_IPC_H */
+diff --git a/sound/soc/intel/skylake/skl-sst.c b/sound/soc/intel/skylake/skl-sst.c
+index 4e5487a64d55..c3a38596479c 100644
+--- a/sound/soc/intel/skylake/skl-sst.c
++++ b/sound/soc/intel/skylake/skl-sst.c
+@@ -13,6 +13,7 @@
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/uuid.h>
++#include <linux/slab.h>
+ #include "../common/sst-dsp.h"
+ #include "../common/sst-dsp-priv.h"
+ #include "../common/sst-ipc.h"
+@@ -493,6 +494,35 @@ static void skl_clear_module_table(struct sst_dsp *ctx)
+ 	}
+ }
+ 
++static int skl_enable_logs(struct sst_dsp *dsp, enum skl_log_enable enable,
++		u32 aging_period, u32 fifo_full_period,
++		unsigned long resource_mask, u32 *priorities)
++{
++	struct skl_dev *skl = dsp->thread_context;
++	struct skl_log_state_info *info;
++	u32 size, num_cores = skl->hw_cfg.dsp_cores;
++	int ret, i;
++
++	size = struct_size(info, logs_core, num_cores);
++	info = kzalloc(size, GFP_KERNEL);
++	if (!info)
++		return -ENOMEM;
++
++	info->core_mask = resource_mask;
++	if (enable)
++		for_each_set_bit(i, &resource_mask, GENMASK(num_cores, 0)) {
++			info->logs_core[i].enable = enable;
++			info->logs_core[i].min_priority = *priorities++;
++		}
++	else
++		for_each_set_bit(i, &resource_mask, GENMASK(num_cores, 0))
++			info->logs_core[i].enable = enable;
++
++	ret = skl_enable_logs_set(&skl->ipc, (u32 *)info, size);
++	kfree(info);
++	return ret;
++}
++
+ static const struct skl_dsp_fw_ops skl_fw_ops = {
+ 	.set_state_D0 = skl_set_dsp_D0,
+ 	.set_state_D3 = skl_set_dsp_D3,
+@@ -501,6 +531,7 @@ static const struct skl_dsp_fw_ops skl_fw_ops = {
+ 	.load_library = skl_load_library,
+ 	.load_mod = skl_load_module,
+ 	.unload_mod = skl_unload_module,
++	.enable_logs = skl_enable_logs,
+ };
+ 
+ static int skl_sst_init(struct sst_dsp *sst, struct sst_pdata *pdata)
+-- 
+2.17.1
+

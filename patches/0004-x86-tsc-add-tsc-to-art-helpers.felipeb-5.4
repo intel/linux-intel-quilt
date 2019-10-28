@@ -1,0 +1,73 @@
+From 88a4671df1c2ef5b76cc54ecbfb0595326da23c1 Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Wed, 20 Feb 2019 11:23:38 +0200
+Subject: [PATCH 04/14] x86: tsc: add tsc to art helpers
+
+Provide a helper which converts TSC to ART ns. This helper does the
+inverse of convert_art_ns_to_tsc().
+
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+---
+ arch/x86/include/asm/tsc.h |  2 ++
+ arch/x86/kernel/tsc.c      | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+
+diff --git a/arch/x86/include/asm/tsc.h b/arch/x86/include/asm/tsc.h
+index 8a0c25c6bf09..b7a9f4385a82 100644
+--- a/arch/x86/include/asm/tsc.h
++++ b/arch/x86/include/asm/tsc.h
+@@ -32,6 +32,8 @@ static inline cycles_t get_cycles(void)
+ 
+ extern struct system_counterval_t convert_art_to_tsc(u64 art);
+ extern struct system_counterval_t convert_art_ns_to_tsc(u64 art_ns);
++extern void get_tsc_ns(struct system_counterval_t *tsc_counterval, u64 *tsc_ns);
++extern u64 get_art_ns_now(void);
+ 
+ extern void tsc_early_init(void);
+ extern void tsc_init(void);
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index c59454c382fd..9df1faa9e8c7 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -1232,6 +1232,38 @@ struct system_counterval_t convert_art_to_tsc(u64 art)
+ }
+ EXPORT_SYMBOL(convert_art_to_tsc);
+ 
++void get_tsc_ns(struct system_counterval_t *tsc_counterval, u64 *tsc_ns)
++{
++	u64 tmp, res, rem;
++	u64 cycles;
++
++	tsc_counterval->cycles = clocksource_tsc.read(NULL);
++	cycles = tsc_counterval->cycles;
++	tsc_counterval->cs = art_related_clocksource;
++
++	rem = do_div(cycles, tsc_khz);
++
++	res = cycles * USEC_PER_SEC;
++	tmp = rem * USEC_PER_SEC;
++
++	do_div(tmp, tsc_khz);
++	res += tmp;
++
++	*tsc_ns = res;
++}
++EXPORT_SYMBOL(get_tsc_ns);
++
++u64 get_art_ns_now(void)
++{
++	struct system_counterval_t tsc_cycles;
++	u64 tsc_ns;
++
++	get_tsc_ns(&tsc_cycles, &tsc_ns);
++
++	return tsc_ns;
++}
++EXPORT_SYMBOL(get_art_ns_now);
++
+ /**
+  * convert_art_ns_to_tsc() - Convert ART in nanoseconds to TSC.
+  * @art_ns: ART (Always Running Timer) in unit of nanoseconds
+-- 
+2.17.1
+
