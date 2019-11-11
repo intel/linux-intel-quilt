@@ -1,0 +1,69 @@
+From 2b8eb9c867c9c6f5b2ff20fcedd53fa6322fc04b Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Thu, 7 Mar 2019 10:40:52 +0200
+Subject: [PATCH 06/14] PTP: implement PTP_EVENT_COUNT_TSTAMP ioctl
+
+With this, we can request the underlying driver to count the number of
+events that have been captured.
+
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+---
+ drivers/ptp/ptp_chardev.c      | 21 +++++++++++++++++++++
+ include/uapi/linux/ptp_clock.h |  2 ++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/drivers/ptp/ptp_chardev.c b/drivers/ptp/ptp_chardev.c
+index 67d0199840fd..d16be5314cb3 100644
+--- a/drivers/ptp/ptp_chardev.c
++++ b/drivers/ptp/ptp_chardev.c
+@@ -111,6 +111,7 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
+ 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+ 	struct ptp_sys_offset_extended *extoff = NULL;
+ 	struct ptp_sys_offset_precise precise_offset;
++	struct ptp_event_count_tstamp counttstamp;
+ 	struct system_device_crosststamp xtstamp;
+ 	struct ptp_clock_info *ops = ptp->info;
+ 	struct ptp_sys_offset *sysoff = NULL;
+@@ -199,6 +200,26 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
+ 		err = ops->enable(ops, &req, enable);
+ 		break;
+ 
++	case PTP_EVENT_COUNT_TSTAMP2:
++		if (!ops->counttstamp)
++			return -ENOTSUPP;
++		if (copy_from_user(&counttstamp, (void __user *)arg,
++				   sizeof(counttstamp))) {
++			err = -EFAULT;
++			break;
++		}
++		if (counttstamp.flags & ~PTP_EVENT_COUNT_TSTAMP_POL_LOW)
++			counttstamp.flags &= PTP_EVENT_COUNT_TSTAMP_POL_LOW;
++		if (counttstamp.rsv[0] || counttstamp.rsv[1]) {
++			err = -EINVAL;
++			break;
++		}
++		err = ops->counttstamp(ops, &counttstamp);
++		if (!err && copy_to_user((void __user *)arg, &counttstamp,
++						sizeof(counttstamp)))
++			err = -EFAULT;
++		break;
++
+ 	case PTP_ENABLE_PPS:
+ 	case PTP_ENABLE_PPS2:
+ 		memset(&req, 0, sizeof(req));
+diff --git a/include/uapi/linux/ptp_clock.h b/include/uapi/linux/ptp_clock.h
+index 35318884fcc3..91721dbf1e4c 100644
+--- a/include/uapi/linux/ptp_clock.h
++++ b/include/uapi/linux/ptp_clock.h
+@@ -204,6 +204,8 @@ struct ptp_pin_desc {
+ 	_IOWR(PTP_CLK_MAGIC, 17, struct ptp_sys_offset_precise)
+ #define PTP_SYS_OFFSET_EXTENDED2 \
+ 	_IOWR(PTP_CLK_MAGIC, 18, struct ptp_sys_offset_extended)
++#define PTP_EVENT_COUNT_TSTAMP2 \
++	_IOWR(PTP_CLK_MAGIC, 19, struct ptp_event_count_tstamp)
+ 
+ struct ptp_extts_event {
+ 	struct ptp_clock_time t; /* Time event occured. */
+-- 
+2.17.1
+

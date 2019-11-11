@@ -1,0 +1,97 @@
+From ad708410b95818bc916432eb167682df160d7211 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Amadeusz=20S=C5=82awi=C5=84ski?=
+ <amadeuszx.slawinski@linux.intel.com>
+Date: Mon, 12 Aug 2019 17:36:49 +0200
+Subject: [PATCH 184/193] ASoC: Intel: Skylake: Refactor skl_get_module_info
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+We want to use information from Module Info IPC. Change
+skl_get_module_info to use this information, instead of one from parsing
+FW binary.
+
+Change-Id: I05d731f3273057b03f75721cc85069b00845a672
+Signed-off-by: Amadeusz Sławiński <amadeuszx.slawinski@linux.intel.com>
+Reviewed-on:
+Tested-by: gkblditp <gkblditp@intel.com>
+Reviewed-by: Rojewski, Cezary <cezary.rojewski@intel.com>
+---
+ sound/soc/intel/skylake/skl-pcm.c | 37 +++++++++++++++++--------------
+ 1 file changed, 20 insertions(+), 17 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
+index 2edfc308988e..2032ae7e79b2 100644
+--- a/sound/soc/intel/skylake/skl-pcm.c
++++ b/sound/soc/intel/skylake/skl-pcm.c
+@@ -1738,21 +1738,24 @@ static int skl_get_module_info(struct skl_dev *skl,
+ 	struct skl_module_inst_id *pin_id;
+ 	guid_t *uuid_mod, *uuid_tplg;
+ 	struct skl_module *skl_module;
+-	struct uuid_module *module;
+-	int i, ret = -EIO;
++	struct skl_module_entry *mod_entries;
++	int i, j, ret = -EIO;
++
++	mod_entries = skl->fw_modules_info->module_entry;
+ 
+ 	uuid_mod = (guid_t *)mconfig->guid;
+ 
+-	if (list_empty(&skl->module_list)) {
++	if (skl->fw_modules_info->count == 0) {
+ 		dev_err(skl->dev, "Module list is empty\n");
+ 		return -EIO;
+ 	}
+ 
+-	list_for_each_entry(module, &skl->module_list, list) {
+-		if (guid_equal(uuid_mod, &module->uuid)) {
+-			mconfig->id.module_id = module->id;
++	for (i = 0; i < skl->fw_modules_info->count; i++) {
++		if (guid_equal(&mod_entries[i].uuid, uuid_mod)) {
++			mconfig->id.module_id = mod_entries[i].module_id;
+ 			if (mconfig->module)
+-				mconfig->module->loadable = module->is_loadable;
++				mconfig->module->loadable =
++					mod_entries[i].type.load_type;
+ 			ret = 0;
+ 			break;
+ 		}
+@@ -1761,7 +1764,7 @@ static int skl_get_module_info(struct skl_dev *skl,
+ 	if (ret)
+ 		return ret;
+ 
+-	uuid_mod = &module->uuid;
++	uuid_mod = &mod_entries[i].uuid;
+ 	ret = -EIO;
+ 	for (i = 0; i < skl->nr_modules; i++) {
+ 		skl_module = skl->modules[i];
+@@ -1775,17 +1778,17 @@ static int skl_get_module_info(struct skl_dev *skl,
+ 	if (skl->nr_modules && ret)
+ 		return ret;
+ 
+-	list_for_each_entry(module, &skl->module_list, list) {
+-		for (i = 0; i < MAX_IN_QUEUE; i++) {
+-			pin_id = &mconfig->m_in_pin[i].id;
+-			if (guid_equal(&pin_id->mod_uuid, &module->uuid))
+-				pin_id->module_id = module->id;
++	for (i = 0; i < skl->fw_modules_info->count; i++) {
++		for (j = 0; j < MAX_IN_QUEUE; j++) {
++			pin_id = &mconfig->m_in_pin[j].id;
++			if (guid_equal(&mod_entries[i].uuid, &pin_id->mod_uuid))
++				pin_id->module_id = mod_entries[i].module_id;
+ 		}
+ 
+-		for (i = 0; i < MAX_OUT_QUEUE; i++) {
+-			pin_id = &mconfig->m_out_pin[i].id;
+-			if (guid_equal(&pin_id->mod_uuid, &module->uuid))
+-				pin_id->module_id = module->id;
++		for (j = 0; j < MAX_OUT_QUEUE; j++) {
++			pin_id = &mconfig->m_out_pin[j].id;
++			if (guid_equal(&mod_entries[i].uuid, &pin_id->mod_uuid))
++				pin_id->module_id = mod_entries[i].module_id;
+ 		}
+ 	}
+ 
+-- 
+2.17.1
+

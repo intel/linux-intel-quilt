@@ -1,0 +1,89 @@
+From af2e8c66dfe0982f345f80c84a4e1f4246e9e060 Mon Sep 17 00:00:00 2001
+From: Cezary Rojewski <cezary.rojewski@intel.com>
+Date: Thu, 4 Apr 2019 13:58:25 +0200
+Subject: [PATCH 149/193] ASoC: Intel: Skylake: Add SYSTEM_TIME IPC request
+
+SYSTEM_TIME IPC request is sent by driver to pass down information about
+current system time. It is used by FW to translate event timestampts to
+the system time domain. FW expects system time provided in us, UTC.
+
+Change-Id: Idffc120435b716a6a93dc781016288ca106206f2
+Signed-off-by: Cezary Rojewski <cezary.rojewski@intel.com>
+Reviewed-on:
+Reviewed-by: Slawinski, AmadeuszX <amadeuszx.slawinski@intel.com>
+---
+ sound/soc/intel/skylake/skl-messages.c | 18 ++++++++++++++++++
+ sound/soc/intel/skylake/skl-sst-ipc.h  |  7 +++++++
+ sound/soc/intel/skylake/skl-topology.h |  1 +
+ 3 files changed, 26 insertions(+)
+
+diff --git a/sound/soc/intel/skylake/skl-messages.c b/sound/soc/intel/skylake/skl-messages.c
+index fd95460794ba..3b27660b1af2 100644
+--- a/sound/soc/intel/skylake/skl-messages.c
++++ b/sound/soc/intel/skylake/skl-messages.c
+@@ -1581,3 +1581,21 @@ int skl_probe_points_disconnect(struct skl_dev *skl,
+ 
+ 	return skl_ipc_set_large_config(&skl->ipc, &msg, (u32 *)id);
+ }
++
++int skl_system_time_set(struct sst_generic_ipc *ipc)
++{
++	struct skl_ipc_large_config_msg msg = {0};
++	struct skl_sys_time sys_time;
++	u64 us;
++
++	/* firmware expects UTC time in micro seconds */
++	us = ktime_to_us(ktime_get());
++	sys_time.val_l = us & UINT_MAX;
++	sys_time.val_u = us >> 32;
++
++	msg.large_param_id = SKL_BASEFW_SYSTEM_TIME;
++	msg.param_data_size = sizeof(sys_time);
++
++	return skl_ipc_set_large_config(ipc, &msg, (u32 *)&sys_time);
++}
++EXPORT_SYMBOL_GPL(skl_system_time_set);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.h b/sound/soc/intel/skylake/skl-sst-ipc.h
+index 5d4ce98bea68..5f2368c00f8e 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.h
++++ b/sound/soc/intel/skylake/skl-sst-ipc.h
+@@ -275,6 +275,7 @@ enum skl_basefw_runtime_param {
+ 	SKL_BASEFW_DMA_CONTROL = 5,
+ 	SKL_BASEFW_FIRMWARE_CONFIG = 7,
+ 	SKL_BASEFW_HARDWARE_CONFIG = 8,
++	SKL_BASEFW_SYSTEM_TIME = 20,
+ };
+ 
+ enum skl_fw_cfg_params {
+@@ -383,6 +384,11 @@ struct skl_hw_cfg {
+ 	u32 ebb_size_bytes;
+ };
+ 
++struct skl_sys_time {
++	u32 val_l;
++	u32 val_u;
++} __packed;
++
+ struct skl_notify_kctrl_info {
+ 	struct list_head list;
+ 	u32 notify_id;
+@@ -509,5 +515,6 @@ int skl_probe_points_connect(struct skl_dev *skl,
+ 		struct skl_probe_point_desc *desc, size_t num_desc);
+ int skl_probe_points_disconnect(struct skl_dev *skl,
+ 		union skl_probe_point_id *id, size_t num_id);
++int skl_system_time_set(struct sst_generic_ipc *ipc);
+ 
+ #endif /* __SKL_IPC_H */
+diff --git a/sound/soc/intel/skylake/skl-topology.h b/sound/soc/intel/skylake/skl-topology.h
+index 54e3edc66b1b..01cc5f99e077 100644
+--- a/sound/soc/intel/skylake/skl-topology.h
++++ b/sound/soc/intel/skylake/skl-topology.h
+@@ -414,4 +414,5 @@ int skl_create_notify_kctl_list(struct skl_dev *skl, struct snd_card *card);
+ void skl_delete_notify_kctl_list(struct skl_dev *skl);
+ struct snd_kcontrol *skl_get_notify_kcontrol(struct skl_dev *skl,
+ 				struct snd_card *card, u32 notify_id);
++void skl_tplg_fw_cfg_set(struct skl_dev *skl);
+ #endif
+-- 
+2.17.1
+
