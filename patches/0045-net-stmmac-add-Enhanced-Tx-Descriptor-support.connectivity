@@ -1,7 +1,7 @@
-From 395bea0bac89fb0576e1160f9068d1dfc1ac8cf3 Mon Sep 17 00:00:00 2001
+From 178391f42c5999748ed42510a3dfc2a0b515ef5c Mon Sep 17 00:00:00 2001
 From: Kweh Hock Leong <hock.leong.kweh@intel.com>
 Date: Fri, 9 Aug 2019 00:22:00 +0800
-Subject: [PATCH 045/108] net: stmmac: add Enhanced Tx Descriptor support in
+Subject: [PATCH 045/113] net: stmmac: add Enhanced Tx Descriptor support in
  main flow
 
 Add support for Enhanced Tx Descriptor in stmmac_main.c for all
@@ -17,8 +17,8 @@ Signed-off-by: Kweh Hock Leong <hock.leong.kweh@intel.com>
 Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
 ---
  drivers/net/ethernet/stmicro/stmmac/stmmac.h  |   2 +
- .../net/ethernet/stmicro/stmmac/stmmac_main.c | 121 ++++++++++++++++--
- 2 files changed, 109 insertions(+), 14 deletions(-)
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 123 ++++++++++++++++--
+ 2 files changed, 111 insertions(+), 14 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 index 703d87d0c178..78d6c5dbda15 100644
@@ -41,7 +41,7 @@ index 703d87d0c178..78d6c5dbda15 100644
  	struct hwtstamp_config tstamp_config;
  	struct ptp_clock *ptp_clock;
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 0f9e24e2a6d8..1270c34f9258 100644
+index dc8ffc3d87a7..b06391e8564f 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -1114,6 +1114,8 @@ static void stmmac_display_tx_rings(struct stmmac_priv *priv)
@@ -193,7 +193,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  	first = desc;
  
  	if (has_vlan)
-@@ -3374,13 +3420,29 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -3376,13 +3422,29 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
  
  		stmmac_display_ring(priv, (void *)tx_q->dma_tx, DMA_TX_SIZE, 0);
  
@@ -224,7 +224,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  	stmmac_set_tx_tail_ptr(priv, priv->ioaddr, tx_q->tx_tail_addr, queue);
  
  	return NETDEV_TX_OK;
-@@ -3449,6 +3511,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -3451,6 +3513,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
  
  	if (likely(priv->extend_desc))
  		desc = (struct dma_desc *)(tx_q->dma_etx + entry);
@@ -233,7 +233,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  	else
  		desc = tx_q->dma_tx + entry;
  
-@@ -3478,6 +3542,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -3480,6 +3544,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
  
  		if (likely(priv->extend_desc))
  			desc = (struct dma_desc *)(tx_q->dma_etx + entry);
@@ -242,7 +242,16 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  		else
  			desc = tx_q->dma_tx + entry;
  
-@@ -3520,6 +3586,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -3517,6 +3583,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	} else {
+ 		if (likely(priv->extend_desc))
+ 			desc = &tx_q->dma_etx[entry].basic;
++		else if (priv->enhanced_tx_desc)
++			desc = &tx_q->dma_enhtx[entry].basic;
+ 		else
+ 			desc = &tx_q->dma_tx[entry];
+ 
+@@ -3543,6 +3611,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
  
  		if (priv->extend_desc)
  			tx_head = (void *)tx_q->dma_etx;
@@ -251,7 +260,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  		else
  			tx_head = (void *)tx_q->dma_tx;
  
-@@ -3603,7 +3671,19 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -3609,7 +3679,19 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
  
  	stmmac_enable_dma_transmission(priv, priv->ioaddr);
  
@@ -272,7 +281,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  	stmmac_set_tx_tail_ptr(priv, priv->ioaddr, tx_q->tx_tail_addr, queue);
  
  	return NETDEV_TX_OK;
-@@ -4453,11 +4533,20 @@ static void sysfs_display_ring(void *head, int size, int extend_desc,
+@@ -4460,11 +4542,20 @@ static void sysfs_display_ring(void *head, int size, int extend_desc,
  			       struct seq_file *seq)
  {
  	int i;
@@ -294,7 +303,7 @@ index 0f9e24e2a6d8..1270c34f9258 100644
  			seq_printf(seq, "%d [0x%x]: 0x%x 0x%x 0x%x 0x%x\n",
  				   i, (unsigned int)virt_to_phys(ep),
  				   le32_to_cpu(ep->basic.des0),
-@@ -4512,6 +4601,10 @@ static int stmmac_rings_status_show(struct seq_file *seq, void *v)
+@@ -4519,6 +4610,10 @@ static int stmmac_rings_status_show(struct seq_file *seq, void *v)
  			seq_printf(seq, "Extended descriptor ring:\n");
  			sysfs_display_ring((void *)tx_q->dma_etx,
  					   DMA_TX_SIZE, 1, seq);
