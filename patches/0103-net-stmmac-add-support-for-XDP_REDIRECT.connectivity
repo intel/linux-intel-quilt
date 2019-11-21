@@ -1,7 +1,7 @@
-From 9cf5d347d625109fc4a43eb537e2ba64fefb5294 Mon Sep 17 00:00:00 2001
+From 8ac1b88e16b6eb95498a0bbb3c5437fbe9159b28 Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Sat, 28 Sep 2019 14:41:15 +0800
-Subject: [PATCH 103/111] net: stmmac: add support for XDP_REDIRECT
+Subject: [PATCH 103/113] net: stmmac: add support for XDP_REDIRECT
 
 This makes the driver now support XDP_REDIRECT return bpf action.
 Also, the ndo_xdp_xmit is implementation.
@@ -17,10 +17,10 @@ Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
  2 files changed, 68 insertions(+), 5 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-index 57d8728559ad..782361594db0 100644
+index 5e17015cdd3c..b607ecb9da40 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-@@ -331,6 +331,7 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
+@@ -323,6 +323,7 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
  #define STMMAC_XDP_PASS		0
  #define STMMAC_XDP_CONSUMED	BIT(0)
  #define STMMAC_XDP_TX		BIT(1)
@@ -29,10 +29,10 @@ index 57d8728559ad..782361594db0 100644
  static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
  {
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 209919ad5fb3..6a4d81be885b 100644
+index 59d21e33f00f..e7e6b331dbfb 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-@@ -1663,6 +1663,7 @@ static void free_dma_tx_desc_resources(struct stmmac_priv *priv)
+@@ -1662,6 +1662,7 @@ static void free_dma_tx_desc_resources(struct stmmac_priv *priv)
  
  static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
  {
@@ -40,7 +40,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  	struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
  	struct page_pool_params pp_params = { 0 };
  	int ret = -ENOMEM;
-@@ -1675,7 +1676,7 @@ static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
+@@ -1674,7 +1675,7 @@ static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
  	pp_params.order = DIV_ROUND_UP(priv->dma_buf_sz, PAGE_SIZE);
  	pp_params.nid = dev_to_node(priv->device);
  	pp_params.dev = priv->device;
@@ -49,7 +49,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  
  	rx_q->page_pool = page_pool_create(&pp_params);
  	if (IS_ERR(rx_q->page_pool)) {
-@@ -4096,7 +4097,9 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
+@@ -4097,7 +4098,9 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
  	int len, dirty = stmmac_rx_dirty(priv, queue);
  	unsigned int entry = rx_q->dirty_rx;
  	unsigned int last_refill = entry;
@@ -59,7 +59,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  	len = DIV_ROUND_UP(priv->dma_buf_sz, PAGE_SIZE) * PAGE_SIZE;
  
  	while (dirty-- > 0) {
-@@ -4132,7 +4135,7 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
+@@ -4133,7 +4136,7 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
  		 * data.
  		 */
  		dma_sync_single_for_device(priv->device, buf->addr, len,
@@ -68,7 +68,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  
  		stmmac_set_desc_addr(priv, p, buf->addr);
  		stmmac_set_desc_sec_addr(priv, p, buf->sec_addr);
-@@ -4238,6 +4241,7 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
+@@ -4239,6 +4242,7 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
  	struct stmmac_tx_queue *xdp_q;
  	struct bpf_prog *xdp_prog;
  	u32 act;
@@ -76,7 +76,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  
  	rcu_read_lock();
  	xdp_prog = READ_ONCE(rx_q->xdp_prog);
-@@ -4255,6 +4259,10 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
+@@ -4256,6 +4260,10 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
  		xdp_q = &priv->xdp_queue[rx_q->queue_index];
  		result = stmmac_xmit_xdp_tx_queue(xdp, xdp_q);
  		break;
@@ -87,7 +87,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  	default:
  		bpf_warn_invalid_xdp_action(act);
  		/* fall through -- handle default by dropping packet */
-@@ -4271,7 +4279,7 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
+@@ -4272,7 +4280,7 @@ static struct sk_buff *stmmac_run_xdp(struct stmmac_rx_queue *rx_q,
  }
  
  /**
@@ -96,7 +96,7 @@ index 209919ad5fb3..6a4d81be885b 100644
   * @xdp_q: XDP Tx queue
   *
   * This function updates the XDP Tx queue tail register.
-@@ -4311,6 +4319,9 @@ void stmmac_finalize_xdp_rx(struct stmmac_rx_queue *rx_q, unsigned int xdp_res)
+@@ -4312,6 +4320,9 @@ void stmmac_finalize_xdp_rx(struct stmmac_rx_queue *rx_q, unsigned int xdp_res)
  {
  	struct stmmac_priv *priv = rx_q->priv_data;
  
@@ -106,7 +106,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  	if (xdp_res & STMMAC_XDP_TX) {
  		struct stmmac_tx_queue *xdp_q =
  			&priv->xdp_queue[rx_q->queue_index];
-@@ -4334,10 +4345,12 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -4335,10 +4346,12 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  	unsigned int count = 0, error = 0, len = 0;
  	int status = 0, coe = priv->hw->rx_csum;
  	unsigned int next_entry = rx_q->cur_rx;
@@ -119,7 +119,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  	xdp.rxq = &rx_q->xdp_rxq;
  
  	if (netif_msg_rx_status(priv)) {
-@@ -4466,7 +4479,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -4467,7 +4480,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  
  			prefetchw(buf->page);
  			dma_sync_single_for_cpu(priv->device, buf->addr,
@@ -128,7 +128,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  
  			xdp.data = page_address(buf->page);
  			xdp.data_meta = xdp.data;
-@@ -4478,7 +4491,8 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -4479,7 +4492,8 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  			if (IS_ERR(skb)) {
  				unsigned int xdp_res = -PTR_ERR(skb);
  
@@ -138,7 +138,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  					/* XDP-TX, update tail pointer later */
  					xdp_xmit |= xdp_res;
  				} else {
-@@ -5147,6 +5161,53 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
+@@ -5148,6 +5162,53 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
  	return ret;
  }
  
@@ -192,7 +192,7 @@ index 209919ad5fb3..6a4d81be885b 100644
  /**
   * stmmac_xdp_setup - add/remove an XDP program
   * @vsi: VSI to changed
-@@ -5494,6 +5555,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
+@@ -5495,6 +5556,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
  	.ndo_vlan_rx_add_vid = stmmac_vlan_rx_add_vid,
  	.ndo_vlan_rx_kill_vid = stmmac_vlan_rx_kill_vid,
  	.ndo_bpf = stmmac_xdp,

@@ -1,7 +1,7 @@
-From e6a706816515fcd80b9528a2dc0f5f9be9b32385 Mon Sep 17 00:00:00 2001
+From ed41bbb524b42246a5ed340ae39272ce66840d36 Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Sat, 28 Sep 2019 17:49:02 +0800
-Subject: [PATCH 106/111] net: stmmac: add AF_XDP zero-copy Rx support
+Subject: [PATCH 106/113] net: stmmac: add AF_XDP zero-copy Rx support
 
 This add the support for zero-copy RX support for AF_XDP socket.
 The Rx buffers are added from MEM_TYPE_ZERO_COPY when AF_XDP is
@@ -39,7 +39,7 @@ index cd663017ea20..d34b4fd48b9b 100644
  stmmac-$(CONFIG_STMMAC_SELFTESTS) += stmmac_selftests.o
  
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-index 8417a5f7b3e1..aa9be1fb6381 100644
+index b288cdf8b0bb..aae4806e510d 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 @@ -65,13 +65,23 @@ struct stmmac_tx_queue {
@@ -85,7 +85,7 @@ index 8417a5f7b3e1..aa9be1fb6381 100644
  };
  
  struct stmmac_channel {
-@@ -295,6 +308,10 @@ struct stmmac_priv {
+@@ -287,6 +300,10 @@ struct stmmac_priv {
  
  	/* XDP BPF Program */
  	struct bpf_prog *xdp_prog;
@@ -96,7 +96,7 @@ index 8417a5f7b3e1..aa9be1fb6381 100644
  };
  
  enum stmmac_state {
-@@ -334,6 +351,11 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
+@@ -326,6 +343,11 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
  #define STMMAC_XDP_TX		BIT(1)
  #define STMMAC_XDP_REDIR	BIT(2)
  
@@ -108,7 +108,7 @@ index 8417a5f7b3e1..aa9be1fb6381 100644
  static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
  {
  	return !!priv->xdp_prog;
-@@ -366,10 +388,21 @@ static inline struct stmmac_tx_queue *get_tx_queue(struct stmmac_priv *priv,
+@@ -358,10 +380,21 @@ static inline struct stmmac_tx_queue *get_tx_queue(struct stmmac_priv *priv,
  	((((x)->dirty_tx > (x)->cur_tx) ? 0 : priv->dma_tx_size) + \
  	(x)->dirty_tx - (x)->cur_tx - 1)
  
@@ -131,7 +131,7 @@ index 8417a5f7b3e1..aa9be1fb6381 100644
  void stmmac_selftest_run(struct net_device *dev,
  			 struct ethtool_test *etest, u64 *buf);
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index bfd497242e3a..c8c1cc72c850 100644
+index f9a90dc28330..02399221e2cc 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -38,6 +38,7 @@
@@ -150,7 +150,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  #ifdef CONFIG_STMMAC_NETWORK_PROXY
  #include "stmmac_netproxy.h"
  #endif
-@@ -478,8 +480,8 @@ static void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
+@@ -477,8 +479,8 @@ static void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
   * This function will read received packet's timestamp from the descriptor
   * and pass it to stack. It also perform some sanity checks.
   */
@@ -161,7 +161,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  {
  	struct skb_shared_hwtstamps *shhwtstamp = NULL;
  	struct dma_desc *desc = p;
-@@ -1341,6 +1343,22 @@ static void stmmac_free_tx_buffer(struct stmmac_priv *priv, u32 queue, int i)
+@@ -1340,6 +1342,22 @@ static void stmmac_free_tx_buffer(struct stmmac_priv *priv, u32 queue, int i)
  	tx_q->tx_skbuff_dma[i].map_as_page = false;
  }
  
@@ -184,7 +184,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  bool stmmac_alloc_rx_buffers(struct stmmac_rx_queue *rx_q, u32 count)
  {
  	struct stmmac_priv *priv = rx_q->priv_data;
-@@ -1388,20 +1406,47 @@ static int init_dma_rx_desc_ring(struct stmmac_priv *priv, u32 queue,
+@@ -1387,20 +1405,47 @@ static int init_dma_rx_desc_ring(struct stmmac_priv *priv, u32 queue,
  
  	xdp_rxq_info_unreg_mem_model(&rx_q->xdp_rxq);
  
@@ -244,7 +244,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  
  	/* Setup the chained descriptor addresses */
  	if (priv->mode == STMMAC_CHAIN_MODE) {
-@@ -4071,7 +4116,7 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+@@ -4072,7 +4117,7 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
  	return NETDEV_TX_OK;
  }
  
@@ -253,7 +253,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  {
  	struct vlan_ethhdr *veth;
  	__be16 vlan_proto;
-@@ -4667,11 +4712,15 @@ static int stmmac_napi_poll_rx(struct napi_struct *napi, int budget)
+@@ -4668,11 +4713,15 @@ static int stmmac_napi_poll_rx(struct napi_struct *napi, int budget)
  		container_of(napi, struct stmmac_channel, rx_napi);
  	struct stmmac_priv *priv = ch->priv_data;
  	u32 chan = ch->index;
@@ -270,7 +270,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  	if (work_done < budget && napi_complete_done(napi, work_done))
  		stmmac_enable_dma_irq(priv, priv->ioaddr, chan);
  	return work_done;
-@@ -5191,6 +5240,254 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
+@@ -5192,6 +5241,254 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
  	return ret;
  }
  
@@ -525,7 +525,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  /**
   * stmmac_xdp_xmit - Implements ndo_xdp_xmit
   * @dev: netdev
-@@ -5298,6 +5595,9 @@ static int stmmac_xdp(struct net_device *dev,
+@@ -5299,6 +5596,9 @@ static int stmmac_xdp(struct net_device *dev,
  	case XDP_QUERY_PROG:
  		xdp->prog_id = priv->xdp_prog ? priv->xdp_prog->aux->id : 0;
  		return 0;
@@ -535,7 +535,7 @@ index bfd497242e3a..c8c1cc72c850 100644
  	default:
  		return -EINVAL;
  	}
-@@ -6275,6 +6575,7 @@ static void stmmac_reset_queues_param(struct stmmac_priv *priv)
+@@ -6276,6 +6576,7 @@ static void stmmac_reset_queues_param(struct stmmac_priv *priv)
  
  		rx_q->cur_rx = 0;
  		rx_q->dirty_rx = 0;

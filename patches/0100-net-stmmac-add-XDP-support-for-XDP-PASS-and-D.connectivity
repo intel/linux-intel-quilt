@@ -1,7 +1,7 @@
-From d7058f6af2274f0c3ae08472c4ee1160c6bf100e Mon Sep 17 00:00:00 2001
+From 1be11f238d853718571a0d0d1a8ea4d23b3a9556 Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Mon, 23 Sep 2019 10:07:50 +0800
-Subject: [PATCH 100/111] net: stmmac: add XDP support for XDP PASS and DROP
+Subject: [PATCH 100/113] net: stmmac: add XDP support for XDP PASS and DROP
  actions
 
 This commit adds basic XDP support for stmmac. All XDP actions will
@@ -16,7 +16,7 @@ Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
  2 files changed, 163 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-index 93158eb15c1a..7171a9478358 100644
+index 4319c1c36dc2..3b2c98b14db1 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
 @@ -91,6 +91,7 @@ struct stmmac_rx_queue {
@@ -27,17 +27,17 @@ index 93158eb15c1a..7171a9478358 100644
  };
  
  struct stmmac_channel {
-@@ -283,6 +284,9 @@ struct stmmac_priv {
- 	u64 phy_rx_latency_1000;
- 	u64 phy_rx_latency_100;
- 	u64 phy_rx_latency_10;
+@@ -275,6 +276,9 @@ struct stmmac_priv {
+ 
+ 	/* WA for EST */
+ 	int est_hw_del;
 +
 +	/* XDP BPF Program */
 +	struct bpf_prog *xdp_prog;
  };
  
  enum stmmac_state {
-@@ -317,6 +321,14 @@ int stmmac_suspend_main(struct stmmac_priv *priv, struct net_device *ndev);
+@@ -309,6 +313,14 @@ int stmmac_suspend_main(struct stmmac_priv *priv, struct net_device *ndev);
  int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
  #endif
  
@@ -53,7 +53,7 @@ index 93158eb15c1a..7171a9478358 100644
  void stmmac_selftest_run(struct net_device *dev,
  			 struct ethtool_test *etest, u64 *buf);
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 13d5c8d19ba6..ce93a15841ad 100644
+index ec895265d4e4..1ea58bd5fe35 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -42,6 +42,8 @@
@@ -65,7 +65,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  #include "dwmac1000.h"
  #include "dwxgmac2.h"
  #include "hwif.h"
-@@ -1571,6 +1573,8 @@ static void free_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
+@@ -1570,6 +1572,8 @@ static void free_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
  		page_pool_request_shutdown(rx_q->page_pool);
  		page_pool_destroy(rx_q->page_pool);
  	}
@@ -74,7 +74,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  }
  
  /**
-@@ -1676,6 +1680,8 @@ static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
+@@ -1675,6 +1679,8 @@ static int alloc_dma_rx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
  			goto err_dma;
  	}
  
@@ -83,7 +83,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  	return 0;
  
  err_dma:
-@@ -4056,6 +4062,45 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
+@@ -4057,6 +4063,45 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
  	}
  }
  
@@ -129,7 +129,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  /**
   * stmmac_rx - manage the receive process
   * @priv: driver private structure
-@@ -4072,6 +4117,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -4073,6 +4118,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  	int status = 0, coe = priv->hw->rx_csum;
  	unsigned int next_entry = rx_q->cur_rx;
  	struct sk_buff *skb = NULL;
@@ -137,7 +137,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  
  	if (netif_msg_rx_status(priv)) {
  		void *rx_head;
-@@ -4197,15 +4243,38 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+@@ -4198,15 +4244,38 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
  					   len, status);
  			}
  
@@ -180,7 +180,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  			skb_copy_to_linear_data(skb, page_address(buf->page),
  						len);
  			skb_put(skb, len);
-@@ -4393,6 +4462,15 @@ static void stmmac_set_rx_mode(struct net_device *dev)
+@@ -4394,6 +4463,15 @@ static void stmmac_set_rx_mode(struct net_device *dev)
  	stmmac_set_filter(priv, priv->hw, dev);
  }
  
@@ -196,7 +196,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  /**
   *  stmmac_change_mtu - entry point to change MTU size for the device.
   *  @dev : device pointer.
-@@ -4413,6 +4491,13 @@ static int stmmac_change_mtu(struct net_device *dev, int new_mtu)
+@@ -4414,6 +4492,13 @@ static int stmmac_change_mtu(struct net_device *dev, int new_mtu)
  		return -EBUSY;
  	}
  
@@ -210,7 +210,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  	dev->mtu = new_mtu;
  
  	netdev_update_features(dev);
-@@ -4831,6 +4916,67 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
+@@ -4832,6 +4917,67 @@ static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
  	return ret;
  }
  
@@ -278,7 +278,7 @@ index 13d5c8d19ba6..ce93a15841ad 100644
  #ifdef CONFIG_DEBUG_FS
  static struct dentry *stmmac_fs_dir;
  
-@@ -5109,6 +5255,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
+@@ -5110,6 +5256,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
  	.ndo_set_mac_address = stmmac_set_mac_address,
  	.ndo_vlan_rx_add_vid = stmmac_vlan_rx_add_vid,
  	.ndo_vlan_rx_kill_vid = stmmac_vlan_rx_kill_vid,

@@ -1,7 +1,7 @@
-From bce37177c42b8d82dfe522c0c364167ef9528c8a Mon Sep 17 00:00:00 2001
+From 200c5025cc6d74b049ec7fe9fd903c10578871d2 Mon Sep 17 00:00:00 2001
 From: Voon Weifeng <weifeng.voon@intel.com>
 Date: Thu, 7 Nov 2019 16:32:38 +0800
-Subject: [PATCH 084/111] HOTFIX: net: stmmac: added phy ingress and egress
+Subject: [PATCH 084/113] HOTFIX: net: stmmac: added phy ingress and egress
  path latency
 
 Phy path latency will contribute to the total link path delay.
@@ -13,33 +13,13 @@ Marvell 88E1512 PHY.
 
 Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
 ---
- drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  8 +++++
- .../net/ethernet/stmicro/stmmac/stmmac_main.c | 30 +++++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 29 +++++++++++++++++++
  .../net/ethernet/stmicro/stmmac/stmmac_pci.c  |  8 +++++
  include/linux/stmmac.h                        |  7 +++++
- 4 files changed, 53 insertions(+)
+ 3 files changed, 44 insertions(+)
 
-diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-index af086dc81b27..c6d4cc3786bd 100644
---- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-+++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
-@@ -260,6 +260,14 @@ struct stmmac_priv {
- 
- 	/* WA for EST */
- 	int est_hw_del;
-+
-+	/* TX and RX PHY latency (ns) */
-+	u64 phy_tx_latency_1000;
-+	u64 phy_tx_latency_100;
-+	u64 phy_tx_latency_10;
-+	u64 phy_rx_latency_1000;
-+	u64 phy_rx_latency_100;
-+	u64 phy_rx_latency_10;
- };
- 
- enum stmmac_state {
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 10dd9812a97c..a4b1909ca6b4 100644
+index 36a23684bf3e..2b36338c3849 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 @@ -421,6 +421,7 @@ static void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
@@ -50,7 +30,7 @@ index 10dd9812a97c..a4b1909ca6b4 100644
  	u64 ns = 0;
  
  	if (!priv->hwts_tx_en)
-@@ -439,8 +440,22 @@ static void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
+@@ -439,6 +440,19 @@ static void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
  	}
  
  	if (found) {
@@ -69,11 +49,8 @@ index 10dd9812a97c..a4b1909ca6b4 100644
 +		ns += adjust;
  		memset(&shhwtstamp, 0, sizeof(struct skb_shared_hwtstamps));
  		shhwtstamp.hwtstamp = ns_to_ktime(ns);
-+		shhwtstamp.hwtstamp = ktime_add_ns(shhwtstamp.hwtstamp, adjust);
  
- 		netdev_dbg(priv->dev, "get valid TX hw timestamp %llu\n", ns);
- 		/* pass tstamp to stack */
-@@ -462,6 +477,7 @@ static void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+@@ -462,6 +476,7 @@ static void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
  {
  	struct skb_shared_hwtstamps *shhwtstamp = NULL;
  	struct dma_desc *desc = p;
@@ -81,7 +58,7 @@ index 10dd9812a97c..a4b1909ca6b4 100644
  	u64 ns = 0;
  
  	if (!priv->hwts_rx_en)
-@@ -473,6 +489,20 @@ static void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+@@ -473,6 +488,20 @@ static void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
  	/* Check if timestamp is available */
  	if (stmmac_get_rx_timestamp_status(priv, p, np, priv->adv_ts)) {
  		stmmac_get_timestamp(priv, desc, priv->adv_ts, &ns);
@@ -103,7 +80,7 @@ index 10dd9812a97c..a4b1909ca6b4 100644
  		shhwtstamp = skb_hwtstamps(skb);
  		memset(shhwtstamp, 0, sizeof(struct skb_shared_hwtstamps));
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
-index 7abcbcabbe25..b894b3dc37d3 100644
+index b14a57fa29cf..080737107092 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
 @@ -292,6 +292,14 @@ static int ehl_common_data(struct pci_dev *pdev,
