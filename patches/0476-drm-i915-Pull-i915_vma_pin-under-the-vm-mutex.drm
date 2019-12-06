@@ -1,4 +1,4 @@
-From d367fe93ecac6be32d779d7617335437a1a55217 Mon Sep 17 00:00:00 2001
+From cd505ce28b253428d86f5c7c0c98f5c98a3d81f1 Mon Sep 17 00:00:00 2001
 From: Chris Wilson <chris@chris-wilson.co.uk>
 Date: Fri, 4 Oct 2019 14:39:58 +0100
 Subject: [PATCH 476/869] drm/i915: Pull i915_vma_pin under the vm->mutex
@@ -82,7 +82,7 @@ Link: https://patchwork.freedesktop.org/patch/msgid/20191004134015.13204-4-chris
  40 files changed, 824 insertions(+), 706 deletions(-)
 
 diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
-index fe7ec6b25bcd..886abf8b928e 100644
+index 427feb551049..17f02e1f53b6 100644
 --- a/drivers/gpu/drm/i915/display/intel_display.c
 +++ b/drivers/gpu/drm/i915/display/intel_display.c
 @@ -2079,7 +2079,6 @@ intel_pin_and_fence_fb_obj(struct drm_framebuffer *fb,
@@ -102,7 +102,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  	i915_gem_object_lock(vma->obj);
  	if (flags & PLANE_HAS_FENCE)
  		i915_vma_unpin_fence(vma);
-@@ -3065,12 +3062,10 @@ intel_alloc_initial_plane_obj(struct intel_crtc *crtc,
+@@ -3068,12 +3065,10 @@ intel_alloc_initial_plane_obj(struct intel_crtc *crtc,
  		return false;
  	}
  
@@ -115,7 +115,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  	if (!obj)
  		return false;
  
-@@ -3232,13 +3227,11 @@ intel_find_initial_plane_obj(struct intel_crtc *intel_crtc,
+@@ -3235,13 +3230,11 @@ intel_find_initial_plane_obj(struct intel_crtc *intel_crtc,
  	intel_state->color_plane[0].stride =
  		intel_fb_pitch(fb, 0, intel_state->base.rotation);
  
@@ -129,7 +129,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  	if (IS_ERR(intel_state->vma)) {
  		DRM_ERROR("failed to pin boot fb on pipe %d: %li\n",
  			  intel_crtc->pipe, PTR_ERR(intel_state->vma));
-@@ -14366,8 +14359,6 @@ static void fb_obj_bump_render_priority(struct drm_i915_gem_object *obj)
+@@ -14375,8 +14368,6 @@ static void fb_obj_bump_render_priority(struct drm_i915_gem_object *obj)
   * bits.  Some older platforms need special physical address handling for
   * cursor planes.
   *
@@ -138,7 +138,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
   * Returns 0 on success, negative error code on failure.
   */
  int
-@@ -14424,15 +14415,8 @@ intel_prepare_plane_fb(struct drm_plane *plane,
+@@ -14433,15 +14424,8 @@ intel_prepare_plane_fb(struct drm_plane *plane,
  	if (ret)
  		return ret;
  
@@ -154,7 +154,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  	i915_gem_object_unpin_pages(obj);
  	if (ret)
  		return ret;
-@@ -14481,8 +14465,6 @@ intel_prepare_plane_fb(struct drm_plane *plane,
+@@ -14490,8 +14474,6 @@ intel_prepare_plane_fb(struct drm_plane *plane,
   * @old_state: the state from the previous modeset
   *
   * Cleans up a framebuffer that has just been removed from a plane.
@@ -163,7 +163,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
   */
  void
  intel_cleanup_plane_fb(struct drm_plane *plane,
-@@ -14498,9 +14480,7 @@ intel_cleanup_plane_fb(struct drm_plane *plane,
+@@ -14507,9 +14489,7 @@ intel_cleanup_plane_fb(struct drm_plane *plane,
  	}
  
  	/* Should only be called after a successful intel_prepare_plane_fb()! */
@@ -173,7 +173,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  }
  
  int
-@@ -14703,7 +14683,6 @@ intel_legacy_cursor_update(struct drm_plane *plane,
+@@ -14712,7 +14692,6 @@ intel_legacy_cursor_update(struct drm_plane *plane,
  			   u32 src_w, u32 src_h,
  			   struct drm_modeset_acquire_ctx *ctx)
  {
@@ -181,7 +181,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  	struct drm_plane_state *old_plane_state, *new_plane_state;
  	struct intel_plane *intel_plane = to_intel_plane(plane);
  	struct intel_crtc_state *crtc_state =
-@@ -14769,13 +14748,9 @@ intel_legacy_cursor_update(struct drm_plane *plane,
+@@ -14778,13 +14757,9 @@ intel_legacy_cursor_update(struct drm_plane *plane,
  	if (ret)
  		goto out_free;
  
@@ -196,7 +196,7 @@ index fe7ec6b25bcd..886abf8b928e 100644
  
  	intel_frontbuffer_flush(to_intel_frontbuffer(fb), ORIGIN_FLIP);
  	intel_frontbuffer_track(to_intel_frontbuffer(old_plane_state->fb),
-@@ -14805,8 +14780,6 @@ intel_legacy_cursor_update(struct drm_plane *plane,
+@@ -14814,8 +14789,6 @@ intel_legacy_cursor_update(struct drm_plane *plane,
  
  	intel_plane_unpin_fb(to_intel_plane_state(old_plane_state));
  
@@ -232,7 +232,7 @@ index 0a0a1536ac96..bb5a0e91b370 100644
  		dsb->free_pos = 0;
  		dsb->ins_start_offset = 0;
 diff --git a/drivers/gpu/drm/i915/display/intel_fbdev.c b/drivers/gpu/drm/i915/display/intel_fbdev.c
-index 68338669f054..97cde017670a 100644
+index c0372fb623fd..8e003b666215 100644
 --- a/drivers/gpu/drm/i915/display/intel_fbdev.c
 +++ b/drivers/gpu/drm/i915/display/intel_fbdev.c
 @@ -204,7 +204,6 @@ static int intelfb_create(struct drm_fb_helper *helper,
@@ -243,7 +243,7 @@ index 68338669f054..97cde017670a 100644
  	wakeref = intel_runtime_pm_get(&dev_priv->runtime_pm);
  
  	/* Pin the GGTT vma for our access via info->screen_base.
-@@ -266,7 +265,6 @@ static int intelfb_create(struct drm_fb_helper *helper,
+@@ -267,7 +266,6 @@ static int intelfb_create(struct drm_fb_helper *helper,
  	ifbdev->vma_flags = flags;
  
  	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
@@ -251,7 +251,7 @@ index 68338669f054..97cde017670a 100644
  	vga_switcheroo_client_fb_set(pdev, info);
  	return 0;
  
-@@ -274,7 +272,6 @@ static int intelfb_create(struct drm_fb_helper *helper,
+@@ -275,7 +273,6 @@ static int intelfb_create(struct drm_fb_helper *helper,
  	intel_unpin_fb_vma(vma, flags);
  out_unlock:
  	intel_runtime_pm_put(&dev_priv->runtime_pm, wakeref);
@@ -259,7 +259,7 @@ index 68338669f054..97cde017670a 100644
  	return ret;
  }
  
-@@ -291,11 +288,8 @@ static void intel_fbdev_destroy(struct intel_fbdev *ifbdev)
+@@ -292,11 +289,8 @@ static void intel_fbdev_destroy(struct intel_fbdev *ifbdev)
  
  	drm_fb_helper_fini(&ifbdev->helper);
  
@@ -930,7 +930,7 @@ index e5d1ae8d4dba..dc2a83ce44d5 100644
  	/* We have to maintain this existing ABI... */
  	args->stride = i915_gem_object_get_stride(obj);
 diff --git a/drivers/gpu/drm/i915/gem/i915_gem_userptr.c b/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
-index 6b3b50f0f6d9..1738a15eb911 100644
+index abfbac49b8e8..fb46033949a3 100644
 --- a/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
 +++ b/drivers/gpu/drm/i915/gem/i915_gem_userptr.c
 @@ -92,7 +92,6 @@ userptr_mn_invalidate_range_start(struct mmu_notifier *_mn,
