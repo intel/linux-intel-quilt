@@ -1,0 +1,114 @@
+From d5cb11d0db3f9d3080b9af7dc39c65f7816655d7 Mon Sep 17 00:00:00 2001
+From: Sumit Garg <sumit.garg@linaro.org>
+Date: Tue, 29 Jan 2019 11:19:36 +0530
+Subject: [PATCH 3/3] tee: add supp_nowait flag in tee_context struct
+
+This flag indicates that requests in this context should not wait for
+tee-supplicant daemon to be started if not present and just return
+with an error code. It is needed for requests which should be
+non-blocking in nature like ones arising from TEE based kernel drivers
+or any in kernel api that uses TEE internal client interface.
+
+Signed-off-by: Sumit Garg <sumit.garg@linaro.org>
+Reviewed-by: Daniel Thompson <daniel.thompson@linaro.org>
+Signed-off-by: Jens Wiklander <jens.wiklander@linaro.org>
+---
+ drivers/char/tpm/tpm_ftpm_optee.c |  4 ++--
+ drivers/tee/tee_core.c            | 22 ++++++++++++++++++++++
+ include/linux/tee_drv.h           |  6 ++++++
+ 3 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/char/tpm/tpm_ftpm_optee.c b/drivers/char/tpm/tpm_ftpm_optee.c
+index f724722e44d1..933bc3d83c53 100644
+--- a/drivers/char/tpm/tpm_ftpm_optee.c
++++ b/drivers/char/tpm/tpm_ftpm_optee.c
+@@ -215,13 +215,13 @@ static void fwtpm_cancel(struct tpm_chip *chip)
+ 
+ 	arg.cancel_id = priv->cancel_id;
+ 	arg.session = priv->sess;
+-
++/*
+ 	if (tee_client_cancel_req(priv->ctx, &arg)) {
+ 		dev_err(&chip->dev,
+ 			"Cancel request failed\n");
+ 		return;
+ 	}
+-
++*/
+ 	priv->is_canceled = true;
+ }
+ 
+diff --git a/drivers/tee/tee_core.c b/drivers/tee/tee_core.c
+index 86218b4d60cf..641bb0979fa4 100644
+--- a/drivers/tee/tee_core.c
++++ b/drivers/tee/tee_core.c
+@@ -95,6 +95,11 @@ static int tee_open(struct inode *inode, struct file *filp)
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+ 
++	/*
++	 * Default user-space behaviour is to wait for tee-supplicant
++	 * if not present for any requests in this context.
++	 */
++	ctx->supp_nowait = false;
+ 	filp->private_data = ctx;
+ 	return 0;
+ }
+@@ -971,6 +976,14 @@ tee_client_open_context(struct tee_context *start,
+ 	} while (IS_ERR(ctx) && PTR_ERR(ctx) != -ENOMEM);
+ 
+ 	put_device(put_dev);
++	/*
++	 * Default behaviour for in kernel client is to not wait for
++	 * tee-supplicant if not present for any requests in this context.
++	 * Also this flag could be configured again before call to
++	 * tee_client_open_session() if any in kernel client requires
++	 * different behaviour.
++	 */
++	ctx->supp_nowait = true;
+ 	return ctx;
+ }
+ EXPORT_SYMBOL_GPL(tee_client_open_context);
+@@ -1016,6 +1029,15 @@ int tee_client_invoke_func(struct tee_context *ctx,
+ }
+ EXPORT_SYMBOL_GPL(tee_client_invoke_func);
+ 
++int tee_client_cancel_req(struct tee_context *ctx,
++			  struct tee_ioctl_cancel_arg *arg)
++{
++	if (!ctx->teedev->desc->ops->cancel_req)
++		return -EINVAL;
++	return ctx->teedev->desc->ops->cancel_req(ctx, arg->cancel_id,
++						  arg->session);
++}
++
+ static int tee_client_device_match(struct device *dev,
+ 				   struct device_driver *drv)
+ {
+diff --git a/include/linux/tee_drv.h b/include/linux/tee_drv.h
+index 2c67d24a162f..82936fef5e33 100644
+--- a/include/linux/tee_drv.h
++++ b/include/linux/tee_drv.h
+@@ -41,6 +41,11 @@ struct tee_shm_pool;
+  * @releasing:  flag that indicates if context is being released right now.
+  *		It is needed to break circular dependency on context during
+  *              shared memory release.
++ * @supp_nowait: flag that indicates that requests in this context should not
++ *              wait for tee-supplicant daemon to be started if not present
++ *              and just return with an error code. It is needed for requests
++ *              that arises from TEE based kernel drivers that should be
++ *              non-blocking in nature.
+  */
+ struct tee_context {
+ 	struct tee_device *teedev;
+@@ -48,6 +53,7 @@ struct tee_context {
+ 	void *data;
+ 	struct kref refcount;
+ 	bool releasing;
++	bool supp_nowait;
+ };
+ 
+ struct tee_param_memref {
+-- 
+2.17.1
+
