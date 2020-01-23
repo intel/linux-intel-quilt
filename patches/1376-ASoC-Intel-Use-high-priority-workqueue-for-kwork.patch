@@ -1,0 +1,48 @@
+From 14e5df62dd52a086d0551292a6073c355eac9481 Mon Sep 17 00:00:00 2001
+From: Dominik Bozek <dominikx.bozek@intel.com>
+Date: Tue, 28 May 2019 10:12:19 +0200
+Subject: [PATCH 1376/1505] ASoC: Intel: Use high priority workqueue for kwork
+
+Generic workqueue may execute tasks with reasonable delay,
+but IPC subsystem waits 300ms.
+Schedule sending of IPC messages on high priority workqueue.
+
+Change-Id: I937aef3a3ad1e4536649a57d468f1cd33e365a3e
+Tracked-On: ACI-5838
+Tracked-On: OAM-80904
+Signed-off-by: Dominik Bozek <dominikx.bozek@intel.com>
+---
+ sound/soc/intel/common/sst-ipc.c      | 2 +-
+ sound/soc/intel/skylake/skl-sst-ipc.c | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/common/sst-ipc.c b/sound/soc/intel/common/sst-ipc.c
+index 3465eca8ed1d..07dabab2553c 100644
+--- a/sound/soc/intel/common/sst-ipc.c
++++ b/sound/soc/intel/common/sst-ipc.c
+@@ -126,7 +126,7 @@ static int ipc_tx_message(struct sst_generic_ipc *ipc, u64 header,
+ 
+ 	if ((ipc->ops.is_dsp_busy && ipc->ops.is_dsp_busy(ipc->dsp)) ||
+                         (ipc->ops.direct_tx_msg == NULL)) {
+-                schedule_work(&ipc->kwork);
++		queue_work(system_highpri_wq, &ipc->kwork);
+                 spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
+         } else {
+                 spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 891d6ca8325b..69b842f7f918 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -823,7 +823,8 @@ irqreturn_t skl_dsp_irq_thread_handler(int irq, void *context)
+ 	skl_ipc_int_enable(dsp);
+ 
+ 	/* continue to send any remaining messages... */
+-	schedule_work(&ipc->kwork);
++	if (!list_empty(&ipc->tx_list))
++		queue_work(system_highpri_wq, &ipc->kwork);
+ 
+ 	return IRQ_HANDLED;
+ }
+-- 
+2.17.1
+

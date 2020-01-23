@@ -1,0 +1,74 @@
+From a4a6e0c837b5b6b5706bf7a8e6dd7a09080b47dc Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Fri, 24 May 2019 15:33:51 +0800
+Subject: [PATCH 1377/1505] dma-buf/hyper_dmabuf: fix vq "out of range" issue
+
+This patch address the io request handle for multiple vcpus.
+After check the valid io requests for all vcpus, only the request from
+the last vcpu get handled and others are dropped. So some requests in vq
+are not kicked out correctly and ndesc is keeping increasing. At last
+the vq is full and throws out warnings:
+
+virtio_hyper_dmabuf: ndesc (129) out of range, driver confused?
+
+Tracked-On: projectacrn/acrn-hypervisor#3151
+
+Cc: Kim Dongwon <dongwon.kim@intel.com>
+Signed-off-by: Liu Xinyun <xinyun.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ .../virtio/hyper_dmabuf_virtio_be_drv.c         | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/virtio/hyper_dmabuf_virtio_be_drv.c b/drivers/dma-buf/hyper_dmabuf/virtio/hyper_dmabuf_virtio_be_drv.c
+index c29793997bbc..360ced127d12 100644
+--- a/drivers/dma-buf/hyper_dmabuf/virtio/hyper_dmabuf_virtio_be_drv.c
++++ b/drivers/dma-buf/hyper_dmabuf/virtio/hyper_dmabuf_virtio_be_drv.c
+@@ -164,7 +164,7 @@ static void virtio_be_handle_vq_kick(
+  */
+ static int virtio_be_handle_kick(int client_id, unsigned long *ioreqs_map)
+ {
+-	int val = -1;
++	int *val, i, count = 0;
+ 	struct vhm_request *req;
+ 	struct virtio_fe_info *fe_info;
+ 	int vcpu;
+@@ -175,6 +175,10 @@ static int virtio_be_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 		return -EINVAL;
+ 	}
+ 
++	val = kzalloc(fe_info->max_vcpu * sizeof(int), GFP_KERNEL);
++	if (val == NULL)
++		return -ENOMEM;
++
+ 	while (1) {
+ 		vcpu = find_first_bit(ioreqs_map, fe_info->max_vcpu);
+ 		if (vcpu == fe_info->max_vcpu)
+@@ -185,16 +189,21 @@ static int virtio_be_handle_kick(int client_id, unsigned long *ioreqs_map)
+ 			if (req->reqs.pio_request.direction == REQUEST_READ)
+ 				req->reqs.pio_request.value = 0;
+ 			else
+-				val = req->reqs.pio_request.value;
++				val[count] = req->reqs.pio_request.value;
+ 
+ 			acrn_ioreq_complete_request(
+ 					fe_info->client_id, vcpu, req);
++			count++;
+ 		}
+ 	}
+ 
+-	if (val >= 0)
+-		virtio_be_handle_vq_kick(val, fe_info);
+ 
++	for (i = 0; i < count; i++) {
++		if (val[i] >= 0)
++			virtio_be_handle_vq_kick(val[i], fe_info);
++	}
++
++	kfree(val);
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

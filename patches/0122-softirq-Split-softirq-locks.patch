@@ -1,7 +1,7 @@
-From d807c2cd3bd691a900939514c9a510f751f41932 Mon Sep 17 00:00:00 2001
+From e530715caf9839d15d550ed5ed57d4d928ca3806 Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 4 Oct 2012 14:20:47 +0100
-Subject: [PATCH 0122/1494] softirq: Split softirq locks
+Subject: [PATCH 0122/1505] softirq: Split softirq locks
 
 The 3.x RT series removed the split softirq implementation in favour
 of pushing softirq processing into the context of the thread which
@@ -30,12 +30,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  include/linux/preempt.h     |  15 +-
  include/linux/sched.h       |   3 +
  init/main.c                 |   1 +
- kernel/softirq.c            | 491 +++++++++++++++++++++++++++++++++++++-------
+ kernel/softirq.c            | 491 ++++++++++++++++++++++++++++++------
  kernel/time/tick-sched.c    |   9 +-
  7 files changed, 478 insertions(+), 90 deletions(-)
 
 diff --git a/include/linux/bottom_half.h b/include/linux/bottom_half.h
-index a19519f..40dd5ef 100644
+index a19519f4241d..40dd5ef9c154 100644
 --- a/include/linux/bottom_half.h
 +++ b/include/linux/bottom_half.h
 @@ -4,6 +4,39 @@
@@ -86,7 +86,7 @@ index a19519f..40dd5ef 100644
  
  #endif /* _LINUX_BH_H */
 diff --git a/include/linux/interrupt.h b/include/linux/interrupt.h
-index cb2d138..6c25b96 100644
+index cb2d1384cb0d..6c25b962ba89 100644
 --- a/include/linux/interrupt.h
 +++ b/include/linux/interrupt.h
 @@ -503,10 +503,11 @@ struct softirq_action
@@ -135,7 +135,7 @@ index cb2d138..6c25b96 100644
  	struct hrtimer		timer;
  	struct tasklet_struct	tasklet;
 diff --git a/include/linux/preempt.h b/include/linux/preempt.h
-index 9984f2b..27c3176 100644
+index 9984f2b75b73..27c3176d88d2 100644
 --- a/include/linux/preempt.h
 +++ b/include/linux/preempt.h
 @@ -51,7 +51,11 @@
@@ -177,7 +177,7 @@ index 9984f2b..27c3176 100644
  #define in_task()		(!(preempt_count() & \
  				   (NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET)))
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index c073a32..baa5fce 100644
+index c073a3273beb..baa5fceea0ff 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -1198,6 +1198,8 @@ struct task_struct {
@@ -198,10 +198,10 @@ index c073a32..baa5fce 100644
  #define PF_EXITING		0x00000004	/* Getting shut down */
  #define PF_EXITPIDONE		0x00000008	/* PI exit done on shut down */
 diff --git a/init/main.c b/init/main.c
-index 020972f..4a74716 100644
+index 38a603f62b7b..6e02188386a7 100644
 --- a/init/main.c
 +++ b/init/main.c
-@@ -561,6 +561,7 @@ asmlinkage __visible void __init start_kernel(void)
+@@ -560,6 +560,7 @@ asmlinkage __visible void __init start_kernel(void)
  	setup_command_line(command_line);
  	setup_nr_cpu_ids();
  	setup_per_cpu_areas();
@@ -210,7 +210,7 @@ index 020972f..4a74716 100644
  	boot_cpu_hotplug_init();
  
 diff --git a/kernel/softirq.c b/kernel/softirq.c
-index 1d3a482..fd89f8a 100644
+index 1d3a482246cc..fd89f8ab85ac 100644
 --- a/kernel/softirq.c
 +++ b/kernel/softirq.c
 @@ -26,7 +26,9 @@
@@ -447,10 +447,11 @@ index 1d3a482..fd89f8a 100644
  
  	pending = local_softirq_pending();
  	if (pending) {
-@@ -340,6 +465,248 @@ asmlinkage __visible void do_softirq(void)
+@@ -339,6 +464,248 @@ asmlinkage __visible void do_softirq(void)
+ 	local_irq_restore(flags);
  }
  
- /*
++/*
 + * This function must run with irqs disabled!
 + */
 +void raise_softirq_irqoff(unsigned int nr)
@@ -692,10 +693,9 @@ index 1d3a482..fd89f8a 100644
 +}
 +
 +#endif /* PREEMPT_RT_FULL */
-+/*
+ /*
   * Enter an interrupt context.
   */
- void irq_enter(void)
 @@ -350,9 +717,9 @@ void irq_enter(void)
  		 * Prevent raise_softirq from needlessly waking up ksoftirqd
  		 * here, as softirq will be serviced on return from interrupt.
@@ -807,7 +807,7 @@ index 1d3a482..fd89f8a 100644
  	.thread_fn		= run_ksoftirqd,
  	.thread_comm		= "ksoftirqd/%u",
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index c217af7..6482945 100644
+index c217af74dddf..6482945f8ae8 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
 @@ -891,14 +891,7 @@ static bool can_stop_idle_tick(int cpu, struct tick_sched *ts)
@@ -827,5 +827,5 @@ index c217af7..6482945 100644
  	}
  
 -- 
-2.7.4
+2.17.1
 

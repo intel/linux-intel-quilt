@@ -1,0 +1,94 @@
+From 358cfd650e9555f2e670810b3699d65092df6a3a Mon Sep 17 00:00:00 2001
+From: Nikolay Yakimov <root@livid.pp.ru>
+Date: Tue, 15 Jan 2019 19:13:54 +0300
+Subject: [PATCH 1466/1505] USB: Fix configuration selection issues introduced
+ in v4.20.0
+
+Commit f13912d3f014a introduced changes to the usb_choose_configuration function
+to better support USB Audio UAC3-compatible devices. However, there are a few
+problems with this patch. First of all, it adds new "if" clauses in the middle
+of an existing "if"/"else if" tree, which obviously breaks pre-existing logic.
+Secondly, since it continues iterating over configurations in one of the branches,
+other code in the loop can choose an unintended configuration. Finally,
+if an audio device's first configuration is UAC3-compatible, and there
+are multiple UAC3 configurations, the second one would be chosen, due to
+the first configuration never being checked for UAC3-compatibility.
+
+Commit ff2a8c532c14 tries to fix the second issue, but it goes about it in a
+somewhat unnecessarily convoluted way, in my opinion, and does nothing
+to fix the first or the last one.
+
+This patch tries to rectify problems described by essentially rewriting
+code introduced in f13912d3f014a. Notice the code was moved to *before*
+the "if"/"else if" tree.
+
+Change-Id: Ica94e3436b278a2389404b1249e60ad88db7c3d2
+Signed-off-by: Nikolay Yakimov <root@livid.pp.ru>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Tracked-On: PKT-2618
+---
+ drivers/usb/core/generic.c | 41 +++++++++++++++++++++++---------------
+ 1 file changed, 25 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/usb/core/generic.c b/drivers/usb/core/generic.c
+index df38d5a32e95..a0c610797247 100644
+--- a/drivers/usb/core/generic.c
++++ b/drivers/usb/core/generic.c
+@@ -118,6 +118,31 @@ int usb_choose_configuration(struct usb_device *udev)
+ 			continue;
+ 		}
+ 
++		/*
++		 * Select first configuration as default for audio so that
++		 * devices that don't comply with UAC3 protocol are supported.
++		 * But, still iterate through other configurations and
++		 * select UAC3 compliant config if present.
++		 */
++		if (desc && is_audio(desc)) {
++			/* Always prefer the first found UAC3 config */
++			if (is_uac3_config(desc)) {
++				best = c;
++				break;
++			}
++
++			/* If there is no UAC3 config, prefer the first config */
++			else if (i == 0)
++				best = c;
++
++			/* Unconditional continue, because the rest of the code
++			 * in the loop is irrelevant for audio devices, and
++			 * because it can reassign best, which for audio devices
++			 * we don't want.
++			 */
++			continue;
++		}
++
+ 		/* When the first config's first interface is one of Microsoft's
+ 		 * pet nonstandard Ethernet-over-USB protocols, ignore it unless
+ 		 * this kernel has enabled the necessary host side driver.
+@@ -132,22 +157,6 @@ int usb_choose_configuration(struct usb_device *udev)
+ #endif
+ 		}
+ 
+-		/*
+-		 * Select first configuration as default for audio so that
+-		 * devices that don't comply with UAC3 protocol are supported.
+-		 * But, still iterate through other configurations and
+-		 * select UAC3 compliant config if present.
+-		 */
+-		if (i == 0 && num_configs > 1 && desc && is_audio(desc)) {
+-			best = c;
+-			continue;
+-		}
+-
+-		if (i > 0 && desc && is_audio(desc) && is_uac3_config(desc)) {
+-			best = c;
+-			break;
+-		}
+-
+ 		/* From the remaining configs, choose the first one whose
+ 		 * first interface is for a non-vendor-specific class.
+ 		 * Reason: Linux is more likely to have a class driver
+-- 
+2.17.1
+

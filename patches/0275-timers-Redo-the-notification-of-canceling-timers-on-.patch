@@ -1,7 +1,7 @@
-From 25bc5c5a0f57a4846c10f278d976a37679061493 Mon Sep 17 00:00:00 2001
+From 07d9aaa5917187845b59efdf55fa02d70f35cad2 Mon Sep 17 00:00:00 2001
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Date: Mon, 24 Jun 2019 19:39:06 +0200
-Subject: [PATCH 0275/1494] timers: Redo the notification of canceling timers
+Subject: [PATCH 0275/1505] timers: Redo the notification of canceling timers
  on -RT
 
 [ Upstream commit c71273154c2ad12e13333aada340ff30e826a11b ]
@@ -26,20 +26,20 @@ This is an all in one commit of the following patches:
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Signed-off-by: Steven Rostedt (VMware) <rostedt@goodmis.org>
 ---
- fs/timerfd.c                   |  5 ++-
- include/linux/hrtimer.h        | 17 +++-----
+ fs/timerfd.c                   |  5 +-
+ include/linux/hrtimer.h        | 17 ++----
  include/linux/posix-timers.h   |  1 +
  kernel/time/alarmtimer.c       |  2 +-
- kernel/time/hrtimer.c          | 36 ++++------------
+ kernel/time/hrtimer.c          | 36 ++++---------
  kernel/time/itimer.c           |  2 +-
- kernel/time/posix-cpu-timers.c | 23 ++++++++++
- kernel/time/posix-timers.c     | 69 ++++++++++++------------------
+ kernel/time/posix-cpu-timers.c | 23 ++++++++
+ kernel/time/posix-timers.c     | 69 ++++++++++--------------
  kernel/time/posix-timers.h     |  2 +
- kernel/time/timer.c            | 96 ++++++++++++++++++++----------------------
+ kernel/time/timer.c            | 96 ++++++++++++++++------------------
  10 files changed, 118 insertions(+), 135 deletions(-)
 
 diff --git a/fs/timerfd.c b/fs/timerfd.c
-index 82d0f52..f845093 100644
+index 82d0f52414a6..f845093466be 100644
 --- a/fs/timerfd.c
 +++ b/fs/timerfd.c
 @@ -471,10 +471,11 @@ static int do_timerfd_settime(int ufd, int flags,
@@ -57,7 +57,7 @@ index 82d0f52..f845093 100644
  
  	/*
 diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index 2bdb047c..6c4c381 100644
+index 082147c07831..aee31b1f0cc3 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
 @@ -22,7 +22,6 @@
@@ -113,7 +113,7 @@ index 2bdb047c..6c4c381 100644
  /* Query timers: */
  extern ktime_t __hrtimer_get_remaining(const struct hrtimer *timer, bool adjust);
  
-@@ -475,7 +468,7 @@ static inline int hrtimer_is_queued(struct hrtimer *timer)
+@@ -481,7 +474,7 @@ static inline bool hrtimer_is_queued(struct hrtimer *timer)
   * Helper function to check, whether the timer is running the callback
   * function
   */
@@ -123,7 +123,7 @@ index 2bdb047c..6c4c381 100644
  	return timer->base->running == timer;
  }
 diff --git a/include/linux/posix-timers.h b/include/linux/posix-timers.h
-index 0571b49..3e6c91b 100644
+index 0571b498db73..3e6c91bdf2ef 100644
 --- a/include/linux/posix-timers.h
 +++ b/include/linux/posix-timers.h
 @@ -15,6 +15,7 @@ struct cpu_timer_list {
@@ -135,7 +135,7 @@ index 0571b49..3e6c91b 100644
  
  /*
 diff --git a/kernel/time/alarmtimer.c b/kernel/time/alarmtimer.c
-index 966708e..efa1e43 100644
+index 1d1f077cffb3..61ab2c923579 100644
 --- a/kernel/time/alarmtimer.c
 +++ b/kernel/time/alarmtimer.c
 @@ -436,7 +436,7 @@ int alarm_cancel(struct alarm *alarm)
@@ -148,7 +148,7 @@ index 966708e..efa1e43 100644
  }
  EXPORT_SYMBOL_GPL(alarm_cancel);
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
-index e1040b8..4534e78 100644
+index f16cbc98c47a..ed5d8d51ca91 100644
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
 @@ -963,33 +963,16 @@ u64 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval)
@@ -190,7 +190,7 @@ index e1040b8..4534e78 100644
  /*
   * enqueue_hrtimer - internal function to (re)start a timer
   *
-@@ -1224,7 +1207,7 @@ int hrtimer_cancel(struct hrtimer *timer)
+@@ -1227,7 +1210,7 @@ int hrtimer_cancel(struct hrtimer *timer)
  
  		if (ret >= 0)
  			return ret;
@@ -199,7 +199,7 @@ index e1040b8..4534e78 100644
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1528,6 +1511,7 @@ static __latent_entropy void hrtimer_run_softirq(struct softirq_action *h)
+@@ -1531,6 +1514,7 @@ static __latent_entropy void hrtimer_run_softirq(struct softirq_action *h)
  	unsigned long flags;
  	ktime_t now;
  
@@ -207,7 +207,7 @@ index e1040b8..4534e78 100644
  	raw_spin_lock_irqsave(&cpu_base->lock, flags);
  
  	now = hrtimer_update_base(cpu_base);
-@@ -1537,7 +1521,7 @@ static __latent_entropy void hrtimer_run_softirq(struct softirq_action *h)
+@@ -1540,7 +1524,7 @@ static __latent_entropy void hrtimer_run_softirq(struct softirq_action *h)
  	hrtimer_update_softirq_timer(cpu_base, true);
  
  	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
@@ -216,7 +216,7 @@ index e1040b8..4534e78 100644
  }
  
  #ifdef CONFIG_HIGH_RES_TIMERS
-@@ -1947,9 +1931,7 @@ int hrtimers_prepare_cpu(unsigned int cpu)
+@@ -1950,9 +1934,7 @@ int hrtimers_prepare_cpu(unsigned int cpu)
  	cpu_base->softirq_next_timer = NULL;
  	cpu_base->expires_next = KTIME_MAX;
  	cpu_base->softirq_expires_next = KTIME_MAX;
@@ -228,7 +228,7 @@ index e1040b8..4534e78 100644
  }
  
 diff --git a/kernel/time/itimer.c b/kernel/time/itimer.c
-index 55b0e58..a5ff222 100644
+index 55b0e58368bf..a5ff222df4c7 100644
 --- a/kernel/time/itimer.c
 +++ b/kernel/time/itimer.c
 @@ -215,7 +215,7 @@ int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
@@ -241,10 +241,10 @@ index 55b0e58..a5ff222 100644
  		}
  		expires = timeval_to_ktime(value->it_value);
 diff --git a/kernel/time/posix-cpu-timers.c b/kernel/time/posix-cpu-timers.c
-index baeeaef..59ceedb 100644
+index 8d95e8de98b2..765e700962ab 100644
 --- a/kernel/time/posix-cpu-timers.c
 +++ b/kernel/time/posix-cpu-timers.c
-@@ -789,6 +789,7 @@ check_timers_list(struct list_head *timers,
+@@ -792,6 +792,7 @@ check_timers_list(struct list_head *timers,
  			return t->expires;
  
  		t->firing = 1;
@@ -252,7 +252,7 @@ index baeeaef..59ceedb 100644
  		list_move_tail(&t->entry, firing);
  	}
  
-@@ -1134,6 +1135,20 @@ static inline int fastpath_timer_check(struct task_struct *tsk)
+@@ -1138,6 +1139,20 @@ static inline int fastpath_timer_check(struct task_struct *tsk)
  	return 0;
  }
  
@@ -273,7 +273,7 @@ index baeeaef..59ceedb 100644
  /*
   * This is called from the timer interrupt handler.  The irq handler has
   * already updated our counts.  We need to check if any timers fire now.
-@@ -1144,6 +1159,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
+@@ -1148,6 +1163,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
  	LIST_HEAD(firing);
  	struct k_itimer *timer, *next;
  	unsigned long flags;
@@ -281,7 +281,7 @@ index baeeaef..59ceedb 100644
  
  	/*
  	 * The fast path checks that there are no expired thread or thread
-@@ -1152,6 +1168,9 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
+@@ -1156,6 +1172,9 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
  	if (!fastpath_timer_check(tsk))
  		return;
  
@@ -291,7 +291,7 @@ index baeeaef..59ceedb 100644
  	if (!lock_task_sighand(tsk, &flags))
  		return;
  	/*
-@@ -1186,6 +1205,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
+@@ -1190,6 +1209,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
  		list_del_init(&timer->it.cpu.entry);
  		cpu_firing = timer->it.cpu.firing;
  		timer->it.cpu.firing = 0;
@@ -299,7 +299,7 @@ index baeeaef..59ceedb 100644
  		/*
  		 * The firing flag is -1 if we collided with a reset
  		 * of the timer, which already reported this
-@@ -1195,6 +1215,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
+@@ -1199,6 +1219,7 @@ static void __run_posix_cpu_timers(struct task_struct *tsk)
  			cpu_timer_fire(timer);
  		spin_unlock(&timer->it_lock);
  	}
@@ -307,7 +307,7 @@ index baeeaef..59ceedb 100644
  }
  
  #ifdef CONFIG_PREEMPT_RT_BASE
-@@ -1460,6 +1481,8 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
+@@ -1466,6 +1487,8 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
  		spin_unlock_irq(&timer.it_lock);
  
  		while (error == TIMER_RETRY) {
@@ -317,7 +317,7 @@ index baeeaef..59ceedb 100644
  			 * We need to handle case when timer was or is in the
  			 * middle of firing. In other cases we already freed
 diff --git a/kernel/time/posix-timers.c b/kernel/time/posix-timers.c
-index a5ec421..c7e97d4 100644
+index a5ec421e3437..c7e97d421590 100644
 --- a/kernel/time/posix-timers.c
 +++ b/kernel/time/posix-timers.c
 @@ -821,25 +821,20 @@ static void common_hrtimer_arm(struct k_itimer *timr, ktime_t expires,
@@ -447,7 +447,7 @@ index a5ec421..c7e97d4 100644
  	/*
  	 * This keeps any tasks waiting on the spin lock from thinking
 diff --git a/kernel/time/posix-timers.h b/kernel/time/posix-timers.h
-index ddb2114..725bd23 100644
+index ddb21145211a..725bd230a8db 100644
 --- a/kernel/time/posix-timers.h
 +++ b/kernel/time/posix-timers.h
 @@ -32,6 +32,8 @@ extern const struct k_clock clock_process;
@@ -460,7 +460,7 @@ index ddb2114..725bd23 100644
  
  void common_timer_get(struct k_itimer *timr, struct itimerspec64 *cur_setting);
 diff --git a/kernel/time/timer.c b/kernel/time/timer.c
-index 781483c..d6289d8 100644
+index 2fcd56aa6092..1c67aab34ff5 100644
 --- a/kernel/time/timer.c
 +++ b/kernel/time/timer.c
 @@ -44,7 +44,6 @@
@@ -616,7 +616,7 @@ index 781483c..d6289d8 100644
  			raw_spin_lock_irq(&base->lock);
  		}
  	}
-@@ -1696,6 +1693,7 @@ static inline void __run_timers(struct timer_base *base)
+@@ -1698,6 +1695,7 @@ static inline void __run_timers(struct timer_base *base)
  	if (!time_after_eq(jiffies, base->clk))
  		return;
  
@@ -624,7 +624,7 @@ index 781483c..d6289d8 100644
  	raw_spin_lock_irq(&base->lock);
  
  	/*
-@@ -1723,7 +1721,7 @@ static inline void __run_timers(struct timer_base *base)
+@@ -1725,7 +1723,7 @@ static inline void __run_timers(struct timer_base *base)
  			expire_timers(base, heads + levels);
  	}
  	raw_spin_unlock_irq(&base->lock);
@@ -633,7 +633,7 @@ index 781483c..d6289d8 100644
  }
  
  /*
-@@ -1970,9 +1968,7 @@ static void __init init_timer_cpu(int cpu)
+@@ -1972,9 +1970,7 @@ static void __init init_timer_cpu(int cpu)
  		base->cpu = cpu;
  		raw_spin_lock_init(&base->lock);
  		base->clk = jiffies;
@@ -645,5 +645,5 @@ index 781483c..d6289d8 100644
  }
  
 -- 
-2.7.4
+2.17.1
 

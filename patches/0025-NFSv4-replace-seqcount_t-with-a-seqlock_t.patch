@@ -1,7 +1,7 @@
-From 3f1bb8175ac6968d1eb4a246b98374c9af752252 Mon Sep 17 00:00:00 2001
+From 78cfba1f8655c35ecd538b02a09000d4d7d18af9 Mon Sep 17 00:00:00 2001
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Date: Fri, 28 Oct 2016 23:05:11 +0200
-Subject: [PATCH 0025/1494] NFSv4: replace seqcount_t with a seqlock_t
+Subject: [PATCH 0025/1505] NFSv4: replace seqcount_t with a seqlock_t
 
 The raw_write_seqcount_begin() in nfs4_reclaim_open_state() bugs me
 because it maps to preempt_disable() in -RT which I can't have at this
@@ -26,25 +26,25 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  4 files changed, 21 insertions(+), 11 deletions(-)
 
 diff --git a/fs/nfs/delegation.c b/fs/nfs/delegation.c
-index 75fe92e..e8d0539 100644
+index 74ff459b75ef..6b422d1b5ae1 100644
 --- a/fs/nfs/delegation.c
 +++ b/fs/nfs/delegation.c
-@@ -152,11 +152,11 @@ static int nfs_delegation_claim_opens(struct inode *inode,
+@@ -162,11 +162,11 @@ static int nfs_delegation_claim_opens(struct inode *inode,
  		sp = state->owner;
  		/* Block nfs4_proc_unlck */
  		mutex_lock(&sp->so_delegreturn_mutex);
 -		seq = raw_seqcount_begin(&sp->so_reclaim_seqcount);
 +		seq = read_seqbegin(&sp->so_reclaim_seqlock);
- 		err = nfs4_open_delegation_recall(ctx, state, stateid, type);
+ 		err = nfs4_open_delegation_recall(ctx, state, stateid);
  		if (!err)
- 			err = nfs_delegation_claim_locks(ctx, state, stateid);
+ 			err = nfs_delegation_claim_locks(state, stateid);
 -		if (!err && read_seqcount_retry(&sp->so_reclaim_seqcount, seq))
 +		if (!err && read_seqretry(&sp->so_reclaim_seqlock, seq))
  			err = -EAGAIN;
  		mutex_unlock(&sp->so_delegreturn_mutex);
  		put_nfs_open_context(ctx);
 diff --git a/fs/nfs/nfs4_fs.h b/fs/nfs/nfs4_fs.h
-index 5b61520..2771aaf 100644
+index 5b61520dce88..2771aafaca19 100644
 --- a/fs/nfs/nfs4_fs.h
 +++ b/fs/nfs/nfs4_fs.h
 @@ -114,7 +114,7 @@ struct nfs4_state_owner {
@@ -57,10 +57,10 @@ index 5b61520..2771aaf 100644
  };
  
 diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
-index 31ae3bd..a5f63bf 100644
+index 792f8821b5d6..041d235cf5ef 100644
 --- a/fs/nfs/nfs4proc.c
 +++ b/fs/nfs/nfs4proc.c
-@@ -2874,7 +2874,7 @@ static int _nfs4_open_and_get_state(struct nfs4_opendata *opendata,
+@@ -2870,7 +2870,7 @@ static int _nfs4_open_and_get_state(struct nfs4_opendata *opendata,
  	unsigned int seq;
  	int ret;
  
@@ -69,7 +69,7 @@ index 31ae3bd..a5f63bf 100644
  
  	ret = _nfs4_proc_open(opendata, ctx);
  	if (ret != 0)
-@@ -2915,7 +2915,7 @@ static int _nfs4_open_and_get_state(struct nfs4_opendata *opendata,
+@@ -2911,7 +2911,7 @@ static int _nfs4_open_and_get_state(struct nfs4_opendata *opendata,
  
  	if (d_inode(dentry) == state->inode) {
  		nfs_inode_attach_open_context(ctx);
@@ -79,7 +79,7 @@ index 31ae3bd..a5f63bf 100644
  	}
  
 diff --git a/fs/nfs/nfs4state.c b/fs/nfs/nfs4state.c
-index c36ef75..e86450c 100644
+index b3086e99420c..c9bf1eb7e1b2 100644
 --- a/fs/nfs/nfs4state.c
 +++ b/fs/nfs/nfs4state.c
 @@ -515,7 +515,7 @@ nfs4_alloc_state_owner(struct nfs_server *server,
@@ -131,5 +131,5 @@ index c36ef75..e86450c 100644
  }
  
 -- 
-2.7.4
+2.17.1
 

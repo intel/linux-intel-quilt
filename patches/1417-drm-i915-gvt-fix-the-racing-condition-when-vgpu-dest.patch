@@ -1,0 +1,57 @@
+From 0ed22ccd29c2b103f8aa103eaa8d9a8a681041b4 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Tue, 30 Jul 2019 02:05:10 +0000
+Subject: [PATCH 1417/1505] drm/i915/gvt: fix the racing condition when vgpu
+ destroy
+
+When the acrn-dm is killed, there could be possibility that the
+vGPU is destroyed but there's still workloads running in worker_thread,
+which leads to a kernel panic. This is because pick_next_workload didn't
+check if the vGPU is being destroyed.
+This patch fixed the issue mentioned above, by adding a check when
+picking next workload.
+Also, there's a new MPT interface vgpu_release() can help to release
+unfinished workloads, so we use this interface to replace previous
+vgpu_deactivate().
+
+Change-Id: I3aa870ae9d18ac72c225ddf2cea53f12253d3e71
+Tracked-On: projectacrn/acrn-hypervisor#3530
+Signed-off-by: Min He <min.he@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/acrngt.c    | 2 +-
+ drivers/gpu/drm/i915/gvt/scheduler.c | 5 +++++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/acrngt.c b/drivers/gpu/drm/i915/gvt/acrngt.c
+index ff48b15ae9d4..0215fc23b3e3 100644
+--- a/drivers/gpu/drm/i915/gvt/acrngt.c
++++ b/drivers/gpu/drm/i915/gvt/acrngt.c
+@@ -152,7 +152,7 @@ void acrngt_instance_destroy(struct intel_vgpu *vgpu)
+                         }
+                 }
+ 
+-		intel_gvt_ops->vgpu_deactivate(vgpu);
++		intel_gvt_ops->vgpu_release(vgpu);
+ 		intel_gvt_ops->vgpu_destroy(vgpu);
+ 	}
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index c6233fb61753..b5aa2cbb20fb 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -785,6 +785,11 @@ static struct intel_vgpu_workload *pick_next_workload(
+ 		goto out;
+ 	}
+ 
++	if (!scheduler->current_vgpu[ring_id]->active) {
++		gvt_dbg_sched("ring id %d stop - vgpu not active\n", ring_id);
++		goto out;
++	}
++
+ 	if (scheduler->need_reschedule[ring_id]) {
+ 		gvt_dbg_sched("ring id %d stop - will reschedule\n", ring_id);
+ 		goto out;
+-- 
+2.17.1
+
