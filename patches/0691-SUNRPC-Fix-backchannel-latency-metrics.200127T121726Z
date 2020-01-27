@@ -1,0 +1,56 @@
+From 46fabfd623a88fc1f4695cff420a7855e4078010 Mon Sep 17 00:00:00 2001
+From: Chuck Lever <chuck.lever@oracle.com>
+Date: Wed, 20 Nov 2019 16:25:46 -0500
+Subject: [PATCH 691/777] SUNRPC: Fix backchannel latency metrics
+
+commit 8729aaba74626c4ebce3abf1b9e96bb62d2958ca upstream.
+
+I noticed that for callback requests, the reported backlog latency
+is always zero, and the rtt value is crazy big. The problem was that
+rqst->rq_xtime is never set for backchannel requests.
+
+Fixes: 78215759e20d ("SUNRPC: Make RTT measurement more ... ")
+Signed-off-by: Chuck Lever <chuck.lever@oracle.com>
+Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ net/sunrpc/xprtrdma/svc_rdma_backchannel.c | 1 +
+ net/sunrpc/xprtsock.c                      | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/net/sunrpc/xprtrdma/svc_rdma_backchannel.c b/net/sunrpc/xprtrdma/svc_rdma_backchannel.c
+index d1fcc41d5eb5..908e78bb87c6 100644
+--- a/net/sunrpc/xprtrdma/svc_rdma_backchannel.c
++++ b/net/sunrpc/xprtrdma/svc_rdma_backchannel.c
+@@ -195,6 +195,7 @@ rpcrdma_bc_send_request(struct svcxprt_rdma *rdma, struct rpc_rqst *rqst)
+ 	pr_info("%s: %*ph\n", __func__, 64, rqst->rq_buffer);
+ #endif
+ 
++	rqst->rq_xtime = ktime_get();
+ 	rc = svc_rdma_bc_sendto(rdma, rqst, ctxt);
+ 	if (rc) {
+ 		svc_rdma_send_ctxt_put(rdma, ctxt);
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index 70e52f567b2a..5361b98f31ae 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -2659,6 +2659,8 @@ static int bc_sendto(struct rpc_rqst *req)
+ 		.iov_len	= sizeof(marker),
+ 	};
+ 
++	req->rq_xtime = ktime_get();
++
+ 	len = kernel_sendmsg(transport->sock, &msg, &iov, 1, iov.iov_len);
+ 	if (len != iov.iov_len)
+ 		return -EAGAIN;
+@@ -2684,7 +2686,6 @@ static int bc_send_request(struct rpc_rqst *req)
+ 	struct svc_xprt	*xprt;
+ 	int len;
+ 
+-	dprintk("sending request with xid: %08x\n", ntohl(req->rq_xid));
+ 	/*
+ 	 * Get the server socket associated with this callback xprt
+ 	 */
+-- 
+2.17.1
+
