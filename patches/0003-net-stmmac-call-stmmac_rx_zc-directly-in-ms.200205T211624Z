@@ -1,0 +1,45 @@
+From ab4c1d3119ce88db7678d0166f5a53630c4cc0c0 Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Sat, 23 Nov 2019 19:20:14 +0800
+Subject: [PATCH 03/31] net: stmmac: call stmmac_rx_zc() directly in
+ msi_intr_rx
+
+Call stmmac_rx_zc() directly in the ISR to further reduce
+receive latency. The penalties of not using NAPI can be
+alleviated by increasing the RX interrupt coalesce but it
+should not be required as XDP ZC RX path should be
+sufficiently fast.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+Signed-off-by: Tan, Tee Min <tee.min.tan@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 3b3089e8ffbe..8b85bdcf5d58 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5157,7 +5157,17 @@ static irqreturn_t stmmac_msi_intr_rx(int irq, void *data)
+ 	if (test_bit(STMMAC_DOWN, &priv->state))
+ 		return IRQ_HANDLED;
+ 
+-	stmmac_napi_check(priv, chan, DMA_DIR_RX);
++	/* Skip napi for XDP ZC queues to reduce latency.
++	 * Penalties of not using NAPI should be minimal for XDP's case.
++	 * Otherwise, users can increase the Rx interrupt coalesce.
++	 */
++	if (rx_q->xsk_umem && priv->xdp_prog) {
++		stmmac_disable_dma_irq(priv, priv->ioaddr, chan);
++		stmmac_rx_zc(priv, priv->dma_rx_size, chan);
++		stmmac_enable_dma_irq(priv, priv->ioaddr, chan);
++	} else {
++		stmmac_napi_check(priv, chan, DMA_DIR_RX);
++	}
+ 
+ 	stmmac_tstamp_interrupt(priv, priv);
+ 
+-- 
+2.17.1
+

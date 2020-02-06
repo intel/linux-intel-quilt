@@ -1,0 +1,137 @@
+From 065911d3230699217faeccdc2461c7bf3984d8a6 Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Thu, 26 Dec 2019 11:35:50 +0800
+Subject: [PATCH 11/31] net: stmmac: introduce AF_XDP ZC RX HW timestamps
+
+Users can requests for timestamps by requesting HWTSTAMP_FILTER_ALL.
+The timestamp is passed up the stack via xdp_buff's data_meta field.
+This is applicable to AF_XDP ZC only for now.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+Signed-off-by: Tan, Tee Min <tee.min.tan@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  1 +
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c |  1 +
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.c  | 45 ++++++++++++++++---
+ 3 files changed, 40 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index c5745dc5a717..5e16e4cf77da 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -190,6 +190,7 @@ struct stmmac_priv {
+ 	struct mac_device_info *hw;
+ 	int (*hwif_quirks)(struct stmmac_priv *priv);
+ 	struct mutex lock;
++	int hwts_all;
+ 
+ 	/* RX Queue */
+ 	struct stmmac_rx_queue rx_queue[MTL_MAX_RX_QUEUES];
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 1e57bbb423e5..27ead4f63a91 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -683,6 +683,7 @@ static int stmmac_hwtstamp_set(struct net_device *dev, struct ifreq *ifr)
+ 		case HWTSTAMP_FILTER_ALL:
+ 			/* time stamp any incoming packet */
+ 			config.rx_filter = HWTSTAMP_FILTER_ALL;
++			priv->hwts_all = HWTSTAMP_FILTER_ALL;
+ 			tstamp_all = PTP_TCR_TSENALL;
+ 			break;
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index d20d3bc9e4e5..cbbecb63afd5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -573,8 +573,10 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ 	xdp.rxq = &rx_q->xdp_rxq;
+ 
+ 	while (likely(total_rx_packets < (unsigned int)budget)) {
++		struct skb_shared_hwtstamps *shhwtstamp = NULL;
++		struct dma_desc *rx_desc, *nx_desc;
+ 		struct stmmac_rx_buffer *buf;
+-		struct dma_desc *rx_desc;
++		unsigned int next_entry;
+ 		unsigned int size;
+ 		int status;
+ 
+@@ -606,8 +608,14 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ 
+ 		size = stmmac_get_rx_frame_len(priv, rx_desc,
+ 					       coe);
+-		if (!size)
+-			break;
++		if (!size) {
++			if (!priv->hwts_all)
++				break;
++			/* If hw timestamping is enabled, move on to the
++			 * next desc as it might contain timestamps */
++			stmmac_inc_ntc(rx_q);
++			continue;
++		}
+ 
+ 		buf = stmmac_get_rx_buffer_zc(rx_q, size);
+ 
+@@ -618,8 +626,28 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ 			continue;
+ 		}
+ 
++		/* Increment to potentially get the next desc for reading HW T/S */
++		stmmac_inc_ntc(rx_q);
++
+ 		xdp.data = buf->umem_addr;
+-		xdp.data_meta = xdp.data;
++
++		if (unlikely(priv->hwts_all)) {
++			xdp.data_meta = xdp.data - sizeof(u64);
++
++			next_entry = rx_q->cur_rx;
++
++			if (priv->extend_desc)
++				nx_desc = (struct dma_desc *)(rx_q->dma_erx +
++							      next_entry);
++			else
++				nx_desc = rx_q->dma_rx + next_entry;
++
++			stmmac_get_rx_hwtstamp(priv, rx_desc, nx_desc,
++					       (u64 *) xdp.data_meta);
++		} else {
++			xdp.data_meta = xdp.data;
++		}
++
+ 		xdp.data_hard_start = xdp.data - XDP_PACKET_HEADROOM;
+ 		xdp.data_end = xdp.data + size;
+ 		xdp.handle = buf->umem_handle;
+@@ -637,7 +665,6 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ 			total_rx_packets++;
+ 
+ 			fill_count++;
+-			stmmac_inc_ntc(rx_q);
+ 			continue;
+ 		}
+ 
+@@ -650,14 +677,18 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ 
+ 		fill_count++;
+ 
+-		stmmac_inc_ntc(rx_q);
+-
+ 		if (eth_skb_pad(skb))
+ 			continue;
+ 
+ 		total_rx_bytes += skb->len;
+ 		total_rx_packets++;
+ 
++		/* Get Rx HW tstamp into SKB */
++		shhwtstamp = skb_hwtstamps(skb);
++		memset(shhwtstamp, 0, sizeof(struct skb_shared_hwtstamps));
++		stmmac_get_rx_hwtstamp(priv, rx_desc, nx_desc,
++				       &shhwtstamp->hwtstamp);
++
+ 		/* Use HW to strip VLAN header before fallback
+ 		 * to SW.
+ 		 */
+-- 
+2.17.1
+
