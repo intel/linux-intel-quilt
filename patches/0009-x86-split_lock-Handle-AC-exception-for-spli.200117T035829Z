@@ -1,0 +1,84 @@
+From eecee9ebb97331e711740b814672e52347260c20 Mon Sep 17 00:00:00 2001
+From: Fenghua Yu <fenghua.yu@intel.com>
+Date: Thu, 3 May 2018 12:01:45 -0700
+Subject: [PATCH 09/10] x86/split_lock: Handle #AC exception for split lock
+
+Currently Linux does not expect to see an alignment check exception in
+kernel mode (since it does not set CR4.AC). The existing #AC handlers
+will just return from exception to the faulting instruction which will
+trigger another exception.
+
+Add a new handler for #AC exceptions that will force a panic on split
+lock for kernel mode.
+
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+Reviewed-by: Tony Luck <tony.luck@intel.com>
+---
+ arch/x86/include/asm/traps.h |  3 +++
+ arch/x86/kernel/cpu/intel.c  |  2 ++
+ arch/x86/kernel/traps.c      | 22 +++++++++++++++++++++-
+ 3 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/include/asm/traps.h b/arch/x86/include/asm/traps.h
+index b25e633033c3..0fa4eef83057 100644
+--- a/arch/x86/include/asm/traps.h
++++ b/arch/x86/include/asm/traps.h
+@@ -172,4 +172,7 @@ enum x86_pf_error_code {
+ 	X86_PF_INSTR	=		1 << 4,
+ 	X86_PF_PK	=		1 << 5,
+ };
++
++extern bool split_lock_detect_enabled;
++
+ #endif /* _ASM_X86_TRAPS_H */
+diff --git a/arch/x86/kernel/cpu/intel.c b/arch/x86/kernel/cpu/intel.c
+index 2614616fb6d3..bc0c2f288509 100644
+--- a/arch/x86/kernel/cpu/intel.c
++++ b/arch/x86/kernel/cpu/intel.c
+@@ -32,6 +32,8 @@
+ #include <asm/apic.h>
+ #endif
+ 
++bool split_lock_detect_enabled;
++
+ /*
+  * Just in case our CPU detection goes bad, or you have a weird system,
+  * allow a way to override the automatic disabling of MPX.
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index 4bb0f8447112..044033ff4326 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -293,9 +293,29 @@ DO_ERROR(X86_TRAP_OLD_MF, SIGFPE,           0, NULL, "coprocessor segment overru
+ DO_ERROR(X86_TRAP_TS,     SIGSEGV,          0, NULL, "invalid TSS",         invalid_TSS)
+ DO_ERROR(X86_TRAP_NP,     SIGBUS,           0, NULL, "segment not present", segment_not_present)
+ DO_ERROR(X86_TRAP_SS,     SIGBUS,           0, NULL, "stack segment",       stack_segment)
+-DO_ERROR(X86_TRAP_AC,     SIGBUS,  BUS_ADRALN, NULL, "alignment check",     alignment_check)
+ #undef IP
+ 
++dotraplinkage void do_alignment_check(struct pt_regs *regs, long error_code)
++{
++	unsigned int trapnr = X86_TRAP_AC;
++	char str[] = "alignment check";
++	int signr = SIGBUS;
++
++	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
++
++	if (notify_die(DIE_TRAP, str, regs, error_code, trapnr, signr) == NOTIFY_STOP)
++		return;
++
++	if (!user_mode(regs) && split_lock_detect_enabled)
++		panic("Split lock detected\n");
++
++	cond_local_irq_enable(regs);
++
++	/* Handle #AC generated in any other cases. */
++	do_trap(X86_TRAP_AC, SIGBUS, "alignment check", regs,
++		error_code, BUS_ADRALN, NULL);
++}
++
+ #ifdef CONFIG_VMAP_STACK
+ __visible void __noreturn handle_stack_overflow(const char *message,
+ 						struct pt_regs *regs,
+-- 
+2.17.1
+

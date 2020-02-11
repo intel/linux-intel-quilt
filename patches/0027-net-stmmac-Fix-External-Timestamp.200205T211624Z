@@ -1,0 +1,63 @@
+From 5e528220c3ce156ce0516fb8e55070f109aa8c23 Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Thu, 23 Jan 2020 23:27:53 +0800
+Subject: [PATCH 27/31] net: stmmac: Fix External Timestamp
+
+Fix issue where external timestamping event is not being triggered
+after enabling Flexible Pulse-per-second(PPS).
+
+This was due to interrupt from the PPS is not being cleared.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c | 3 +++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c      | 9 +++++++--
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+index 9ce5c1580cf4..7ec43a941299 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+@@ -197,6 +197,7 @@ static void get_ptptime(void __iomem *ptpaddr, u64 *ptp_time)
+ static void tstamp_interrupt(struct stmmac_priv *priv)
+ {
+ 	struct ptp_clock_event event;
++	unsigned long flags;
+ 	u32 num_snapshot;
+ 	u32 tsync_int;
+ 	u64 ptp_time;
+@@ -214,7 +215,9 @@ static void tstamp_interrupt(struct stmmac_priv *priv)
+ 				GMAC_TIMESTAMP_ATSNS_SHIFT;
+ 
+ 		for (i = 0; i < num_snapshot; i++) {
++			spin_lock_irqsave(&priv->ptp_lock, flags);
+ 			get_ptptime(priv->ptpaddr, &ptp_time);
++			spin_unlock_irqrestore(&priv->ptp_lock, flags);
+ 			event.type = PTP_CLOCK_EXTTS;
+ 			event.index = 0;
+ 			event.timestamp = ptp_time;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index ecd8981c95b4..433a171bf264 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -170,10 +170,15 @@ static int stmmac_enable(struct ptp_clock_info *ptp,
+ 			/* Enable External snapshot trigger */
+ 			acr_value |= priv->plat->ext_snapshot_num;
+ 			acr_value |= PTP_ACR_ATSFC;
+-			pr_info("Auxiliary Snapshot %d enable\n",
++
++			/* Clear interrupt from PPS */
++			if (readl(priv->ioaddr + GMAC_INT_STATUS) &
++				  GMAC_INT_TSIE)
++				readl(priv->ioaddr + GMAC_TIMESTAMP_STATUS);
++			pr_info("Auxiliary Snapshot %d enabled\n",
+ 				priv->plat->ext_snapshot_num >> 5);
+ 		} else {
+-			pr_info("Auxiliary Snapshot %d disable\n",
++			pr_info("Auxiliary Snapshot %d disabled\n",
+ 				priv->plat->ext_snapshot_num >> 5);
+ 		}
+ 		writel(acr_value, ptpaddr + PTP_ACR);
+-- 
+2.17.1
+

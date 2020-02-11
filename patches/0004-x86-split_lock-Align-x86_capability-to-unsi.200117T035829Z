@@ -1,0 +1,49 @@
+From 63a9d049d89cc1612c2d7f4b8aa62495d13df044 Mon Sep 17 00:00:00 2001
+From: Fenghua Yu <fenghua.yu@intel.com>
+Date: Thu, 28 Jun 2018 07:49:05 -0700
+Subject: [PATCH 04/10] x86/split_lock: Align x86_capability to unsigned long
+ to avoid split locked access
+
+set_cpu_cap() calls locked BTS and clear_cpu_cap() calls locked BTR to
+operate on bitmap defined in x86_capability.
+
+Locked BTS/BTR accesses a single unsigned long location. In 64-bit mode,
+the location is at:
+base address of x86_capability + (bit offset in x86_capability / 64) * 8
+
+Since base address of x86_capability may not be aligned to unsigned long,
+the single unsigned long location may cross two cache lines and
+accessing the location by locked BTS/BTR introductions will cause
+split lock.
+
+To fix the split lock issue, align x86_capability to size of unsigned long
+so that the location will be always within one cache line.
+
+Changing x86_capability's type to unsigned long may also fix the issue
+because x86_capability will be naturally aligned to size of unsigned long.
+But this needs additional code changes. So choose the simpler solution
+by setting the array's alignment to size of unsigned long.
+
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+---
+ arch/x86/include/asm/processor.h | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 54f5d54280f6..5d247aaae126 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -93,7 +93,9 @@ struct cpuinfo_x86 {
+ 	__u32			extended_cpuid_level;
+ 	/* Maximum supported CPUID level, -1=no CPUID: */
+ 	int			cpuid_level;
+-	__u32			x86_capability[NCAPINTS + NBUGINTS];
++	/* Aligned to size of unsigned long to avoid split lock in atomic ops */
++	__u32			x86_capability[NCAPINTS + NBUGINTS]
++				__aligned(sizeof(unsigned long));
+ 	char			x86_vendor_id[16];
+ 	char			x86_model_id[64];
+ 	/* in KB - valid for CPUS which support this call: */
+-- 
+2.17.1
+

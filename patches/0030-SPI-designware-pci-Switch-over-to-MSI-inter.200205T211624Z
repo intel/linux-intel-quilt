@@ -1,0 +1,67 @@
+From ce06e9f9988b20ced1719761a29c1ab0a8096b16 Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Tue, 1 Oct 2019 11:14:05 +0300
+Subject: [PATCH 30/31] SPI: designware: pci: Switch over to MSI interrupts
+
+Some devices support MSI interrupts. Let's at least try to use them in
+platforms that provide MSI capability.
+
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Link: https://lore.kernel.org/r/20191001081405.764161-1-felipe.balbi@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ drivers/spi/spi-dw-pci.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/spi/spi-dw-pci.c b/drivers/spi/spi-dw-pci.c
+index 263d33b0a67c..12c131b5fb4e 100644
+--- a/drivers/spi/spi-dw-pci.c
++++ b/drivers/spi/spi-dw-pci.c
+@@ -58,13 +58,18 @@ static int spi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 
+ 	/* Get basic io resource and map it */
+ 	dws->paddr = pci_resource_start(pdev, pci_bar);
++	pci_set_master(pdev);
+ 
+ 	ret = pcim_iomap_regions(pdev, 1 << pci_bar, pci_name(pdev));
+ 	if (ret)
+ 		return ret;
+ 
++	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
++	if (ret < 0)
++		return ret;
++
+ 	dws->regs = pcim_iomap_table(pdev)[pci_bar];
+-	dws->irq = pdev->irq;
++	dws->irq = pci_irq_vector(pdev, 0);
+ 
+ 	/*
+ 	 * Specific handling for platforms, like dma setup,
+@@ -81,12 +86,15 @@ static int spi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 				return ret;
+ 		}
+ 	} else {
++		pci_free_irq_vectors(pdev);
+ 		return -ENODEV;
+ 	}
+ 
+ 	ret = dw_spi_add_host(&pdev->dev, dws);
+-	if (ret)
++	if (ret) {
++		pci_free_irq_vectors(pdev);
+ 		return ret;
++	}
+ 
+ 	/* PCI hook and SPI hook use the same drv data */
+ 	pci_set_drvdata(pdev, dws);
+@@ -110,6 +118,7 @@ static void spi_pci_remove(struct pci_dev *pdev)
+ 	pm_runtime_get_noresume(&pdev->dev);
+ 
+ 	dw_spi_remove_host(dws);
++	pci_free_irq_vectors(pdev);
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+-- 
+2.17.1
+
