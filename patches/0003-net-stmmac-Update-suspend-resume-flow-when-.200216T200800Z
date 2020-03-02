@@ -1,0 +1,141 @@
+From d0d351c46adc5cbecd31f8402517a1784437add3 Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Thu, 13 Feb 2020 15:10:46 +0800
+Subject: [PATCH 3/3] net: stmmac: Update suspend/resume flow when Network
+ Proxy is enabled
+
+Update the content of stmmac_suspend_main(), stmmac_suspend_common(),
+stmmac_resume_main(), and stmmac_resume_common(), so that they are
+aligned with stmmac_suspend() and stmmac_resume():
+
+1. Add PHY converter handling
+2. Avoid phy_stop_link() and phy_start_link() if WOL is enabled
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 63 ++++++++++++++++---
+ 1 file changed, 55 insertions(+), 8 deletions(-)
+
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -6596,12 +6596,24 @@
+  */
+ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ {
++	int ret;
++
+ 	mutex_lock(&priv->lock);
+ 
+ 	netif_device_detach(ndev);
+ 
+ 	stmmac_disable_all_queues(priv);
+ 
++	/* Remove phy converter */
++	if (priv->plat->remove_phy_conv) {
++		ret = priv->plat->remove_phy_conv(priv->mii);
++		if (ret < 0) {
++			netdev_err(priv->dev,
++				   "%s: ERROR: remove phy conv (error: %d)\n",
++				   __func__, ret);
++		}
++	}
++
+ 	/* Stop TX/RX DMA */
+ 	stmmac_stop_all_dma(priv);
+ 	stmmac_stop_mac_tx(priv, priv->ioaddr);
+@@ -6624,7 +6636,7 @@
+ 	if (!ndev || !netif_running(ndev))
+ 		return 0;
+ 
+-	phylink_stop(priv->phylink);
++	phylink_mac_change(priv->phylink, false);
+ 
+ 	stmmac_suspend_common(priv, ndev);
+ 
+@@ -6640,11 +6652,19 @@
+ 		stmmac_pmt(priv, priv->hw, priv->wolopts);
+ 		priv->irq_wake = 1;
+ 	} else {
++		mutex_unlock(&priv->lock);
++		rtnl_lock();
++		phylink_stop(priv->phylink);
++		rtnl_unlock();
++		mutex_lock(&priv->lock);
++
+ 		stmmac_mac_set(priv, priv->ioaddr, false);
+ 		pinctrl_pm_select_sleep_state(priv->device);
+ 		/* Disable clock in case of PWM is off */
+-		clk_disable(priv->plat->pclk);
+-		clk_disable(priv->plat->stmmac_clk);
++		if (priv->plat->clk_ptp_ref)
++			clk_disable_unprepare(priv->plat->clk_ptp_ref);
++		clk_disable_unprepare(priv->plat->pclk);
++		clk_disable_unprepare(priv->plat->stmmac_clk);
+ 	}
+ 
+ 	if (stmmac_has_tsn_feat(priv, priv->hw, ndev, TSN_FEAT_ID_FPE)) {
+@@ -6814,6 +6834,8 @@
+  */
+ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev)
+ {
++	int ret;
++
+ 	if (!netif_running(ndev))
+ 		return 0;
+ 
+@@ -6831,8 +6853,10 @@
+ 	} else {
+ 		pinctrl_pm_select_default_state(priv->device);
+ 		/* enable the clk previously disabled */
+-		clk_enable(priv->plat->stmmac_clk);
+-		clk_enable(priv->plat->pclk);
++		clk_prepare_enable(priv->plat->stmmac_clk);
++		clk_prepare_enable(priv->plat->pclk);
++		if (priv->plat->clk_ptp_ref)
++			clk_prepare_enable(priv->plat->clk_ptp_ref);
+ 		/* reset the phy so that it's ready */
+ 		if (priv->mii)
+ 			stmmac_mdio_reset(priv->mii);
+@@ -6842,7 +6866,26 @@
+ 
+ 	stmmac_resume_common(priv, ndev);
+ 
+-	phylink_start(priv->phylink);
++	if (!device_may_wakeup(priv->device)) {
++		rtnl_lock();
++		phylink_start(priv->phylink);
++		rtnl_unlock();
++	}
++
++	phylink_mac_change(priv->phylink, true);
++
++	/* Start phy converter after MDIO bus IRQ handling is up */
++	if (priv->plat->setup_phy_conv) {
++		ret = priv->plat->setup_phy_conv(priv->mii, priv->phy_conv_irq,
++						 priv->plat->phy_addr,
++						 priv->plat->speed_2500_en);
++
++		if (ret < 0) {
++			netdev_err(priv->dev,
++				   "%s: ERROR: setup phy conv (error: %d)\n",
++				   __func__, ret);
++		}
++	}
+ 
+ 	return 0;
+ }
+@@ -6902,10 +6945,12 @@
+ {
+ 	struct net_device *ndev = dev_get_drvdata(dev);
+ 	struct stmmac_priv *priv = netdev_priv(ndev);
+-	int ret;
++
+ #ifdef CONFIG_STMMAC_NETWORK_PROXY
+ 	stmmac_pm_resume(priv, priv, ndev);
+ #else
++	int ret;
++
+ 	if (!netif_running(ndev))
+ 		return 0;
+ 
