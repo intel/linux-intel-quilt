@@ -1,0 +1,48 @@
+From e8ee214fff984917cf67f098fb2d51e8b0af224f Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Tue, 18 Feb 2020 14:11:43 +0800
+Subject: [PATCH 36/44] REVERTME: x86/tsc: WA for incorrect ART-TSC conversion
+
+On TGL A2, the kernel API convert_art_to_tsc() will return a TSC value
+that is half of TSC value returned from CPU instruction rdtsc. This
+will cause crosstimestamping software stacks to fail.
+
+This patch adjust the incorrect value specifically for TGL A2 CPU.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+---
+ arch/x86/kernel/tsc.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index 65609fbf46b1..9400a8ea61db 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -1218,6 +1218,7 @@ int unsynchronized_tsc(void)
+ static struct system_counterval_t _convert_art_to_tsc(u64 art, bool dur)
+ {
+ 	u64 tmp, res, rem;
++	unsigned int eax_denominator, ebx_numerator, ecx_hz, edx;
+ 
+ 	rem = do_div(art, art_to_tsc_denominator);
+ 
+@@ -1228,6 +1229,16 @@ static struct system_counterval_t _convert_art_to_tsc(u64 art, bool dur)
+ 	if (!dur)
+ 		res += tmp + art_to_tsc_offset;
+ 
++	/* TigerLake MCP A2 has a ART value of 0.5x of actual ART.
++	 * As it has same CPU family and model as the rest of the TigerLake
++	 * CPU skus, we can only differentiate them using numerator value in
++	 * CPUID Leaf 15H.
++	 */
++	cpuid(0x15, &eax_denominator, &ebx_numerator, &ecx_hz, &edx);
++	if (boot_cpu_data.x86_model == INTEL_FAM6_TIGERLAKE_L &&
++	    ebx_numerator == 0x5e)
++		res *= 2;
++
+ 	return (struct system_counterval_t) {.cs = art_related_clocksource,
+ 			.cycles = res};
+ }
+-- 
+2.17.1
+
