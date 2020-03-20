@@ -1,7 +1,7 @@
-From abcd83ff05b77fda7b5764a0a35080328e6e20af Mon Sep 17 00:00:00 2001
+From ce1658d57fdef4b164dad731df495bd87a7ae339 Mon Sep 17 00:00:00 2001
 From: Heikki Krogerus <heikki.krogerus@linux.intel.com>
-Date: Thu, 26 Sep 2019 12:38:25 +0300
-Subject: [PATCH 12/18] usb: typec: ucsi: Simplified registration and I/O API
+Date: Mon, 4 Nov 2019 17:24:28 +0300
+Subject: [PATCH 13/44] usb: typec: ucsi: Simplified registration and I/O API
 
 Adding more simplified API for interface registration and
 read and write operations.
@@ -30,16 +30,20 @@ The old API is kept until all drivers have been converted to
 the new API.
 
 Signed-off-by: Heikki Krogerus <heikki.krogerus@linux.intel.com>
+Tested-by: Ajay Gupta <ajayg@nvidia.com>
+Reviewed-by: Guenter Roeck <linux@roeck-us.net>
+Link: https://lore.kernel.org/r/20191104142435.29960-12-heikki.krogerus@linux.intel.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 ---
- drivers/usb/typec/ucsi/ucsi.c | 326 +++++++++++++++++++++++++++++++---
- drivers/usb/typec/ucsi/ucsi.h |  57 ++++++
- 2 files changed, 354 insertions(+), 29 deletions(-)
+ drivers/usb/typec/ucsi/ucsi.c | 330 +++++++++++++++++++++++++++++++---
+ drivers/usb/typec/ucsi/ucsi.h |  58 ++++++
+ 2 files changed, 359 insertions(+), 29 deletions(-)
 
 diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
-index edd722fb88b8..2ba890327b9d 100644
+index edd722fb88b8..dffc2cf8db6f 100644
 --- a/drivers/usb/typec/ucsi/ucsi.c
 +++ b/drivers/usb/typec/ucsi/ucsi.c
-@@ -98,6 +98,98 @@ static int ucsi_ack(struct ucsi *ucsi, u8 ack)
+@@ -98,6 +98,101 @@ static int ucsi_ack(struct ucsi *ucsi, u8 ack)
  	return ret;
  }
  
@@ -129,8 +133,11 @@ index edd722fb88b8..2ba890327b9d 100644
 +	if (cci & UCSI_CCI_NOT_SUPPORTED)
 +		return -EOPNOTSUPP;
 +
-+	if (cci & UCSI_CCI_ERROR)
++	if (cci & UCSI_CCI_ERROR) {
++		if (cmd == UCSI_GET_ERROR_STATUS)
++			return -EIO;
 +		return ucsi_read_error(ucsi);
++	}
 +
 +	return UCSI_CCI_LENGTH(cci);
 +}
@@ -138,7 +145,7 @@ index edd722fb88b8..2ba890327b9d 100644
  static int ucsi_run_command(struct ucsi *ucsi, struct ucsi_control *ctrl,
  			    void *data, size_t size)
  {
-@@ -106,6 +198,26 @@ static int ucsi_run_command(struct ucsi *ucsi, struct ucsi_control *ctrl,
+@@ -106,6 +201,26 @@ static int ucsi_run_command(struct ucsi *ucsi, struct ucsi_control *ctrl,
  	u16 error;
  	int ret;
  
@@ -165,7 +172,7 @@ index edd722fb88b8..2ba890327b9d 100644
  	ret = ucsi_command(ucsi, ctrl);
  	if (ret)
  		goto err;
-@@ -518,7 +630,7 @@ static void ucsi_partner_change(struct ucsi_connector *con)
+@@ -518,7 +633,7 @@ static void ucsi_partner_change(struct ucsi_connector *con)
  		ucsi_altmode_update_active(con);
  }
  
@@ -174,7 +181,7 @@ index edd722fb88b8..2ba890327b9d 100644
  {
  	struct ucsi_connector *con = container_of(work, struct ucsi_connector,
  						  work);
-@@ -580,7 +692,10 @@ static void ucsi_connector_change(struct work_struct *work)
+@@ -580,7 +695,10 @@ static void ucsi_connector_change(struct work_struct *work)
  	if (con->status.change & UCSI_CONSTAT_PARTNER_CHANGE)
  		ucsi_partner_change(con);
  
@@ -186,7 +193,7 @@ index edd722fb88b8..2ba890327b9d 100644
  	if (ret)
  		dev_err(ucsi->dev, "%s: ACK failed (%d)", __func__, ret);
  
-@@ -591,6 +706,20 @@ static void ucsi_connector_change(struct work_struct *work)
+@@ -591,6 +709,20 @@ static void ucsi_connector_change(struct work_struct *work)
  	mutex_unlock(&con->lock);
  }
  
@@ -207,7 +214,7 @@ index edd722fb88b8..2ba890327b9d 100644
  /**
   * ucsi_notify - PPM notification handler
   * @ucsi: Source UCSI Interface for the notifications
-@@ -647,6 +776,39 @@ static int ucsi_reset_ppm(struct ucsi *ucsi)
+@@ -647,6 +779,40 @@ static int ucsi_reset_ppm(struct ucsi *ucsi)
  	unsigned long tmo;
  	int ret;
  
@@ -230,6 +237,7 @@ index edd722fb88b8..2ba890327b9d 100644
 +			if (ret)
 +				return ret;
 +
++			/* If the PPM is still doing something else, reset it again. */
 +			if (cci & ~UCSI_CCI_RESET_COMPLETE) {
 +				ret = ucsi->ops->async_write(ucsi, UCSI_CONTROL,
 +							     &command,
@@ -247,7 +255,7 @@ index edd722fb88b8..2ba890327b9d 100644
  	ctrl.raw_cmd = 0;
  	ctrl.cmd.cmd = UCSI_PPM_RESET;
  	trace_ucsi_command(&ctrl);
-@@ -807,7 +969,7 @@ static int ucsi_register_port(struct ucsi *ucsi, int index)
+@@ -807,7 +973,7 @@ static int ucsi_register_port(struct ucsi *ucsi, int index)
  	struct ucsi_control ctrl;
  	int ret;
  
@@ -256,7 +264,7 @@ index edd722fb88b8..2ba890327b9d 100644
  	init_completion(&con->complete);
  	mutex_init(&con->lock);
  	con->num = index + 1;
-@@ -898,9 +1060,14 @@ static int ucsi_register_port(struct ucsi *ucsi, int index)
+@@ -898,9 +1064,14 @@ static int ucsi_register_port(struct ucsi *ucsi, int index)
  	return 0;
  }
  
@@ -273,7 +281,7 @@ index edd722fb88b8..2ba890327b9d 100644
  	struct ucsi_connector *con;
  	struct ucsi_control ctrl;
  	int ret;
-@@ -956,7 +1123,7 @@ static void ucsi_init(struct work_struct *work)
+@@ -956,7 +1127,7 @@ static void ucsi_init(struct work_struct *work)
  
  	mutex_unlock(&ucsi->ppm_lock);
  
@@ -282,7 +290,7 @@ index edd722fb88b8..2ba890327b9d 100644
  
  err_unregister:
  	for (con = ucsi->connector; con->port; con++) {
-@@ -970,49 +1137,106 @@ static void ucsi_init(struct work_struct *work)
+@@ -970,49 +1141,106 @@ static void ucsi_init(struct work_struct *work)
  	ucsi_reset_ppm(ucsi);
  err:
  	mutex_unlock(&ucsi->ppm_lock);
@@ -375,14 +383,14 @@ index edd722fb88b8..2ba890327b9d 100644
 + */
 +int ucsi_register(struct ucsi *ucsi)
 +{
-+	u16 version;
 +	int ret;
 +
-+	ret = ucsi->ops->read(ucsi, UCSI_VERSION, &version, sizeof(version));
++	ret = ucsi->ops->read(ucsi, UCSI_VERSION, &ucsi->version,
++			      sizeof(ucsi->version));
 +	if (ret)
 +		return ret;
 +
-+	if (!version)
++	if (!ucsi->version)
 +		return -ENODEV;
  
 -	/*
@@ -411,7 +419,7 @@ index edd722fb88b8..2ba890327b9d 100644
  {
  	struct ucsi_control ctrl;
  	int i;
-@@ -1035,7 +1259,51 @@ void ucsi_unregister_ppm(struct ucsi *ucsi)
+@@ -1035,7 +1263,51 @@ void ucsi_unregister_ppm(struct ucsi *ucsi)
  	ucsi_reset_ppm(ucsi);
  
  	kfree(ucsi->connector);
@@ -465,7 +473,7 @@ index edd722fb88b8..2ba890327b9d 100644
  EXPORT_SYMBOL_GPL(ucsi_unregister_ppm);
  
 diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
-index de87d0b8319d..3e9a4ba912e9 100644
+index de87d0b8319d..d8a8e8f2f912 100644
 --- a/drivers/usb/typec/ucsi/ucsi.h
 +++ b/drivers/usb/typec/ucsi/ucsi.h
 @@ -10,6 +10,56 @@
@@ -536,8 +544,11 @@ index de87d0b8319d..3e9a4ba912e9 100644
  /* Bits for SET_NOTIFICATION_ENABLE command */
  #define UCSI_ENABLE_NTFY_CMD_COMPLETE		BIT(0)
  #define UCSI_ENABLE_NTFY_EXT_PWR_SRC_CHANGE	BIT(1)
-@@ -385,6 +439,9 @@ enum ucsi_status {
+@@ -383,8 +437,12 @@ enum ucsi_status {
+ };
+ 
  struct ucsi {
++	u16 version;
  	struct device *dev;
  	struct ucsi_ppm *ppm;
 +	struct driver_data *driver_data;

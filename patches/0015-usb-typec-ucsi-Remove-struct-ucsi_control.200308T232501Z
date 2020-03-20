@@ -1,7 +1,7 @@
-From 96ae36714c96a5939d66c454e4b97296a9f4ea36 Mon Sep 17 00:00:00 2001
+From d0c8dec69b2b304aa4ea4b7018ae5d4e8a5c2a46 Mon Sep 17 00:00:00 2001
 From: Heikki Krogerus <heikki.krogerus@linux.intel.com>
-Date: Thu, 26 Sep 2019 12:38:25 +0300
-Subject: [PATCH 16/18] usb: typec: ucsi: Remove struct ucsi_control
+Date: Mon, 4 Nov 2019 17:24:32 +0300
+Subject: [PATCH 15/44] usb: typec: ucsi: Remove struct ucsi_control
 
 That data structure was used for constructing the commands
 before executing them, but it was never really useful. Using
@@ -14,16 +14,20 @@ easier to for example add support for big endian systems
 later on.
 
 Signed-off-by: Heikki Krogerus <heikki.krogerus@linux.intel.com>
+Tested-by: Ajay Gupta <ajayg@nvidia.com>
+Reviewed-by: Guenter Roeck <linux@roeck-us.net>
+Link: https://lore.kernel.org/r/20191104142435.29960-16-heikki.krogerus@linux.intel.com
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 ---
- drivers/usb/typec/ucsi/displayport.c |  18 +--
+ drivers/usb/typec/ucsi/displayport.c |  16 +-
  drivers/usb/typec/ucsi/trace.c       |  11 --
  drivers/usb/typec/ucsi/trace.h       |  50 +-----
- drivers/usb/typec/ucsi/ucsi.c        | 109 +++++++------
+ drivers/usb/typec/ucsi/ucsi.c        | 107 +++++++------
  drivers/usb/typec/ucsi/ucsi.h        | 231 +++++----------------------
- 5 files changed, 117 insertions(+), 302 deletions(-)
+ 5 files changed, 115 insertions(+), 300 deletions(-)
 
 diff --git a/drivers/usb/typec/ucsi/displayport.c b/drivers/usb/typec/ucsi/displayport.c
-index 9f86d4f99363..0f1fa22b1d30 100644
+index 47424935bc81..d4d5189edfb8 100644
 --- a/drivers/usb/typec/ucsi/displayport.c
 +++ b/drivers/usb/typec/ucsi/displayport.c
 @@ -49,7 +49,7 @@ static int ucsi_displayport_enter(struct typec_altmode *alt)
@@ -33,20 +37,18 @@ index 9f86d4f99363..0f1fa22b1d30 100644
 -	struct ucsi_control ctrl;
 +	u64 command;
  	u8 cur = 0;
- 	u16 ver;
  	int ret;
-@@ -65,8 +65,8 @@ static int ucsi_displayport_enter(struct typec_altmode *alt)
- 		return -EOPNOTSUPP;
+ 
+@@ -64,7 +64,7 @@ static int ucsi_displayport_enter(struct typec_altmode *alt)
+ 		goto err_unlock;
  	}
  
 -	UCSI_CMD_GET_CURRENT_CAM(ctrl, dp->con->num);
--	ret = ucsi_send_command(dp->con->ucsi, &ctrl, &cur, sizeof(cur));
 +	command = UCSI_GET_CURRENT_CAM | UCSI_CONNECTOR_NUMBER(dp->con->num);
-+	ret = ucsi_send_command(dp->con->ucsi, command, &cur, sizeof(cur));
+ 	ret = ucsi_send_command(ucsi, command, &cur, sizeof(cur));
  	if (ret < 0) {
- 		ret = ucsi->ops->read(ucsi, UCSI_VERSION, &ver, sizeof(ver));
- 		if (ret)
-@@ -109,7 +109,7 @@ static int ucsi_displayport_enter(struct typec_altmode *alt)
+ 		if (ucsi->version > 0x0100)
+@@ -101,7 +101,7 @@ static int ucsi_displayport_enter(struct typec_altmode *alt)
  static int ucsi_displayport_exit(struct typec_altmode *alt)
  {
  	struct ucsi_dp *dp = typec_altmode_get_drvdata(alt);
@@ -55,7 +57,7 @@ index 9f86d4f99363..0f1fa22b1d30 100644
  	int ret = 0;
  
  	mutex_lock(&dp->con->lock);
-@@ -123,8 +123,8 @@ static int ucsi_displayport_exit(struct typec_altmode *alt)
+@@ -115,8 +115,8 @@ static int ucsi_displayport_exit(struct typec_altmode *alt)
  		goto out_unlock;
  	}
  
@@ -66,7 +68,7 @@ index 9f86d4f99363..0f1fa22b1d30 100644
  	if (ret < 0)
  		goto out_unlock;
  
-@@ -178,14 +178,14 @@ static int ucsi_displayport_status_update(struct ucsi_dp *dp)
+@@ -170,14 +170,14 @@ static int ucsi_displayport_status_update(struct ucsi_dp *dp)
  static int ucsi_displayport_configure(struct ucsi_dp *dp)
  {
  	u32 pins = DP_CONF_GET_PIN_ASSIGN(dp->data.conf);
@@ -187,10 +189,10 @@ index 6e3d510b236e..2262229dae8e 100644
  
  DECLARE_EVENT_CLASS(ucsi_log_connector_status,
 diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
-index ea149a115834..19892511120b 100644
+index 6462dadd7540..373dd575c68d 100644
 --- a/drivers/usb/typec/ucsi/ucsi.c
 +++ b/drivers/usb/typec/ucsi/ucsi.c
-@@ -128,13 +128,13 @@ static int ucsi_exec_command(struct ucsi *ucsi, u64 cmd)
+@@ -131,13 +131,13 @@ static int ucsi_exec_command(struct ucsi *ucsi, u64 cmd)
  	return UCSI_CCI_LENGTH(cci);
  }
  
@@ -206,7 +208,7 @@ index ea149a115834..19892511120b 100644
  	if (ret < 0)
  		return ret;
  
-@@ -153,13 +153,13 @@ static int ucsi_run_command(struct ucsi *ucsi, struct ucsi_control *ctrl,
+@@ -156,13 +156,13 @@ static int ucsi_run_command(struct ucsi *ucsi, struct ucsi_control *ctrl,
  	return length;
  }
  
@@ -222,7 +224,7 @@ index ea149a115834..19892511120b 100644
  	mutex_unlock(&ucsi->ppm_lock);
  
  	return ret;
-@@ -168,11 +168,12 @@ EXPORT_SYMBOL_GPL(ucsi_send_command);
+@@ -171,11 +171,12 @@ EXPORT_SYMBOL_GPL(ucsi_send_command);
  
  int ucsi_resume(struct ucsi *ucsi)
  {
@@ -238,14 +240,7 @@ index ea149a115834..19892511120b 100644
  }
  EXPORT_SYMBOL_GPL(ucsi_resume);
  /* -------------------------------------------------------------------------- */
-@@ -180,14 +181,14 @@ EXPORT_SYMBOL_GPL(ucsi_resume);
- void ucsi_altmode_update_active(struct ucsi_connector *con)
- {
- 	const struct typec_altmode *altmode = NULL;
--	struct ucsi_control ctrl;
-+	u64 command;
- 	u16 version;
- 	int ret;
+@@ -188,8 +189,8 @@ void ucsi_altmode_update_active(struct ucsi_connector *con)
  	u8 cur;
  	int i;
  
@@ -254,8 +249,8 @@ index ea149a115834..19892511120b 100644
 +	command = UCSI_GET_CURRENT_CAM | UCSI_CONNECTOR_NUMBER(con->num);
 +	ret = ucsi_run_command(con->ucsi, command, &cur, sizeof(cur));
  	if (ret < 0) {
- 		ret = con->ucsi->ops->read(con->ucsi, UCSI_VERSION, &version,
- 					   sizeof(version));
+ 		if (con->ucsi->version > 0x0100) {
+ 			dev_err(con->ucsi->dev,
 @@ -307,7 +308,7 @@ static int ucsi_register_altmodes(struct ucsi_connector *con, u8 recipient)
  	int max_altmodes = UCSI_MAX_ALTMODES;
  	struct typec_altmode_desc desc;
@@ -490,7 +485,7 @@ index ea149a115834..19892511120b 100644
  	for (i = 0; i < ucsi->cap.num_connectors; i++) {
  		cancel_work_sync(&ucsi->connector[i].work);
 diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
-index bb1df6cb241b..755c8936bff4 100644
+index 29f9e7f0d212..4f1409e06d22 100644
 --- a/drivers/usb/typec/ucsi/ucsi.h
 +++ b/drivers/usb/typec/ucsi/ucsi.h
 @@ -60,178 +60,6 @@ void ucsi_connector_change(struct ucsi *ucsi, u8 num);
@@ -679,7 +674,7 @@ index bb1df6cb241b..755c8936bff4 100644
 -/* ACK_CC_CI commands */
 -#define UCSI_ACK_EVENT			1
 -#define UCSI_ACK_CMD			2
-+#define UCSI_CONNECTOR_NUMBER(_num_)		((_num_) << 16)
++#define UCSI_CONNECTOR_NUMBER(_num_)		((u64)(_num_) << 16)
 +
 +/* CONNECTOR_RESET command bits */
 +#define UCSI_CONNECTOR_RESET_HARD		BIT(23) /* Deprecated in v1.1 */
@@ -740,7 +735,7 @@ index bb1df6cb241b..755c8936bff4 100644
  
  /* Error information returned by PPM in response to GET_ERROR_STATUS command. */
  #define UCSI_ERROR_UNREGONIZED_CMD		BIT(0)
-@@ -442,7 +291,7 @@ struct ucsi_connector {
+@@ -443,7 +292,7 @@ struct ucsi_connector {
  	struct ucsi_connector_capability cap;
  };
  

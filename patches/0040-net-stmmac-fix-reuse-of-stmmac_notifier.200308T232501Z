@@ -1,0 +1,66 @@
+From a409f59e11ef8a77f0880a3ca5a6db2451997142 Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Fri, 21 Feb 2020 15:57:02 +0800
+Subject: [PATCH 40/44] net: stmmac: fix reuse of stmmac_notifier
+
+The register_netdevice_notifier() will not be able to reuse the
+stmmac_notifier. When multiple instance of stmmac driver starts, the
+driver will hit into kernel panic. Hence, declare stmmac_notifier in
+stmmac_priv so that a new stmmac_notifier struct is declare per instance.
+
+Fixes: f4691c14d449 ("stmmac: debugfs entry name is not be changed when udev rename device name.")
+
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h      | 1 +
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 9 +++------
+ 2 files changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 5e16e4cf77da..02d7c88c3e61 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -272,6 +272,7 @@ struct stmmac_priv {
+ 
+ #ifdef CONFIG_DEBUG_FS
+ 	struct dentry *dbgfs_dir;
++	struct notifier_block stmmac_notifier;
+ #endif
+ 
+ 	unsigned long state;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index ca9ab863a97b..6c999af44138 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5911,10 +5911,6 @@ static int stmmac_device_event(struct notifier_block *unused,
+ 	return NOTIFY_DONE;
+ }
+ 
+-static struct notifier_block stmmac_notifier = {
+-	.notifier_call = stmmac_device_event,
+-};
+-
+ static void stmmac_init_fs(struct net_device *dev)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+@@ -5930,14 +5926,15 @@ static void stmmac_init_fs(struct net_device *dev)
+ 	debugfs_create_file("dma_cap", 0444, priv->dbgfs_dir, dev,
+ 			    &stmmac_dma_cap_fops);
+ 
+-	register_netdevice_notifier(&stmmac_notifier);
++	priv->stmmac_notifier.notifier_call = &stmmac_device_event;
++	register_netdevice_notifier(&priv->stmmac_notifier);
+ }
+ 
+ static void stmmac_exit_fs(struct net_device *dev)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+ 
+-	unregister_netdevice_notifier(&stmmac_notifier);
++	unregister_netdevice_notifier(&priv->stmmac_notifier);
+ 	debugfs_remove_recursive(priv->dbgfs_dir);
+ }
+ #endif /* CONFIG_DEBUG_FS */
+-- 
+2.17.1
+
