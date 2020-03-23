@@ -1,0 +1,78 @@
+From 94f9e57d466e3fcc9a306f8a360caaa28ad85228 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 23 Oct 2017 22:32:36 +0100
+Subject: [PATCH 2362/2367] UPSTREAM: drm/i915: Filter out spurious execlists
+ context-switch interrupts
+
+Back in commit a4b2b01523a8 ("drm/i915: Don't mark an execlists
+context-switch when idle") we noticed the presence of late
+context-switch interrupts. We were able to filter those out by looking
+at whether the ELSP remained active, but in commit beecec901790
+("drm/i915/execlists: Preemption!") that became problematic as we now
+anticipate receiving a context-switch event for preemption while ELSP
+may be empty. To restore the spurious interrupt suppression, add a
+counter for the expected number of pending context-switches and skip if
+we do not need to handle this interrupt to make forward progress.
+
+v2: Don't forget to switch on for preempt.
+v3: Reduce the counter to a on/off boolean tracker. Declare the HW as
+active when we first submit, and idle after the final completion event
+(with which we confirm the HW says it is idle), and track each source
+of activity separately. With a finite number of sources, it should aide
+us in debugging which gets stuck.
+
+Fixes: beecec901790 ("drm/i915/execlists: Preemption!")
+
+Hand-edit additions.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Michal Winiarski <michal.winiarski@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Arkadiusz Hiler <arkadiusz.hiler@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20171023213237.26536-3-chris@chris-wilson.co.uk
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+(cherry picked from commit 4a118ecbe99c93cf9f9582e83a88d03f18d6cb84)
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+(cherry picked from commit 2ecd83ab51d636877a7e7abfc1fddaf390919562)
+Signed-off-by: Asif Haswarey <asif.haswarey@intel.com>
+---
+ drivers/gpu/drm/i915/intel_ringbuffer.h | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/intel_ringbuffer.h b/drivers/gpu/drm/i915/intel_ringbuffer.h
+index 568779b..62f9472 100644
+--- a/drivers/gpu/drm/i915/intel_ringbuffer.h
++++ b/drivers/gpu/drm/i915/intel_ringbuffer.h
+@@ -546,6 +546,27 @@ struct intel_engine_cs {
+ 	u32 (*get_cmd_length_mask)(u32 cmd_header);
+ };
+ 
++static inline void
++execlists_set_active(struct intel_engine_execlists *execlists,
++		     unsigned int bit)
++{
++	__set_bit(bit, (unsigned long *)&execlists->active);
++}
++
++static inline void
++execlists_clear_active(struct intel_engine_execlists *execlists,
++		       unsigned int bit)
++{
++	__clear_bit(bit, (unsigned long *)&execlists->active);
++}
++
++static inline bool
++execlists_is_active(const struct intel_engine_execlists *execlists,
++		    unsigned int bit)
++{
++	return test_bit(bit, (unsigned long *)&execlists->active);
++}
++
+ static inline unsigned int
+ execlists_num_ports(const struct intel_engine_execlists * const execlists)
+ {
+-- 
+2.7.4
+

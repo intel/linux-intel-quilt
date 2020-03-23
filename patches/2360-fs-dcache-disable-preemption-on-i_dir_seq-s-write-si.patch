@@ -1,0 +1,72 @@
+From f08aba15bfb033120deadac0b1a22f378b4377a2 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Fri, 20 Oct 2017 11:29:53 +0200
+Subject: [PATCH 2360/2367] fs/dcache: disable preemption on i_dir_seq's write
+ side
+
+i_dir_seq is an opencoded seqcounter. Based on the code it looks like we
+could have two writers in parallel despite the fact that the d_lock is
+held. The problem is that during the write process on RT the preemption
+is still enabled and if this process is interrupted by a reader with RT
+priority then we lock up.
+To avoid that lock up I am disabling the preemption during the update.
+The rename of i_dir_seq is here to ensure to catch new write sides in
+future.
+
+Cc: stable-rt@vger.kernel.org
+Reported-by: Oleg.Karfich@wago.com
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ fs/libfs.c | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/fs/libfs.c b/fs/libfs.c
+index 4962330..1e70d29 100644
+--- a/fs/libfs.c
++++ b/fs/libfs.c
+@@ -123,10 +123,42 @@ static struct list_head *scan_positives(struct dentry *cursor,
+ 			spin_lock(&dentry->d_lock);
+ 		}
+ 	}
++<<<<<<< HEAD
+ 	spin_unlock(&dentry->d_lock);
+ 	dput(*res);
+ 	*res = found;
+ 	return p;
++=======
++	rcu_read_unlock();
++	if (skipped) {
++		smp_rmb();
++		if (unlikely(*seq != n))
++			goto retry;
++	}
++	return res;
++}
++
++static void move_cursor(struct dentry *cursor, struct list_head *after)
++{
++	struct dentry *parent = cursor->d_parent;
++	unsigned n, *seq = &parent->d_inode->__i_dir_seq;
++	spin_lock(&parent->d_lock);
++	preempt_disable_rt();
++	for (;;) {
++		n = *seq;
++		if (!(n & 1) && cmpxchg(seq, n, n + 1) == n)
++			break;
++		cpu_relax();
++	}
++	__list_del(cursor->d_child.prev, cursor->d_child.next);
++	if (after)
++		list_add(&cursor->d_child, after);
++	else
++		list_add_tail(&cursor->d_child, &parent->d_subdirs);
++	smp_store_release(seq, n + 2);
++	preempt_enable_rt();
++	spin_unlock(&parent->d_lock);
++>>>>>>> 3d78bd4... fs/dcache: disable preemption on i_dir_seq's write side
+ }
+ 
+ loff_t dcache_dir_lseek(struct file *file, loff_t offset, int whence)
+-- 
+2.7.4
+

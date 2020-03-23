@@ -1,7 +1,7 @@
-From 76c128aecb177dce0398860238922d5fefec0fdb Mon Sep 17 00:00:00 2001
+From d15acc12f41703aa24f68e119b26da3703c6bb85 Mon Sep 17 00:00:00 2001
 From: Anna-Maria Gleixner <anna-maria@linutronix.de>
 Date: Wed, 20 Dec 2017 17:13:17 +0100
-Subject: [PATCH 0042/2345] hrtimer: Implement support for softirq based
+Subject: [PATCH 0042/2367] hrtimer: Implement support for softirq based
  hrtimers
 
 hrtimer callbacks are always invoked in hard interrupt context. Several
@@ -40,7 +40,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  2 files changed, 189 insertions(+), 31 deletions(-)
 
 diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index 26ae8a8..c7902ca 100644
+index b2bb584..89ca675 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
 @@ -103,6 +103,7 @@ enum hrtimer_restart {
@@ -113,7 +113,7 @@ index 26ae8a8..c7902ca 100644
  static inline void hrtimer_start(struct hrtimer *timer, ktime_t tim,
  				 const enum hrtimer_mode mode)
 diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
-index 9a1f2b0..66d7a12 100644
+index 8f68114..4c63780 100644
 --- a/kernel/time/hrtimer.c
 +++ b/kernel/time/hrtimer.c
 @@ -411,7 +411,8 @@ static inline void debug_hrtimer_init(struct hrtimer *timer)
@@ -319,7 +319,7 @@ index 9a1f2b0..66d7a12 100644
  	if (expires >= cpu_base->expires_next)
  		return;
  
-@@ -961,6 +1029,31 @@ static inline ktime_t hrtimer_update_lowres(struct hrtimer *timer, ktime_t tim,
+@@ -964,6 +1032,31 @@ static inline ktime_t hrtimer_update_lowres(struct hrtimer *timer, ktime_t tim,
  	return tim;
  }
  
@@ -351,7 +351,7 @@ index 9a1f2b0..66d7a12 100644
  static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
  				    u64 delta_ns, const enum hrtimer_mode mode,
  				    struct hrtimer_clock_base *base)
-@@ -982,13 +1075,15 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+@@ -985,13 +1078,15 @@ static int __hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
  
  	return enqueue_hrtimer(timer, new_base, mode);
  }
@@ -368,7 +368,7 @@ index 9a1f2b0..66d7a12 100644
   */
  void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
  			    u64 delta_ns, const enum hrtimer_mode mode)
-@@ -996,10 +1091,16 @@ void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
+@@ -999,10 +1094,16 @@ void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
  	struct hrtimer_clock_base *base;
  	unsigned long flags;
  
@@ -386,7 +386,7 @@ index 9a1f2b0..66d7a12 100644
  
  	unlock_hrtimer_base(timer, &flags);
  }
-@@ -1098,7 +1199,7 @@ u64 hrtimer_get_next_event(void)
+@@ -1101,7 +1202,7 @@ u64 hrtimer_get_next_event(void)
  	raw_spin_lock_irqsave(&cpu_base->lock, flags);
  
  	if (!__hrtimer_hres_active(cpu_base))
@@ -395,7 +395,7 @@ index 9a1f2b0..66d7a12 100644
  
  	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
  
-@@ -1308,6 +1409,23 @@ static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
+@@ -1311,6 +1412,23 @@ static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
  	}
  }
  
@@ -419,7 +419,7 @@ index 9a1f2b0..66d7a12 100644
  #ifdef CONFIG_HIGH_RES_TIMERS
  
  /*
-@@ -1338,10 +1456,16 @@ void hrtimer_interrupt(struct clock_event_device *dev)
+@@ -1341,10 +1459,16 @@ void hrtimer_interrupt(struct clock_event_device *dev)
  	 */
  	cpu_base->expires_next = KTIME_MAX;
  
@@ -437,7 +437,7 @@ index 9a1f2b0..66d7a12 100644
  	/*
  	 * Store the new expiry value so the migration code can verify
  	 * against it.
-@@ -1445,6 +1569,13 @@ void hrtimer_run_queues(void)
+@@ -1448,6 +1572,13 @@ void hrtimer_run_queues(void)
  
  	raw_spin_lock_irqsave(&cpu_base->lock, flags);
  	now = hrtimer_update_base(cpu_base);
@@ -451,7 +451,7 @@ index 9a1f2b0..66d7a12 100644
  	__hrtimer_run_queues(cpu_base, now, flags, HRTIMER_ACTIVE_HARD);
  	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
  }
-@@ -1628,7 +1759,9 @@ int hrtimers_prepare_cpu(unsigned int cpu)
+@@ -1631,7 +1762,9 @@ int hrtimers_prepare_cpu(unsigned int cpu)
  	cpu_base->hres_active = 0;
  	cpu_base->hang_detected = 0;
  	cpu_base->next_timer = NULL;
@@ -461,7 +461,7 @@ index 9a1f2b0..66d7a12 100644
  	return 0;
  }
  
-@@ -1672,6 +1805,12 @@ int hrtimers_dead_cpu(unsigned int scpu)
+@@ -1675,6 +1808,12 @@ int hrtimers_dead_cpu(unsigned int scpu)
  	BUG_ON(cpu_online(scpu));
  	tick_cancel_sched_timer(scpu);
  
@@ -474,7 +474,7 @@ index 9a1f2b0..66d7a12 100644
  	local_irq_disable();
  	old_base = &per_cpu(hrtimer_bases, scpu);
  	new_base = this_cpu_ptr(&hrtimer_bases);
-@@ -1687,12 +1826,19 @@ int hrtimers_dead_cpu(unsigned int scpu)
+@@ -1690,12 +1829,19 @@ int hrtimers_dead_cpu(unsigned int scpu)
  				     &new_base->clock_base[i]);
  	}
  
@@ -494,7 +494,7 @@ index 9a1f2b0..66d7a12 100644
  	return 0;
  }
  
-@@ -1701,6 +1847,7 @@ int hrtimers_dead_cpu(unsigned int scpu)
+@@ -1704,6 +1850,7 @@ int hrtimers_dead_cpu(unsigned int scpu)
  void __init hrtimers_init(void)
  {
  	hrtimers_prepare_cpu(smp_processor_id());

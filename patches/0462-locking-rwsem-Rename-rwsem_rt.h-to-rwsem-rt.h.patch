@@ -1,0 +1,181 @@
+From 00bde77616642994e4ddbc627ad083781bf98a59 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Tue, 30 Apr 2019 18:15:19 +0200
+Subject: [PATCH 0462/2367] locking/rwsem: Rename rwsem_rt.h to rwsem-rt.h
+
+[ Upstream commit fc7a6bdcce83ce162c32d991f0ac8e56ea260f5b ]
+
+Rename rwsem_rt.h to rwsem-rt.h to remain consistent with rwsem-rt.c.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Signed-off-by: Tom Zanussi <zanussi@kernel.org>
+---
+ include/linux/rwsem-rt.h | 67 ++++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/rwsem.h    |  2 +-
+ include/linux/rwsem_rt.h | 67 ------------------------------------------------
+ 3 files changed, 68 insertions(+), 68 deletions(-)
+ create mode 100644 include/linux/rwsem-rt.h
+ delete mode 100644 include/linux/rwsem_rt.h
+
+diff --git a/include/linux/rwsem-rt.h b/include/linux/rwsem-rt.h
+new file mode 100644
+index 00000000..2ffbf09
+--- /dev/null
++++ b/include/linux/rwsem-rt.h
+@@ -0,0 +1,67 @@
++#ifndef _LINUX_RWSEM_RT_H
++#define _LINUX_RWSEM_RT_H
++
++#ifndef _LINUX_RWSEM_H
++#error "Include rwsem.h"
++#endif
++
++#include <linux/rtmutex.h>
++#include <linux/swait.h>
++
++#define READER_BIAS		(1U << 31)
++#define WRITER_BIAS		(1U << 30)
++
++struct rw_semaphore {
++	atomic_t		readers;
++	struct rt_mutex		rtmutex;
++#ifdef CONFIG_DEBUG_LOCK_ALLOC
++	struct lockdep_map	dep_map;
++#endif
++};
++
++#define __RWSEM_INITIALIZER(name)				\
++{								\
++	.readers = ATOMIC_INIT(READER_BIAS),			\
++	.rtmutex = __RT_MUTEX_INITIALIZER(name.rtmutex),	\
++	RW_DEP_MAP_INIT(name)					\
++}
++
++#define DECLARE_RWSEM(lockname) \
++	struct rw_semaphore lockname = __RWSEM_INITIALIZER(lockname)
++
++extern void  __rwsem_init(struct rw_semaphore *rwsem, const char *name,
++			  struct lock_class_key *key);
++
++#define __init_rwsem(sem, name, key)			\
++do {							\
++		rt_mutex_init(&(sem)->rtmutex);		\
++		__rwsem_init((sem), (name), (key));	\
++} while (0)
++
++#define init_rwsem(sem)					\
++do {							\
++	static struct lock_class_key __key;		\
++							\
++	__init_rwsem((sem), #sem, &__key);		\
++} while (0)
++
++static inline int rwsem_is_locked(struct rw_semaphore *sem)
++{
++	return atomic_read(&sem->readers) != READER_BIAS;
++}
++
++static inline int rwsem_is_contended(struct rw_semaphore *sem)
++{
++	return atomic_read(&sem->readers) > 0;
++}
++
++extern void __down_read(struct rw_semaphore *sem);
++extern int __down_read_trylock(struct rw_semaphore *sem);
++extern void __down_write(struct rw_semaphore *sem);
++extern int __must_check __down_write_killable(struct rw_semaphore *sem);
++extern int __down_write_trylock(struct rw_semaphore *sem);
++extern void __up_read(struct rw_semaphore *sem);
++extern void __up_write(struct rw_semaphore *sem);
++extern void __downgrade_write(struct rw_semaphore *sem);
++
++#endif
+diff --git a/include/linux/rwsem.h b/include/linux/rwsem.h
+index 513df11..ac0857d 100644
+--- a/include/linux/rwsem.h
++++ b/include/linux/rwsem.h
+@@ -21,7 +21,7 @@
+ #endif
+ 
+ #ifdef CONFIG_PREEMPT_RT_FULL
+-#include <linux/rwsem_rt.h>
++#include <linux/rwsem-rt.h>
+ #else /* PREEMPT_RT_FULL */
+ 
+ struct rw_semaphore;
+diff --git a/include/linux/rwsem_rt.h b/include/linux/rwsem_rt.h
+deleted file mode 100644
+index 2ffbf09..00000000
+--- a/include/linux/rwsem_rt.h
++++ /dev/null
+@@ -1,67 +0,0 @@
+-#ifndef _LINUX_RWSEM_RT_H
+-#define _LINUX_RWSEM_RT_H
+-
+-#ifndef _LINUX_RWSEM_H
+-#error "Include rwsem.h"
+-#endif
+-
+-#include <linux/rtmutex.h>
+-#include <linux/swait.h>
+-
+-#define READER_BIAS		(1U << 31)
+-#define WRITER_BIAS		(1U << 30)
+-
+-struct rw_semaphore {
+-	atomic_t		readers;
+-	struct rt_mutex		rtmutex;
+-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+-	struct lockdep_map	dep_map;
+-#endif
+-};
+-
+-#define __RWSEM_INITIALIZER(name)				\
+-{								\
+-	.readers = ATOMIC_INIT(READER_BIAS),			\
+-	.rtmutex = __RT_MUTEX_INITIALIZER(name.rtmutex),	\
+-	RW_DEP_MAP_INIT(name)					\
+-}
+-
+-#define DECLARE_RWSEM(lockname) \
+-	struct rw_semaphore lockname = __RWSEM_INITIALIZER(lockname)
+-
+-extern void  __rwsem_init(struct rw_semaphore *rwsem, const char *name,
+-			  struct lock_class_key *key);
+-
+-#define __init_rwsem(sem, name, key)			\
+-do {							\
+-		rt_mutex_init(&(sem)->rtmutex);		\
+-		__rwsem_init((sem), (name), (key));	\
+-} while (0)
+-
+-#define init_rwsem(sem)					\
+-do {							\
+-	static struct lock_class_key __key;		\
+-							\
+-	__init_rwsem((sem), #sem, &__key);		\
+-} while (0)
+-
+-static inline int rwsem_is_locked(struct rw_semaphore *sem)
+-{
+-	return atomic_read(&sem->readers) != READER_BIAS;
+-}
+-
+-static inline int rwsem_is_contended(struct rw_semaphore *sem)
+-{
+-	return atomic_read(&sem->readers) > 0;
+-}
+-
+-extern void __down_read(struct rw_semaphore *sem);
+-extern int __down_read_trylock(struct rw_semaphore *sem);
+-extern void __down_write(struct rw_semaphore *sem);
+-extern int __must_check __down_write_killable(struct rw_semaphore *sem);
+-extern int __down_write_trylock(struct rw_semaphore *sem);
+-extern void __up_read(struct rw_semaphore *sem);
+-extern void __up_write(struct rw_semaphore *sem);
+-extern void __downgrade_write(struct rw_semaphore *sem);
+-
+-#endif
+-- 
+2.7.4
+

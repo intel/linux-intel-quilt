@@ -1,0 +1,112 @@
+From e4ebebb7fa0b9ed9bfd0d3ab3c305e04d0737286 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 25 Jul 2018 14:02:38 +0200
+Subject: [PATCH 0446/2367] arm64: fpsimd: use preemp_disable in addition to
+ local_bh_disable()
+
+[ Upstream commit 3afdfe419c33c1655d0763e070350aad44416594 ]
+
+In v4.16-RT I noticed a number of warnings from task_fpsimd_load(). The
+code disables BH and expects that it is not preemptible. On -RT the
+task remains preemptible but remains the same CPU. This may corrupt the
+content of the SIMD registers if the task is preempted during
+saving/restoring those registers.
+
+Add preempt_disable()/enable() to enfore the required semantic on -RT.
+
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+[tom.zanussi@linux.intel.com: ignored sve-related changes]
+Signed-off-by: Tom Zanussi <tom.zanussi@linux.intel.com>
+
+ Conflicts:
+	arch/arm64/kernel/fpsimd.c
+---
+ arch/arm64/kernel/fpsimd.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/arm64/kernel/fpsimd.c b/arch/arm64/kernel/fpsimd.c
+index f4fdf64..2531e48 100644
+--- a/arch/arm64/kernel/fpsimd.c
++++ b/arch/arm64/kernel/fpsimd.c
+@@ -173,6 +173,7 @@ void fpsimd_flush_thread(void)
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	memset(&current->thread.fpsimd_state, 0, sizeof(struct fpsimd_state));
+@@ -180,6 +181,7 @@ void fpsimd_flush_thread(void)
+ 	set_thread_flag(TIF_FOREIGN_FPSTATE);
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -191,12 +193,14 @@ void fpsimd_preserve_current_state(void)
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	if (!test_thread_flag(TIF_FOREIGN_FPSTATE))
+ 		fpsimd_save_state(&current->thread.fpsimd_state);
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -209,6 +213,7 @@ void fpsimd_restore_current_state(void)
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	if (test_and_clear_thread_flag(TIF_FOREIGN_FPSTATE)) {
+@@ -220,6 +225,7 @@ void fpsimd_restore_current_state(void)
+ 	}
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -232,6 +238,7 @@ void fpsimd_update_current_state(struct fpsimd_state *state)
+ 	if (!system_supports_fpsimd())
+ 		return;
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	fpsimd_load_state(state);
+@@ -243,6 +250,7 @@ void fpsimd_update_current_state(struct fpsimd_state *state)
+ 	}
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ 
+ /*
+@@ -282,6 +290,7 @@ void kernel_neon_begin(void)
+ 
+ 	BUG_ON(!may_use_simd());
+ 
++	preempt_disable();
+ 	local_bh_disable();
+ 
+ 	__this_cpu_write(kernel_neon_busy, true);
+@@ -296,6 +305,7 @@ void kernel_neon_begin(void)
+ 	preempt_disable();
+ 
+ 	local_bh_enable();
++	preempt_enable();
+ }
+ EXPORT_SYMBOL(kernel_neon_begin);
+ 
+-- 
+2.7.4
+

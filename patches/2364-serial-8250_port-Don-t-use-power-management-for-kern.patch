@@ -1,0 +1,47 @@
+From 035c7725b1b25ea7d01b95f840be16fdd19e7bd8 Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Thu, 17 Nov 2016 13:12:45 +0200
+Subject: [PATCH 2364/2367] serial: 8250_port: Don't use power management for
+ kernel console
+
+Doing any kind of power management for kernel console is really bad idea.
+
+First of all, it runs in poll and atomic mode. This fact attaches a limitation
+on the functions that might be called. For example, pm_runtime_get_sync() might
+sleep and thus can't be used. On the other hand pm_runtime_get() doesn't
+guarantee that device becames powered on (fast enough). On ACPI enabled
+platforms it might even call firmware for a job.
+
+Besides that, imagine the case when console is about to print a kernel oops and
+it's powered off. In such an emergency case calling the complex functions is
+not the best what we can do, taking into consideration that user wants to see
+at least something of the last kernel word before it passes away.
+
+Here we modify the 8250 console code to prevent runtime power management.
+
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/tty/serial/8250/8250_port.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_port.c b/drivers/tty/serial/8250/8250_port.c
+index 72e1e6af..a0f2623 100644
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -3190,11 +3190,9 @@ void serial8250_console_write(struct uart_8250_port *up, const char *s,
+ 
+ 	touch_nmi_watchdog();
+ 
+-	serial8250_rpm_get(up);
+-
+-	if (port->sysrq || oops_in_progress)
++	if (port->sysrq)
+ 		locked = 0;
+-	else if (in_kdb_printk())
++	else if (oops_in_progress)
+ 		locked = spin_trylock_irqsave(&port->lock, flags);
+ 	else
+ 		spin_lock_irqsave(&port->lock, flags);
+-- 
+2.7.4
+
