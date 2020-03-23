@@ -1,0 +1,63 @@
+From afaa8e0f1c20066acf8bacef1d6eac8a29026f52 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Mon, 1 Jul 2019 02:24:33 +0000
+Subject: [PATCH 1459/1548] drm/i915/gvt: release the handle to avoid panic
+
+When destroying the GVT-g vgpu instance, there could be racing
+condition which may cause kernel panic when vblank_work accessing
+vgpu_priv structure in vgpu.
+This patch is to fix the issue mentioned above.
+Also, this patch removed some trace_printk for debug purpose.
+
+Fixes 'commit cf57d95ddf0a ("Change the priority of
+acrngt_emulation_thread on demand when injecting VBLANK interrupt")'
+
+Change-Id: Idf77c0128bc6b7925c7179e6258f62aacad7f943
+Tracked-On: projectacrn/acrn-hypervisor#3531
+Signed-off-by: Min He <min.he@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/acrngt.c    | 6 +++---
+ drivers/gpu/drm/i915/gvt/interrupt.c | 2 --
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/acrngt.c b/drivers/gpu/drm/i915/gvt/acrngt.c
+index 0215fc23b3e3..7911d63ffa0c 100644
+--- a/drivers/gpu/drm/i915/gvt/acrngt.c
++++ b/drivers/gpu/drm/i915/gvt/acrngt.c
+@@ -98,9 +98,6 @@ static int acrngt_emulation_timer_thread(void *data)
+ 						SCHED_NORMAL, &param);
+ 		}
+ 		clear_bit(ACRNGT_TIMER_ISR, &info->thread_flags);
+-		trace_printk("ACRN thread work is fired. Policy %d, Prio is %d\n",
+-			info->emulation_thread->policy,
+-			task_nice(info->emulation_thread));
+ 	}
+ 
+ 	return 0;
+@@ -136,6 +133,9 @@ void acrngt_instance_destroy(struct intel_vgpu *vgpu)
+ 	if (vgpu) {
+ 		info = (struct acrngt_hvm_dev *)vgpu->handle;
+ 
++		mutex_lock(&gvt->lock);
++		vgpu->vgpu_priv = NULL;
++		mutex_unlock(&gvt->lock);
+ 		if (info && info->emulation_thread != NULL) {
+ 			kthread_stop(info->emulation_thread);
+ 			info->emulation_thread = NULL;
+diff --git a/drivers/gpu/drm/i915/gvt/interrupt.c b/drivers/gpu/drm/i915/gvt/interrupt.c
+index 7bb9be5ae9fd..3b7dbeb20c5e 100644
+--- a/drivers/gpu/drm/i915/gvt/interrupt.c
++++ b/drivers/gpu/drm/i915/gvt/interrupt.c
+@@ -654,8 +654,6 @@ void intel_vgpu_trigger_virtual_event(struct intel_vgpu *vgpu,
+ 			hrtimer_cancel(&vhm_dev->thread_timer);
+ 
+ 		preempt_disable();
+-		trace_printk("ACRN thread timer is started. Policy is %d\n",
+-			vhm_dev->emulation_thread->policy);
+ 		/* 750*1000 ns */
+ 		hrtimer_set_expires(&vhm_dev->thread_timer, 750000);
+ 		hrtimer_start_expires(&vhm_dev->thread_timer, HRTIMER_MODE_REL);
+-- 
+2.20.1
+

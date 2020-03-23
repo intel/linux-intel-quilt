@@ -1,0 +1,134 @@
+From b7a4e121759aeca95a062ad77c29741c1e6ac7a5 Mon Sep 17 00:00:00 2001
+From: Dongwon Kim <dongwon.kim@intel.com>
+Date: Tue, 18 Jun 2019 00:30:45 -0700
+Subject: [PATCH 1446/1548] dma-buf/hyper_dmabuf: delayed_export protected with
+ mutex
+
+delayed_export is protected by mutex. Also, for safer operation,
+it checks if 'exported' still exists before processing "unexporting"
+after mutex is acquired.
+
+Signed-off-by: Dongwon Kim <dongwon.kim@intel.com>
+---
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c | 20 ++++++++++++++++---
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_list.c  | 17 ++++++++++++++--
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_list.h  |  9 ++++++---
+ 3 files changed, 38 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+index 1ede172e1ad7..17b24d27c396 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+@@ -235,8 +235,8 @@ static int hyper_dmabuf_export_remote_ioctl(struct file *filp, void *data)
+ 	 * to the same domain and if yes and it's valid sgt_info,
+ 	 * it returns hyper_dmabuf_id of pre-exported sgt_info
+ 	 */
+-	hid = hyper_dmabuf_find_hid_exported(dma_buf,
+-					     export_remote_attr->remote_domain);
++	hid = hyper_dmabuf_find_hid_dmabuf(dma_buf,
++					   export_remote_attr->remote_domain);
+ 
+ 	if (hid.id != -1) {
+ 		ret = fastpath_export(hid, export_remote_attr->sz_priv,
+@@ -608,6 +608,7 @@ static void delayed_unexport(struct work_struct *work)
+ 	struct hyper_dmabuf_req *req;
+ 	struct hyper_dmabuf_bknd_ops *bknd_ops = hy_drv_priv->bknd_ops;
+ 	struct exported_sgt_info *exported;
++	hyper_dmabuf_id_t hid;
+ 	int op[4];
+ 	int i, ret;
+ 
+@@ -621,13 +622,24 @@ static void delayed_unexport(struct work_struct *work)
+ 		exported->hid.id, exported->hid.rng_key[0],
+ 		exported->hid.rng_key[1], exported->hid.rng_key[2]);
+ 
++	mutex_lock(&hy_drv_priv->lock);
++
++	/* make sure if exported hasn't already been removed */
++	hid = hyper_dmabuf_find_hid_exported(exported);
++	if (hid.id == -1) {
++		mutex_unlock(&hy_drv_priv->lock);
++		return;
++	}
++
+ 	/* no longer valid */
+ 	exported->valid = false;
+ 
+ 	req = kcalloc(1, sizeof(*req), GFP_KERNEL);
+ 
+-	if (!req)
++	if (!req) {
++		mutex_unlock(&hy_drv_priv->lock);
+ 		return;
++	}
+ 
+ 	op[0] = exported->hid.id;
+ 
+@@ -673,6 +685,8 @@ static void delayed_unexport(struct work_struct *work)
+ 
+ 		kfree(exported);
+ 	}
++
++	mutex_unlock(&hy_drv_priv->lock);
+ }
+ 
+ /* Schedule unexport of dmabuf.
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.c
+index 85e07789a58a..aedb6c292a09 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.c
+@@ -197,8 +197,8 @@ struct exported_sgt_info *hyper_dmabuf_find_exported(hyper_dmabuf_id_t hid)
+ }
+ 
+ /* search for pre-exported sgt and return id of it if it exist */
+-hyper_dmabuf_id_t hyper_dmabuf_find_hid_exported(struct dma_buf *dmabuf,
+-						 int domid)
++hyper_dmabuf_id_t hyper_dmabuf_find_hid_dmabuf(struct dma_buf *dmabuf,
++					       int domid)
+ {
+ 	struct list_entry_exported *info_entry;
+ 	hyper_dmabuf_id_t hid = {-1, {0, 0, 0} };
+@@ -226,6 +226,19 @@ hyper_dmabuf_id_t hyper_dmabuf_find_hid_imported(struct imported_sgt_info *impor
+ 	return hid;
+ }
+ 
++hyper_dmabuf_id_t hyper_dmabuf_find_hid_exported(struct exported_sgt_info *exported)
++{
++	struct list_entry_exported *info_entry;
++	hyper_dmabuf_id_t hid = {-1, {0, 0, 0} };
++	int bkt;
++
++	hash_for_each(hyper_dmabuf_hash_exported, bkt, info_entry, node)
++		if (info_entry->exported == exported)
++			return info_entry->exported->hid;
++
++	return hid;
++}
++
+ struct imported_sgt_info *hyper_dmabuf_find_imported(hyper_dmabuf_id_t hid)
+ {
+ 	struct list_entry_imported *info_entry;
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.h b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.h
+index 715bfc1f3ec7..943698f4d526 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.h
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_list.h
+@@ -49,10 +49,13 @@ int hyper_dmabuf_table_destroy(void);
+ int hyper_dmabuf_register_exported(struct exported_sgt_info *info);
+ 
+ /* search for pre-exported sgt and return id of it if it exist */
+-hyper_dmabuf_id_t hyper_dmabuf_find_hid_exported(struct dma_buf *dmabuf,
+-						 int domid);
++hyper_dmabuf_id_t hyper_dmabuf_find_hid_dmabuf(struct dma_buf *dmabuf,
++					       int domid);
+ 
+-hyper_dmabuf_id_t hyper_dmabuf_find_hid_imported(struct imported_sgt_info *imported);
++hyper_dmabuf_id_t hyper_dmabuf_find_hid_exported(
++					struct exported_sgt_info *exported);
++hyper_dmabuf_id_t hyper_dmabuf_find_hid_imported(
++					struct imported_sgt_info *imported);
+ 
+ int hyper_dmabuf_register_imported(struct imported_sgt_info *info);
+ 
+-- 
+2.20.1
+

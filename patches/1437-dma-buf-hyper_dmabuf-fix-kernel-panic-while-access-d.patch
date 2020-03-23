@@ -1,0 +1,191 @@
+From bbf6275775f2e15a50110678409e1a0dd605b3b0 Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Wed, 29 May 2019 22:33:45 +0800
+Subject: [PATCH 1437/1548] dma-buf/hyper_dmabuf: fix kernel panic while access
+ dma_buf
+
+dma_buf get/put in ops_release/export_fd_ioctl is not protected via lock.
+
+It's possible try to access a dma_buf which is already released. So
+leads to kernel panic:
+
+misc hyper_dmabuf: hyper_dmabuf_ops_release: dma_buf changed!
+
+CPU: 0 PID: 124 Comm: kworker/0:4 Tainted: G  U  W  4.19.23-24.iot-lts2018-sos #16
+Workqueue: events delayed_fput
+RIP: 0010:kfree+0x67/0x130
+Code: da 0f 82 d5 00 00 00 48 c7 c0 00 00 00 80 48 2b 05 e6 22 a5 01 48 01 c2 48 89 de 48 c1 ea 0c 48 c1 e2 06 48 03 15 c1 22 a5 01 <48> 8b 42 08 48 8d 48 ff a8 01 48 0f 45 d1 48 8b 7a 18 48 8b 55 08
+RSP: 0018:ffffa1c7354f7d78 EFLAGS: 00010007
+RAX: 00005e39c0000000 RBX: ffffa1c500000010 RCX: 0000000000000000
+RDX: 03fff539bd000000 RSI: ffffa1c500000010 RDI: ffffffffa9222e36
+RBP: ffffa1c7354f7d90 R08: 0000000000001060 R09: 0000000000000003
+R10: 0000000000000000 R11: 0000000000000001 R12: 0000000000000286
+R13: ffffffffa9787bb8 R14: 0000000000000000 R15: ffffa1c712810bd0
+FS:  0000000000000000(0000) GS:ffffa1c73fc00000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007fafaea81030 CR3: 000000016d05c000 CR4: 00000000003406f0
+Call Trace:
+ virtio_unmap_shared_pages+0xd8/0x130
+ hyper_dmabuf_ops_release+0xb4/0x1d0
+ dma_buf_release+0x5c/0x170
+ __fput+0xc2/0x200
+ delayed_fput+0x20/0x30
+ process_one_work+0x1ae/0x3e0
+ worker_thread+0x43/0x3a0
+ kthread+0x12c/0x150
+ ? wq_sysfs_prep_attrs+0x50/0x50
+ ? kthread_create_worker_on_cpu+0x70/0x70
+ ret_from_fork+0x3a/0x50
+
+Signed-off-by: Liu Xinyun <xinyun.liu@intel.com>
+---
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c | 18 ++++++---
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_ops.c   | 38 ++++++++++++++++---
+ .../dma-buf/hyper_dmabuf/hyper_dmabuf_ops.h   |  2 +
+ 3 files changed, 47 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+index 8fc3a56ffee6..107d28e39e13 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+@@ -439,24 +439,32 @@ static int hyper_dmabuf_export_fd_ioctl(struct file *filp, void *data)
+ 
+ 	dev_dbg(hy_drv_priv->dev, "%s entry\n", __func__);
+ 
++	mutex_lock(&hy_drv_priv->lock);
++
+ 	/* look for dmabuf for the id */
+ 	imported = hyper_dmabuf_find_imported(export_fd_attr->hid);
+ 
+ 	/* can't find sgt from the table */
+ 	if (!imported) {
++		mutex_unlock(&hy_drv_priv->lock);
+ 		dev_err(hy_drv_priv->dev, "can't find the entry\n");
+ 		return -ENOENT;
+ 	}
+ 
+-	mutex_lock(&hy_drv_priv->lock);
++	if (IS_ERR(imported->dma_buf)) {
++		mutex_unlock(&hy_drv_priv->lock);
++		dev_err(hy_drv_priv->dev,
++			"Buffer is invalid {id:%d key:%d}, cannot import\n",
++			imported->hid.id, imported->hid.rng_key[0]);
++		return -EINVAL;
++	}
+ 
+-	if (imported->dma_buf) {
++	if (imported->dma_buf && dmabuf_refcount(imported->dma_buf) > 0) {
+ 		if (imported->valid == false) {
+ 			mutex_unlock(&hy_drv_priv->lock);
+ 			dev_err(hy_drv_priv->dev,
+-				"Buffer is released {id:%d key:%d %d %d}, cannot import\n",
+-				imported->hid.id, imported->hid.rng_key[0],
+-				imported->hid.rng_key[1], imported->hid.rng_key[2]);
++				"Buffer is released {id:%d key:%d}, cannot import\n",
++				imported->hid.id, imported->hid.rng_key[0]);
+ 			return -EINVAL;
+ 		}
+ 		get_dma_buf(imported->dma_buf);
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.c
+index 3864f4b6a856..8426fbeefd76 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.c
+@@ -42,11 +42,11 @@
+ #define WAIT_AFTER_SYNC_REQ 0
+ #define REFS_PER_PAGE (PAGE_SIZE/sizeof(grant_ref_t))
+ 
+-static int dmabuf_refcount(struct dma_buf *dma_buf)
++int dmabuf_refcount(struct dma_buf *dma_buf)
+ {
+-	if ((dma_buf != NULL) && (dma_buf->file != NULL))
++	if (dma_buf->file != NULL)
+ 		return file_count(dma_buf->file);
+-
++	pr_err("dma_buf->file is NULL\n");
+ 	return -EINVAL;
+ }
+ 
+@@ -140,8 +140,11 @@ static struct sg_table *hyper_dmabuf_ops_map(
+ 	/* extract pages from sgt */
+ 	pg_info = hyper_dmabuf_ext_pgs(imported->sgt);
+ 
+-	if (!pg_info)
++	if (!pg_info) {
++		dev_err(hy_drv_priv->dev,
++			"%s: failed to extract pages\n", __func__);
+ 		return NULL;
++	}
+ 
+ 	/* create a new sg_table with extracted pages */
+ 	st = hyper_dmabuf_create_sgt(pg_info->pgs, pg_info->frst_ofst,
+@@ -168,6 +171,9 @@ static struct sg_table *hyper_dmabuf_ops_map(
+ 	kfree(pg_info->pgs);
+ 	kfree(pg_info);
+ 
++	dev_err(hy_drv_priv->dev,
++		"%s: failed to create dma_buf with sgt\n", __func__);
++
+ 	return NULL;
+ }
+ 
+@@ -199,10 +205,22 @@ static void hyper_dmabuf_ops_release(struct dma_buf *dma_buf)
+ 	if (!dma_buf->priv)
+ 		return;
+ 
++	mutex_lock(&hy_drv_priv->lock);
++
+ 	imported = (struct imported_sgt_info *)dma_buf->priv;
+ 
+-	if (!dmabuf_refcount(imported->dma_buf))
+-		imported->dma_buf = NULL;
++	dev_dbg(hy_drv_priv->dev, "%s: {%x,%x} dmabuf:%p ref_c:%d\n", __func__,
++			imported->hid.id, imported->hid.rng_key[0],
++			imported->dma_buf, imported->importers);
++
++	if (dma_buf != imported->dma_buf) {
++		dev_dbg(hy_drv_priv->dev, "%s: dma_buf changed!\n", __func__);
++		mutex_unlock(&hy_drv_priv->lock);
++		return;
++	}
++
++	dev_dbg(hy_drv_priv->dev, "%s: clear imported->dma_buf\n", __func__);
++	imported->dma_buf = NULL;
+ 
+ 	imported->importers--;
+ 
+@@ -220,6 +238,12 @@ static void hyper_dmabuf_ops_release(struct dma_buf *dma_buf)
+ 	finish = imported && !imported->valid &&
+ 		 !imported->importers;
+ 
++
++	dev_dbg(hy_drv_priv->dev, "%s   finished:%d ref_c:%d valid:%c\n",
++			__func__, finish, imported->importers,
++			imported->valid ? 'Y':'N');
++
++
+ 	sync_request(imported->hid, HYPER_DMABUF_OPS_RELEASE);
+ 
+ 	/*
+@@ -232,6 +256,8 @@ static void hyper_dmabuf_ops_release(struct dma_buf *dma_buf)
+ 		kfree(imported->priv);
+ 		kfree(imported);
+ 	}
++
++	mutex_unlock(&hy_drv_priv->lock);
+ }
+ 
+ static int hyper_dmabuf_ops_begin_cpu_access(struct dma_buf *dmabuf,
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.h b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.h
+index c5505a41f0fe..f2b88a818ce9 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.h
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ops.h
+@@ -29,4 +29,6 @@ int hyper_dmabuf_export_fd(struct imported_sgt_info *imported, int flags);
+ 
+ void hyper_dmabuf_export_dma_buf(struct imported_sgt_info *imported);
+ 
++int dmabuf_refcount(struct dma_buf *dma_buf);
++
+ #endif /* __HYPER_DMABUF_IMP_H__ */
+-- 
+2.20.1
+

@@ -1,0 +1,48 @@
+From 3fa33468cae8468fbb4eaaf0c5302217878e3d52 Mon Sep 17 00:00:00 2001
+From: "Furtak, Pawel" <pawel.furtak@intel.com>
+Date: Thu, 21 Mar 2019 14:13:30 -0800
+Subject: [PATCH 1390/1548] ASoC: Intel: Skl: Virt: Do not update locked
+ streams
+
+Calling snd_pcm_period_elapsed on already locked stream may
+lead to blocking of update work and glitch on other active
+streams.
+
+Change-Id: Ic0c438fb28fbb13934cab89a091705fe201848a6
+Tracked-On: OAM-77677
+Signed-off-by: Pawel Furtak <pawel.furtak@intel.com>
+
+Tested-by: gkblditp <gkblditp@intel.com>
+Reviewed-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Tested-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index c41292b8fe2a..20a37d48d061 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -426,6 +426,7 @@ static void vfe_not_handle_rx(struct virtqueue *vq)
+ static void vfe_handle_posn(struct work_struct *work)
+ {
+ 	struct vfe_updated_substream *updated_stream_desc;
++	struct snd_pcm_substream *substream;
+ 	unsigned long irq_flags;
+ 	struct snd_skl_vfe *vfe =
+ 		container_of(work, struct snd_skl_vfe, posn_update_work);
+@@ -436,8 +437,9 @@ static void vfe_handle_posn(struct work_struct *work)
+ 				struct vfe_updated_substream, list);
+ 		list_del(&updated_stream_desc->list);
+ 		spin_unlock_irqrestore(&vfe->updated_streams_lock, irq_flags);
+-
+-		snd_pcm_period_elapsed(updated_stream_desc->substream);
++		substream = updated_stream_desc->substream;
++		if (!mutex_is_locked(&substream->self_group.mutex))
++			snd_pcm_period_elapsed(updated_stream_desc->substream);
+ 		kfree(updated_stream_desc);
+ 	}
+ }
+-- 
+2.20.1
+
