@@ -1,0 +1,91 @@
+From c916c2c72f25d352ce1bebb9cadf7130ff62ad73 Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Thu, 27 Feb 2020 15:29:27 +0800
+Subject: [PATCH 1/9] net: stmmac: Change PSE PTP clock source to PLL_PTP
+
+Changed PSE GbE PTP clock source to use PLL_PTP that has a frequency
+of 200MHz. The reason for to use this clock source is due to GBE_PTP
+clocksource is not available in the S0ix power state.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c |  4 ++--
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c | 13 +++++++++----
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.h |  7 +++++++
+ 3 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 4018f8e18d3e..8a3744dbe46a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -410,7 +410,7 @@ static int ehl_pse0_common_data(struct pci_dev *pdev,
+ 	if (plat->is_hfpga)
+ 		plat->clk_ptp_rate = 20000000;
+ 	else
+-		plat->clk_ptp_rate = 256000000;
++		plat->clk_ptp_rate = 200000000;
+ 
+ 	/* store A2H packets in L2 SRAM, access through BAR0 + 128KB */
+ #ifdef CONFIG_STMMAC_NETWORK_PROXY
+@@ -470,7 +470,7 @@ static int ehl_pse1_common_data(struct pci_dev *pdev,
+ 	if (plat->is_hfpga)
+ 		plat->clk_ptp_rate = 20000000;
+ 	else
+-		plat->clk_ptp_rate = 256000000;
++		plat->clk_ptp_rate = 200000000;
+ 
+ 	/* store A2H packets in L2 SRAM, access through BAR0 + 128KB */
+ #ifdef CONFIG_STMMAC_NETWORK_PROXY
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index d38d58b7ad9a..1b29ba6f5efd 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -338,15 +338,20 @@ void stmmac_ptp_register(struct stmmac_priv *priv)
+ {
+ 	int aux_snapshot_n;
+ 	int i;
+-#ifdef CONFIG_STMMAC_HWTS
++
+ 	void __iomem *ioaddr = priv->hw->pcsr;
+ 	u32 gpio_value;
+ 
+-	/* set 200 Mhz xtal clock for Hammock Harbor */
+ 	gpio_value = readl(ioaddr + GMAC_GPIO_STATUS);
+-	gpio_value &= ~GPO0;
++
++	if (priv->plat->is_pse) {
++		gpio_value &= ~PTP_PSE_CLK_FREQ_MASK;
++		gpio_value |= PTP_PSE_CLK_FREQ_200MHZ;
++	} else {
++		gpio_value &= ~GPO0;
++	}
++
+ 	writel(gpio_value, ioaddr + GMAC_GPIO_STATUS);
+-#endif
+ 
+ 	for (i = 0; i < priv->dma_cap.pps_out_num; i++) {
+ 		if (i >= STMMAC_PPS_MAX)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.h b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.h
+index c3dbb6364778..e2166a0c6864 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.h
+@@ -81,8 +81,15 @@
+ #define	GMAC_GPIO_STATUS	0x20c	/* MAC GPIO Status */
+ #define	GPO0			BIT(16)	/* GPO0 clock type for HH */
+ #define	GPO1			BIT(17)	/* GPO1 high-active signal */
++#define	GPO2			BIT(19)	/* GPO2 clock type for HH */
+ #define	GMAC4_ART_TIME_SHIFT	16	/* ART TIME 16-bits shift */
+ 
++/* Select Frequency for the PSE PTP Clock */
++#define PTP_PSE_CLK_FREQ_MASK		((GPO0) | (GPO2))
++#define PTP_PSE_CLK_FREQ_19_2MHZ	GPO0
++#define PTP_PSE_CLK_FREQ_256MHZ		0x0
++#define PTP_PSE_CLK_FREQ_200MHZ		((GPO0) | (GPO2))
++
+ enum aux_snapshot {
+ 	AUX_SNAPSHOT0 = 0x10,
+ 	AUX_SNAPSHOT1 = 0x20,
+-- 
+2.17.1
+

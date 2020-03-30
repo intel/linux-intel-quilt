@@ -1,0 +1,149 @@
+From ab3a334557b7dc4690e185bb3b855a08b492a8aa Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Mon, 16 Mar 2020 13:34:38 +0800
+Subject: [PATCH 6/9] net: stmmac: Fix incorrect handling of TX/RX interrupts
+
+In the case of multi-MSI interrupt enabled, TX/RX interrupts should be
+handled separately by the sbd_perch_[tx|rx]_intr_o (Transmit/Receive
+Per Channel) interrupt service routines.
+
+Current implementation has TX/RX handling in the sbd_intr_o (Common)
+interrupt service routine, which will cause unexpected behavior when
+there are sbd_perch_[tx|rx]intr_o and sbd_intr_o interrupts asserted at
+the same time. Moving the TX/RX related codes to the correct ISR, and
+also setting the Interrupt Mode to 1 in the DMA_Bus_Mode register, so
+that TX/RX packet transfer will not cause the sbd_intr_o interrupt to
+assert.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/dwmac4_dma.c  |  8 ++++++
+ .../net/ethernet/stmicro/stmmac/dwmac4_dma.h  |  5 ++++
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 28 ++++++++-----------
+ include/linux/stmmac.h                        |  1 +
+ 4 files changed, 26 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+index d44985256e0a..a91aab8fcc26 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+@@ -146,6 +146,14 @@ static void dwmac4_dma_init(void __iomem *ioaddr,
+ #endif
+ 
+ 	writel(value, ioaddr + DMA_SYS_BUS_MODE);
++
++	value = readl(ioaddr + DMA_BUS_MODE);
++
++	if (dma_cfg->multi_msi_en) {
++		value &= ~DMA_BUS_MODE_INTM_MASK;
++		value |= (DMA_BUS_MODE_INTM_MODE1 << DMA_BUS_MODE_INTM_SHIFT);
++	}
++	writel(value, ioaddr + DMA_BUS_MODE);
+ }
+ 
+ static void _dwmac4_dump_dma_regs(void __iomem *ioaddr, u32 channel,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
+index 00e9c185f2e9..340b3d8fda4b 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
+@@ -24,6 +24,11 @@
+ #define DMA_AXI_BUS_MODE		0x00001028
+ 
+ /* DMA Bus Mode bitmap */
++#define DMA_BUS_MODE_INTM_MASK		GENMASK(17, 16)
++#define DMA_BUS_MODE_INTM_SHIFT		16
++#define DMA_BUS_MODE_INTM_MODE0		0x0
++#define DMA_BUS_MODE_INTM_MODE1		0x1
++#define DMA_BUS_MODE_INTM_MODE2		0x2
+ #define DMA_BUS_MODE_SFT_RESET		BIT(0)
+ 
+ /* DMA SYS Bus Mode bitmap */
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 08988b2606b1..fe6620cd5185 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5005,7 +5005,6 @@ static void stmmac_common_interrupt(struct stmmac_priv *priv)
+ 	u32 rx_cnt = priv->plat->rx_queues_to_use;
+ 	u32 tx_cnt = priv->plat->tx_queues_to_use;
+ 	u32 queues_count;
+-	u32 queue;
+ 	bool xmac;
+ 
+ 	xmac = priv->plat->has_gmac4 || priv->plat->has_xgmac;
+@@ -5023,7 +5022,6 @@ static void stmmac_common_interrupt(struct stmmac_priv *priv)
+ 	/* To handle GMAC own interrupts */
+ 	if ((priv->plat->has_gmac) || xmac) {
+ 		int status = stmmac_host_irq_status(priv, priv->hw, &priv->xstats);
+-		int mtl_status;
+ 
+ 		if (unlikely(status)) {
+ 			/* For LPI we need to save the tx status */
+@@ -5033,20 +5031,6 @@ static void stmmac_common_interrupt(struct stmmac_priv *priv)
+ 				priv->tx_path_in_lpi_mode = false;
+ 		}
+ 
+-		for (queue = 0; queue < queues_count; queue++) {
+-			struct stmmac_rx_queue *rx_q = &priv->rx_queue[queue];
+-
+-			mtl_status = stmmac_host_mtl_irq_status(priv, priv->hw,
+-								queue);
+-			if (mtl_status != -EINVAL)
+-				status |= mtl_status;
+-
+-			if (status & CORE_IRQ_MTL_RX_OVERFLOW)
+-				stmmac_set_rx_tail_ptr(priv, priv->ioaddr,
+-						       rx_q->rx_tail_addr,
+-						       queue);
+-		}
+-
+ 		/* PCS link status */
+ 		if (priv->hw->pcs) {
+ 			if (priv->xstats.pcs_link)
+@@ -5186,6 +5170,7 @@ static irqreturn_t stmmac_msi_intr_rx(int irq, void *data)
+ 	struct stmmac_rx_queue *rx_q = (struct stmmac_rx_queue *)data;
+ 	int chan = rx_q->queue_index;
+ 	struct stmmac_priv *priv;
++	int mtl_status;
+ 
+ 	priv = container_of(rx_q, struct stmmac_priv, rx_queue[chan]);
+ 
+@@ -5198,6 +5183,16 @@ static irqreturn_t stmmac_msi_intr_rx(int irq, void *data)
+ 	if (test_bit(STMMAC_DOWN, &priv->state))
+ 		return IRQ_HANDLED;
+ 
++	mtl_status = stmmac_host_mtl_irq_status(priv, priv->hw,
++						chan);
++
++	if (mtl_status & CORE_IRQ_MTL_RX_OVERFLOW) {
++		stmmac_set_rx_tail_ptr(priv, priv->ioaddr,
++				       rx_q->rx_tail_addr,
++				       chan);
++		return IRQ_HANDLED;
++	}
++
+ 	/* Skip napi for XDP ZC queues to reduce latency.
+ 	 * Penalties of not using NAPI should be minimal for XDP's case.
+ 	 * Otherwise, users can increase the Rx interrupt coalesce.
+@@ -6311,6 +6306,7 @@ int stmmac_dvr_probe(struct device *device,
+ 	priv->plat = plat_dat;
+ 	priv->ioaddr = res->addr;
+ 	priv->dev->base_addr = (unsigned long)res->addr;
++	priv->plat->dma_cfg->multi_msi_en = priv->plat->multi_msi_en;
+ 
+ 	priv->dev->irq = res->irq;
+ 	priv->wol_irq = res->wol_irq;
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index 8f0830713839..6391537b6c86 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -93,6 +93,7 @@ struct stmmac_dma_cfg {
+ 	int fixed_burst;
+ 	int mixed_burst;
+ 	bool aal;
++	bool multi_msi_en;
+ };
+ 
+ #define AXI_BLEN	7
+-- 
+2.17.1
+
