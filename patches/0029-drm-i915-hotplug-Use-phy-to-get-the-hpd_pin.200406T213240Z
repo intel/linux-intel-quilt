@@ -1,0 +1,112 @@
+From 785a891cd42459316b8f2bfa1029045f00e8dafb Mon Sep 17 00:00:00 2001
+From: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Date: Wed, 4 Mar 2020 15:42:40 -0800
+Subject: [PATCH 029/100] drm/i915/hotplug: Use phy to get the hpd_pin instead
+ of the port (v5)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On some platforms such as Elkhart Lake, although we may use DDI D
+to drive a connector, we have to use PHY A (Combo Phy PORT A) to
+detect the hotplug interrupts as per the spec because there is no
+one-to-one mapping between DDIs and PHYs. Therefore, use the
+function intel_port_to_phy() which contains the logic for such
+mapping(s) to find the correct hpd_pin.
+
+This change should not affect other platforms as there is always
+a one-to-one mapping between DDIs and PHYs.
+
+v2:
+- Convert the case statements to use PHYs instead of PORTs (Jani)
+
+v3:
+- Refactor the function to reduce the number of return statements by
+  lumping all the case statements together except PHY_F which needs
+  special handling (Jose)
+
+v4:
+- Add a comment describing how the HPD pin value associated with any
+  port can be retrieved using port or phy enum value. (Jani)
+
+v5:
+- Use case ranges instead of individual labels and also normalize the
+  return statement by adding -PHY_A to the expression (Ville)
+
+Cc: Jani Nikula <jani.nikula@intel.com>
+Cc: Matt Roper <matthew.d.roper@intel.com>
+Cc: José Roberto de Souza <jose.souza@intel.com>
+Cc: Ville Syrjala <ville.syrjala@linux.intel.com>
+Signed-off-by: Vivek Kasireddy <vivek.kasireddy@intel.com>
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+Signed-off-by: José Roberto de Souza <jose.souza@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200304234240.12062-1-vivek.kasireddy@intel.com
+---
+ drivers/gpu/drm/i915/display/intel_hotplug.c | 31 ++++++--------------
+ drivers/gpu/drm/i915/i915_drv.h              |  7 +++++
+ 2 files changed, 16 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_hotplug.c b/drivers/gpu/drm/i915/display/intel_hotplug.c
+index fc29046d48ea..60c192fb7488 100644
+--- a/drivers/gpu/drm/i915/display/intel_hotplug.c
++++ b/drivers/gpu/drm/i915/display/intel_hotplug.c
+@@ -89,29 +89,16 @@
+ enum hpd_pin intel_hpd_pin_default(struct drm_i915_private *dev_priv,
+ 				   enum port port)
+ {
+-	switch (port) {
+-	case PORT_A:
+-		return HPD_PORT_A;
+-	case PORT_B:
+-		return HPD_PORT_B;
+-	case PORT_C:
+-		return HPD_PORT_C;
+-	case PORT_D:
+-		return HPD_PORT_D;
+-	case PORT_E:
+-		return HPD_PORT_E;
+-	case PORT_F:
+-		if (IS_CNL_WITH_PORT_F(dev_priv))
+-			return HPD_PORT_E;
+-		return HPD_PORT_F;
+-	case PORT_G:
+-		return HPD_PORT_G;
+-	case PORT_H:
+-		return HPD_PORT_H;
+-	case PORT_I:
+-		return HPD_PORT_I;
++	enum phy phy = intel_port_to_phy(dev_priv, port);
++
++	switch (phy) {
++	case PHY_F:
++		return IS_CNL_WITH_PORT_F(dev_priv) ? HPD_PORT_E : HPD_PORT_F;
++	case PHY_A ... PHY_E:
++	case PHY_G ... PHY_I:
++		return HPD_PORT_A + phy - PHY_A;
+ 	default:
+-		MISSING_CASE(port);
++		MISSING_CASE(phy);
+ 		return HPD_NONE;
+ 	}
+ }
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6fdeceb7a833..2c34a6017cde 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -115,6 +115,13 @@
+ 
+ struct drm_i915_gem_object;
+ 
++/*
++ * The code assumes that the hpd_pins below have consecutive values and
++ * starting with HPD_PORT_A, the HPD pin associated with any port can be
++ * retrieved by adding the corresponding port (or phy) enum value to
++ * HPD_PORT_A in most cases. For example:
++ * HPD_PORT_C = HPD_PORT_A + PHY_C - PHY_A
++ */
+ enum hpd_pin {
+ 	HPD_NONE = 0,
+ 	HPD_TV = HPD_NONE,     /* TV is known to be unreliable */
+-- 
+2.17.1
+

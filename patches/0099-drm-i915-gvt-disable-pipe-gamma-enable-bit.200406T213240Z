@@ -1,0 +1,68 @@
+From de90da0273c57f34f2ad7fd91afd5c97d3558a29 Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Mon, 16 Mar 2020 21:50:03 +0800
+Subject: [PATCH 099/100] drm/i915/gvt: disable pipe gamma enable bit
+
+The guest OS has color distortion issue after kernel rebased from 4.19
+to 5.4. Disable pipe gamma can workaround the issue. This patch works on
+v4.19 kernel too.
+
+Signed-off-by: Liu Xinyun <xinyun.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c  |  5 ++---
+ drivers/gpu/drm/i915/gvt/handlers.c | 14 ++++++++++++--
+ 2 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 580a981bfd7a..d534866bfbf7 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -866,10 +866,9 @@ static int setup_gop_display(struct intel_vgpu *vgpu)
+ 	width--;
+ 	height--;
+ 	surf = vgpu->gm.high_gm_node.start;
++
+ 	ctl = PLANE_CTL_ENABLE | PLANE_CTL_FORMAT_XRGB_8888;
+-	ctl |= PLANE_CTL_PIPE_GAMMA_ENABLE |
+-		PLANE_CTL_PIPE_CSC_ENABLE |
+-		PLANE_CTL_PLANE_GAMMA_DISABLE;
++
+ 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 	I915_WRITE_FW(PLANE_OFFSET(pipe, plane), 0);
+ 	I915_WRITE_FW(PLANE_STRIDE(pipe, plane), stride);
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index e914415920f5..f86c84071e10 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -2946,7 +2946,12 @@ static int skl_plane_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	if ((vgpu_vreg_t(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
+ 			(vgpu->gvt->pipe_info[pipe].plane_owner[plane] == vgpu->id)) {
+-		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++		uint32_t reg_value = vgpu_vreg(vgpu, offset);
++
++		if (offset == PLANE_CTL(pipe, plane).reg)
++			reg_value &= ~DISPPLANE_GAMMA_ENABLE;
++
++		I915_WRITE(_MMIO(offset), reg_value);
+ 	}
+ 	return 0;
+ }
+@@ -2982,7 +2987,12 @@ static int skl_cursor_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	if ((vgpu_vreg_t(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
+ 			(vgpu->gvt->pipe_info[pipe].plane_owner[0] == vgpu->id)) {
+-		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++		uint32_t reg_value = vgpu_vreg(vgpu, offset);
++
++		if (offset == CURCNTR(pipe).reg)
++			reg_value &= ~MCURSOR_GAMMA_ENABLE;
++
++		I915_WRITE(_MMIO(offset), reg_value);
+ 	}
+ 
+ 	return 0;
+-- 
+2.17.1
+

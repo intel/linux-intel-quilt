@@ -1,0 +1,47 @@
+From a4ce47da0ad5b03c016dcdc32aa9010edc55ac26 Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Thu, 7 Nov 2019 15:12:44 +0800
+Subject: [PATCH 087/100] drm/i915/gvt: workload scan and prepare workload in
+ one thread to avoid incorrect mutex usage
+
+The mutex_unlock will check whether the owner is the same as that of
+mutex_lock. If not, the warning will be complained.
+Currently the workload scan will try to obtain the mutex lock for
+some i915 object buffer. And then it is released in prepare_workload.
+As they are executed in different thread, it will complain the warning.
+
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/scheduler.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index abbcc6ac0e2f..72ec21fd0d25 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -1538,7 +1538,6 @@ intel_vgpu_create_workload(struct intel_vgpu *vgpu, int ring_id,
+ 	struct list_head *q = workload_q_head(vgpu, ring_id);
+ 	struct intel_vgpu_workload *last_workload = NULL;
+ 	struct intel_vgpu_workload *workload = NULL;
+-	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 	u64 ring_context_gpa;
+ 	u32 head, tail, start, ctl, ctx_ctl, per_ctx, indirect_ctx;
+ 	u32 guest_head;
+@@ -1657,11 +1656,14 @@ intel_vgpu_create_workload(struct intel_vgpu *vgpu, int ring_id,
+ 	/* Only scan and shadow the first workload in the queue
+ 	 * as there is only one pre-allocated buf-obj for shadow.
+ 	 */
++	/* scan_workload and prepare_shadow are executed in one thread to avoid
++	 * the incorrect mutex lock.
+ 	if (list_empty(workload_q_head(vgpu, ring_id))) {
+ 		intel_runtime_pm_get(&dev_priv->runtime_pm);
+ 		ret = intel_gvt_scan_and_shadow_workload(workload);
+ 		intel_runtime_pm_put_unchecked(&dev_priv->runtime_pm);
+ 	}
++	*/
+ 
+ 	if (ret) {
+ 		if (vgpu_is_vm_unhealthy(ret))
+-- 
+2.17.1
+

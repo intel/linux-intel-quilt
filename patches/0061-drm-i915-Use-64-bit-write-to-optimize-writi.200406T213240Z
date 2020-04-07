@@ -1,0 +1,59 @@
+From d1e45a409f79f5711216f96856c5c2a8758b2569 Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Fri, 14 Sep 2018 16:10:20 +0800
+Subject: [PATCH 061/100] drm/i915: Use 64-bit write to optimize writing
+ fence_reg
+
+On VGPU scenario the read/write operation of fence_reg will be trapped
+by the GVT-g. Then gvt-g follows the HW spec to program the fence_reg.
+And the gvt-g takes care of updating the fence reg correctly for any
+trapped value of fence reg.
+
+So it is unnecessary to read/write fence reg several times. It is enough
+that the fence reg is written only value in 64-bit mode. This will help
+to reduce the redundant trap of fence_reg mmio operation.
+
+V1->V2: Add back the condition judgement of !pipelined
+
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: He Min <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem_fence_reg.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_fence_reg.c b/drivers/gpu/drm/i915/i915_gem_fence_reg.c
+index 71efccfde122..342e8282fa22 100644
+--- a/drivers/gpu/drm/i915/i915_gem_fence_reg.c
++++ b/drivers/gpu/drm/i915/i915_gem_fence_reg.c
+@@ -75,6 +75,8 @@ static void i965_write_fence_reg(struct i915_fence_reg *fence,
+ 	i915_reg_t fence_reg_lo, fence_reg_hi;
+ 	int fence_pitch_shift;
+ 	u64 val;
++	struct drm_i915_private *dev_priv = fence_to_i915(fence);
++	struct intel_uncore *uncore = fence_to_uncore(fence);
+ 
+ 	if (INTEL_GEN(fence_to_i915(fence)) >= 6) {
+ 		fence_reg_lo = FENCE_REG_GEN6_LO(fence->id);
+@@ -104,8 +106,17 @@ static void i965_write_fence_reg(struct i915_fence_reg *fence,
+ 		val |= I965_FENCE_REG_VALID;
+ 	}
+ 
+-	if (!pipelined) {
+-		struct intel_uncore *uncore = fence_to_uncore(fence);
++	if (intel_vgpu_active(dev_priv)) {
++		/* Use the 64-bit RW to write fence reg on VGPU mode.
++		 * The GVT-g can trap the written val of VGPU to program the
++		 * fence reg. And the fence write in gvt-g follows the
++		 * sequence of off/read/double-write/read. This assures that
++		 * the fence reg is configured as expected.
++		 * At the same time the 64-bit op can help to reduce the num
++		 * of VGPU trap for the fence reg.
++		 */
++		intel_uncore_write64_fw(uncore, fence_reg_lo, val);
++	} else if (!pipelined) {
+ 
+ 		/*
+ 		 * To w/a incoherency with non-atomic 64-bit register updates,
+-- 
+2.17.1
+

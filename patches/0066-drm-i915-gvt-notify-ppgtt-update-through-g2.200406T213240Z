@@ -1,0 +1,214 @@
+From bce2386a520777eb423e2d3fa7f40d66825f8642 Mon Sep 17 00:00:00 2001
+From: Zhipeng Gong <zhipeng.gong@intel.com>
+Date: Fri, 14 Sep 2018 16:10:20 +0800
+Subject: [PATCH 066/100] drm/i915/gvt: notify ppgtt update through g2v
+
+This patch extends g2v notification to notify host GVT-g of
+ppgtt update from guest, including alloc_4lvl, clear_4lv4 and
+insert_4lvl. It uses shared page to pass the additional params.
+This patch also add one new pvmmio level to control ppgtt update.
+
+This patch is needed for both uos and sos
+
+v2:
+- create a struct for ppggt update in shared page.
+- use multiple notifications in case insert size is too big.
+
+v3:
+- not pass pd pages, let GVT-g read from guest memory instead.
+
+v4:
+- not change rsvd2 type.
+
+v5:
+- pass cache_level to GVT-g
+
+Tracked-On: #874
+Signed-off-by: Zhipeng Gong <zhipeng.gong@intel.com>
+Reviewed-by: He, Min <min.he@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.c     |  1 +
+ drivers/gpu/drm/i915/i915_drv.h     |  1 +
+ drivers/gpu/drm/i915/i915_gem_gtt.c | 58 ++++++++++++++++++++++++++---
+ drivers/gpu/drm/i915/i915_pvinfo.h  | 14 ++++++-
+ 4 files changed, 67 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index d3dd9c947e4c..9019ab47a2d1 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -491,6 +491,7 @@ static int i915_driver_early_probe(struct drm_i915_private *dev_priv)
+ 
+ 	spin_lock_init(&dev_priv->irq_lock);
+ 	spin_lock_init(&dev_priv->shared_page_lock);
++	spin_lock_init(&dev_priv->pvmmio_ppgtt_lock);
+ 	spin_lock_init(&dev_priv->gpu_error.lock);
+ 	mutex_init(&dev_priv->backlight_lock);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6df0866713a0..9f196a069deb 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -937,6 +937,7 @@ struct drm_i915_private {
+ 
+ 	struct gvt_shared_page *shared_page;
+ 	spinlock_t shared_page_lock;
++	spinlock_t pvmmio_ppgtt_lock;
+ 
+ 	struct intel_uncore uncore;
+ 	struct intel_uncore_mmio_debug mmio_debug;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index 9b67511097a7..12f95dad5864 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -1021,6 +1021,10 @@ static u64 __gen8_ppgtt_clear(struct i915_address_space * const vm,
+ static void gen8_ppgtt_clear(struct i915_address_space *vm,
+ 			     u64 start, u64 length)
+ {
++	struct i915_page_directory * const pml4 = i915_vm_to_ppgtt(vm)->pd;
++	u64 orig_start = start;
++	u64 orig_length = length;
++
+ 	GEM_BUG_ON(!IS_ALIGNED(start, BIT_ULL(GEN8_PTE_SHIFT)));
+ 	GEM_BUG_ON(!IS_ALIGNED(length, BIT_ULL(GEN8_PTE_SHIFT)));
+ 	GEM_BUG_ON(range_overflows(start, length, vm->total));
+@@ -1029,8 +1033,20 @@ static void gen8_ppgtt_clear(struct i915_address_space *vm,
+ 	length >>= GEN8_PTE_SHIFT;
+ 	GEM_BUG_ON(length == 0);
+ 
+-	__gen8_ppgtt_clear(vm, i915_vm_to_ppgtt(vm)->pd,
+-			   start, start + length, vm->top);
++	__gen8_ppgtt_clear(vm, pml4, start, start + length, vm->top);
++
++	if (PVMMIO_LEVEL(vm->i915, PVMMIO_PPGTT_UPDATE)) {
++		struct drm_i915_private *dev_priv = vm->i915;
++		struct pv_ppgtt_update *pv_ppgtt =
++					&dev_priv->shared_page->pv_ppgtt;
++
++		spin_lock(&dev_priv->pvmmio_ppgtt_lock);
++		writeq(px_dma(pml4), &pv_ppgtt->pdp);
++		writeq(orig_start, &pv_ppgtt->start);
++		writeq(orig_length, &pv_ppgtt->length);
++		I915_WRITE(vgtif_reg(g2v_notify), VGT_G2V_PPGTT_L4_CLEAR);
++		spin_unlock(&dev_priv->pvmmio_ppgtt_lock);
++	}
+ }
+ 
+ static int __gen8_ppgtt_alloc(struct i915_address_space * const vm,
+@@ -1134,6 +1150,9 @@ static int gen8_ppgtt_alloc(struct i915_address_space *vm,
+ {
+ 	u64 from;
+ 	int err;
++	struct i915_page_directory * const pml4 = i915_vm_to_ppgtt(vm)->pd;
++	u64 orig_start = start;
++	u64 orig_length = length;
+ 
+ 	GEM_BUG_ON(!IS_ALIGNED(start, BIT_ULL(GEN8_PTE_SHIFT)));
+ 	GEM_BUG_ON(!IS_ALIGNED(length, BIT_ULL(GEN8_PTE_SHIFT)));
+@@ -1144,11 +1163,23 @@ static int gen8_ppgtt_alloc(struct i915_address_space *vm,
+ 	GEM_BUG_ON(length == 0);
+ 	from = start;
+ 
+-	err = __gen8_ppgtt_alloc(vm, i915_vm_to_ppgtt(vm)->pd,
+-				 &start, start + length, vm->top);
++	err = __gen8_ppgtt_alloc(vm, pml4, &start, start + length, vm->top);
++
++	if (PVMMIO_LEVEL(vm->i915, PVMMIO_PPGTT_UPDATE)) {
++		struct drm_i915_private *dev_priv = vm->i915;
++		struct pv_ppgtt_update *pv_ppgtt =
++					&dev_priv->shared_page->pv_ppgtt;
++
++		spin_lock(&dev_priv->pvmmio_ppgtt_lock);
++		writeq(px_dma(pml4), &pv_ppgtt->pdp);
++		writeq(orig_start, &pv_ppgtt->start);
++		writeq(orig_length, &pv_ppgtt->length);
++		I915_WRITE(vgtif_reg(g2v_notify), VGT_G2V_PPGTT_L4_ALLOC);
++		spin_unlock(&dev_priv->pvmmio_ppgtt_lock);
++	}
++
+ 	if (unlikely(err && from != start))
+-		__gen8_ppgtt_clear(vm, i915_vm_to_ppgtt(vm)->pd,
+-				   from, start, vm->top);
++		__gen8_ppgtt_clear(vm, pml4, from, start, vm->top);
+ 
+ 	return err;
+ }
+@@ -1336,6 +1367,7 @@ static void gen8_ppgtt_insert(struct i915_address_space *vm,
+ 			      u32 flags)
+ {
+ 	struct i915_ppgtt * const ppgtt = i915_vm_to_ppgtt(vm);
++	struct i915_page_directory * const pml4 = ppgtt->pd;
+ 	struct sgt_dma iter = sgt_dma(vma);
+ 
+ 	if (vma->page_sizes.sg > I915_GTT_PAGE_SIZE) {
+@@ -1351,6 +1383,20 @@ static void gen8_ppgtt_insert(struct i915_address_space *vm,
+ 						    cache_level, flags);
+ 		} while (idx);
+ 
++		if (PVMMIO_LEVEL(vm->i915, PVMMIO_PPGTT_UPDATE)) {
++			struct drm_i915_private *dev_priv = vm->i915;
++			struct pv_ppgtt_update *pv_ppgtt =
++				&dev_priv->shared_page->pv_ppgtt;
++
++			spin_lock(&dev_priv->pvmmio_ppgtt_lock);
++			writeq(px_dma(pml4), &pv_ppgtt->pdp);
++			writeq(vma->node.start, &pv_ppgtt->start);
++			writeq(vma->node.size, &pv_ppgtt->length);
++			writel(cache_level, &pv_ppgtt->cache_level);
++			I915_WRITE(vgtif_reg(g2v_notify), VGT_G2V_PPGTT_L4_INSERT);
++			spin_unlock(&dev_priv->pvmmio_ppgtt_lock);
++		}
++
+ 		vma->page_sizes.gtt = I915_GTT_PAGE_SIZE;
+ 	}
+ }
+diff --git a/drivers/gpu/drm/i915/i915_pvinfo.h b/drivers/gpu/drm/i915/i915_pvinfo.h
+index 725c0b7f95fd..502253ebb6e5 100644
+--- a/drivers/gpu/drm/i915/i915_pvinfo.h
++++ b/drivers/gpu/drm/i915/i915_pvinfo.h
+@@ -48,6 +48,9 @@ enum vgt_g2v_type {
+ 	VGT_G2V_PPGTT_L4_PAGE_TABLE_DESTROY,
+ 	VGT_G2V_EXECLIST_CONTEXT_CREATE,
+ 	VGT_G2V_EXECLIST_CONTEXT_DESTROY,
++	VGT_G2V_PPGTT_L4_ALLOC,
++	VGT_G2V_PPGTT_L4_CLEAR,
++	VGT_G2V_PPGTT_L4_INSERT,
+ 	VGT_G2V_MAX,
+ };
+ 
+@@ -74,6 +77,13 @@ struct pv_plane_update {
+ 	u32 plane_ctl;
+ };
+ 
++struct pv_ppgtt_update {
++	u64 pdp;
++	u64 start;
++	u64 length;
++	u32 cache_level;
++};
++
+ /* shared page(4KB) between gvt and VM, located at the first page next
+  * to MMIO region(2MB size normally).
+  */
+@@ -81,7 +91,8 @@ struct gvt_shared_page {
+ 	u32 elsp_data[4];
+ 	u32 reg_addr;
+ 	struct pv_plane_update pv_plane;
+-	u32 rsvd2[0x400 - 21];
++	struct pv_ppgtt_update pv_ppgtt;
++	u32 rsvd2[0x400 - 30];
+ };
+ 
+ #define VGPU_PVMMIO(vgpu) vgpu_vreg_t(vgpu, vgtif_reg(enable_pvmmio))
+@@ -92,6 +103,7 @@ struct gvt_shared_page {
+ enum pvmmio_levels {
+ 	PVMMIO_ELSP_SUBMIT = 0x1,
+ 	PVMMIO_PLANE_UPDATE = 0x2,
++	PVMMIO_PPGTT_UPDATE = 0x10,
+ };
+ 
+ /*
+-- 
+2.17.1
+
