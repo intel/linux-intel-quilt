@@ -1,0 +1,793 @@
+From 7bfb76de4a622eec2529cd0e06476cbc4919cdf5 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Tue, 19 Dec 2017 10:22:34 +0800
+Subject: [PATCH 039/100] drm/i915/gvt: local display support
+
+Added local display dispaly support for GVT-g.
+
+v2:
+   The skl_compute_wm/skl_atomic_update_crtc_wm/verify_wm_state
+is skipped on VGPU.
+   Update the gvt-g pipe wm info into the intel_crtc_state->wm.skl
+   plane ddb/wm is programmed in skl_atomic_update_crtc_wm for
+gvt-g scenario.
+
+Signed-off-by: Min He <min.he@intel.com>
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+
+Change-Id: I430fbf98318cd35f7104657c4d1c128e50f56f2d
+Reviewed-by: He, Min <min.he@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_display.c |   6 ++
+ drivers/gpu/drm/i915/display/intel_display.h |   3 +
+ drivers/gpu/drm/i915/display/intel_dp.c      |   2 +-
+ drivers/gpu/drm/i915/display/intel_sprite.c  |  24 ++++-
+ drivers/gpu/drm/i915/gvt/cfg_space.c         |   9 ++
+ drivers/gpu/drm/i915/gvt/display.c           | 103 +++++++++++++++++--
+ drivers/gpu/drm/i915/gvt/edid.c              |  20 ++--
+ drivers/gpu/drm/i915/gvt/edid.h              |   2 +-
+ drivers/gpu/drm/i915/gvt/gvt.c               |  50 +++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h               |  14 +++
+ drivers/gpu/drm/i915/gvt/handlers.c          |  35 +++++--
+ drivers/gpu/drm/i915/i915_irq.c              |  25 ++++-
+ drivers/gpu/drm/i915/intel_pm.c              |  92 ++++++++++++++++-
+ 13 files changed, 349 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index cb4bf41501dd..a81906e859d4 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -13378,6 +13378,12 @@ static void verify_wm_state(struct intel_crtc *crtc,
+ 	if (INTEL_GEN(dev_priv) < 9 || !new_crtc_state->hw.active)
+ 		return;
+ 
++	/* For the VGPU scenario based on Linux this is skipped as Dom0
++	 * ignores the WM setting from Guest.
++	 */
++	if (intel_vgpu_active(dev_priv))
++		return;
++
+ 	hw = kzalloc(sizeof(*hw), GFP_KERNEL);
+ 	if (!hw)
+ 		return;
+diff --git a/drivers/gpu/drm/i915/display/intel_display.h b/drivers/gpu/drm/i915/display/intel_display.h
+index 4dc490760fbc..fa56334a75d5 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.h
++++ b/drivers/gpu/drm/i915/display/intel_display.h
+@@ -589,6 +589,9 @@ unsigned int i9xx_plane_max_stride(struct intel_plane *plane,
+ 				   unsigned int rotation);
+ int bdw_get_pipemisc_bpp(struct intel_crtc *crtc);
+ 
++/* intel_dp.c */
++void intel_dp_unpack_aux(uint32_t src, uint8_t *dst, int dst_bytes);
++
+ struct intel_display_error_state *
+ intel_display_capture_error_state(struct drm_i915_private *dev_priv);
+ void intel_display_print_error_state(struct drm_i915_error_state_buf *e,
+diff --git a/drivers/gpu/drm/i915/display/intel_dp.c b/drivers/gpu/drm/i915/display/intel_dp.c
+index d8603ae185cf..20f10db03fef 100644
+--- a/drivers/gpu/drm/i915/display/intel_dp.c
++++ b/drivers/gpu/drm/i915/display/intel_dp.c
+@@ -699,7 +699,7 @@ u32 intel_dp_pack_aux(const u8 *src, int src_bytes)
+ 	return v;
+ }
+ 
+-static void intel_dp_unpack_aux(u32 src, u8 *dst, int dst_bytes)
++void intel_dp_unpack_aux(u32 src, u8 *dst, int dst_bytes)
+ {
+ 	int i;
+ 	if (dst_bytes > 4)
+diff --git a/drivers/gpu/drm/i915/display/intel_sprite.c b/drivers/gpu/drm/i915/display/intel_sprite.c
+index d7f71fa90659..0cd1443dc91c 100644
+--- a/drivers/gpu/drm/i915/display/intel_sprite.c
++++ b/drivers/gpu/drm/i915/display/intel_sprite.c
+@@ -48,6 +48,10 @@
+ #include "intel_psr.h"
+ #include "intel_sprite.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ int intel_usecs_to_scanlines(const struct drm_display_mode *adjusted_mode,
+ 			     int usecs)
+ {
+@@ -603,6 +607,12 @@ skl_program_plane(struct intel_plane *plane,
+ 		plane_color_ctl = plane_state->color_ctl |
+ 			glk_plane_color_ctl_crtc(crtc_state);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt &&
++			dev_priv->gvt->pipe_info[pipe].plane_owner[plane_id])
++		return;
++#endif
++
+ 	/* Sizes are 0 based */
+ 	src_w--;
+ 	src_h--;
+@@ -636,7 +646,9 @@ skl_program_plane(struct intel_plane *plane,
+ 	if (fb->format->is_yuv && icl_is_hdr_plane(dev_priv, plane_id))
+ 		icl_program_input_csc(plane, crtc_state, plane_state);
+ 
+-	skl_write_plane_wm(plane, crtc_state);
++	/* In VGPU or gvt-g mode, skip plane DDB/WM */
++	if (!(intel_gvt_active(dev_priv) || intel_vgpu_active(dev_priv)))
++		skl_write_plane_wm(plane, crtc_state);
+ 
+ 	I915_WRITE_FW(PLANE_KEYVAL(pipe, plane_id), key->min_value);
+ 	I915_WRITE_FW(PLANE_KEYMSK(pipe, plane_id), keymsk);
+@@ -686,12 +698,20 @@ skl_disable_plane(struct intel_plane *plane,
+ 	enum pipe pipe = plane->pipe;
+ 	unsigned long irqflags;
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt &&
++			dev_priv->gvt->pipe_info[pipe].plane_owner[plane_id])
++		return;
++#endif
++
+ 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
+ 
+ 	if (icl_is_hdr_plane(dev_priv, plane_id))
+ 		I915_WRITE_FW(PLANE_CUS_CTL(pipe, plane_id), 0);
+ 
+-	skl_write_plane_wm(plane, crtc_state);
++	/* In VGPU ornative mode, skip plane DDB/WM */
++	if (!(intel_gvt_active(dev_priv) || intel_vgpu_active(dev_priv)))
++		skl_write_plane_wm(plane, crtc_state);
+ 
+ 	I915_WRITE_FW(PLANE_CTL(pipe, plane_id), 0);
+ 	I915_WRITE_FW(PLANE_SURF(pipe, plane_id), 0);
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index 19cf1bbe059d..b4c404ef7b06 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -334,6 +334,15 @@ int intel_vgpu_emulate_cfg_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	case INTEL_GVT_PCI_OPREGION:
+ 		if (WARN_ON(!IS_ALIGNED(offset, 4)))
+ 			return -EINVAL;
++
++		/*
++		 * To support virtual display, we need to override the real VBT
++		 * in the OpRegion. So here we don't report OpRegion to guest.
++		 */
++		if (IS_BROXTON(vgpu->gvt->dev_priv) ||
++				IS_KABYLAKE(vgpu->gvt->dev_priv))
++			return 0;
++
+ 		ret = intel_vgpu_opregion_base_write_handler(vgpu,
+ 						   *(u32 *)p_data);
+ 		if (ret)
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index a62bdf9be682..89abcc220145 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -33,6 +33,7 @@
+  */
+ 
+ #include "i915_drv.h"
++#include "display/intel_display_types.h"
+ #include "gvt.h"
+ 
+ static int get_edp_pipe(struct intel_vgpu *vgpu)
+@@ -317,14 +318,19 @@ static void clean_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num)
+ }
+ 
+ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
+-				    int type, unsigned int resolution)
++				    int type, unsigned int resolution, void *edid)
+ {
+ 	struct intel_vgpu_port *port = intel_vgpu_port(vgpu, port_num);
++	int valid_extensions = 1;
++	struct edid *tmp_edid = NULL;
+ 
+ 	if (WARN_ON(resolution >= GVT_EDID_NUM))
+ 		return -EINVAL;
+ 
+-	port->edid = kzalloc(sizeof(*(port->edid)), GFP_KERNEL);
++	if (edid)
++		valid_extensions += ((struct edid *)edid)->extensions;
++	port->edid = kzalloc(sizeof(*(port->edid))
++			+ valid_extensions * EDID_SIZE, GFP_KERNEL);
+ 	if (!port->edid)
+ 		return -ENOMEM;
+ 
+@@ -334,8 +340,23 @@ static int setup_virtual_dp_monitor(struct intel_vgpu *vgpu, int port_num,
+ 		return -ENOMEM;
+ 	}
+ 
+-	memcpy(port->edid->edid_block, virtual_dp_monitor_edid[resolution],
+-			EDID_SIZE);
++	if (edid)
++		memcpy(port->edid->edid_block, edid, EDID_SIZE * valid_extensions);
++	else
++		memcpy(port->edid->edid_block, virtual_dp_monitor_edid[resolution],
++				EDID_SIZE);
++
++	/* Sometimes the physical display will report the EDID with no
++	 * digital bit set, which will cause the guest fail to enumerate
++	 * the virtual HDMI monitor. So here we will set the digital
++	 * bit and re-calculate the checksum.
++	 */
++	tmp_edid = ((struct edid *)port->edid->edid_block);
++	if (!(tmp_edid->input & DRM_EDID_INPUT_DIGITAL)) {
++		tmp_edid->input += DRM_EDID_INPUT_DIGITAL;
++		tmp_edid->checksum -= DRM_EDID_INPUT_DIGITAL;
++	}
++
+ 	port->edid->data_valid = true;
+ 
+ 	memcpy(port->dpcd->data, dpcd_fix_data, DPCD_HEADER_SIZE);
+@@ -475,6 +496,66 @@ void intel_vgpu_emulate_hotplug(struct intel_vgpu *vgpu, bool connected)
+ 	}
+ }
+ 
++static void intel_gvt_vblank_work(struct work_struct *w)
++{
++	struct intel_gvt_pipe_info *pipe_info = container_of(w,
++			struct intel_gvt_pipe_info, vblank_work);
++	struct intel_gvt *gvt = pipe_info->gvt;
++	struct intel_vgpu *vgpu;
++	int id;
++
++	mutex_lock(&gvt->lock);
++	for_each_active_vgpu(gvt, vgpu, id)
++		emulate_vblank_on_pipe(vgpu, pipe_info->pipe_num);
++	mutex_unlock(&gvt->lock);
++}
++
++void intel_gvt_init_pipe_info(struct intel_gvt *gvt)
++{
++	int pipe;
++
++	for (pipe = PIPE_A; pipe <= PIPE_C; pipe++) {
++		gvt->pipe_info[pipe].pipe_num = pipe;
++		gvt->pipe_info[pipe].gvt = gvt;
++		INIT_WORK(&gvt->pipe_info[pipe].vblank_work,
++				intel_gvt_vblank_work);
++	}
++}
++
++int setup_virtual_monitors(struct intel_vgpu *vgpu)
++{
++	struct intel_connector *connector = NULL;
++	struct drm_connector_list_iter conn_iter;
++	int pipe = 0;
++	int ret = 0;
++
++	drm_connector_list_iter_begin(&vgpu->gvt->dev_priv->drm, &conn_iter);
++	for_each_intel_connector_iter(connector, &conn_iter) {
++		if (connector->encoder->get_hw_state(connector->encoder, &pipe)
++				&& connector->detect_edid) {
++			ret = setup_virtual_dp_monitor(vgpu, pipe,
++					GVT_DP_A + pipe, 0,
++					connector->detect_edid);
++			if (ret)
++				return ret;
++		}
++	}
++	drm_connector_list_iter_end(&conn_iter);
++	return 0;
++}
++
++void clean_virtual_monitors(struct intel_vgpu *vgpu)
++{
++	int port = 0;
++
++	for (port = PORT_A; port < I915_MAX_PORTS; port++) {
++		struct intel_vgpu_port *p = intel_vgpu_port(vgpu, port);
++
++		if (p->edid)
++			clean_virtual_dp_monitor(vgpu, port);
++	}
++}
++
+ /**
+  * intel_vgpu_clean_display - clean vGPU virtual display emulation
+  * @vgpu: a vGPU
+@@ -486,8 +567,9 @@ void intel_vgpu_clean_display(struct intel_vgpu *vgpu)
+ {
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv) ||
+-	    IS_COFFEELAKE(dev_priv))
++	if (IS_BROXTON(dev_priv) || IS_KABYLAKE(dev_priv))
++		clean_virtual_monitors(vgpu);
++	else if (IS_SKYLAKE(dev_priv))
+ 		clean_virtual_dp_monitor(vgpu, PORT_D);
+ 	else
+ 		clean_virtual_dp_monitor(vgpu, PORT_B);
+@@ -510,13 +592,14 @@ int intel_vgpu_init_display(struct intel_vgpu *vgpu, u64 resolution)
+ 
+ 	intel_vgpu_init_i2c_edid(vgpu);
+ 
+-	if (IS_SKYLAKE(dev_priv) || IS_KABYLAKE(dev_priv) ||
+-	    IS_COFFEELAKE(dev_priv))
++	if (IS_BROXTON(dev_priv) || IS_KABYLAKE(dev_priv))
++		return setup_virtual_monitors(vgpu);
++	else if (IS_SKYLAKE(dev_priv))
+ 		return setup_virtual_dp_monitor(vgpu, PORT_D, GVT_DP_D,
+-						resolution);
++						resolution, NULL);
+ 	else
+ 		return setup_virtual_dp_monitor(vgpu, PORT_B, GVT_DP_B,
+-						resolution);
++						resolution, NULL);
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/gvt/edid.c b/drivers/gpu/drm/i915/gvt/edid.c
+index 1fe6124918f1..04867ca8b1b2 100644
+--- a/drivers/gpu/drm/i915/gvt/edid.c
++++ b/drivers/gpu/drm/i915/gvt/edid.c
+@@ -55,10 +55,6 @@ static unsigned char edid_get_byte(struct intel_vgpu *vgpu)
+ 		gvt_vgpu_err("Driver tries to read EDID without proper sequence!\n");
+ 		return 0;
+ 	}
+-	if (edid->current_edid_read >= EDID_SIZE) {
+-		gvt_vgpu_err("edid_get_byte() exceeds the size of EDID!\n");
+-		return 0;
+-	}
+ 
+ 	if (!edid->edid_available) {
+ 		gvt_vgpu_err("Reading EDID but EDID is not available!\n");
+@@ -479,6 +475,8 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 	u32 value = *(u32 *)p_data;
+ 	int aux_data_for_write = 0;
+ 	int reg = get_aux_ch_reg(offset);
++	uint8_t rxbuf[20];
++	size_t rxsize;
+ 
+ 	if (reg != AUX_CH_CTL) {
+ 		vgpu_vreg(vgpu, offset) = value;
+@@ -486,6 +484,9 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 	}
+ 
+ 	msg_length = AUX_CTL_MSG_LENGTH(value);
++	for (rxsize = 0; rxsize < msg_length; rxsize += 4)
++		intel_dp_unpack_aux(vgpu_vreg(vgpu, offset + 4 + rxsize),
++				rxbuf + rxsize, msg_length - rxsize);
+ 	// check the msg in DATA register.
+ 	msg = vgpu_vreg(vgpu, offset + 4);
+ 	addr = (msg >> 8) & 0xffff;
+@@ -525,12 +526,13 @@ void intel_gvt_i2c_handle_aux_ch_write(struct intel_vgpu *vgpu,
+ 			}
+ 		}
+ 	} else if ((op & 0x1) == GVT_AUX_I2C_WRITE) {
+-		/* TODO
+-		 * We only support EDID reading from I2C_over_AUX. And
+-		 * we do not expect the index mode to be used. Right now
+-		 * the WRITE operation is ignored. It is good enough to
+-		 * support the gfx driver to do EDID access.
++		/* We only support EDID reading from I2C_over_AUX.
++		 * But if EDID has extension blocks, we use this write
++		 * operation to set block starting address
+ 		 */
++		if (addr == EDID_ADDR) {
++			i2c_edid->current_edid_read = rxbuf[4];
++		}
+ 	} else {
+ 		if (WARN_ON((op & 0x1) != GVT_AUX_I2C_READ))
+ 			return;
+diff --git a/drivers/gpu/drm/i915/gvt/edid.h b/drivers/gpu/drm/i915/gvt/edid.h
+index f6dfc8b795ec..11a75d69062d 100644
+--- a/drivers/gpu/drm/i915/gvt/edid.h
++++ b/drivers/gpu/drm/i915/gvt/edid.h
+@@ -48,7 +48,7 @@
+ 
+ struct intel_vgpu_edid_data {
+ 	bool data_valid;
+-	unsigned char edid_block[EDID_SIZE];
++	unsigned char edid_block[0];
+ };
+ 
+ enum gmbus_cycle_type {
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index 8f37eefa0a02..01a748be5231 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -255,6 +255,54 @@ static int init_service_thread(struct intel_gvt *gvt)
+ 	return 0;
+ }
+ 
++void intel_gvt_init_pipe_info(struct intel_gvt *gvt);
++
++/*
++ * When enabling multi-plane in DomU, an issue is that the PLANE_BUF_CFG
++ * register cannot be updated dynamically, since Dom0 has no idea of the
++ * plane information of DomU's planes, so here we statically allocate the
++ * ddb entries for all the possible enabled planes.
++ */
++void intel_gvt_allocate_ddb(struct intel_gvt *gvt, unsigned int active_crtcs)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct intel_gvt_pipe_info *pipe_info = gvt->pipe_info;
++	const struct intel_runtime_info *info = RUNTIME_INFO(dev_priv);
++	unsigned int pipe_size, ddb_size, plane_size, plane_cnt;
++	u16 start, end;
++	enum pipe pipe;
++	enum plane_id plane;
++	int i = 0;
++	int num_active = hweight32(active_crtcs);
++
++	if (!num_active)
++		return;
++
++	ddb_size = INTEL_INFO(dev_priv)->ddb_size;
++	ddb_size -= 4; /* 4 blocks for bypass path allocation */
++	pipe_size = ddb_size / num_active;
++
++	for_each_pipe_masked(dev_priv, pipe, active_crtcs) {
++		start = pipe_size * (i++);
++		end = start + pipe_size;
++		pipe_info[pipe].pipe_ddb.start = start;
++		pipe_info[pipe].pipe_ddb.end = end;
++
++		pipe_info[pipe].plane_ddb_y[PLANE_CURSOR].start = end - 8;
++		pipe_info[pipe].plane_ddb_y[PLANE_CURSOR].end = end;
++
++		plane_cnt = (info->num_sprites[pipe] + 1);
++		plane_size = (pipe_size - 8) / plane_cnt;
++
++		for_each_universal_plane(dev_priv, pipe, plane) {
++			pipe_info[pipe].plane_ddb_y[plane].start = start +
++				(plane * (pipe_size - 8) / plane_cnt);
++			pipe_info[pipe].plane_ddb_y[plane].end =
++				pipe_info[pipe].plane_ddb_y[plane].start + plane_size;
++		}
++	}
++}
++
+ /**
+  * intel_gvt_clean_device - clean a GVT device
+  * @dev_priv: i915 private
+@@ -367,6 +415,8 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
+ 		goto out_clean_types;
+ 	}
+ 
++	intel_gvt_init_pipe_info(gvt);
++
+ 	vgpu = intel_gvt_create_idle_vgpu(gvt);
+ 	if (IS_ERR(vgpu)) {
+ 		ret = PTR_ERR(vgpu);
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index b47c6acaf9c0..879fe66f5fdc 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -298,6 +298,17 @@ struct intel_vgpu_type {
+ 	enum intel_vgpu_edid resolution;
+ };
+ 
++struct intel_gvt_pipe_info {
++	enum pipe pipe_num;
++	int owner;
++	struct intel_gvt *gvt;
++	struct work_struct vblank_work;
++	int plane_owner[I915_MAX_PLANES];
++	struct skl_ddb_entry plane_ddb_y[I915_MAX_PLANES];
++	struct skl_ddb_entry plane_ddb_uv[I915_MAX_PLANES];
++	struct skl_ddb_entry pipe_ddb;
++};
++
+ struct intel_gvt {
+ 	/* GVT scope lock, protect GVT itself, and all resource currently
+ 	 * not yet protected by special locks(vgpu and scheduler lock).
+@@ -331,6 +342,8 @@ struct intel_gvt {
+ 	 */
+ 	unsigned long service_request;
+ 
++	struct intel_gvt_pipe_info pipe_info[I915_MAX_PIPES];
++
+ 	struct {
+ 		struct engine_mmio *mmio;
+ 		int ctx_mmio_count[I915_NUM_ENGINES];
+@@ -579,6 +592,7 @@ struct intel_gvt_ops {
+ 	void (*emulate_hotplug)(struct intel_vgpu *vgpu, bool connected);
+ };
+ 
++void intel_gvt_allocate_ddb(struct intel_gvt *gvt, unsigned int active_crtcs);
+ 
+ enum {
+ 	GVT_FAILSAFE_UNSUPPORTED_GUEST,
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 6a56979ee3b8..cbdb5df89773 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -37,6 +37,8 @@
+  */
+ 
+ #include "i915_drv.h"
++#include "display/intel_display.h"
++#include "display/intel_display_types.h"
+ #include "gvt.h"
+ #include "i915_pvinfo.h"
+ 
+@@ -441,18 +443,21 @@ static int pipeconf_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+ 	u32 data;
++	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
++	struct intel_crtc *crtc = intel_get_crtc_for_pipe(
++		vgpu->gvt->dev_priv, pipe);
+ 
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	data = vgpu_vreg(vgpu, offset);
+ 
+-	if (data & PIPECONF_ENABLE)
++	if (data & PIPECONF_ENABLE) {
+ 		vgpu_vreg(vgpu, offset) |= I965_PIPECONF_ACTIVE;
+-	else
++		if (crtc)
++			drm_crtc_vblank_get(&crtc->base);
++	} else {
+ 		vgpu_vreg(vgpu, offset) &= ~I965_PIPECONF_ACTIVE;
+-	/* vgpu_lock already hold by emulate mmio r/w */
+-	mutex_unlock(&vgpu->vgpu_lock);
+-	intel_gvt_check_vblank_emulation(vgpu->gvt);
+-	mutex_lock(&vgpu->vgpu_lock);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -2875,6 +2880,7 @@ static int init_broadwell_mmio_info(struct intel_gvt *gvt)
+ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
+ 	unsigned int plane = SKL_PLANE_REG_TO_PLANE(offset);
+ 	i915_reg_t reg_1ac = _MMIO(_REG_701AC(pipe, plane));
+@@ -2883,6 +2889,11 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 	vgpu_vreg_t(vgpu, reg_1ac) = vgpu_vreg(vgpu, offset);
+ 
++	if ((vgpu_vreg_t(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
++			(vgpu->gvt->pipe_info[pipe].plane_owner[plane] == vgpu->id)) {
++		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++	}
++
+ 	set_bit(flip_event, vgpu->irq.flip_done_event[pipe]);
+ 	return 0;
+ }
+@@ -2890,7 +2901,15 @@ static int skl_plane_surf_write(struct intel_vgpu *vgpu, unsigned int offset,
+ static int skl_plane_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	unsigned int pipe = SKL_PLANE_REG_TO_PIPE(offset);
++	unsigned int plane = SKL_PLANE_REG_TO_PLANE(offset);
++
+ 	write_vreg(vgpu, offset, p_data, bytes);
++	if ((vgpu_vreg_t(vgpu, PIPECONF(pipe)) & I965_PIPECONF_ACTIVE) &&
++			(vgpu->gvt->pipe_info[pipe].plane_owner[plane] == vgpu->id)) {
++		I915_WRITE(_MMIO(offset), vgpu_vreg(vgpu, offset));
++	}
+ 	return 0;
+ }
+ 
+@@ -2992,8 +3011,8 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_PLANES_DH(PLANE_AUX_DIST, D_SKL_PLUS, NULL, skl_plane_mmio_write);
+ 	MMIO_PLANES_DH(PLANE_AUX_OFFSET, D_SKL_PLUS, NULL, skl_plane_mmio_write);
+ 
+-	MMIO_PLANES_SDH(PLANE_WM_BASE, 4 * 8, D_SKL_PLUS, NULL, NULL);
+-	MMIO_PLANES_DH(PLANE_WM_TRANS, D_SKL_PLUS, NULL, NULL);
++	MMIO_PLANES_SDH(PLANE_WM_BASE, 4 * 8, D_SKL_PLUS, NULL, skl_plane_mmio_write);
++	MMIO_PLANES_DH(PLANE_WM_TRANS, D_SKL_PLUS, NULL, skl_plane_mmio_write);
+ 	MMIO_PLANES_DH(PLANE_NV12_BUF_CFG, D_SKL_PLUS, NULL, NULL);
+ 	MMIO_PLANES_DH(PLANE_BUF_CFG, D_SKL_PLUS, NULL, NULL);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index dae00f7dd7df..469f40a46510 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -52,6 +52,10 @@
+ #include "i915_trace.h"
+ #include "intel_pm.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ /**
+  * DOC: interrupt handling
+  *
+@@ -253,6 +257,17 @@ void gen2_irq_init(struct intel_uncore *uncore,
+ 	intel_uncore_posting_read16(uncore, GEN2_IMR);
+ }
+ 
++
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++static inline void gvt_notify_vblank(struct drm_i915_private *dev_priv,
++				     enum pipe pipe)
++{
++	if (dev_priv->gvt)
++		queue_work(system_highpri_wq,
++				&dev_priv->gvt->pipe_info[pipe].vblank_work);
++}
++#endif
++
+ /* For display hotplug interrupt */
+ static inline void
+ i915_hotplug_interrupt_update_locked(struct drm_i915_private *dev_priv,
+@@ -2315,8 +2330,12 @@ gen8_de_irq_handler(struct drm_i915_private *dev_priv, u32 master_ctl)
+ 		ret = IRQ_HANDLED;
+ 		I915_WRITE(GEN8_DE_PIPE_IIR(pipe), iir);
+ 
+-		if (iir & GEN8_PIPE_VBLANK)
++		if (iir & GEN8_PIPE_VBLANK) {
+ 			drm_handle_vblank(&dev_priv->drm, pipe);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++			gvt_notify_vblank(dev_priv, pipe);
++#endif
++		}
+ 
+ 		if (iir & GEN8_PIPE_CDCLK_CRC_DONE)
+ 			hsw_pipe_crc_irq_handler(dev_priv, pipe);
+@@ -2646,7 +2665,9 @@ void bdw_disable_vblank(struct drm_crtc *crtc)
+ 	unsigned long irqflags;
+ 
+ 	spin_lock_irqsave(&dev_priv->irq_lock, irqflags);
+-	bdw_disable_pipe_irq(dev_priv, pipe, GEN8_PIPE_VBLANK);
++	/*since guest will see all the pipes, we don't want it disable vblank*/
++	if (!dev_priv->gvt)
++		bdw_disable_pipe_irq(dev_priv, pipe, GEN8_PIPE_VBLANK);
+ 	spin_unlock_irqrestore(&dev_priv->irq_lock, irqflags);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 9ad09b70608b..322bf299f0b5 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -390,6 +390,10 @@ static bool _intel_set_memory_cxsr(struct drm_i915_private *dev_priv, bool enabl
+ 	return was_enabled;
+ }
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ /**
+  * intel_set_memory_cxsr - Configure CxSR state
+  * @dev_priv: i915 device
+@@ -5187,6 +5191,42 @@ skl_compute_ddb(struct intel_atomic_state *state)
+ 
+ 	memcpy(ddb, &dev_priv->wm.skl_hw.ddb, sizeof(*ddb));
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	/*
++	 * In GVT environemnt, allocate ddb for all planes in active crtc.
++	 * When there is active pipe change, intel_state active_pipes is
++	 * not zero and updated before dev_priv, so use intel_state
++	 * active_crtc when it is not zero.
++	 */
++	if (dev_priv->gvt) {
++		unsigned int active_pipes;
++		struct intel_gvt_pipe_info *pipe_info;
++
++		active_pipes = state->active_pipes ?
++			state->active_pipes : dev_priv->active_pipes;
++		intel_gvt_allocate_ddb(dev_priv->gvt, active_pipes);
++
++		/* update the ddb into intel_crtc_state->wm */
++		for_each_new_intel_crtc_in_state(state, crtc,
++					new_crtc_state, i) {
++			pipe_info = &(dev_priv->gvt->pipe_info[crtc->pipe]);
++
++			memset(new_crtc_state->wm.skl.plane_ddb_y, 0,
++				sizeof(new_crtc_state->wm.skl.plane_ddb_y));
++			memset(new_crtc_state->wm.skl.plane_ddb_uv, 0,
++				sizeof(new_crtc_state->wm.skl.plane_ddb_uv));
++
++			memcpy(new_crtc_state->wm.skl.plane_ddb_y,
++			       pipe_info->plane_ddb_y,
++			       sizeof(pipe_info->plane_ddb_y));
++			memcpy(&new_crtc_state->wm.skl.ddb,
++			       &pipe_info->pipe_ddb,
++			       sizeof(pipe_info->pipe_ddb));
++		}
++		return 0;
++	}
++#endif
++
+ 	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state,
+ 					    new_crtc_state, i) {
+ 		ret = skl_allocate_pipe_ddb(new_crtc_state, ddb);
+@@ -5454,6 +5494,7 @@ static int skl_wm_add_affected_planes(struct intel_atomic_state *state,
+ static int
+ skl_compute_wm(struct intel_atomic_state *state)
+ {
++	struct drm_i915_private *dev_priv = to_i915(state->base.dev);
+ 	struct intel_crtc *crtc;
+ 	struct intel_crtc_state *new_crtc_state;
+ 	struct intel_crtc_state *old_crtc_state;
+@@ -5463,10 +5504,23 @@ skl_compute_wm(struct intel_atomic_state *state)
+ 	/* Clear all dirty flags */
+ 	results->dirty_pipes = 0;
+ 
++	/* For the VGPU scenario based on Linux this is skipped as Dom0
++	 * ignores the WM setting from Guest.
++	 */
++	if (intel_vgpu_active(dev_priv))
++		return 0;
++
+ 	ret = skl_ddb_add_affected_pipes(state);
+ 	if (ret)
+ 		return ret;
+ 
++	/* In GVT-g scenario the ddb is statically allocated in DOM0 */
++	if (intel_gvt_active(dev_priv)) {
++		ret = skl_compute_ddb(state);
++		if (ret)
++			return ret;
++	}
++
+ 	/*
+ 	 * Calculate WM's for all pipes that are part of this transaction.
+ 	 * Note that skl_ddb_add_affected_pipes may have added more CRTC's that
+@@ -5489,9 +5543,12 @@ skl_compute_wm(struct intel_atomic_state *state)
+ 			results->dirty_pipes |= BIT(crtc->pipe);
+ 	}
+ 
+-	ret = skl_compute_ddb(state);
+-	if (ret)
+-		return ret;
++	if (!intel_gvt_active(dev_priv)) {
++		/* On native scenario it uses the dynamic mechanism among pipes */
++		ret = skl_compute_ddb(state);
++		if (ret)
++			return ret;
++	}
+ 
+ 	skl_print_wm_changes(state);
+ 
+@@ -5506,10 +5563,35 @@ static void skl_atomic_update_crtc_wm(struct intel_atomic_state *state,
+ 	struct skl_pipe_wm *pipe_wm = &crtc_state->wm.skl.optimal;
+ 	enum pipe pipe = crtc->pipe;
+ 
++	/* This is ignored for VGPU */
++	if (intel_vgpu_active(dev_priv))
++		return;
++
+ 	if ((state->wm_results.dirty_pipes & BIT(crtc->pipe)) == 0)
+ 		return;
+ 
+ 	I915_WRITE(PIPE_WM_LINETIME(pipe), pipe_wm->linetime);
++
++	if (intel_gvt_active(dev_priv)) {
++		struct intel_plane *intel_plane;
++		enum plane_id plane_id;
++
++		/* TBD: 1. Check the plane_res_block with ddb_plane[i].
++		 *      2. update the plane with plane_id
++		 */
++		for_each_intel_plane_on_crtc(&dev_priv->drm, crtc, intel_plane) {
++			plane_id = intel_plane->id;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++			if (dev_priv->gvt &&
++				dev_priv->gvt->pipe_info[pipe].plane_owner[plane_id])
++				continue;
++#endif
++			if (plane_id != PLANE_CURSOR)
++				skl_write_plane_wm(intel_plane, crtc_state);
++			else
++				skl_write_cursor_wm(intel_plane, crtc_state);
++		}
++	}
+ }
+ 
+ static void skl_initial_wm(struct intel_atomic_state *state,
+@@ -5519,6 +5601,10 @@ static void skl_initial_wm(struct intel_atomic_state *state,
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+ 	struct skl_ddb_values *results = &state->wm_results;
+ 
++	/* This is ignored on VGPU */
++	if (intel_vgpu_active(dev_priv))
++		return;
++
+ 	if ((results->dirty_pipes & BIT(crtc->pipe)) == 0)
+ 		return;
+ 
+-- 
+2.17.1
+

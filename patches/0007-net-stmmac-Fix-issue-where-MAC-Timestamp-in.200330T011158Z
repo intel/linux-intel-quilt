@@ -1,0 +1,66 @@
+From e1140191ef685e7b45c1a438d423ef0f8de444b9 Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Wed, 25 Mar 2020 15:13:39 +0800
+Subject: [PATCH 7/9] net: stmmac: Fix issue where MAC Timestamp interrupt is
+ not being cleared
+
+When the MAC Timestmap interrupt is asserted in use cases such as the
+Pulse-Per-Second(PPS) or Auxiliary Snapshot events, it is not cleared
+by reading the MAC Timestamp Status register. This patch includes the
+interrupt clear in the MAC Timestamp interrupt ISR.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c | 11 ++++++++---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c      |  5 -----
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+index 7ec43a941299..8946001ed0a1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_hwtstamp.c
+@@ -199,6 +199,7 @@ static void tstamp_interrupt(struct stmmac_priv *priv)
+ 	struct ptp_clock_event event;
+ 	unsigned long flags;
+ 	u32 num_snapshot;
++	u32 ts_status;
+ 	u32 tsync_int;
+ 	u64 ptp_time;
+ 	int i;
+@@ -209,10 +210,14 @@ static void tstamp_interrupt(struct stmmac_priv *priv)
+ 	if (!tsync_int)
+ 		return;
+ 
++	/* Read timestamp status to clear interrupt from either external
++	 * timestamp or start/end of PPS.
++	 */
++	ts_status = readl(priv->ioaddr + GMAC_TIMESTAMP_STATUS);
++
+ 	if (priv->plat->ext_snapshot_en) {
+-		num_snapshot = (readl(priv->ioaddr + GMAC_TIMESTAMP_STATUS) &
+-				GMAC_TIMESTAMP_ATSNS_MASK) >>
+-				GMAC_TIMESTAMP_ATSNS_SHIFT;
++		num_snapshot = (ts_status & GMAC_TIMESTAMP_ATSNS_MASK) >>
++			       GMAC_TIMESTAMP_ATSNS_SHIFT;
+ 
+ 		for (i = 0; i < num_snapshot; i++) {
+ 			spin_lock_irqsave(&priv->ptp_lock, flags);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index e6502f08290c..71ffa3060422 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -172,11 +172,6 @@ static int stmmac_enable(struct ptp_clock_info *ptp,
+ 			/* Enable External snapshot trigger */
+ 			acr_value |= priv->plat->ext_snapshot_num;
+ 			acr_value |= PTP_ACR_ATSFC;
+-
+-			/* Clear interrupt from PPS */
+-			if (readl(priv->ioaddr + GMAC_INT_STATUS) &
+-				  GMAC_INT_TSIE)
+-				readl(priv->ioaddr + GMAC_TIMESTAMP_STATUS);
+ 			pr_info("Auxiliary Snapshot %d enabled\n",
+ 				priv->plat->ext_snapshot_num >> 5);
+ 		} else {
+-- 
+2.17.1
+

@@ -1,0 +1,103 @@
+From ea5719e899db6f7815a031948d4d68d9ae3168f3 Mon Sep 17 00:00:00 2001
+From: Min He <min.he@intel.com>
+Date: Thu, 28 Dec 2017 12:21:16 +0800
+Subject: [PATCH 040/100] drm/i915/gvt: local display support in GVT-g guest
+
+This patch includes below features in GVT-g guest
+1. DP on port A will be treated as external DP
+2. Avoid some unnecessary checks in GVT-g guest
+3. initial default vbt values by using PCH_NONE
+
+Signed-off-by: Min He <min.he@intel.com>
+Reviewed-by: Dong, Eddie <eddie.dong@intel.com>
+Tested-by: Dong, Eddie <eddie.dong@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_bios.c    |  7 +++++++
+ drivers/gpu/drm/i915/display/intel_ddi.c     |  4 ++--
+ drivers/gpu/drm/i915/display/intel_display.c | 11 +++++++++--
+ drivers/gpu/drm/i915/display/intel_dp.c      |  7 ++++++-
+ 4 files changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_bios.c b/drivers/gpu/drm/i915/display/intel_bios.c
+index a03f56b7b4ef..414bb1d91325 100644
+--- a/drivers/gpu/drm/i915/display/intel_bios.c
++++ b/drivers/gpu/drm/i915/display/intel_bios.c
+@@ -1849,6 +1849,13 @@ void intel_bios_init(struct drm_i915_private *dev_priv)
+ 		return;
+ 	}
+ 
++	if (HAS_PCH_NOP(dev_priv) && !intel_vgpu_active(dev_priv)) {
++		DRM_DEBUG_KMS("Skipping VBT init due to disabled display.\n");
++		return;
++	} else if (HAS_PCH_NOP(dev_priv)) {
++		dev_priv->pch_type = PCH_NONE;
++	}
++
+ 	init_vbt_defaults(dev_priv);
+ 
+ 	/* If the OpRegion does not have VBT, look in PCI ROM. */
+diff --git a/drivers/gpu/drm/i915/display/intel_ddi.c b/drivers/gpu/drm/i915/display/intel_ddi.c
+index c180680e27be..75977087a60a 100644
+--- a/drivers/gpu/drm/i915/display/intel_ddi.c
++++ b/drivers/gpu/drm/i915/display/intel_ddi.c
+@@ -2106,7 +2106,7 @@ bool intel_ddi_connector_get_hw_state(struct intel_connector *intel_connector)
+ 		goto out;
+ 	}
+ 
+-	if (HAS_TRANSCODER_EDP(dev_priv) && port == PORT_A)
++	if (HAS_TRANSCODER_EDP(dev_priv) && port == PORT_A && !intel_vgpu_active(dev_priv))
+ 		cpu_transcoder = TRANSCODER_EDP;
+ 	else
+ 		cpu_transcoder = (enum transcoder) pipe;
+@@ -4487,7 +4487,7 @@ static int intel_ddi_compute_config(struct intel_encoder *encoder,
+ 	enum port port = encoder->port;
+ 	int ret;
+ 
+-	if (HAS_TRANSCODER_EDP(dev_priv) && port == PORT_A)
++	if (HAS_TRANSCODER_EDP(dev_priv) && port == PORT_A && !intel_vgpu_active(dev_priv))
+ 		pipe_config->cpu_transcoder = TRANSCODER_EDP;
+ 
+ 	if (intel_crtc_has_type(pipe_config, INTEL_OUTPUT_HDMI)) {
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index a81906e859d4..7bdb0e7524ca 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -13641,8 +13641,15 @@ verify_crtc_state(struct intel_crtc *crtc,
+ 
+ 	intel_pipe_config_sanity_check(dev_priv, pipe_config);
+ 
+-	if (!intel_pipe_config_compare(new_crtc_state,
+-				       pipe_config, false)) {
++	/*
++	 * Only check for pipe config if we are not in a GVT guest environment,
++	 * because such a check in a GVT guest environment doesn't make any sense
++	 * as we don't allow the guest to do a mode set, so there can very well
++	 * be a difference between what it has programmed vs. what the host
++	 * truly configured the HW pipe to be in.
++	 */
++	if (!intel_vgpu_active(dev_priv) &&
++		!intel_pipe_config_compare(new_crtc_state, pipe_config, false)) {
+ 		I915_STATE_WARN(1, "pipe state doesn't match!\n");
+ 		intel_dump_pipe_config(pipe_config, NULL, "[hw state]");
+ 		intel_dump_pipe_config(new_crtc_state, NULL, "[sw state]");
+diff --git a/drivers/gpu/drm/i915/display/intel_dp.c b/drivers/gpu/drm/i915/display/intel_dp.c
+index 20f10db03fef..d6b70b1d96f7 100644
+--- a/drivers/gpu/drm/i915/display/intel_dp.c
++++ b/drivers/gpu/drm/i915/display/intel_dp.c
+@@ -2547,7 +2547,12 @@ static void wait_panel_status(struct intel_dp *intel_dp,
+ 			I915_READ(pp_stat_reg),
+ 			I915_READ(pp_ctrl_reg));
+ 
+-	if (intel_de_wait_for_register(dev_priv, pp_stat_reg,
++	/*
++	 * Only wait for panel status if we are not in a GVT guest environment,
++	 * because such a wait in a GVT guest environment doesn't make any sense
++	 * as we are exposing virtual DP monitors to the guest.
++	 */
++	if (!intel_vgpu_active(dev_priv) && intel_de_wait_for_register(dev_priv, pp_stat_reg,
+ 				       mask, value, 5000))
+ 		DRM_ERROR("Panel status timeout: status %08x control %08x\n",
+ 				I915_READ(pp_stat_reg),
+-- 
+2.17.1
+

@@ -1,0 +1,111 @@
+From cd80c02fcd70c138b5ceb58ee1b1ac70b69a09b0 Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Tue, 17 Mar 2020 13:22:35 +0800
+Subject: [PATCH 5/9] net: stmmac: REVERTME: WA for incorrect ART-TSC
+ conversion on TGL A2
+
+On IoTG Tigerlake Internal MCP A2 stepping, the ART value that is read
+from the MDIO adhoc register is half of TSC value returned from CPU
+instruction rdtsc. This will cause crosstimestamping software stacks to
+ fail.
+
+This patch adjust the incorrect value specifically for Tigerlake
+platform with IoTG Internal MCP A2 stepping only and does not apply to
+other Tigerlake stepping.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c  |  5 +++-
+ .../net/ethernet/stmicro/stmmac/stmmac_ptp.c  | 23 ++++++++++++++++---
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 0485aa4324e1..46965fa94b78 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -393,6 +393,7 @@ static void ehl_pse_work_around(struct pci_dev *pdev,
+ static int ehl_pse0_common_data(struct pci_dev *pdev,
+ 				struct plat_stmmacenet_data *plat)
+ {
++#ifdef CONFIG_X86
+ 	if (boot_cpu_has(X86_FEATURE_ART)) {
+ 		unsigned int unused[3], ecx_pmc_art_freq;
+ 		/* Elkhart Lake PSE ART is 19.2MHz */
+@@ -402,6 +403,7 @@ static int ehl_pse0_common_data(struct pci_dev *pdev,
+ 		plat->pmc_art_to_pse_art_ratio = ecx_pmc_art_freq /
+ 						 pse_art_freq;
+ 	}
++#endif
+ 
+ 	plat->phy_addr = 1;
+ 	plat->is_pse = 1;
+@@ -453,6 +455,7 @@ static struct stmmac_pci_info ehl_pse0_sgmii1g_pci_info = {
+ static int ehl_pse1_common_data(struct pci_dev *pdev,
+ 				struct plat_stmmacenet_data *plat)
+ {
++#ifdef CONFIG_X86
+ 	if (boot_cpu_has(X86_FEATURE_ART)) {
+ 		unsigned int unused[3], ecx_pmc_art_freq;
+ 		/* Elkhart Lake PSE ART is 19.2MHz */
+@@ -462,7 +465,7 @@ static int ehl_pse1_common_data(struct pci_dev *pdev,
+ 		plat->pmc_art_to_pse_art_ratio = ecx_pmc_art_freq /
+ 						 pse_art_freq;
+ 	}
+-
++#endif
+ 	plat->phy_addr = 1;
+ 	plat->is_pse = 1;
+ 	ehl_pse_work_around(pdev, plat);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+index 1b29ba6f5efd..e6502f08290c 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ptp.c
+@@ -11,7 +11,9 @@
+ #include "stmmac_ptp.h"
+ #include "dwmac4.h"
+ #include <linux/iopoll.h>
+-
++#ifdef CONFIG_X86
++#include <asm/intel-family.h>
++#endif
+ /**
+  * stmmac_adjust_freq
+  *
+@@ -214,6 +216,8 @@ static int stmmac_get_syncdevicetime(ktime_t *device,
+ 	struct stmmac_priv *priv = (struct stmmac_priv *)ctx;
+ 	void __iomem *ptpaddr = priv->ptpaddr;
+ 	void __iomem *ioaddr = priv->hw->pcsr;
++	unsigned int ebx_numerator;
++	unsigned int unused[3];
+ 	unsigned long flags;
+ 	u32 num_snapshot;
+ 	u32 gpio_value;
+@@ -288,9 +292,22 @@ static int stmmac_get_syncdevicetime(ktime_t *device,
+ 	 * compared to the PMC ART, so we will need to perform a multiplication
+ 	 * to match the PMC ART frequency.
+ 	 */
+-	if (priv->plat->is_pse)
++	if (priv->plat->is_pse) {
+ 		system->cycles *= priv->plat->pmc_art_to_pse_art_ratio;
+-
++		return 0;
++	}
++#ifdef CONFIG_X86
++	/* [REVERTME] Workaround: TigerLake Internal MCP A2 stepping has ART
++	 * value of 0.5x of actual ART. As it has same CPU family and model as
++	 * the rest of the TigerLak CPU skus, we can only differentiate them
++	 * using numerator value define in CPUID Leaf 15H. Note that this
++	 * workaround is not required for Tigerlake Internal MCP A6 stepping.
++	 */
++	cpuid(0x15, unused, &ebx_numerator, unused + 1, unused + 2);
++	if (boot_cpu_data.x86_model == INTEL_FAM6_TIGERLAKE_L &&
++	    ebx_numerator == 0x5e)
++		system->cycles *= 2;
++#endif
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

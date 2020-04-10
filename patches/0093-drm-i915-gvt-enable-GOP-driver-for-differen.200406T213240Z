@@ -1,0 +1,313 @@
+From 380785108156d96c4e38acd1e5d3742b06d4623c Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Mon, 9 Sep 2019 23:59:56 +0800
+Subject: [PATCH 093/100] drm/i915/gvt: enable GOP driver for different display
+ modes
+
+Get display mode from the first active crtc which assigned to the vGPU
+and pass the information through vgtif to OVMF gop driver
+
+For resolutions above 1920x1080@32bpp, will show the guest content to
+the top-left portion of the display
+
+Tracked-On: projectacrn/acrn-hypervisor#3624
+Co-Developed-by: He Min <min.he@intel.com>
+Signed-off-by: Liu Xinyun <xinyun.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c  | 123 +++++++++++++++++++++++++---
+ drivers/gpu/drm/i915/gvt/gvt.h      |  11 +++
+ drivers/gpu/drm/i915/gvt/handlers.c |   9 +-
+ drivers/gpu/drm/i915/gvt/vgpu.c     |   7 ++
+ drivers/gpu/drm/i915/i915_pvinfo.h  |  13 ++-
+ 5 files changed, 149 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 38003e4066e8..580a981bfd7a 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -678,9 +678,92 @@ void intel_vgpu_reset_display(struct intel_vgpu *vgpu)
+ 	emulate_monitor_status_change(vgpu);
+ }
+ 
++
++#define GOP_FB_SIZE		0x800000
++#define GOP_DISPLAY_WIDTH	1920u
++#define GOP_DISPLAY_HEIGHT	1080u
++
+ /*
+- * prepare_gop_fb will allocate a arrange of memory, then map them into the
+- * ggtt table of the guest partition in the aperture.
++ * check_gop_mode to query current mode and pass it to GOP
++ *
++ * 1. Get current mode from ctrc)
++ * 2. use crtc mode as GOP mode if mode <=1920x1080
++ * 3. use 1920x1080 as GOP mode if mode > 1080p
++ * 4.   enable panel scale (ToDO)
++ * 5. pass GOP mode to OVMF
++ *
++ */
++static int check_gop_mode(struct intel_vgpu *vgpu)
++{
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	unsigned int pipe, plane;
++	struct intel_crtc *crtc;
++	struct intel_crtc_state *crtc_state;
++	struct drm_display_mode mode;
++	bool found = false;
++
++	/* we will get the gop output on the first pipe the vgpu ownes */
++	for_each_pipe(dev_priv, pipe) {
++		for_each_universal_plane(dev_priv, pipe, plane) {
++			if (vgpu->gvt->pipe_info[pipe].plane_owner[plane]
++					== vgpu->id) {
++				found = true;
++				break;
++			}
++		}
++		if (found)
++			break;
++	}
++
++	if (found == false) {
++		gvt_dbg_dpy("Failed to find owned plane for %d", vgpu->id);
++		return -ENODEV;
++	}
++
++	crtc = intel_get_crtc_for_pipe(vgpu->gvt->dev_priv, pipe);
++	crtc_state = to_intel_crtc_state(crtc->base.state);
++	intel_mode_from_pipe_config(&mode, crtc_state);
++
++	drm_mode_debug_printmodeline(&mode);
++
++	if (mode.vdisplay <= 0 || mode.hdisplay <= 0)
++		return -EINVAL;
++
++	vgpu->gm.gop.width = mode.hdisplay;
++	vgpu->gm.gop.height = mode.vdisplay;
++	vgpu->gm.gop.pitch = mode.hdisplay;
++	vgpu->gm.gop.Bpp = 4;
++
++	/* populate mode for OVMF GOP driver */
++	if (mode.hdisplay * mode.vdisplay * 4 > GOP_FB_SIZE) {
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.width)) =
++			min(vgpu->gm.gop.width, GOP_DISPLAY_WIDTH);
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.height)) =
++			min(vgpu->gm.gop.height, GOP_DISPLAY_HEIGHT);
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.pitch)) =
++			min(vgpu->gm.gop.pitch, GOP_DISPLAY_WIDTH);
++	} else {
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.width)) = vgpu->gm.gop.width;
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.height)) = vgpu->gm.gop.height;
++		vgpu_vreg_t(vgpu, vgtif_reg(gop.pitch)) = vgpu->gm.gop.pitch;
++	}
++
++	vgpu->gm.gop.size = 4 * vgpu_vreg_t(vgpu, vgtif_reg(gop.width)) *
++				vgpu_vreg_t(vgpu, vgtif_reg(gop.height));
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.Bpp)) = 4;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.size)) = vgpu->gm.gop.size;
++
++	DRM_INFO("prepare GOP fb: %dKB for %dX%d@%d\n",
++			vgpu_vreg_t(vgpu, vgtif_reg(gop.size))>>10,
++			vgpu_vreg_t(vgpu, vgtif_reg(gop.width)),
++			vgpu_vreg_t(vgpu, vgtif_reg(gop.height)),
++			vgpu_vreg_t(vgpu, vgtif_reg(gop.Bpp))*8);
++	return 0;
++}
++
++/*
++ * prepare_gop_fb will allocate a arrange of memory, and then map them
++ * into the ggtt table of the guest partition in the aperture.
+  */
+ static int prepare_gop_fb(struct intel_vgpu *vgpu, u32 size)
+ {
+@@ -743,18 +826,22 @@ static int prepare_gop_fb(struct intel_vgpu *vgpu, u32 size)
+ 	return ret;
+ }
+ 
+-#define GOP_DISPLAY_WIDTH 1920
+-#define GOP_DISPLAY_HEIGHT 1080
+ static int setup_gop_display(struct intel_vgpu *vgpu)
+ {
+ 	int ret = 0;
+ 	unsigned int pipe, plane;
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 	bool found = false;
+-	u32 width = GOP_DISPLAY_WIDTH, height = GOP_DISPLAY_HEIGHT;
++
++	u32 width, height, Bpp;
+ 	u32 stride, ctl, surf;
+ 	unsigned long irqflags;
+ 
++	width = vgpu_vreg_t(vgpu, vgtif_reg(gop.width));
++	height = vgpu_vreg_t(vgpu, vgtif_reg(gop.height));
++	Bpp = vgpu_vreg_t(vgpu, vgtif_reg(gop.Bpp));
++
++	DRM_INFO("Set up display w:%u h:%u for GOP \n", width, height);
+ 
+ 	/* we will display the gop output on the first plane the vgpu ownes */
+ 	for_each_pipe(dev_priv, pipe) {
+@@ -775,7 +862,7 @@ static int setup_gop_display(struct intel_vgpu *vgpu)
+ 	}
+ 
+ 	/* Sizes are 0 based */
+-	stride = width * 4 / 64; /* 32bit per pixel */
++	stride = width * Bpp / 64; /* 32bit per pixel */
+ 	width--;
+ 	height--;
+ 	surf = vgpu->gm.high_gm_node.start;
+@@ -797,24 +884,40 @@ static int setup_gop_display(struct intel_vgpu *vgpu)
+ 	return ret;
+ }
+ 
+-#define GOP_FB_SIZE 0x800000  /* 8M FB size */
+ int intel_vgpu_g2v_setup_gop(struct intel_vgpu *vgpu)
+ {
+ 	int ret = 0;
+ 
++	gvt_dbg_dpy("intel_vgpu_g2v_setup_gop\n");
++
+ 	if (vgpu->gm.gop_fb_pages)
+ 		goto Done;
+ 
+-	ret = prepare_gop_fb(vgpu, GOP_FB_SIZE);
++	ret = check_gop_mode(vgpu);
++	if (ret) {
++		gvt_vgpu_err("gop check pipe faile %d\n", ret);
++		goto Done;
++	}
++
++	ret = prepare_gop_fb(vgpu, vgpu->gm.gop.size);
+ 	if (ret) {
+-		gvt_dbg_dpy("gop prepared failed %d\n", ret);
++		gvt_vgpu_err("gop prepared failed %d\n", ret);
+ 		goto Done;
+ 	}
+ 
+ 	ret = setup_gop_display(vgpu);
+ 	if (ret) {
+-		gvt_dbg_dpy("gop display setup failed %d\n", ret);
++		gvt_vgpu_err("gop display setup failed %d\n", ret);
++		goto Done;
+ 	}
++
++	vgpu->gm.gop.fb_base = GOP_FB_BASE;
++
++	vgpu_vreg(vgpu, _vgtif_reg(gop.fb_base)) = vgpu->gm.gop.fb_base;
++
++	gvt_dbg_dpy("set up gop FbBase: %x\n",
++			vgpu_vreg(vgpu, _vgtif_reg(gop.fb_base)));
++
+ Done:
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 94eb627e8022..528adc22659a 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -78,6 +78,15 @@ struct intel_gvt_device_info {
+ 	u32 max_surface_size;
+ };
+ 
++struct gvt_gop_info {
++	unsigned int fb_base;
++	unsigned int width;
++	unsigned int height;
++	unsigned int pitch;
++	unsigned int Bpp;
++	unsigned int size;
++};
++
+ /* GM resources owned by a vGPU */
+ struct intel_vgpu_gm {
+ 	u64 aperture_sz;
+@@ -85,6 +94,7 @@ struct intel_vgpu_gm {
+ 	struct drm_mm_node low_gm_node;
+ 	struct drm_mm_node high_gm_node;
+ 	struct page **gop_fb_pages;
++	struct gvt_gop_info gop;
+ 	u32 gop_fb_size;
+ };
+ 
+@@ -122,6 +132,7 @@ struct intel_vgpu_irq {
+ 		       INTEL_GVT_EVENT_MAX);
+ };
+ 
++/* ToDo: GOP_FB_BASE from kernel parameter */
+ #define GOP_FB_BASE	0xDF000000
+ 
+ struct intel_vgpu_opregion {
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 8b32fb2e8b95..dafdfac63832 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1170,9 +1170,6 @@ static int sbi_ctl_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	return 0;
+ }
+ 
+-#define _vgtif_reg(x) \
+-	(VGT_PVINFO_PAGE + offsetof(struct vgt_if, x))
+-
+ static int pvinfo_mmio_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 		void *p_data, unsigned int bytes)
+ {
+@@ -1214,6 +1211,12 @@ static int pvinfo_mmio_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 	case _vgtif_reg(scaler_owned):
+ 	case _vgtif_reg(enable_pvmmio):
+ 		break;
++	case _vgtif_reg(gop.fb_base) ... _vgtif_reg(gop.size):
++		gvt_vgpu_err("pvinfo read gop: [%x:%x] = %x\n",
++				offset, bytes, *(u32 *)p_data);
++		if (offset + bytes > _vgtif_reg(gop.size) + 4)
++			invalid_read = true;
++		break;
+ 	default:
+ 		invalid_read = true;
+ 		break;
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 3615cffd4d2b..66251a59ecd4 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -78,6 +78,13 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
+ 
+ 	vgpu_vreg_t(vgpu, vgtif_reg(enable_pvmmio)) = 0;
+ 
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.fb_base)) = 0;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.width)) = 0;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.height)) = 0;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.pitch)) = 0;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.Bpp)) = 0;
++	vgpu_vreg_t(vgpu, vgtif_reg(gop.size)) = 0;
++
+ 	gvt_dbg_core("Populate PVINFO PAGE for vGPU %d\n", vgpu->id);
+ 	gvt_dbg_core("aperture base [GMADR] 0x%llx size 0x%llx\n",
+ 		vgpu_aperture_gmadr_base(vgpu), vgpu_aperture_sz(vgpu));
+diff --git a/drivers/gpu/drm/i915/i915_pvinfo.h b/drivers/gpu/drm/i915/i915_pvinfo.h
+index 290964eb2d51..c6c01b096823 100644
+--- a/drivers/gpu/drm/i915/i915_pvinfo.h
++++ b/drivers/gpu/drm/i915/i915_pvinfo.h
+@@ -177,9 +177,20 @@ struct vgt_if {
+ 	u32 pv_mmio;
+ 	u32 scaler_owned;
+ 
+-	u32  rsv7[0x200 - 27];    /* pad to one page */
++	struct {
++		u32 fb_base;
++		u32 width;
++		u32 height;
++		u32 pitch;
++		u32 Bpp;
++		u32 size;
++	} gop;
++	u32  rsv8[0x200 - 33];    /* pad to one page */
+ } __packed;
+ 
++#define _vgtif_reg(x) \
++	(VGT_PVINFO_PAGE + offsetof(struct vgt_if, x))
++
+ #define vgtif_offset(x) (offsetof(struct vgt_if, x))
+ 
+ #define vgtif_reg(x) _MMIO(VGT_PVINFO_PAGE + vgtif_offset(x))
+-- 
+2.17.1
+

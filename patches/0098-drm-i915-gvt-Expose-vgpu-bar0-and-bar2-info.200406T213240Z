@@ -1,0 +1,75 @@
+From 854d5065762e1a57360a9774d1c7b044e532f57c Mon Sep 17 00:00:00 2001
+From: Junming Liu <junming.liu@intel.com>
+Date: Fri, 8 Nov 2019 15:45:06 +0000
+Subject: [PATCH 098/100] drm/i915/gvt:Expose vgpu bar0 and bar2 information
+
+Expose vgpu bar0 and bar2 information. In the next design,
+ACRN-DM will need vgpu bar information.
+
+/sys/kernel/gvt/vmx/vgpu_bar_info expose vgpu bar info.
+If the value is:
+0x00000000de000000 0x0000000001000000
+0x00000000c0000000 0x0000000010000000
+then:
+bar0 start addr: 0x00000000de000000
+bar0 size: 0x0000000001000000
+bar2 start addr: 0x00000000c0000000
+bar2 size: 0x0000000010000000
+
+Tracked-On: projectacrn/acrn-hypervisor#4005
+
+Signed-off-by: Junming Liu <junming.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: Liu XinYun <xinyun.liu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/acrngt.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/acrngt.c b/drivers/gpu/drm/i915/gvt/acrngt.c
+index d0f5c25394a8..ed69108c14a8 100644
+--- a/drivers/gpu/drm/i915/gvt/acrngt.c
++++ b/drivers/gpu/drm/i915/gvt/acrngt.c
+@@ -417,12 +417,40 @@ static ssize_t acrngt_sysfs_vgpu_id(struct kobject *kobj,
+ 	return 0;
+ }
+ 
++static ssize_t acrngt_sysfs_vgpu_bar_info(struct kobject *kobj,
++		struct kobj_attribute *attr, char *buf)
++{
++	u64 bar0_start, bar0_len, bar2_start, bar2_len;
++	u64 mask;
++	struct acrngt_hvm_dev *info;
++	struct intel_vgpu *vgpu;
++
++	info = container_of(kobj, struct acrngt_hvm_dev, kobj);
++	if (!info || !info->vgpu)
++		return 0;
++	vgpu = info->vgpu;
++	mask = ~(0xf);
++	/* clear last four bits according to PCI spec */
++	bar0_start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_0) & mask;
++	bar0_len = vgpu->cfg_space.bar[0].size;
++	bar2_start = *(u64 *)(vgpu_cfg_space(vgpu) + PCI_BASE_ADDRESS_2) & mask;
++	bar2_len = vgpu->cfg_space.bar[1].size;
++	return sprintf(buf, "0x%016llx 0x%016llx\n0x%016llx 0x%016llx\n",
++		bar0_start, bar0_len, bar2_start, bar2_len);
++
++	return 0;
++}
++
+ static struct kobj_attribute acrngt_vm_attr =
+ __ATTR(vgpu_id, 0440, acrngt_sysfs_vgpu_id, NULL);
+ 
++static struct kobj_attribute acrngt_vgpu_bar_info =
++__ATTR(vgpu_bar_info, 0440, acrngt_sysfs_vgpu_bar_info, NULL);
++
+ 
+ static struct attribute *acrngt_vm_attrs[] = {
+ 	&acrngt_vm_attr.attr,
++	&acrngt_vgpu_bar_info.attr,
+ 	NULL,   /* need to NULL terminate the list of attributes */
+ };
+ 
+-- 
+2.17.1
+
