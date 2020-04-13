@@ -1,0 +1,42 @@
+From afae2e9c19ff78e9328f7b3192b5e902174f57cf Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Sun, 15 Mar 2020 18:41:53 +0800
+Subject: [PATCH 2/4] net: xsk: REVERTME: workaround stmmac AF_XDP ZC RX
+ duplicate & loss
+
+Duplicated packets are observed is due to the fact the ring->desc
+not being initialized during XDP_SETUP_PROG. causing the driver
+to map the same dma_addr_t for all packets.
+
+This is considered a workaround as this changes the XSK core directly
+which other XDP developers do not seem to require. It however works
+with the stmmac driver and with this change no duplication or losses
+are observed. This also restricts the xsk frame size to 4096 bytes.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ net/xdp/xsk_queue.h | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/net/xdp/xsk_queue.h b/net/xdp/xsk_queue.h
+index eddae4688862..0f853ebb50ae 100644
+--- a/net/xdp/xsk_queue.h
++++ b/net/xdp/xsk_queue.h
+@@ -178,7 +178,12 @@ static inline u64 *xskq_validate_addr(struct xsk_queue *q, u64 *addr,
+ 		struct xdp_umem_ring *ring = (struct xdp_umem_ring *)q->ring;
+ 		unsigned int idx = q->cons_tail & q->ring_mask;
+ 
+-		*addr = READ_ONCE(ring->desc[idx]) & q->chunk_mask;
++		/* WORKAROUND for stmmac AF_XDP Zero-Copy rx-path:
++		 * This enables the driver to map the dynamic dma_addresses
++		 * correctly as otherwise all packets will use a single
++		 * dma_address, causing packet duplication/losses
++		 */
++		*addr = (idx * 4096) & q->chunk_mask;
+ 
+ 		if (umem->flags & XDP_UMEM_UNALIGNED_CHUNK_FLAG) {
+ 			if (xskq_is_valid_addr_unaligned(q, *addr,
+-- 
+2.17.1
+
