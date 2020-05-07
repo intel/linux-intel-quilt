@@ -1,0 +1,886 @@
+From 5b224a29b98b8ea91417f1575e3b0573c4fa2e53 Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Fri, 24 Apr 2020 17:46:54 +0300
+Subject: [PATCH 16/46] mei: vt: virtual fix use after free issue.
+
+This is technical gap patch to adjust the codebase
+to the recent version:
+1. Rename vm (virtual machine) to more generic vt (virtual tag)
+2. Add kdoc documentation for VT functions and structures
+3. Fix security use after free issue between mei_ioctl_connect_vtag()
+   mei_release()
+
+Tracked-On: PKT-3321
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+---
+ drivers/misc/mei/bus.c       |  56 +++++++++++------
+ drivers/misc/mei/client.c    | 116 +++++++++++++++++++++++++++++-----
+ drivers/misc/mei/client.h    |  11 +---
+ drivers/misc/mei/hbm.c       |   4 +-
+ drivers/misc/mei/hw-virtio.c |  11 ++--
+ drivers/misc/mei/hw.h        | 113 ++++++++++++++++++++++-----------
+ drivers/misc/mei/interrupt.c |   4 +-
+ drivers/misc/mei/main.c      | 118 ++++++++++++++++++++++++++---------
+ drivers/misc/mei/mei_dev.h   |  12 +++-
+ 9 files changed, 323 insertions(+), 122 deletions(-)
+
+diff --git a/drivers/misc/mei/bus.c b/drivers/misc/mei/bus.c
+index 93b253532177..caef6275f9e1 100644
+--- a/drivers/misc/mei/bus.c
++++ b/drivers/misc/mei/bus.c
+@@ -495,24 +495,39 @@ static void mei_cl_bus_module_put(struct mei_cl_device *cldev)
+ 	module_put(cldev->bus->dev->driver->owner);
+ }
+ 
+-static int mei_cldev_vt_support_check(struct mei_cl_device *cldev)
++/**
++ * mei_cl_bus_vtag - get bus vtag entry wrapper
++ *     The tag for bus client is always first.
++ *
++ * @cl: host client
++ *
++ * Return: bus vtag or NULL
++ */
++static inline struct mei_cl_vtag *mei_cl_bus_vtag(struct mei_cl *cl)
+ {
+-	struct mei_device *bus = cldev->bus;
+-
+-	if (!bus->hbm_f_vt_supported)
+-		return -EOPNOTSUPP;
+-
+-	return cldev->me_cl->props.vt_supported ? 0 : -EOPNOTSUPP;
++	return list_first_entry_or_null(&cl->vtag_map,
++					struct mei_cl_vtag, list);
+ }
+ 
+-static inline int mei_cldev_vtag_alloc(struct mei_cl_device *cldev)
++/**
++ * mei_cl_bus_vtag_alloc - add bus client entry to vtag map
++ *
++ * @cldev: me client device
++ *
++ * Return:
++ * * 0 on success
++ * * -ENOMEM if memory allocation failed
++ */
++static int mei_cl_bus_vtag_alloc(struct mei_cl_device *cldev)
+ {
+ 	struct mei_cl *cl = cldev->cl;
+ 	struct mei_cl_vtag *cl_vtag;
+ 
+-	/* client supports virtualization and have not already allocated one */
+-	if (mei_cldev_vt_support_check(cldev) ||
+-	    list_first_entry_or_null(&cl->vtag_map, struct mei_cl_vtag, list))
++	/*
++	 * Bail out if the client does not supports vtags
++	 * or has already allocated one
++	 */
++	if (mei_cl_vt_support_check(cl) || mei_cl_bus_vtag(cl))
+ 		return 0;
+ 
+ 	cl_vtag = mei_cl_vtag_alloc(NULL, 0);
+@@ -520,16 +535,21 @@ static inline int mei_cldev_vtag_alloc(struct mei_cl_device *cldev)
+ 		return -ENOMEM;
+ 
+ 	list_add_tail(&cl_vtag->list, &cl->vtag_map);
++
+ 	return 0;
+ }
+ 
+-static inline void mei_cldev_vtag_free(struct mei_cl_device *cldev)
++/**
++ * mei_cl_bus_vtag_free - remove the bus entry from vtag map
++ *
++ * @cldev: me client device
++ */
++static void mei_cl_bus_vtag_free(struct mei_cl_device *cldev)
+ {
+ 	struct mei_cl *cl = cldev->cl;
+ 	struct mei_cl_vtag *cl_vtag;
+ 
+-	cl_vtag = list_first_entry_or_null(&cl->vtag_map,
+-					   struct mei_cl_vtag, list);
++	cl_vtag = mei_cl_bus_vtag(cl);
+ 	if (!cl_vtag)
+ 		return;
+ 
+@@ -573,14 +593,14 @@ int mei_cldev_enable(struct mei_cl_device *cldev)
+ 		goto out;
+ 	}
+ 
+-	ret = mei_cldev_vtag_alloc(cldev);
++	ret = mei_cl_bus_vtag_alloc(cldev);
+ 	if (ret)
+ 		goto out;
+ 
+ 	ret = mei_cl_connect(cl, cldev->me_cl, NULL);
+ 	if (ret < 0) {
+ 		dev_err(&cldev->dev, "cannot connect\n");
+-		mei_cldev_vtag_free(cldev);
++		mei_cl_bus_vtag_free(cldev);
+ 	}
+ 
+ out:
+@@ -634,7 +654,7 @@ int mei_cldev_disable(struct mei_cl_device *cldev)
+ 
+ 	mutex_lock(&bus->device_lock);
+ 
+-	mei_cldev_vtag_free(cldev);
++	mei_cl_bus_vtag_free(cldev);
+ 
+ 	if (!mei_cl_is_connected(cl)) {
+ 		dev_dbg(bus->dev, "Already disconnected\n");
+@@ -867,7 +887,7 @@ static ssize_t vtag_show(struct device *dev, struct device_attribute *a,
+ 	struct mei_cl_device *cldev = to_mei_cl_device(dev);
+ 	bool vt = mei_me_cl_vt(cldev->me_cl);
+ 
+-	return scnprintf(buf, PAGE_SIZE, "%d", vt);
++	return sprintf(buf, "%d", vt);
+ }
+ static DEVICE_ATTR_RO(vtag);
+ 
+diff --git a/drivers/misc/mei/client.c b/drivers/misc/mei/client.c
+index c40166af96a2..3391fe0c0c4c 100644
+--- a/drivers/misc/mei/client.c
++++ b/drivers/misc/mei/client.c
+@@ -352,6 +352,14 @@ static inline void mei_tx_cb_dequeue(struct mei_cl_cb *cb)
+ 	mei_io_cb_free(cb);
+ }
+ 
++/**
++ * mei_cl_set_read_by_fp - set pending_read flag to vtag struct for given fp
++ *
++ * Locking: called under "dev->device_lock" lock
++ *
++ * @cl: mei client
++ * @fp: pointer to file structure
++ */
+ static void mei_cl_set_read_by_fp(const struct mei_cl *cl,
+ 				  const struct file *fp)
+ {
+@@ -569,6 +577,7 @@ int mei_cl_flush_queues(struct mei_cl *cl, const struct file *fp)
+ 	cl_dbg(dev, cl, "remove list entry belonging to cl\n");
+ 	mei_io_tx_list_free_cl(&cl->dev->write_list, cl, fp);
+ 	mei_io_tx_list_free_cl(&cl->dev->write_waiting_list, cl, fp);
++	/* free pending and control cb only in final flush */
+ 	if (!fp) {
+ 		mei_io_list_flush_cl(&cl->dev->ctrl_wr_list, cl);
+ 		mei_io_list_flush_cl(&cl->dev->ctrl_rd_list, cl);
+@@ -1267,6 +1276,16 @@ static int mei_cl_tx_flow_ctrl_creds_reduce(struct mei_cl *cl)
+ 	return 0;
+ }
+ 
++/**
++ * mei_cl_vtag_alloc - allocate and fill the vtag structure
++ *
++ * @fp: pointer to file structure
++ * @vtag: vm tag
++ *
++ * Return:
++ * * Pointer to allocated struct - on success
++ * * ERR_PTR(-ENOMEM) on memory allocation failure
++ */
+ struct mei_cl_vtag *mei_cl_vtag_alloc(struct file *fp, u8 vtag)
+ {
+ 	struct mei_cl_vtag *cl_vtag;
+@@ -1282,6 +1301,16 @@ struct mei_cl_vtag *mei_cl_vtag_alloc(struct file *fp, u8 vtag)
+ 	return cl_vtag;
+ }
+ 
++/**
++ * mei_cl_fp_by_vtag - obtain the file pointer by vtag
++ *
++ * @cl: host client
++ * @vtag: vm tag
++ *
++ * Return:
++ * * A file pointer - on success
++ * * ERR_PTR(-ENOENT) if vtag is not found in the client vtag list
++ */
+ const struct file *mei_cl_fp_by_vtag(const struct mei_cl *cl, u8 vtag)
+ {
+ 	struct mei_cl_vtag *vtag_l;
+@@ -1293,6 +1322,12 @@ const struct file *mei_cl_fp_by_vtag(const struct mei_cl *cl, u8 vtag)
+ 	return ERR_PTR(-ENOENT);
+ }
+ 
++/**
++ * mei_cl_reset_read_by_vtag - reset pending_read flag by given vtag
++ *
++ * @cl: host client
++ * @vtag: vm tag
++ */
+ static void mei_cl_reset_read_by_vtag(const struct mei_cl *cl, u8 vtag)
+ {
+ 	struct mei_cl_vtag *vtag_l;
+@@ -1305,6 +1340,12 @@ static void mei_cl_reset_read_by_vtag(const struct mei_cl *cl, u8 vtag)
+ 	}
+ }
+ 
++/**
++ * mei_cl_read_vtag_add_fc - add flow control for next pending reader
++ *                           in the vtag list
++ *
++ * @cl: host client
++ */
+ static void mei_cl_read_vtag_add_fc(struct mei_cl *cl)
+ {
+ 	struct mei_cl_vtag *cl_vtag;
+@@ -1321,7 +1362,16 @@ static void mei_cl_read_vtag_add_fc(struct mei_cl *cl)
+ 	}
+ }
+ 
+-static int mei_cl_vt_support_check(struct mei_cl *cl)
++/**
++ * mei_cl_vt_support_check - check if client support vtags
++ *
++ * @cl: host client
++ *
++ * Return:
++ * * 0 - supported, or not connected at all
++ * * -EOPNOTSUPP - vtags are not supported by client
++ */
++int mei_cl_vt_support_check(const struct mei_cl *cl)
+ {
+ 	struct mei_device *dev = cl->dev;
+ 
+@@ -1334,6 +1384,14 @@ static int mei_cl_vt_support_check(struct mei_cl *cl)
+ 	return cl->me_cl->props.vt_supported ? 0 : -EOPNOTSUPP;
+ }
+ 
++/**
++ * mei_cl_add_rd_completed - add read completed callback to list with lock
++ *                           and vtag check
++ *
++ * @cl: host client
++ * @cb: callback block
++ *
++ */
+ void mei_cl_add_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb)
+ {
+ 	const struct file *fp;
+@@ -1355,6 +1413,20 @@ void mei_cl_add_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb)
+ 	spin_unlock(&cl->rd_completed_lock);
+ }
+ 
++/**
++ * mei_cl_del_rd_completed - free read completed callback with lock
++ *
++ * @cl: host client
++ * @cb: callback block
++ *
++ */
++void mei_cl_del_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb)
++{
++	spin_lock(&cl->rd_completed_lock);
++	mei_io_cb_free(cb);
++	spin_unlock(&cl->rd_completed_lock);
++}
++
+ /**
+  *  mei_cl_notify_fop2req - convert fop to proper request
+  *
+@@ -1649,14 +1721,22 @@ int mei_cl_read_start(struct mei_cl *cl, size_t length, const struct file *fp)
+ 	return rets;
+ }
+ 
++static inline u8 mei_ext_hdr_set_vtag(struct mei_ext_hdr *ext, u8 vtag)
++{
++	ext->type = MEI_EXT_HDR_VTAG;
++	ext->ext_payload[0] = vtag;
++	ext->length = mei_data2slots(sizeof(*ext));
++	return ext->length;
++}
++
+ /**
+- * mei_msg_hdr_init - initialize mei message header
++ * mei_msg_hdr_init - allocate and initialize mei message header
+  *
+  * @cb: message callback structure
+  *
+- * Return: initialized header
++ * Return: a pointer to initialized header
+  */
+-static struct mei_msg_hdr *mei_msg_hdr_init(struct mei_cl_cb *cb)
++static struct mei_msg_hdr *mei_msg_hdr_init(const struct mei_cl_cb *cb)
+ {
+ 	size_t hdr_len;
+ 	struct mei_ext_meta_hdr *meta;
+@@ -1664,16 +1744,24 @@ static struct mei_msg_hdr *mei_msg_hdr_init(struct mei_cl_cb *cb)
+ 	struct mei_msg_hdr *mei_hdr;
+ 	bool is_ext, is_vtag;
+ 
+-	is_ext = (cb->vtag && cb->buf_idx == 0);
+-	is_vtag = is_ext;
++	if (!cb)
++		return ERR_PTR(-EINVAL);
++
++	/* Extended header for vtag is attached only on the first fragment */
++	is_vtag = (cb->vtag && cb->buf_idx == 0);
++	is_ext = is_vtag;
+ 
++	/* Compute extended header size */
+ 	hdr_len = sizeof(*mei_hdr);
+-	if (is_ext)
+-		hdr_len += sizeof(*meta);
+ 
++	if (!is_ext)
++		goto setup_hdr;
++
++	hdr_len += sizeof(*meta);
+ 	if (is_vtag)
+ 		hdr_len += sizeof(*ext);
+ 
++setup_hdr:
+ 	mei_hdr = kzalloc(hdr_len, GFP_KERNEL);
+ 	if (!mei_hdr)
+ 		return ERR_PTR(-ENOMEM);
+@@ -1689,12 +1777,7 @@ static struct mei_msg_hdr *mei_msg_hdr_init(struct mei_cl_cb *cb)
+ 	meta = (struct mei_ext_meta_hdr *)mei_hdr->extension;
+ 	if (is_vtag) {
+ 		meta->count++;
+-		meta->size = mei_data2slots(sizeof(*ext));
+-
+-		ext = meta->hdrs;
+-		ext->type = MEI_EXT_HDR_VTAG;
+-		ext->ext_payload[0] = cb->vtag;
+-		ext->length = mei_data2slots(sizeof(*ext));
++		meta->size += mei_ext_hdr_set_vtag(meta->hdrs, cb->vtag);
+ 	}
+ out:
+ 	mei_hdr->length = hdr_len - sizeof(*mei_hdr);
+@@ -1765,7 +1848,7 @@ int mei_cl_irq_write(struct mei_cl *cl, struct mei_cl_cb *cb,
+ 		goto err;
+ 	}
+ 
+-	cl_dbg(dev, cl, "Extend Header %d vtag = %d\n",
++	cl_dbg(dev, cl, "Extended Header %d vtag = %d\n",
+ 	       mei_hdr->extended, cb->vtag);
+ 
+ 	hdr_len = sizeof(*mei_hdr) + mei_hdr->length;
+@@ -1890,7 +1973,7 @@ ssize_t mei_cl_write(struct mei_cl *cl, struct mei_cl_cb *cb)
+ 		goto err;
+ 	}
+ 
+-	cl_dbg(dev, cl, "Extend Header %d vtag = %d\n",
++	cl_dbg(dev, cl, "Extended Header %d vtag = %d\n",
+ 	       mei_hdr->extended, cb->vtag);
+ 
+ 	hdr_len = sizeof(*mei_hdr) + mei_hdr->length;
+@@ -1992,7 +2075,6 @@ ssize_t mei_cl_write(struct mei_cl *cl, struct mei_cl_cb *cb)
+ 	return rets;
+ }
+ 
+-
+ /**
+  * mei_cl_complete - processes completed operation for a client
+  *
+diff --git a/drivers/misc/mei/client.h b/drivers/misc/mei/client.h
+index 75cb727fc48b..64143d4ec758 100644
+--- a/drivers/misc/mei/client.h
++++ b/drivers/misc/mei/client.h
+@@ -134,15 +134,9 @@ int mei_cl_unlink(struct mei_cl *cl);
+ struct mei_cl *mei_cl_alloc_linked(struct mei_device *dev);
+ 
+ struct mei_cl_cb *mei_cl_read_cb(struct mei_cl *cl, const struct file *fp);
+-void mei_cl_add_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb);
+ 
+-static inline void mei_cl_del_rd_completed(struct mei_cl *cl,
+-					   struct mei_cl_cb *cb)
+-{
+-	spin_lock(&cl->rd_completed_lock);
+-	mei_io_cb_free(cb);
+-	spin_unlock(&cl->rd_completed_lock);
+-}
++void mei_cl_add_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb);
++void mei_cl_del_rd_completed(struct mei_cl *cl, struct mei_cl_cb *cb);
+ 
+ struct mei_cl_cb *mei_cl_alloc_cb(struct mei_cl *cl, size_t length,
+ 				  enum mei_cb_file_ops type,
+@@ -154,6 +148,7 @@ int mei_cl_flush_queues(struct mei_cl *cl, const struct file *fp);
+ 
+ struct mei_cl_vtag *mei_cl_vtag_alloc(struct file *fp, u8 vtag);
+ const struct file *mei_cl_fp_by_vtag(const struct mei_cl *cl, u8 vtag);
++int mei_cl_vt_support_check(const struct mei_cl *cl);
+ /*
+  *  MEI input output function prototype
+  */
+diff --git a/drivers/misc/mei/hbm.c b/drivers/misc/mei/hbm.c
+index c7c2f6b10ff9..85c2ee7f2326 100644
+--- a/drivers/misc/mei/hbm.c
++++ b/drivers/misc/mei/hbm.c
+@@ -341,7 +341,7 @@ static int mei_hbm_capabilities_req(struct mei_device *dev)
+ 	memset(&req, 0, sizeof(req));
+ 	req.hbm_cmd = MEI_HBM_CAPABILITIES_REQ_CMD;
+ 	if (dev->hbm_f_vt_supported)
+-		req.capability_requested[0] = HBM_CAP_VM;
++		req.capability_requested[0] = HBM_CAP_VT;
+ 
+ 	ret = mei_hbm_write_message(dev, &mei_hdr, &req);
+ 	if (ret) {
+@@ -1232,7 +1232,7 @@ int mei_hbm_dispatch(struct mei_device *dev, struct mei_msg_hdr *hdr)
+ 		}
+ 
+ 		capability_res = (struct hbm_capability_response *)mei_msg;
+-		if (!(capability_res->capability_granted[0] & HBM_CAP_VM))
++		if (!(capability_res->capability_granted[0] & HBM_CAP_VT))
+ 			dev->hbm_f_vt_supported = 0;
+ 
+ 		if (dev->hbm_f_dr_supported) {
+diff --git a/drivers/misc/mei/hw-virtio.c b/drivers/misc/mei/hw-virtio.c
+index 2b72113bff3f..62ddee3cb173 100644
+--- a/drivers/misc/mei/hw-virtio.c
++++ b/drivers/misc/mei/hw-virtio.c
+@@ -224,9 +224,12 @@ static void mei_virtio_free_outbufs(struct mei_virtio_hw *hw)
+  * @hdr: mei header of message
+  * @hdr_len: header length
+  * @data: message payload will be written
+- * @data_len: messag payload length
++ * @data_len: message payload length
+  *
+- * Return: -EIO if write has failed
++ * Return:
++ * *  0: on success
++ * * -EIO: if write has failed
++ * * -ENOMEM: on memory allocation failure
+  */
+ static int mei_virtio_write_message(struct mei_device *dev,
+ 				    const void *hdr, size_t hdr_len,
+@@ -593,10 +596,8 @@ static void mei_virtio_intr_handler(struct work_struct *work)
+ 
+ end:
+ 	if (dev->dev_state != MEI_DEV_DISABLED) {
+-		if (!virtqueue_enable_cb(hw->in)) {
+-			dev_dbg(dev->dev, "IN queue pending 1\n");
++		if (!virtqueue_enable_cb(hw->in))
+ 			schedule_work(&hw->intr_handler);
+-		}
+ 	}
+ 
+ 	mutex_unlock(&dev->device_lock);
+diff --git a/drivers/misc/mei/hw.h b/drivers/misc/mei/hw.h
+index 6d07732aae69..f6c660eb772f 100644
+--- a/drivers/misc/mei/hw.h
++++ b/drivers/misc/mei/hw.h
+@@ -201,18 +201,24 @@ enum mei_cl_disconnect_status {
+ 	MEI_CL_DISCONN_SUCCESS = MEI_HBMS_SUCCESS
+ };
+ 
++/**
++ * enum mei_ext_hdr_type - extended header type used in
++ *    extended header TLV
++ *
++ * @MEI_EXT_HDR_NONE: sentinel
++ * @MEI_EXT_HDR_VTAG: vtag header
++ */
+ enum mei_ext_hdr_type {
+ 	MEI_EXT_HDR_NONE = 0,
+ 	MEI_EXT_HDR_VTAG = 1,
+-	MEI_EXT_HDR_GSC = 2,
+ };
+ 
+ /**
+  * struct mei_ext_hdr - extend header descriptor (TLV)
+  * @type: enum mei_ext_hdr_type
+- * @length: length exluding descriptor
++ * @length: length excluding descriptor
+  * @ext_payload: payload of the specific extended header
+- * @hdr: place holder for actuall header
++ * @hdr: place holder for actual header
+  */
+ struct mei_ext_hdr {
+ 	u8 type;
+@@ -226,6 +232,7 @@ struct mei_ext_hdr {
+  * @count: number of headers
+  * @size: total size of the extended header list excluding meta header
+  * @reserved: reserved
++ * @hdrs: extended headers TLV list
+  */
+ struct mei_ext_meta_hdr {
+ 	u8 count;
+@@ -234,43 +241,50 @@ struct mei_ext_meta_hdr {
+ 	struct mei_ext_hdr hdrs[0];
+ };
+ 
++/*
++ * Extended header iterator functions
++ */
++/**
++ * mei_ext_hdr - extended header iterator begin
++ *
++ * @meta: meta header of the extended header list
++ *
++ * Return:
++ *     The first extended header
++ */
+ static inline struct mei_ext_hdr *mei_ext_begin(struct mei_ext_meta_hdr *meta)
+ {
+ 	return meta->hdrs;
+ }
+ 
+-static inline struct mei_ext_hdr *mei_ext_next(struct mei_ext_hdr *ext)
+-{
+-	return (struct mei_ext_hdr *)(ext->hdr + (ext->length * 4));
+-}
+-
++/**
++ * mei_ext_last - check if the ext is the last one in the TLV list
++ *
++ * @meta: meta header of the extended header list
++ * @ext: a meta header on the list
++ *
++ * Return: true if ext is the last header on the list
++ */
+ static inline bool mei_ext_last(struct mei_ext_meta_hdr *meta,
+ 				struct mei_ext_hdr *ext)
+ {
+ 	return (u8 *)ext >= (u8 *)meta + sizeof(*meta) + (meta->size * 4);
+ }
+ 
+-struct mei_gcs_sgl {
+-	u32 low;
+-	u32 high;
+-	u32 length;
+-} __packed;
+-
+-struct mei_ext_hdr_gcs_h2f {
+-	u32                fence_id;
+-	u32                addr_type;
+-	u32                input_address_count;
+-	u32                output_address_count;
+-	struct mei_gcs_sgl input_buffer[0];
+-	struct mei_gcs_sgl output_buffer[0];
+-} __packed;
+-
+-struct mei_ext_hdr_gcs_f2h {
+-	u8  client_id;
+-	u8  reserved[3];
+-	u32 fence_id;
+-	u32 total_bytes_written;
+-} __packed;
++/**
++ *mei_ext_next - following extended header on the TLV list
++ *
++ * @ext: current extend header
++ *
++ * Context: The function does not check for the overflows,
++ *          one should call mei_ext_last before.
++ *
++ * Return: The following extend header after @ext
++ */
++static inline struct mei_ext_hdr *mei_ext_next(struct mei_ext_hdr *ext)
++{
++	return (struct mei_ext_hdr *)(ext->hdr + (ext->length * 4));
++}
+ 
+ /**
+  * struct mei_msg_hdr - MEI BUS Interface Section
+@@ -382,6 +396,18 @@ struct hbm_host_enum_response {
+ 	u8 valid_addresses[32];
+ } __packed;
+ 
++/**
++ * struct mei_client_properties - mei client properties
++ *
++ * @protocol_name: guid of the client
++ * @protocol_version: client protocol version
++ * @max_number_of_connections: number of possible connections.
++ * @fixed_address: fixed me address (0 if the client is dynamic)
++ * @single_recv_buf: 1 if all connections share a single receive buffer.
++ * @vt_supported: the client support vtag
++ * @reserved: reserved
++ * @max_msg_length: MTU of the client
++ */
+ struct mei_client_properties {
+ 	uuid_le protocol_name;
+ 	u8 protocol_version;
+@@ -509,17 +535,19 @@ struct hbm_notification_request {
+ 
+ /**
+  * struct hbm_notification_response - start/stop notification response
++ *
+  * @hbm_cmd: bus message command header
+  * @me_addr: address of the client in ME
+  * @host_addr: address of the client in the driver
+  * @status: (mei_hbm_status) response status for the request
+- * * MEI_HBMS_SUCCESS: successful stop/start
+- * * MEI_HBMS_CLIENT_NOT_FOUND: if the connection could not be found.
+- * * MEI_HBMS_ALREADY_STARTED: for start requests for a previously
+- *                             started notification.
+- * * MEI_HBMS_NOT_STARTED: for stop request for a connected client for whom
++ *  - MEI_HBMS_SUCCESS: successful stop/start
++ *  - MEI_HBMS_CLIENT_NOT_FOUND: if the connection could not be found.
++ *  - MEI_HBMS_ALREADY_STARTED: for start requests for a previously
++ *                         started notification.
++ *  - MEI_HBMS_NOT_STARTED: for stop request for a connected client for whom
+  *                         asynchronous notifications are currently disabled.
+- * @start: start = 1 or stop = 0 asynchronous notifications
++ *
++ * @start:  start = 1 or stop = 0 asynchronous notifications
+  * @reserved: reserved
+  */
+ struct hbm_notification_response {
+@@ -615,13 +643,26 @@ struct hbm_dma_ring_ctrl {
+ 	u32 reserved4;
+ } __packed;
+ 
+-#define HBM_CAP_VM BIT(0)
++/* virtual tag supported */
++#define HBM_CAP_VT BIT(0)
+ 
++/**
++ * struct hbm_capability_request - capability request from host to fw
++ *
++ * @hbm_cmd : bus message command header
++ * @capability_requested: bitmask of capabilities requested by host
++ */
+ struct hbm_capability_request {
+ 	u8 hbm_cmd;
+ 	u8 capability_requested[3];
+ } __packed;
+ 
++/**
++ * struct hbm_capability_response - capability response from fw to host
++ *
++ * @hbm_cmd : bus message command header
++ * @capability_granted: bitmask of capabilities granted by FW
++ */
+ struct hbm_capability_response {
+ 	u8 hbm_cmd;
+ 	u8 capability_granted[3];
+diff --git a/drivers/misc/mei/interrupt.c b/drivers/misc/mei/interrupt.c
+index cd3ab9276cd8..1f4fc392caa4 100644
+--- a/drivers/misc/mei/interrupt.c
++++ b/drivers/misc/mei/interrupt.c
+@@ -131,8 +131,7 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
+ 			case MEI_EXT_HDR_VTAG:
+ 				vtag = ext;
+ 				break;
+-			case MEI_EXT_HDR_GSC:
+-			case MEI_EXT_HDR_NONE:
++			case MEI_EXT_HDR_NONE: /* fallthrough */
+ 			default:
+ 				cb->status = -EPROTO;
+ 				break;
+@@ -155,7 +154,6 @@ static int mei_cl_irq_read_msg(struct mei_cl *cl,
+ 			goto discard;
+ 		}
+ 		cb->vtag = vtag->ext_payload[0];
+-
+ 	}
+ 
+ 	if (!mei_cl_is_connected(cl)) {
+diff --git a/drivers/misc/mei/main.c b/drivers/misc/mei/main.c
+index d6ed85b04b9b..970b0b08579f 100644
+--- a/drivers/misc/mei/main.c
++++ b/drivers/misc/mei/main.c
+@@ -80,6 +80,13 @@ static int mei_open(struct inode *inode, struct file *file)
+ 	return err;
+ }
+ 
++/**
++ * mei_cl_vtag_remove_by_fp - remove vtag that corresponds to fp from list
++ *
++ * @cl: host client
++ * @fp: pointer to file structure
++ *
++ */
+ static void mei_cl_vtag_remove_by_fp(const struct mei_cl *cl,
+ 				     const struct file *fp)
+ {
+@@ -125,7 +132,10 @@ static int mei_release(struct inode *inode, struct file *file)
+ 	}
+ 
+ 	rets = mei_cl_disconnect(cl);
+-	/* Check again: This is necessary since disconnect releases the lock. */
++	/*
++	 * Check again: This is necessary since disconnect releases the lock
++	 * and another client can connect in the meantime.
++	 */
+ 	if (!list_empty(&cl->vtag_map)) {
+ 		cl_dbg(dev, cl, "not the last vtag after disconnect\n");
+ 		mei_cl_flush_queues(cl, file);
+@@ -267,6 +277,14 @@ static ssize_t mei_read(struct file *file, char __user *ubuf,
+ 	return rets;
+ }
+ 
++/**
++ * mei_cl_vtag_by_fp - obtain the vtag by file pointer
++ *
++ * @cl: host client
++ * @fp: pointer to file structure
++ *
++ * Return: vtag value on success, otherwise 0
++ */
+ static u8 mei_cl_vtag_by_fp(const struct mei_cl *cl, const struct file *fp)
+ {
+ 	struct mei_cl_vtag *cl_vtag;
+@@ -439,6 +457,19 @@ static int mei_ioctl_connect_client(struct file *file,
+ 	return rets;
+ }
+ 
++/**
++ * mei_vt_support_check - check if client support vtags
++ *
++ * Locking: called under "dev->device_lock" lock
++ *
++ * @dev: mei_device
++ * @uuid: client UUID
++ *
++ * Return:
++ *	0 - supported
++ *	-ENOTTY - no such client
++ *	-EOPNOTSUPP - vtags are not supported by client
++ */
+ static int mei_vt_support_check(struct mei_device *dev, const uuid_le *uuid)
+ {
+ 	struct mei_me_client *me_cl;
+@@ -459,6 +490,18 @@ static int mei_vt_support_check(struct mei_device *dev, const uuid_le *uuid)
+ 	return ret;
+ }
+ 
++/**
++ * mei_ioctl_connect_vtag - connect to fw client with vtag IOCTL function
++ *
++ * @file: private data of the file object
++ * @in_client_uuid: requested UUID for connection
++ * @client: IOCTL connect data, output parameters
++ * @vtag: vm tag
++ *
++ * Locking: called under "dev->device_lock" lock
++ *
++ * Return: 0 on success, <0 on failure.
++ */
+ static int mei_ioctl_connect_vtag(struct file *file,
+ 				  const uuid_le *in_client_uuid,
+ 				  struct mei_client *client,
+@@ -474,38 +517,52 @@ static int mei_ioctl_connect_vtag(struct file *file,
+ 
+ 	dev_dbg(dev->dev, "FW Client %pUl vtag %d\n", in_client_uuid, vtag);
+ 
+-	if (cl->state != MEI_FILE_INITIALIZING &&
+-	    cl->state != MEI_FILE_DISCONNECTED)
+-		return  -EBUSY;
+-
+-	list_for_each_entry(pos, &dev->file_list, link) {
+-		if (pos == cl)
+-			continue;
+-		if (!pos->me_cl)
+-			continue;
+-
+-		/* FIXME: just compare me_cl addr */
+-		if (uuid_le_cmp(*mei_cl_uuid(pos), *in_client_uuid))
+-			continue;
+-
+-		/* if tag already exist try another fp */
+-		if (!IS_ERR(mei_cl_fp_by_vtag(pos, vtag)))
+-			continue;
+-
+-		/* replace cl with acquired one */
+-		dev_dbg(dev->dev, "replacing with existing cl\n");
+-		mei_cl_unlink(cl);
+-		kfree(cl);
+-		file->private_data = pos;
+-		cl = pos;
++	switch (cl->state) {
++	case MEI_FILE_DISCONNECTED:
++		if (mei_cl_vtag_by_fp(cl, file) != vtag) {
++			dev_err(dev->dev, "reconnect with different vtag\n");
++			return -EINVAL;
++		}
+ 		break;
+-	}
++	case MEI_FILE_INITIALIZING:
++		/* malicious connect from another thread may push vtag */
++		if (!IS_ERR(mei_cl_fp_by_vtag(cl, vtag))) {
++			dev_err(dev->dev, "vtag already filled\n");
++			return -EINVAL;
++		}
+ 
+-	cl_vtag = mei_cl_vtag_alloc(file, vtag);
+-	if (IS_ERR(cl_vtag))
+-		return -ENOMEM;
++		list_for_each_entry(pos, &dev->file_list, link) {
++			if (pos == cl)
++				continue;
++			if (!pos->me_cl)
++				continue;
++
++			/* only search for same UUID */
++			if (uuid_le_cmp(*mei_cl_uuid(pos), *in_client_uuid))
++				continue;
++
++			/* if tag already exist try another fp */
++			if (!IS_ERR(mei_cl_fp_by_vtag(pos, vtag)))
++				continue;
++
++			/* replace cl with acquired one */
++			dev_dbg(dev->dev, "replacing with existing cl\n");
++			mei_cl_unlink(cl);
++			kfree(cl);
++			file->private_data = pos;
++			cl = pos;
++			break;
++		}
+ 
+-	list_add_tail(&cl_vtag->list, &cl->vtag_map);
++		cl_vtag = mei_cl_vtag_alloc(file, vtag);
++		if (IS_ERR(cl_vtag))
++			return -ENOMEM;
++
++		list_add_tail(&cl_vtag->list, &cl->vtag_map);
++		break;
++	default:
++		return -EBUSY;
++	}
+ 
+ 	while (cl->state != MEI_FILE_INITIALIZING &&
+ 	       cl->state != MEI_FILE_DISCONNECTED &&
+@@ -622,7 +679,6 @@ static long mei_ioctl(struct file *file, unsigned int cmd, unsigned long data)
+ 		rets = mei_vt_support_check(dev, cl_uuid);
+ 		if (rets == -ENOTTY)
+ 			goto out;
+-
+ 		if (!rets)
+ 			rets = mei_ioctl_connect_vtag(file, cl_uuid, props,
+ 						      vtag);
+diff --git a/drivers/misc/mei/mei_dev.h b/drivers/misc/mei/mei_dev.h
+index 6b234349cd44..ff5fcaba5454 100644
+--- a/drivers/misc/mei/mei_dev.h
++++ b/drivers/misc/mei/mei_dev.h
+@@ -174,7 +174,7 @@ struct mei_cl;
+  * @fop_type: file operation type
+  * @buf: buffer for data associated with the callback
+  * @buf_idx: last read index
+- * @vtag: vm tag
++ * @vtag: virtual tag
+  * @fp: pointer to file structure
+  * @status: io status of the cb
+  * @internal: communication between driver and FW flag
+@@ -193,6 +193,14 @@ struct mei_cl_cb {
+ 	u32 blocking:1;
+ };
+ 
++/**
++ * struct mei_cl_vtag - file pointer to vtag mapping structure
++ *
++ * @list: link in map queue
++ * @fp: file pointer
++ * @vtag: corresponding vtag
++ * @pending_read: the read is pending on this file
++ */
+ struct mei_cl_vtag {
+ 	struct list_head list;
+ 	const struct file *fp;
+@@ -216,7 +224,7 @@ struct mei_cl_vtag {
+  * @me_cl: fw client connected
+  * @fp: file associated with client
+  * @host_client_id: host id
+- * @vtag_map: vm tag map
++ * @vtag_map: vtag map
+  * @tx_flow_ctrl_creds: transmit flow credentials
+  * @rx_flow_ctrl_creds: receive flow credentials
+  * @timer_count:  watchdog timer for operation completion
+-- 
+2.17.1
+
