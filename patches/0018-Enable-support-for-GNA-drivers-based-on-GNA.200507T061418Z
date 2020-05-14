@@ -1,0 +1,3714 @@
+From 2d2e3dc79dbf54b9905e4086db001a25047d8c0c Mon Sep 17 00:00:00 2001
+From: "Tan, Seng Kai" <seng.kai.tan@intel.com>
+Date: Tue, 28 Apr 2020 15:31:08 +0800
+Subject: [PATCH 18/46] Enable support for GNA drivers based on GNA API
+ specification 2.0
+
+Release package: gna-drv-mod.1.0.29
+Detail Driver information avalaible at
+/Documentation/misc-devices/gna.gna.txt
+
+Signed-off-by: Jerome Anand <jerome.anand@intel.com>
+Signed-off-by: Mariusz Zalewski <mariusz.zalewski@intel.com>
+Signed-off-by: Shah, ParthX <parth.x.shah@intel.com>
+Signed-off-by: Tomasz Jankowski <tomasz1.jankowski@intel.com>
+---
+ Documentation/misc-devices/gna.txt |  44 ++
+ drivers/misc/Kconfig               |   1 +
+ drivers/misc/Makefile              |   1 +
+ drivers/misc/gna/Kconfig           |  11 +
+ drivers/misc/gna/Makefile          |  20 +
+ drivers/misc/gna/gna.h             | 152 +++++++
+ drivers/misc/gna/gna_drv.c         | 579 ++++++++++++++++++++++++
+ drivers/misc/gna/gna_drv.h         | 185 ++++++++
+ drivers/misc/gna/gna_hw.c          | 142 ++++++
+ drivers/misc/gna/gna_hw.h          | 131 ++++++
+ drivers/misc/gna/gna_ioctl.c       | 307 +++++++++++++
+ drivers/misc/gna/gna_ioctl.h       |  11 +
+ drivers/misc/gna/gna_irq.c         |  47 ++
+ drivers/misc/gna/gna_irq.h         |  13 +
+ drivers/misc/gna/gna_mem.c         | 569 ++++++++++++++++++++++++
+ drivers/misc/gna/gna_mem.h         | 110 +++++
+ drivers/misc/gna/gna_pci.c         | 173 ++++++++
+ drivers/misc/gna/gna_request.c     | 247 +++++++++++
+ drivers/misc/gna/gna_request.h     |  69 +++
+ drivers/misc/gna/gna_score.c       | 678 +++++++++++++++++++++++++++++
+ drivers/misc/gna/gna_score.h       |  33 ++
+ 21 files changed, 3523 insertions(+)
+ create mode 100644 Documentation/misc-devices/gna.txt
+ create mode 100644 drivers/misc/gna/Kconfig
+ create mode 100644 drivers/misc/gna/Makefile
+ create mode 100644 drivers/misc/gna/gna.h
+ create mode 100644 drivers/misc/gna/gna_drv.c
+ create mode 100644 drivers/misc/gna/gna_drv.h
+ create mode 100644 drivers/misc/gna/gna_hw.c
+ create mode 100644 drivers/misc/gna/gna_hw.h
+ create mode 100644 drivers/misc/gna/gna_ioctl.c
+ create mode 100644 drivers/misc/gna/gna_ioctl.h
+ create mode 100644 drivers/misc/gna/gna_irq.c
+ create mode 100644 drivers/misc/gna/gna_irq.h
+ create mode 100644 drivers/misc/gna/gna_mem.c
+ create mode 100644 drivers/misc/gna/gna_mem.h
+ create mode 100644 drivers/misc/gna/gna_pci.c
+ create mode 100644 drivers/misc/gna/gna_request.c
+ create mode 100644 drivers/misc/gna/gna_request.h
+ create mode 100644 drivers/misc/gna/gna_score.c
+ create mode 100644 drivers/misc/gna/gna_score.h
+
+diff --git a/Documentation/misc-devices/gna.txt b/Documentation/misc-devices/gna.txt
+new file mode 100644
+index 000000000000..f57660e1d6f4
+--- /dev/null
++++ b/Documentation/misc-devices/gna.txt
+@@ -0,0 +1,44 @@
++Intel(R) Gaussian & Neural Accelerator (Intel(R) GNA)
++=====================================================
++
++Acronyms
++========
++GNA	- Gaussian & Neural Accelerator
++GMM	- Gaussian Mixer Model
++CNN	- Convolutional Neural Network
++RNN	- Recurrent Neural Networks
++DNN	- Deep Neural Networks
++
++Introduction
++============
++The Intel GNA is an Internal PCI fixed device available on several Intel platforms/SoCs.
++Feature set depends on the Intel Chipset SKU.
++
++Intel GNA provides hardware accelerated computation for GMMs and Neural Networks.
++It supports several layer types: affine, recurrent, and convolutional among others.
++Hardware also provides helper layer types for copying and transposing matrices.
++
++Linux Driver
++============
++Intel GNA driver is a pci driver as Intel GNA is a PCI device.
++The driver also registers a character device to expose file operations via dev node.
++
++The driver probes/removes PCI device, implements file operations, handles runtime
++power management, and interacts with hardware through MMIO registers.
++
++IOCTL
++=====
++Intel GNA driver controls the device through IOCTL interface.
++Following IOCTL commands are supported:
++       GNA_MAP_USRPTR lock user pages and GNA MMU setups for DMA transfer.
++       GNA_UNMAP_USRPTR unlocks user pages and releases GNA MMU structures.
++       GNA_SCORE submits a request to the device queue.
++       GNA_WAIT blocks and waits on the submitted request.
++       GNA_CPBLTS gets driver and device capabilities.
++
++Notes
++=====
++- Intel GNA hardware can process one request at given time using FIFO queue.
++- The driver locks user pages at GNA_MAP_USRPTR and keeps them locked until
++  GNA_UNMAP_USRPTR is called from user space.
++- Intel GNA driver supports more than one opened file.
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index c55b63750757..10c5375da30f 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -481,4 +481,5 @@ source "drivers/misc/cxl/Kconfig"
+ source "drivers/misc/ocxl/Kconfig"
+ source "drivers/misc/cardreader/Kconfig"
+ source "drivers/misc/habanalabs/Kconfig"
++source "drivers/misc/gna/Kconfig"
+ endmenu
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index c1860d35dc7e..74350b22e98d 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -57,3 +57,4 @@ obj-y				+= cardreader/
+ obj-$(CONFIG_PVPANIC)   	+= pvpanic.o
+ obj-$(CONFIG_HABANA_AI)		+= habanalabs/
+ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
++obj-$(CONFIG_INTEL_GNA)        += gna/
+diff --git a/drivers/misc/gna/Kconfig b/drivers/misc/gna/Kconfig
+new file mode 100644
+index 000000000000..faf3346cb9ac
+--- /dev/null
++++ b/drivers/misc/gna/Kconfig
+@@ -0,0 +1,11 @@
++#
++# Intel GNA device
++#
++
++config INTEL_GNA
++        tristate "Intel GMM & Neural Networks Accelerator"
++	depends on X86 && PCI
++        help
++	  This adds an option to enable the Intel GMM & Neural Networks Accelerator (Intel GNA) driver
++	  See Documentation/misc-devices/gna/gna.txt for more information on the functionality.
++
+diff --git a/drivers/misc/gna/Makefile b/drivers/misc/gna/Makefile
+new file mode 100644
+index 000000000000..47827dd0e9c2
+--- /dev/null
++++ b/drivers/misc/gna/Makefile
+@@ -0,0 +1,20 @@
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# Makefile - Intel GMM & Neural Network Accelerator (Intel GNA) Linux driver
++# Copyright (c) 2018-2019, Intel Corporation.
++#
++
++ccflags-y += -Werror
++
++obj-$(CONFIG_INTEL_GNA) += gna.o
++
++gna-y := gna_drv.o \
++         gna_hw.o \
++         gna_ioctl.o \
++         gna_irq.o \
++         gna_mem.o \
++         gna_pci.o \
++         gna_request.o \
++         gna_score.o \
++
++
+diff --git a/drivers/misc/gna/gna.h b/drivers/misc/gna/gna.h
+new file mode 100644
+index 000000000000..6a0f3d8916ba
+--- /dev/null
++++ b/drivers/misc/gna/gna.h
+@@ -0,0 +1,152 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef _UAPI_GNA_H_
++#define _UAPI_GNA_H_
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <linux/types.h>
++#include <linux/ioctl.h>
++
++#ifndef __user
++#define __user
++#endif
++
++/* Request processing flags */
++
++/* Operation modes */
++#define GNA_MODE_GMM	0
++#define GNA_MODE_XNN	1
++
++#define GNA_PARAM_DEVICE_ID		1
++#define GNA_PARAM_RECOVERY_TIMEOUT	2
++#define GNA_PARAM_DEVICE_TYPE		3
++#define GNA_PARAM_INPUT_BUFFER_S	4
++
++#define GNA_STS_SCORE_COMPLETED		(1 <<  0)
++#define GNA_STS_STATISTICS_VALID	(1 <<  3)
++#define GNA_STS_PCI_MMU_ERR		(1 <<  4)
++#define GNA_STS_PCI_DMA_ERR		(1 <<  5)
++#define GNA_STS_PCI_UNEXCOMPL_ERR	(1 <<  6)
++#define GNA_STS_PARAM_OOR		(1 <<  7)
++#define GNA_STS_VA_OOR			(1 <<  8)
++#define GNA_STS_OUTBUF_FULL		(1 << 16)
++#define GNA_STS_SATURATE		(1 << 17)
++
++#define GNA_ERROR (GNA_STS_PCI_DMA_ERR | \
++		   GNA_STS_PCI_MMU_ERR | \
++		   GNA_STS_PCI_UNEXCOMPL_ERR | \
++		   GNA_STS_PARAM_OOR | \
++		   GNA_STS_VA_OOR)
++
++#define GNA_DEV_TYPE_0_9	0x09
++#define GNA_DEV_TYPE_1_0	0x10
++#define GNA_DEV_TYPE_2_0	0x20
++
++/**
++ * Structure describes part of memory to be overwritten before starting GNA
++ */
++struct gna_memory_patch {
++	/* offset from targeted memory */
++	__u64 offset;
++
++	__u64 size;
++	union {
++		__u64 value;
++		void __user *user_ptr;
++	};
++};
++
++struct gna_buffer {
++	__u64 memory_id;
++
++	__u64 offset;
++	__u64 size;
++
++	__u64 patch_count;
++	__u64 patches_ptr;
++};
++
++struct gna_drv_perf {
++	__u64 pre_processing;	// driver starts pre-processing
++	__u64 processing;	// hw starts processing
++	__u64 hw_completed;	// hw finishes processing
++	__u64 completion;	// driver finishes post-processing
++};
++
++struct gna_hw_perf {
++	__u64 total;
++	__u64 stall;
++};
++
++struct gna_compute_cfg {
++	__u32 layer_base;
++	__u32 layer_count;
++
++	/* List of GNA memory buffers */
++	__u64 buffers_ptr;
++	__u64 buffer_count;
++
++	__u8 active_list_on;
++	__u8 gna_mode;
++	__u8 hw_perf_encoding;
++};
++
++union gna_parameter {
++	struct {
++		__u64 id;
++	} in;
++
++	struct {
++		__u64 value;
++	} out;
++};
++
++union gna_memory_map {
++	struct {
++		__u64 address;
++		__u32 size;
++	} in;
++
++	struct {
++		__u64 memory_id;
++	} out;
++};
++
++union gna_compute {
++	struct {
++		struct gna_compute_cfg config;
++	} in;
++
++	struct {
++		__u64 request_id;
++	} out;
++};
++
++union gna_wait {
++	struct {
++		__u64 request_id;
++		__u32 timeout;
++	} in;
++
++	struct {
++		__u32 hw_status;
++		struct gna_drv_perf drv_perf;
++		struct gna_hw_perf hw_perf;
++	} out;
++};
++
++#define GNA_IOCTL_PARAM_GET	_IOWR('C', 0x01, union gna_parameter)
++#define GNA_IOCTL_MEMORY_MAP	_IOWR('C', 0x02, union gna_memory_map)
++#define GNA_IOCTL_MEMORY_UNMAP	_IOWR('C', 0x03, __u64)
++#define GNA_IOCTL_COMPUTE	_IOWR('C', 0x04, union gna_compute)
++#define GNA_IOCTL_WAIT		_IOWR('C', 0x05, union gna_wait)
++
++#if defined(__cplusplus)
++}
++#endif
++
++#endif /* _UAPI_GNA_H_ */
+diff --git a/drivers/misc/gna/gna_drv.c b/drivers/misc/gna/gna_drv.c
+new file mode 100644
+index 000000000000..f45964b983e9
+--- /dev/null
++++ b/drivers/misc/gna/gna_drv.c
+@@ -0,0 +1,579 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++/*
++ *  gna_drv.c - GNA Driver
++ */
++
++#include <linux/cdev.h>
++#include <linux/err.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/pagemap.h>
++#include <linux/pci.h>
++#include <linux/pm_runtime.h>
++#include <linux/sched.h>
++#include <linux/types.h>
++
++#include "gna.h"
++
++#include "gna_drv.h"
++#include "gna_ioctl.h"
++#include "gna_irq.h"
++#include "gna_request.h"
++#include "gna_score.h"
++
++struct class *gna_class;
++
++struct gna_driver_private gna_drv_priv;
++
++static bool msi_enable = true;
++module_param(msi_enable, bool, 0444);
++MODULE_PARM_DESC(msi_enable, "Enable MSI interrupts");
++
++/* recovery timeout in seconds */
++int recovery_timeout = 60;
++module_param(recovery_timeout, int, 0644);
++MODULE_PARM_DESC(recovery_timeout, "Recovery timeout");
++
++static int gna_suspend(struct device *dev)
++{
++	dev_dbg(dev, "%s\n", __func__);
++	return 0;
++}
++
++static int gna_resume(struct device *dev)
++{
++	dev_dbg(dev, "%s\n", __func__);
++	return 0;
++}
++
++static int gna_runtime_suspend(struct device *dev)
++{
++	struct gna_private *gna_priv = dev_get_drvdata(dev);
++	void __iomem *addr = gna_priv->bar0.mem_addr;
++	u32 val;
++	int i;
++
++	val = gna_reg_read(addr, GNAD0I3C);
++	dev_dbg(dev, "D0I3 %.8x\n", gna_reg_read(addr, GNAD0I3C));
++
++	/* Verify command in progress bit */
++	i = 100;
++	do {
++		val = gna_reg_read(addr, GNAD0I3C);
++		if ((val & 0x1) == 0)
++			break;
++	} while (--i);
++
++	if (i == 0) {
++		dev_err(dev, "command in progress - try again\n");
++		return -EAGAIN;
++	}
++
++	gna_abort_hw(gna_priv, addr);
++	gna_reg_write(addr, GNAD0I3C, GNA_D0I3_POWER_OFF);
++
++	dev_dbg(dev, "%s: exit: D0I3 %.8x val 0x%x\n",
++		__func__, gna_reg_read(addr, GNAD0I3C), val);
++
++	return 0;
++}
++
++static int gna_runtime_resume(struct device *dev)
++{
++	struct gna_private *gna_priv = dev_get_drvdata(dev);
++	void __iomem *addr = gna_priv->bar0.mem_addr;
++	u32 val;
++
++	dev_dbg(dev, "%s:\n", __func__);
++
++	val = gna_reg_read(addr, GNAD0I3C);
++	dev_dbg(dev, "D0I3 %.8x\n", gna_reg_read(addr, GNAD0I3C));
++
++	/* put device in active D0 state */
++	val = GNA_D0I3_POWER_ON;
++	gna_reg_write(addr, GNAD0I3C, val);
++
++	dev_dbg(dev, "D0I3 %.8x val 0x%x\n", gna_reg_read(addr, GNAD0I3C), val);
++	return 0;
++}
++
++const struct dev_pm_ops gna_pm = {
++	.suspend = gna_suspend,
++	.resume = gna_resume,
++	.runtime_suspend = gna_runtime_suspend,
++	.runtime_resume = gna_runtime_resume,
++};
++
++static inline struct gna_private *inode_to_gna(struct inode *inode)
++{
++	return container_of(inode->i_cdev, struct gna_private, cdev);
++}
++
++static int gna_open(struct inode *inode, struct file *f)
++{
++	struct gna_private *gna_priv;
++	int ret;
++	int id;
++
++	id = iminor(inode);
++
++	gna_priv = inode_to_gna(inode);
++	if (!gna_priv)
++		return -ENODEV;
++
++	dev_dbg(&gna_priv->dev, "%s: enter id=%d\n", __func__, id);
++
++	mutex_lock(&gna_priv->lock);
++	ret = gna_priv->ops->open(gna_priv, f);
++	mutex_unlock(&gna_priv->lock);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++
++	return ret;
++}
++
++static int gna_release(struct inode *inode, struct file *f)
++{
++	struct gna_private *gna_priv;
++
++	gna_priv = inode_to_gna(inode);
++	if (!gna_priv)
++		return -ENODEV;
++
++	dev_dbg(&gna_priv->dev, "%s: enter\n", __func__);
++
++	gna_priv->ops->free(f);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++	return 0;
++}
++
++static const struct file_operations gna_file_ops = {
++	.owner		=	THIS_MODULE,
++	.open		=	gna_open,
++	.release	=	gna_release,
++	.unlocked_ioctl =	gna_ioctl,
++};
++
++static int gna_priv_open(struct gna_private *gna_priv, struct file *fd)
++{
++	struct gna_file_private *file_priv;
++
++	file_priv = kzalloc(sizeof(*file_priv), GFP_KERNEL);
++	if (!file_priv)
++		return -ENOMEM;
++
++	file_priv->fd = fd;
++	file_priv->gna_priv = gna_priv;
++	mutex_init(&file_priv->memlist_lock);
++
++	fd->private_data = file_priv;
++
++	mutex_lock(&gna_priv->filelist_lock);
++	list_add_tail(&file_priv->flist, &gna_priv->file_list);
++	mutex_unlock(&gna_priv->filelist_lock);
++	INIT_LIST_HEAD(&file_priv->memory_list);
++
++	return 0;
++}
++
++static void gna_priv_free(struct file *fd)
++{
++	struct gna_file_private *file_priv;
++	struct gna_private *gna_priv;
++	struct gna_memory_object *iter_mo, *temp_mo;
++	struct gna_file_private *iter_file, *temp_file;
++
++	file_priv = (struct gna_file_private *) fd->private_data;
++	gna_priv = file_priv->gna_priv;
++
++	// free all memory objects created by that file
++	mutex_lock(&file_priv->memlist_lock);
++	list_for_each_entry_safe(iter_mo, temp_mo,
++				 &file_priv->memory_list, file_mem_list) {
++		queue_work(gna_priv->request_wq, &iter_mo->work);
++		wait_event(iter_mo->waitq, true);
++		gna_memory_free(gna_priv, iter_mo);
++	}
++	mutex_unlock(&file_priv->memlist_lock);
++
++	gna_delete_file_requests(fd, gna_priv);
++
++	// delete itself from device's file list
++	mutex_lock(&gna_priv->filelist_lock);
++	list_for_each_entry_safe(iter_file, temp_file,
++				 &gna_priv->file_list, flist) {
++		if (iter_file->fd == fd) {
++			list_del(&iter_file->flist);
++			fd->private_data = NULL;
++			kfree(iter_file);
++			break;
++		}
++	}
++	mutex_unlock(&gna_priv->filelist_lock);
++}
++
++static u32 gna_device_type_by_hwid(u32 hwid)
++{
++	switch (hwid) {
++	case GNA_DEV_HWID_CNL:
++		return GNA_DEV_TYPE_0_9;
++	case GNA_DEV_HWID_GLK:
++	case GNA_DEV_HWID_EHL:
++	case GNA_DEV_HWID_ICL:
++		return GNA_DEV_TYPE_1_0;
++	case GNA_DEV_HWID_JSL:
++	case GNA_DEV_HWID_TGL:
++		return GNA_DEV_TYPE_2_0;
++	default:
++		return 0;
++	}
++}
++
++static int gna_priv_getparam(struct gna_private *gna_priv,
++		union gna_parameter *param)
++{
++	switch (param->in.id) {
++	case GNA_PARAM_DEVICE_ID:
++		param->out.value = gna_priv->info.hwid;
++		break;
++	case GNA_PARAM_RECOVERY_TIMEOUT:
++		param->out.value = recovery_timeout;
++		break;
++	case GNA_PARAM_INPUT_BUFFER_S:
++		param->out.value = gna_priv->hw_info.in_buf_s;
++		break;
++	case GNA_PARAM_DEVICE_TYPE:
++		param->out.value = gna_device_type_by_hwid(gna_priv->info.hwid);
++		break;
++	default:
++		dev_err(&gna_priv->dev,
++				"unknown parameter id %llu\n", param->in.id);
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static struct gna_device_operations gna_drv_ops = {
++	.owner		=	THIS_MODULE,
++	.getparam	=	gna_priv_getparam,
++	.open		=	gna_priv_open,
++	.free		=	gna_priv_free,
++	.score		=	gna_priv_score,
++	.userptr	=	gna_priv_userptr,
++};
++
++void gna_dev_release(struct device *dev)
++{
++	struct gna_private *gna_priv;
++
++	dev_dbg(dev, "%s enter\n", __func__);
++
++	gna_priv = dev_get_drvdata(dev);
++
++	__clear_bit(MINOR(dev->devt), gna_drv_priv.dev_map);
++	flush_workqueue(gna_priv->request_wq);
++	destroy_workqueue(gna_priv->request_wq);
++	idr_destroy(&gna_priv->memory_idr);
++	gna_mmu_free(gna_priv);
++	dev_set_drvdata(dev, NULL);
++	pci_set_drvdata(gna_priv->pdev, NULL);
++
++	kfree(gna_priv);
++
++	dev_dbg(dev, "%s exit\n", __func__);
++}
++
++static int gna_dev_create(struct gna_private *gna_priv)
++{
++	struct pci_dev *pcidev;
++	struct device *dev;
++	dev_t gna_devt;
++	int dev_num;
++	int major;
++	int minor;
++	int ret;
++
++	pcidev = gna_priv->pdev;
++
++	mutex_lock(&gna_drv_priv.lock);
++
++	dev_num = find_first_zero_bit(gna_drv_priv.dev_map, MAX_GNA_DEVICES);
++	if (dev_num == MAX_GNA_DEVICES) {
++		dev_err(&pcidev->dev, "number of gna devices reached maximum\n");
++		ret = -ENODEV;
++		goto err_unlock_drv;
++	}
++
++	set_bit(dev_num, gna_drv_priv.dev_map);
++	major = MAJOR(gna_drv_priv.devt);
++	minor = gna_drv_priv.minor++;
++
++	mutex_unlock(&gna_drv_priv.lock);
++
++	gna_devt = MKDEV(major, minor);
++	dev = &gna_priv->dev;
++	device_initialize(dev);
++	dev->devt = gna_devt;
++	dev->class = gna_class;
++	dev->parent = gna_priv->parent;
++	dev->groups = NULL;
++	dev->release = gna_dev_release;
++	dev_set_drvdata(dev, gna_priv);
++	dev_set_name(dev, "gna%d", dev_num);
++
++	snprintf(gna_priv->name, sizeof(gna_priv->name), "gna%d", dev_num);
++	gna_priv->dev_num = dev_num;
++
++	cdev_init(&gna_priv->cdev, &gna_file_ops);
++	gna_priv->cdev.owner = THIS_MODULE;
++
++	ret = cdev_device_add(&gna_priv->cdev, &gna_priv->dev);
++	if (ret) {
++		dev_err(&gna_priv->dev, "could not add gna%d char device\n",
++			dev_num);
++		goto err_release_devnum;
++	}
++
++	dev_info(&gna_priv->dev, "registered gna%d device: major %d, minor %d\n",
++						dev_num, major, minor);
++
++	return 0;
++
++err_release_devnum:
++	mutex_lock(&gna_drv_priv.lock);
++	__clear_bit(minor, gna_drv_priv.dev_map);
++
++err_unlock_drv:
++	mutex_unlock(&gna_drv_priv.lock);
++
++	return ret;
++}
++
++static void gna_dev_read_bld_reg(struct gna_private *gna_priv)
++{
++	u32 bld_reg = gna_reg_read(gna_priv->bar0.mem_addr, GNAIBUFFS);
++
++	gna_priv->hw_info.in_buf_s = bld_reg & GENMASK(7, 0);
++	gna_priv->hw_info.ce_num = (bld_reg & GENMASK(11, 8)) >> 8;
++	gna_priv->hw_info.ple_num = (bld_reg & GENMASK(15, 12)) >> 12;
++	gna_priv->hw_info.afe_num = (bld_reg & GENMASK(19, 16)) >> 16;
++	gna_priv->hw_info.has_mmu = (bld_reg & BIT_MASK(23)) >> 23;
++	gna_priv->hw_info.hw_ver = (bld_reg & GENMASK(31, 24)) >> 24;
++}
++
++static int gna_dev_init(struct gna_private *gna_priv, struct pci_dev *pcidev,
++		const struct pci_device_id *pci_id)
++{
++	struct gna_drv_info *gna_info;
++	int ret;
++
++	pci_set_drvdata(pcidev, gna_priv);
++
++	gna_priv->irq = pcidev->irq;
++	gna_priv->parent = &pcidev->dev;
++	gna_priv->pdev = pci_dev_get(pcidev);
++
++	gna_info = (struct gna_drv_info *)pci_id->driver_data;
++	gna_priv->info = *gna_info;
++
++	gna_dev_read_bld_reg(gna_priv);
++
++	if (gna_mmu_alloc(gna_priv)) {
++		dev_err(&gna_priv->dev, "gna mmu allocation failed\n");
++		return -EFAULT;
++	}
++
++	dev_dbg(&pcidev->dev, "maximum memory size %llu num pd %d\n",
++			gna_info->max_hw_mem, gna_info->num_pagetables);
++
++	dev_dbg(&pcidev->dev, "desc gna_info %d mmu gna_info %d\n",
++			gna_info->desc_info.rsvd_size,
++			gna_info->desc_info.mmu_info.vamax_size);
++
++	mutex_init(&gna_priv->lock);
++	mutex_init(&gna_priv->mmu_lock);
++	mutex_init(&gna_priv->filelist_lock);
++	mutex_init(&gna_priv->reqlist_lock);
++	spin_lock_init(&gna_priv->busy_lock);
++	spin_lock_init(&gna_priv->hw_lock);
++	init_waitqueue_head(&gna_priv->busy_waitq);
++
++	gna_priv->drv_priv = &gna_drv_priv;
++
++	INIT_LIST_HEAD(&gna_priv->file_list);
++	INIT_LIST_HEAD(&gna_priv->request_list);
++
++	timer_setup(&gna_priv->isr_timer, gna_isr_timeout, 0);
++
++	atomic_set(&gna_priv->request_count, 0);
++	atomic_set(&gna_priv->isr_count, 0);
++
++	tasklet_init(&gna_priv->request_tasklet, gna_request_tasklet, 0);
++
++	idr_init(&gna_priv->memory_idr);
++	mutex_init(&gna_priv->memidr_lock);
++
++	gna_priv->request_wq = create_singlethread_workqueue("gna_request_wq");
++	if (!gna_priv->request_wq) {
++		dev_err(&pcidev->dev, "could not create wq for gna device\n");
++		ret = -EFAULT;
++		goto err_pci_put;
++	}
++
++	gna_priv->busy = false;
++
++	gna_priv->ops = &gna_drv_ops;
++
++	ret = gna_dev_create(gna_priv);
++	if (ret) {
++		dev_err(&pcidev->dev, "could not create gna device\n");
++		goto err_del_wq;
++	}
++
++	return 0;
++
++err_del_wq:
++	destroy_workqueue(gna_priv->request_wq);
++
++err_pci_put:
++	pci_dev_put(pcidev);
++	pci_set_drvdata(pcidev, NULL);
++
++	return ret;
++}
++
++int gna_probe(struct pci_dev *pcidev, const struct pci_device_id *pci_id)
++{
++	struct gna_private *gna_priv;
++	int ret;
++
++	dev_dbg(&pcidev->dev, "%s: enter\n", __func__);
++
++	ret = pci_enable_device(pcidev);
++	if (ret) {
++		dev_err(&pcidev->dev, "pci device can't be enabled\n");
++		goto end;
++	}
++
++	ret = pci_request_regions(pcidev, GNA_DRV_NAME);
++	if (ret)
++		goto err_disable_device;
++
++	ret = pci_set_dma_mask(pcidev, DMA_BIT_MASK(64));
++	if (ret) {
++		dev_err(&pcidev->dev,
++			"pci_set_dma_mask returned error %d\n", ret);
++		goto err_release_regions;
++	}
++
++	pci_set_master(pcidev);
++
++	/* register for interrupts */
++	if (msi_enable) {
++		ret = pci_enable_msi(pcidev);
++		if (ret) {
++			dev_err(&pcidev->dev, "could not enable msi interrupts\n");
++			goto err_clear_master;
++		}
++		dev_info(&pcidev->dev, "msi interrupts enabled\n");
++	}
++
++	/* init gna device */
++	gna_priv = kzalloc(sizeof(*gna_priv), GFP_KERNEL | GFP_ATOMIC);
++	if (!gna_priv) {
++		ret = PTR_ERR(gna_priv);
++		dev_err(&pcidev->dev, "could not allocate gna private structure\n");
++		goto err_disable_msi;
++	}
++
++	ret = request_threaded_irq(pcidev->irq, gna_interrupt,
++			gna_irq_thread, IRQF_SHARED,
++			GNA_DRV_NAME, gna_priv);
++
++	if (ret) {
++		dev_err(&pcidev->dev, "could not register for interrupt\n");
++		goto err_free_priv;
++	}
++
++	dev_dbg(&pcidev->dev, "irq num %d\n", pcidev->irq);
++
++	/* Map BAR0 */
++	gna_priv->bar0.iostart = pci_resource_start(pcidev, 0);
++	gna_priv->bar0.iosize = pci_resource_len(pcidev, 0);
++	gna_priv->bar0.mem_addr = pci_iomap(pcidev, 0, 0);
++
++	dev_dbg(&pcidev->dev,
++		"bar0 io start: %p\n", (void *)gna_priv->bar0.iostart);
++	dev_dbg(&pcidev->dev,
++		"bar0 io size: %llu\n", gna_priv->bar0.iosize);
++	dev_dbg(&pcidev->dev,
++		"bar0 memory address: %p\n", (void *)gna_priv->bar0.mem_addr);
++
++	ret = gna_dev_init(gna_priv, pcidev, pci_id);
++	if (ret) {
++		dev_err(&pcidev->dev,
++			"could not initialize gna private structure\n");
++		goto err_free_irq;
++	}
++
++	/* enable power management callbacks */
++	pm_runtime_set_autosuspend_delay(&pcidev->dev, 2000);
++	pm_runtime_use_autosuspend(&pcidev->dev);
++	pm_runtime_allow(&pcidev->dev);
++	pm_runtime_put_noidle(&pcidev->dev);
++
++	dev_dbg(&pcidev->dev, "%s exit\n", __func__);
++
++	return 0;
++
++err_free_irq:
++	pci_iounmap(pcidev, gna_priv->bar0.mem_addr);
++	free_irq(pcidev->irq, gna_priv);
++err_free_priv:
++	kfree(gna_priv);
++err_disable_msi:
++	if (msi_enable)
++		pci_disable_msi(pcidev);
++err_clear_master:
++	pci_clear_master(pcidev);
++err_release_regions:
++	pci_release_regions(pcidev);
++err_disable_device:
++	pci_disable_device(pcidev);
++end:
++	dev_err(&pcidev->dev, "gna probe failed with %d\n", ret);
++	return ret;
++}
++
++void gna_remove(struct pci_dev *pcidev)
++{
++	struct gna_private *gna_priv;
++
++	gna_priv = pci_get_drvdata(pcidev);
++	if (IS_ERR(gna_priv)) {
++		dev_err(&pcidev->dev, "could not get driver data from pci device\n");
++		return;
++	}
++
++	dev_dbg(&gna_priv->dev, "%s: enter\n", __func__);
++
++	cdev_device_del(&gna_priv->cdev, &gna_priv->dev);
++
++	free_irq(pcidev->irq, gna_priv);
++
++	if (msi_enable)
++		pci_disable_msi(pcidev);
++
++	pci_clear_master(pcidev);
++	pci_iounmap(pcidev, gna_priv->bar0.mem_addr);
++	pci_release_regions(pcidev);
++	pci_disable_device(pcidev);
++	pci_dev_put(pcidev);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++}
+diff --git a/drivers/misc/gna/gna_drv.h b/drivers/misc/gna/gna_drv.h
+new file mode 100644
+index 000000000000..43798eafea47
+--- /dev/null
++++ b/drivers/misc/gna/gna_drv.h
+@@ -0,0 +1,185 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_DRV_H__
++#define __GNA_DRV_H__
++
++#include <linux/cdev.h>
++#include <linux/fs.h>
++#include <linux/pci.h>
++#include <linux/wait.h>
++
++#include "gna.h"
++
++#include "gna_hw.h"
++#include "gna_mem.h"
++
++#define GNA_DRV_NAME	"gna"
++#define GNA_DRV_VER	"1.0"
++
++#define MAX_GNA_DEVICES		16
++
++#define GNA_DEV_HWID_CNL	0x5A11
++#define GNA_DEV_HWID_GLK	0x3190
++#define GNA_DEV_HWID_EHL	0x4511
++#define GNA_DEV_HWID_ICL	0x8A11
++#define GNA_DEV_HWID_JSL	0x4E11
++#define GNA_DEV_HWID_TGL	0x9A11
++
++struct gna_request;
++
++extern struct class *gna_class;
++
++extern const struct dev_pm_ops gna_pm;
++
++extern int recovery_timeout;
++
++struct gna_driver_private {
++
++	/* device major/minor number facitlities */
++	DECLARE_BITMAP(dev_map, MAX_GNA_DEVICES);
++	dev_t devt;
++	int minor;
++
++	/* protects this structure */
++	struct mutex lock;
++};
++
++struct gna_file_private {
++	struct file *fd;
++	struct gna_private *gna_priv;
++
++	struct list_head memory_list;
++	struct mutex memlist_lock;
++
++	struct list_head flist;
++};
++
++struct pci_bar {
++	resource_size_t iostart;
++	resource_size_t iosize;
++	void __iomem *mem_addr;
++};
++
++struct gna_drv_info {
++	u32 hwid;
++	u32 num_pagetables;
++	u32 num_page_entries;
++	u32 max_layer_count;
++	u64 max_hw_mem;
++
++	struct gna_desc_info desc_info;
++};
++
++/* hardware descriptor & MMU */
++struct gna_mmu_object {
++	struct gna_hw_descriptor *hwdesc;
++
++	dma_addr_t hwdesc_dma;
++
++	u32 **pagetables;
++	dma_addr_t *pagetables_dma;
++
++	u32 num_pagetables;
++
++	u32 filled_pts;
++	u32 filled_pages;
++};
++
++struct gna_hw_info {
++	u8 in_buf_s;
++	u8 ce_num;
++	u8 ple_num;
++	u8 afe_num;
++	u8 has_mmu;
++	u8 hw_ver;
++};
++
++struct gna_device_operations {
++	struct module *owner;
++
++	int (*getparam)
++		(struct gna_private *, union gna_parameter *);
++	int (*open)
++		(struct gna_private *, struct file *);
++	void (*free)
++		(struct file *);
++	int (*score)
++		(struct gna_request *);
++	int (*userptr)
++		(struct gna_file_private *, union gna_memory_map *);
++};
++
++struct gna_private {
++	struct gna_driver_private *drv_priv;
++
++	// character device info
++	char name[8];
++	int dev_num;
++
++	/* lock protecting this very structure */
++	struct mutex lock;
++
++	/* list of files opened */
++	struct list_head file_list;
++	struct mutex filelist_lock;
++
++	/* device objects */
++	struct pci_dev *pdev;
++	struct device *parent; /* pdev->dev */
++	struct device dev;
++	struct cdev cdev;
++
++	/* hardware status set by interrupt handler */
++	u32 hw_status;
++	spinlock_t hw_lock;
++
++	/* device related resources */
++	struct pci_bar bar0;
++	struct gna_drv_info info;
++	struct gna_hw_info hw_info;
++	unsigned int irq;
++
++	struct gna_mmu_object mmu;
++	struct mutex mmu_lock;
++
++	/* device busy indicator */
++	bool busy;
++	spinlock_t busy_lock;
++	struct wait_queue_head busy_waitq;
++
++	/* device functions */
++	/* should be called with acquired mutex */
++	struct gna_device_operations *ops;
++
++	/* request/free workqueue */
++	struct workqueue_struct *request_wq;
++
++	/* bottom half facilities */
++	atomic_t isr_count;
++	struct tasklet_struct request_tasklet;
++
++	/* interrupt timer */
++	struct timer_list isr_timer;
++
++	/* score request related fields */
++	atomic_t request_count;
++
++	/* requests */
++	struct list_head request_list;
++	struct mutex reqlist_lock;
++
++	/* memory objects */
++	struct idr memory_idr;
++	struct mutex memidr_lock;
++
++};
++
++extern struct gna_driver_private gna_drv_priv;
++
++extern int gna_probe(
++	struct pci_dev *pcidev, const struct pci_device_id *pci_id);
++
++extern void gna_remove(struct pci_dev *pci);
++
++#endif /* __GNA_DRV_H__ */
+diff --git a/drivers/misc/gna/gna_hw.c b/drivers/misc/gna/gna_hw.c
+new file mode 100644
+index 000000000000..43a39962f2e3
+--- /dev/null
++++ b/drivers/misc/gna/gna_hw.c
+@@ -0,0 +1,142 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include "gna.h"
++
++#include "gna_drv.h"
++#include "gna_hw.h"
++
++void gna_start_scoring(struct gna_private *gna_priv, void __iomem *addr,
++			      struct gna_compute_cfg *compute_cfg)
++{
++	unsigned long recovery_jiffies;
++	union gna_ctrl_reg ctrl;
++
++	ctrl.val = gna_reg_read(addr, GNACTRL);
++
++	ctrl.ctrl.start_accel    = 1;
++	ctrl.ctrl.compl_int_en   = 1;
++	ctrl.ctrl.err_int_en     = 1;
++	ctrl.ctrl.comp_stats_en  = compute_cfg->hw_perf_encoding & 0xF;
++	ctrl.ctrl.active_list_en = compute_cfg->active_list_on & 0x1;
++	ctrl.ctrl.gna_mode       = compute_cfg->gna_mode & 0x3;
++
++	recovery_jiffies = msecs_to_jiffies(recovery_timeout * 1000);
++	gna_priv->isr_timer.expires = jiffies + recovery_jiffies;
++	add_timer(&gna_priv->isr_timer);
++
++	gna_reg_write(addr, GNACTRL, ctrl.val);
++
++	dev_dbg(&gna_priv->dev, "scoring started...\n");
++}
++
++static void gna_clear_saturation(
++	struct gna_private *gna_priv, void __iomem *addr)
++{
++	u32 val;
++
++	val = gna_reg_read(addr, GNASTS);
++	if (val & GNA_STS_SATURATE) {
++		dev_dbg(&gna_priv->dev, "saturation reached\n");
++		dev_dbg(&gna_priv->dev, "gna status: %#x\n", val);
++
++		val = val & GNA_STS_SATURATE;
++		gna_reg_write(addr, GNASTS, val);
++
++		val = gna_reg_read(addr, GNASTS);
++		dev_dbg(&gna_priv->dev, "gna modified status: %#x\n", val);
++	}
++}
++
++void gna_debug_isi(struct gna_private *gna_priv, void __iomem *addr)
++{
++	u32 isv_lo, isv_hi;
++
++	gna_reg_write(addr, GNAISI, 0x80);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "labase: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "lacnt: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x82);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "{n_inputs,nnFlags,nnop}: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev,
++	"{inputIteration/nInputConvStride,n_groups,n_outputs}: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x83);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev,
++	"{res,outFbIter,inputInLastIter/nConvFilterSize}: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev,
++	"{outFbInLastIter/poolStride,outFbInFirstIter/nConvFlts: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x84);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev,
++	"{nActListElems/nCopyElems,res,nActSegs/poolSize}: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "reserved: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x86);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "in_buffer: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "out_act_fn_buffer: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x87);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "out_sum_buffer: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "out_fb_buffer: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x88);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "weight/filter buffer: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "bias buffer: %#x\n", isv_hi);
++
++	gna_reg_write(addr, GNAISI, 0x89);
++	isv_lo = gna_reg_read(addr, GNAPISV);
++	isv_hi = gna_reg_read(addr, GNAPISV + sizeof(__u32));
++
++	dev_dbg(&gna_priv->dev, "indices buffer: %#x\n", isv_lo);
++	dev_dbg(&gna_priv->dev, "pwl segments buffer: %#x\n", isv_hi);
++}
++
++void gna_abort_hw(struct gna_private *gna_priv, void __iomem *addr)
++{
++	u32 val;
++	int i;
++
++	/* saturation bit in the GNA status register needs
++	 * to be expicitly cleared
++	 */
++	gna_clear_saturation(gna_priv, addr);
++
++	val = gna_reg_read(addr, GNASTS);
++	dev_dbg(&gna_priv->dev, "status before abort: %#x\n", val);
++
++	val = gna_reg_read(addr, GNACTRL);
++	val |= GNA_CTRL_ABORT_BIT;
++	gna_reg_write(addr, GNACTRL, val);
++
++	i = 100;
++	do {
++		val = gna_reg_read(addr, GNASTS);
++		if ((val & 0x1) == 0)
++			break;
++	} while (--i);
++
++	if (i == 0)
++		dev_err(&gna_priv->dev, "abort did not complete\n");
++}
+diff --git a/drivers/misc/gna/gna_hw.h b/drivers/misc/gna/gna_hw.h
+new file mode 100644
+index 000000000000..30099d4b2be9
+--- /dev/null
++++ b/drivers/misc/gna/gna_hw.h
+@@ -0,0 +1,131 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_HW_H__
++#define __GNA_HW_H__
++
++#include <linux/io.h>
++#include <linux/module.h>
++
++/* GNA  PCI registers */
++#define GNA_PCI_DCTRL		0x04
++#define GNA_PCI_CLS		0x0C
++#define GNA_PCI_BA		0x10
++#define GNA_PCI_SSVI		0x2C
++#define GNA_PCI_SSI		0x2E
++#define GNA_PCI_INTL		0x3C
++#define GNA_PCI_OVRCFGCTL	0x40
++#define GNA_PCI_MC		0x92
++#define GNA_PCI_MA		0x94
++#define GNA_PCI_MD		0x98
++#define GNA_PCI_D0I3_PWRCTL	0xB2
++#define GNA_PCI_PMCS		0xE0
++
++/* GNA MMIO registers */
++#define GNASTS		0x80
++#define GNACTRL		0x84
++#define GNAMCTL		0x88
++#define GNAPTC		0x8C
++#define GNAPSC		0x90
++#define GNAISI		0x94
++#define GNAPISV		0x98
++#define GNABP		0xA0
++#define GNAD0I3C	0xA8
++#define GNADESBASE	0xB0
++#define GNAPWRCTRL	0xB2
++#define GNAIBUFFS	0xB4
++
++/* Register bit Shift */
++#define GNA_CTRL_ABORT_BIT	BIT(2)
++
++#define GNA_D0I3_POWER_OFF	(1 << 2)
++#define GNA_D0I3_POWER_ON	0
++
++#define GNA_INTERRUPT (GNA_STS_SCORE_COMPLETED | \
++		GNA_STS_PCI_DMA_ERR | \
++		GNA_STS_PCI_MMU_ERR | \
++		GNA_STS_PCI_UNEXCOMPL_ERR | \
++		GNA_STS_PARAM_OOR | \
++		GNA_STS_VA_OOR)
++
++#define GNA_PT_ENTRY_SIZE		4
++
++/* page entries alignment for correct HW prefetching */
++#define GNA_PREFETCH_ALIGNMENT		64
++
++/* additional page entries for correct HW prefetching */
++#define GNA_PREFETCH_ENTRIES		32
++
++/* there are up to 1024 32-bit pointers in one page in Page Table (L1) */
++#define GNA_PAGE_TABLE_LENGTH           (PAGE_SIZE / GNA_PT_ENTRY_SIZE)
++
++/* minimum size of XNN layer descriptors in bytes (at least 1 layer) */
++#define XNN_LYR_DSC_SIZE		(128)
++
++#define GMM_CFG_SIZE			(128)
++
++#define GNA_CFG_OFFSET			0x100
++
++#define GNA_VAMAXADDR_OFFSET		0x200
++
++#define GNA_PGDIRN_OFFSET		0x210
++
++#define GNA_PGDIRN_LEN			64
++
++#define GNA_PGDIR_ENTRIES		1024 /* 32-bit page addresses */
++
++#define GNA_PGDIR_INVALID		1
++
++union gna_ctrl_reg {
++	struct reg {
++		u32 start_accel:1; /* start accelerator */
++		u32 active_list_en:1; /* active list enable */
++		u32 abort_clr_accel:1; /* abort/clear accelerator */
++		u32 pause_accel:1; /* pause execution */
++		u32 resume_accel:1; /* resume execution */
++		u32 gna_mode:2; /* mode (0:GMM, 1:xNN) */
++		u32 __res_7:1; /* reserved */
++		u32 compl_int_en:1; /* completion interrupt EN */
++		u32 bp_pause_int_en:1; /* BP pause interrupt enable */
++		u32 err_int_en:1; /* error interrupt enable */
++		u32 __res_11:1; /* reserved */
++		u32 comp_stats_en:4; /* compute statistics enable */
++		u32 pm_ovr_power_on:1; /* PM override power on */
++		u32 pm_ovr_clock_on:1; /* PM override force clck on */
++		u32 pm_quite_idle_dis:1; /* PM quite-idle disable */
++		u32 __res_23_19:5; /* reserved */
++		u32 __res_31_24:8; /* reserved */
++	} ctrl;
++	u32 val; /* value of whole register */
++};
++
++struct gna_mmu_info {
++	u32 vamax_size;
++	u32 rsvd_size;
++	u32 pd_size;
++};
++
++struct gna_desc_info {
++	u32 rsvd_size;
++	u32 cfg_size;
++	u32 desc_size;
++	struct gna_mmu_info mmu_info;
++};
++
++struct gna_private;
++
++struct gna_compute_cfg;
++
++extern void gna_debug_isi(struct gna_private *gna_priv, void __iomem *addr);
++
++extern void gna_abort_hw(struct gna_private *gna_priv, void __iomem *addr);
++
++extern void gna_start_scoring(struct gna_private *gna_priv, void __iomem *addr,
++			      struct gna_compute_cfg *compute_cfg);
++
++#define gna_reg_read(addr, offset) \
++readl((addr) + (offset))
++#define gna_reg_write(addr, offset, value) \
++writel((value), (addr) + (offset))
++
++#endif // __GNA_HW_H__
+diff --git a/drivers/misc/gna/gna_ioctl.c b/drivers/misc/gna/gna_ioctl.c
+new file mode 100644
+index 000000000000..682307300dae
+--- /dev/null
++++ b/drivers/misc/gna/gna_ioctl.c
+@@ -0,0 +1,307 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include <linux/uaccess.h>
++
++#include "gna.h"
++
++#include "gna_drv.h"
++#include "gna_ioctl.h"
++#include "gna_mem.h"
++#include "gna_request.h"
++#include "gna_score.h"
++
++static int gna_ioctl_score(
++	struct gna_file_private *file_priv, void __user *argptr)
++{
++	union gna_compute score_args;
++	u64 request_id;
++	struct gna_private *gna_priv;
++	int ret;
++
++	gna_priv = file_priv->gna_priv;
++
++	if (copy_from_user(&score_args, argptr, sizeof(score_args))) {
++		dev_err(&gna_priv->dev,
++			"could not copy score ioctl config from user\n");
++		return -EFAULT;
++	}
++
++	ret = gna_validate_score_config(&score_args.in.config, file_priv);
++	if (ret) {
++		dev_err(&gna_priv->dev, "request not valid\n");
++		return ret;
++	}
++
++	ret = gna_request_enqueue(&score_args.in.config, file_priv, &request_id);
++	if (ret) {
++		dev_err(&gna_priv->dev, "could not enqueue score request %d\n",
++			ret);
++		return ret;
++	}
++
++	score_args.out.request_id = request_id;
++	if (copy_to_user(argptr, &score_args, sizeof(score_args))) {
++		dev_err(&gna_priv->dev,
++			"could not copy score ioctl status to user\n");
++		return -EFAULT;
++	}
++
++	return 0;
++}
++
++static int gna_ioctl_wait(struct file *f, void __user *argptr)
++{
++	enum gna_request_state request_state;
++	struct gna_file_private *file_priv;
++	struct gna_request *score_request;
++	struct gna_private *gna_priv;
++	union gna_wait wait_data;
++	u64 request_id;
++	u32 timeout;
++	int ret;
++
++	file_priv = (struct gna_file_private *) f->private_data;
++	gna_priv = file_priv->gna_priv;
++
++	ret = 0;
++
++	if (copy_from_user(&wait_data, argptr, sizeof(wait_data))) {
++		dev_err(&gna_priv->dev,
++			"could not copy wait ioctl data from user\n");
++		return -EFAULT;
++	}
++
++	request_id = wait_data.in.request_id;
++	timeout = wait_data.in.timeout;
++
++	score_request = gna_find_request_by_id(request_id, gna_priv);
++
++	if (!score_request) {
++		dev_err(&gna_priv->dev,
++			"could not find request with id: %llu\n",
++			request_id);
++		return -EINVAL;
++	}
++
++	if (score_request->fd != f) {
++		kref_put(&score_request->refcount, gna_request_release);
++		return -EINVAL;
++	}
++
++	dev_dbg(&gna_priv->dev, "found request %llu in the queue\n",
++		request_id);
++
++	spin_lock_bh(&score_request->state_lock);
++	request_state = score_request->state;
++	spin_unlock_bh(&score_request->state_lock);
++
++	if (request_state == DONE) {
++		dev_dbg(&gna_priv->dev, "request already done, excellent\n");
++		goto copy_request_result;
++	}
++
++	dev_dbg(&gna_priv->dev, "waiting for request %llu for timeout %u\n",
++		request_id, timeout);
++
++	ret = gna_score_wait(score_request, timeout);
++	if (ret == 0 || ret == -ERESTARTSYS) {
++		dev_err(&gna_priv->dev,
++			"request timed out, id: %llu\n", request_id);
++		kref_put(&score_request->refcount, gna_request_release);
++		return -EBUSY;
++	}
++
++copy_request_result:
++	dev_dbg(&gna_priv->dev, "request wait completed with %d req id %llu\n",
++		ret, request_id);
++
++	spin_lock_bh(&score_request->perf_lock);
++	wait_data.out.hw_perf = score_request->hw_perf;
++	wait_data.out.drv_perf = score_request->drv_perf;
++	spin_unlock_bh(&score_request->perf_lock);
++
++	spin_lock_bh(&score_request->hw_lock);
++	wait_data.out.hw_status = score_request->hw_status;
++	spin_unlock_bh(&score_request->hw_lock);
++
++	spin_lock_bh(&score_request->status_lock);
++	ret = score_request->status;
++	spin_unlock_bh(&score_request->status_lock);
++
++	dev_dbg(&gna_priv->dev, "request status %d, hw status: %#x\n",
++			score_request->status, score_request->hw_status);
++	kref_put(&score_request->refcount, gna_request_release);
++
++	gna_delete_request_by_id(request_id, gna_priv);
++
++	if (copy_to_user(argptr, &wait_data, sizeof(wait_data))) {
++		dev_err(&gna_priv->dev,
++			"could not copy wait ioctl status to user\n");
++		ret = -EFAULT;
++	}
++
++	return ret;
++}
++
++static int gna_ioctl_userptr(struct gna_file_private *file_priv,
++	void __user *argptr)
++{
++	struct gna_private *gna_priv;
++	union gna_memory_map gna_mem;
++	int ret;
++
++	gna_priv = file_priv->gna_priv;
++
++	if (copy_from_user(&gna_mem, argptr, sizeof(gna_mem))) {
++		dev_err(&gna_priv->dev,
++			"could not copy userptr ioctl data from user\n");
++		return -EFAULT;
++	}
++
++	dev_dbg(&gna_priv->dev, "userptr size %d address %p\n",
++			gna_mem.in.size, (void *)gna_mem.in.address);
++
++	ret = gna_priv->ops->userptr(file_priv, &gna_mem);
++	if (ret)
++		return ret;
++
++	if (copy_to_user(argptr, &gna_mem, sizeof(gna_mem))) {
++		dev_err(&gna_priv->dev,
++			"could not copy userptr ioctl status to user\n");
++		return -EFAULT;
++	}
++
++	return 0;
++}
++
++static int gna_ioctl_free(struct gna_file_private *file_priv, unsigned long arg)
++{
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++	struct gna_memory_object *iter_mo, *temp_mo;
++
++	u64 memory_id = arg;
++
++	gna_priv = file_priv->gna_priv;
++
++	dev_dbg(&gna_priv->dev, "memory id %llu\n", memory_id);
++
++	/* get kernel space memory pointer */
++	mutex_lock(&gna_priv->memidr_lock);
++	mo = idr_find(&gna_priv->memory_idr, memory_id);
++	mutex_unlock(&gna_priv->memidr_lock);
++
++	if (!mo) {
++		dev_warn(&gna_priv->dev, "memory object not found\n");
++		return -EINVAL;
++	}
++
++	queue_work(gna_priv->request_wq, &mo->work);
++	if (wait_event_interruptible(mo->waitq, true)) {
++		dev_dbg(&gna_priv->dev, "wait interrupted\n");
++		return -ETIME;
++	}
++
++	mutex_lock(&file_priv->memlist_lock);
++	list_for_each_entry_safe(iter_mo, temp_mo,
++				 &file_priv->memory_list, file_mem_list) {
++		if (iter_mo->memory_id == memory_id) {
++			list_del(&iter_mo->file_mem_list);
++			break;
++		}
++	}
++	mutex_unlock(&file_priv->memlist_lock);
++
++	gna_memory_free(gna_priv, mo);
++
++	return 0;
++}
++
++static int gna_ioctl_getparam(struct gna_private *gna_priv, void __user *argptr)
++{
++	union gna_parameter param;
++	int ret;
++
++	if (copy_from_user(&param, argptr, sizeof(param))) {
++		dev_err(&gna_priv->dev,
++			"could not copy getparam ioctl data from user\n");
++		return -EFAULT;
++	}
++
++	ret = gna_priv->ops->getparam(gna_priv, &param);
++	if (ret)
++		return ret;
++
++	if (copy_to_user(argptr, &param, sizeof(param))) {
++		dev_err(&gna_priv->dev,
++			"could not copy getparam ioctl status to user\n");
++		return -EFAULT;
++	}
++
++	return 0;
++}
++
++long gna_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++{
++	struct gna_file_private *file_priv;
++	struct gna_private *gna_priv;
++	void __user *argptr;
++	void *data;
++	u64 size;
++	int ret;
++
++	argptr = (void __user *) arg;
++	data = NULL;
++	size = 0;
++	ret = -EINVAL;
++
++	file_priv = (struct gna_file_private *) f->private_data;
++	if (!file_priv)
++		return -ENODEV;
++
++	gna_priv = file_priv->gna_priv;
++	if (!gna_priv)
++		return -ENODEV;
++
++	dev_dbg(&gna_priv->dev, "%s: enter cmd %#x\n", __func__, cmd);
++
++	switch (cmd) {
++
++	case GNA_IOCTL_PARAM_GET:
++
++		dev_dbg(&gna_priv->dev, "%s: GNA_IOCTL_PARAM_GET\n", __func__);
++		ret = gna_ioctl_getparam(gna_priv, argptr);
++		break;
++
++	case GNA_IOCTL_MEMORY_MAP:
++
++		dev_dbg(&gna_priv->dev, "%s: GNA_IOCTL_MEMORY_MAP\n", __func__);
++		ret = gna_ioctl_userptr(file_priv, argptr);
++		break;
++
++	case GNA_IOCTL_MEMORY_UNMAP:
++		dev_dbg(&gna_priv->dev, "%s: GNA_IOCTL_MEMORY_UNMAP\n", __func__);
++		ret = gna_ioctl_free(file_priv, arg);
++		break;
++
++	case GNA_IOCTL_COMPUTE:
++		dev_dbg(&gna_priv->dev, "%s: GNA_IOCTL_COMPUTE\n", __func__);
++		ret = gna_ioctl_score(file_priv, argptr);
++		break;
++
++	case GNA_IOCTL_WAIT:
++		dev_dbg(&gna_priv->dev, "%s: GNA_IOCTL_WAIT\n", __func__);
++		ret = gna_ioctl_wait(f, argptr);
++		break;
++
++	default:
++		dev_warn(&gna_priv->dev, "wrong ioctl %#x\n", cmd);
++		ret = -ENOTTY;
++		break;
++	}
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++
++	return ret;
++}
+diff --git a/drivers/misc/gna/gna_ioctl.h b/drivers/misc/gna/gna_ioctl.h
+new file mode 100644
+index 000000000000..151e1cd8ae17
+--- /dev/null
++++ b/drivers/misc/gna/gna_ioctl.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_IOCTL_H__
++#define __GNA_IOCTL_H__
++
++#include <linux/fs.h>
++
++extern long gna_ioctl(struct file *f, unsigned int cmd, unsigned long arg);
++
++#endif // __GNA_IOCTL_H__
+diff --git a/drivers/misc/gna/gna_irq.c b/drivers/misc/gna/gna_irq.c
+new file mode 100644
+index 000000000000..785599a00b77
+--- /dev/null
++++ b/drivers/misc/gna/gna_irq.c
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include "gna.h"
++
++#include "gna_drv.h"
++#include "gna_irq.h"
++
++irqreturn_t gna_interrupt(int irq, void *priv)
++{
++	struct gna_private *gna_priv;
++	void __iomem *addr;
++	irqreturn_t ret;
++	u32 hw_status;
++
++	gna_priv = (struct gna_private *)priv;
++
++	addr = gna_priv->bar0.mem_addr;
++	ret = IRQ_HANDLED;
++
++	hw_status = gna_reg_read(addr, GNASTS);
++	dev_dbg(&gna_priv->dev,
++		"received interrupt, device status: 0x%x\n", hw_status);
++
++	/* check if interrupt originated from gna device */
++	if (hw_status & GNA_INTERRUPT) {
++		dev_dbg(&gna_priv->dev, "interrupt originated from gna device\n");
++
++		spin_lock(&gna_priv->hw_lock);
++		gna_priv->hw_status = hw_status;
++		ret = IRQ_WAKE_THREAD;
++		spin_unlock(&gna_priv->hw_lock);
++	}
++
++	return ret;
++}
++
++irqreturn_t gna_irq_thread(int irq, void *priv)
++{
++	struct gna_private *gna_priv;
++
++	gna_priv = (struct gna_private *)priv;
++	atomic_inc(&gna_priv->isr_count);
++	tasklet_schedule(&gna_priv->request_tasklet);
++
++	return IRQ_HANDLED;
++}
+diff --git a/drivers/misc/gna/gna_irq.h b/drivers/misc/gna/gna_irq.h
+new file mode 100644
+index 000000000000..46ce0bc38125
+--- /dev/null
++++ b/drivers/misc/gna/gna_irq.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_IRQ_H__
++#define __GNA_IRQ_H__
++
++#include <linux/interrupt.h>
++
++extern irqreturn_t gna_interrupt(int irq, void *ctx);
++
++extern irqreturn_t gna_irq_thread(int irq, void *ctx);
++
++#endif // __GNA_IRQ_H__
+diff --git a/drivers/misc/gna/gna_mem.c b/drivers/misc/gna/gna_mem.c
+new file mode 100644
+index 000000000000..f46f3fd4599f
+--- /dev/null
++++ b/drivers/misc/gna/gna_mem.c
+@@ -0,0 +1,569 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include <linux/device.h>
++#include <linux/mm.h>
++#include <linux/pagemap.h>
++#include <linux/pci.h>
++#include <linux/sched.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/task.h>
++#include <linux/slab.h>
++#include <linux/swap.h>
++#include <linux/types.h>
++
++#include "gna.h"
++
++#include "gna_drv.h"
++#include "gna_mem.h"
++#include "gna_score.h"
++#include "gna_request.h"
++
++static void gna_mmu_init(struct gna_private *gna_priv)
++{
++	dma_addr_t pagetable_dma;
++	struct gna_mmu_object *mmu;
++	u32 *pgdirn;
++	int i;
++
++	mmu = &gna_priv->mmu;
++
++	pgdirn = mmu->hwdesc->mmu.pagedir_n;
++
++	for (i = 0; i < mmu->num_pagetables; i++) {
++		pagetable_dma = mmu->pagetables_dma[i];
++		pgdirn[i] = pagetable_dma >> PAGE_SHIFT;
++		dev_dbg(&gna_priv->dev, "pagetable %#x mapped at %#lx\n",
++			(u32)pagetable_dma, (uintptr_t)&pgdirn[i]);
++	}
++
++	for (; i < GNA_PGDIRN_LEN; i++)
++		pgdirn[i] = GNA_PGDIR_INVALID;
++}
++
++/* descriptor and page tables allocation */
++int gna_mmu_alloc(struct gna_private *gna_priv)
++{
++	struct gna_mmu_object *mmu;
++	int desc_size;
++	int i;
++
++	mmu = &gna_priv->mmu;
++
++	dev_dbg(&gna_priv->dev, "%s: enter\n", __func__);
++
++	desc_size = ROUND_UP(gna_priv->info.desc_info.desc_size, PAGE_SIZE);
++
++	mmu->hwdesc = pci_alloc_consistent(gna_priv->pdev,
++				     desc_size, &mmu->hwdesc_dma);
++	if (!mmu->hwdesc) {
++		dev_err(&gna_priv->dev, "gna base descriptor alloc fail\n");
++		goto end;
++	}
++
++	memset(mmu->hwdesc, 0, desc_size);
++
++	mmu->num_pagetables = gna_priv->info.num_pagetables;
++
++	mmu->pagetables_dma = kmalloc_array(mmu->num_pagetables,
++			sizeof(*mmu->pagetables_dma), GFP_KERNEL);
++	if (!mmu->pagetables_dma)
++		goto err_free_descriptor;
++
++	mmu->pagetables = kmalloc_array(mmu->num_pagetables,
++			sizeof(*mmu->pagetables), GFP_KERNEL);
++
++	if (!mmu->pagetables)
++		goto err_free_pagetables_dma;
++
++	for (i = 0; i < mmu->num_pagetables; i++) {
++		mmu->pagetables[i] = pci_alloc_consistent(gna_priv->pdev,
++			PAGE_SIZE, &mmu->pagetables_dma[i]);
++		if (!mmu->pagetables[i]) {
++			dev_err(&gna_priv->dev,
++				"gna page table %d alloc fail\n", i);
++			goto err_free_mmu;
++		}
++		memset(mmu->pagetables[i], 0, PAGE_SIZE);
++		dev_dbg(&gna_priv->dev,
++			"pagetable allocated %#lx\n",
++			(uintptr_t)mmu->pagetables[i]);
++	}
++
++	gna_mmu_init(gna_priv);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++
++	return 0;
++
++err_free_mmu:
++	while (i--) {
++		pci_free_consistent(gna_priv->pdev, PAGE_SIZE,
++			mmu->pagetables[i], mmu->pagetables_dma[i]);
++		mmu->pagetables[i] = NULL;
++		mmu->pagetables_dma[i] = 0;
++	}
++
++	kfree(mmu->pagetables);
++	mmu->pagetables = NULL;
++	mmu->num_pagetables = 0;
++
++err_free_pagetables_dma:
++	kfree(mmu->pagetables_dma);
++	mmu->pagetables_dma = 0;
++
++err_free_descriptor:
++	pci_free_consistent(gna_priv->pdev, desc_size,
++			mmu->hwdesc, mmu->hwdesc_dma);
++	mmu->hwdesc = NULL;
++	mmu->hwdesc_dma = 0;
++
++end:
++	return -ENOMEM;
++}
++
++void gna_mmu_free(struct gna_private *gna_priv)
++{
++	struct gna_mmu_object *mmu;
++	int desc_size;
++	int i;
++
++	dev_dbg(&gna_priv->dev, "%s enter\n", __func__);
++
++	mmu = &gna_priv->mmu;
++	mutex_lock(&gna_priv->mmu_lock);
++
++	for (i = 0; i < mmu->num_pagetables; i++) {
++		pci_free_consistent(gna_priv->pdev, PAGE_SIZE,
++			mmu->pagetables[i], mmu->pagetables_dma[i]);
++		mmu->pagetables[i] = NULL;
++		mmu->pagetables_dma[i] = 0;
++	}
++
++	kfree(mmu->pagetables);
++	mmu->pagetables = NULL;
++
++	kfree(mmu->pagetables_dma);
++	mmu->pagetables_dma = 0;
++
++	desc_size = ROUND_UP(gna_priv->info.desc_info.desc_size, PAGE_SIZE);
++	pci_free_consistent(gna_priv->pdev, desc_size,
++	    mmu->hwdesc, mmu->hwdesc_dma);
++	mmu->hwdesc = NULL;
++	mmu->hwdesc_dma = 0;
++
++	mutex_unlock(&gna_priv->mmu_lock);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++}
++
++void gna_mmu_add(struct gna_private *gna_priv,
++	struct gna_memory_object *mo)
++{
++	struct scatterlist *sgl;
++	struct gna_mmu_object *mmu;
++	dma_addr_t sg_page;
++	int sg_page_len;
++	u32 *pagetable;
++	u32 mmu_page;
++	int sg_pages;
++	int i;
++	int j;
++
++	mmu = &gna_priv->mmu;
++
++	mutex_lock(&gna_priv->mmu_lock);
++	j = mmu->filled_pages;
++
++	sgl = mo->sgt->sgl;
++	sg_page = sg_dma_address(sgl);
++	sg_page_len = ROUND_UP(sg_dma_len(sgl), PAGE_SIZE) >> PAGE_SHIFT;
++	sg_pages = 0;
++
++	for (i = mmu->filled_pts; i < mmu->num_pagetables; i++) {
++		if (sgl == NULL)
++			break;
++
++		pagetable = mmu->pagetables[i];
++
++		for (j = mmu->filled_pages; j < GNA_PAGE_TABLE_LENGTH; j++) {
++			mmu_page = sg_page >> PAGE_SHIFT;
++			pagetable[j] = mmu_page;
++
++			mmu->filled_pages++;
++			sg_page += PAGE_SIZE;
++			sg_pages++;
++			if (sg_pages == sg_page_len) {
++				sgl = sg_next(sgl);
++				if (sgl == NULL)
++					break;
++
++				sg_page = sg_dma_address(sgl);
++				sg_page_len =
++					ROUND_UP(sg_dma_len(sgl), PAGE_SIZE)
++						>> PAGE_SHIFT;
++				sg_pages = 0;
++			}
++		}
++
++		if (j == GNA_PAGE_TABLE_LENGTH) {
++			mmu->filled_pages = 0;
++			mmu->filled_pts++;
++		}
++	}
++
++	mmu->hwdesc->mmu.vamaxaddr =
++		(mmu->filled_pts * PAGE_SIZE * GNA_PGDIR_ENTRIES) +
++		(mmu->filled_pages * PAGE_SIZE) - 1;
++	dev_dbg(&gna_priv->dev, "vamaxaddr set to %u\n",
++			mmu->hwdesc->mmu.vamaxaddr);
++	mutex_unlock(&gna_priv->mmu_lock);
++}
++
++void gna_mmu_clear(struct gna_private *gna_priv)
++{
++	struct gna_mmu_object *mmu;
++	int i;
++
++	mmu = &gna_priv->mmu;
++	mutex_lock(&gna_priv->mmu_lock);
++
++	for (i = 0; i < mmu->filled_pts; i++)
++		memset(mmu->pagetables[i], 0, PAGE_SIZE);
++
++	if (mmu->filled_pages > 0)
++		memset(mmu->pagetables[mmu->filled_pts], 0,
++			mmu->filled_pages * GNA_PT_ENTRY_SIZE);
++
++	mmu->filled_pts = 0;
++	mmu->filled_pages = 0;
++	mmu->hwdesc->mmu.vamaxaddr = 0;
++
++	mutex_unlock(&gna_priv->mmu_lock);
++}
++
++int gna_buffer_get_size(u64 offset, u64 size)
++{
++	u64 page_offset;
++
++	page_offset = offset & ~PAGE_MASK;
++	return ROUND_UP(page_offset + size, PAGE_SIZE);
++}
++
++/* must be called with gna_memory_object page_lock held */
++static int gna_get_pages(struct gna_memory_object *mo, u64 offset, u64 size)
++{
++	struct gna_private *gna_priv;
++	struct mm_struct *mm;
++	struct page **pages;
++	struct sg_table *sgt;
++	u64 effective_address;
++	int effective_size;
++	int num_pinned;
++	int num_pages;
++	int skip_size;
++	int sgcount;
++	int ret;
++
++	ret = 0;
++	gna_priv = mo->gna_priv;
++
++	if (mo->pages) {
++		dev_warn(&gna_priv->dev, "pages are already pinned\n");
++		return -EFAULT;
++	}
++
++	/* using vmalloc because num_pages can be large */
++	skip_size = ROUND_DOWN(offset, PAGE_SIZE);
++	effective_address = mo->user_address + skip_size;
++	dev_dbg(&gna_priv->dev, "user address %llx\n", mo->user_address);
++	dev_dbg(&gna_priv->dev, "effective user address %llx\n", effective_address);
++
++	effective_size = gna_buffer_get_size(offset, size);
++
++	num_pages = effective_size >> PAGE_SHIFT;
++	dev_dbg(&gna_priv->dev, "allocating %d pages\n", num_pages);
++	pages = kvmalloc_array(num_pages, sizeof(struct page *), GFP_KERNEL);
++	if (!pages) {
++		ret = -ENOMEM;
++		dev_err(&gna_priv->dev, "no memory for pages\n");
++		goto err_exit;
++	}
++
++	dev_dbg(&gna_priv->dev, "pages allocated\n");
++
++	get_task_struct(mo->task);
++	mm = get_task_mm(mo->task);
++	if (!mm) {
++		ret = -ENOENT;
++		goto err_put_task;
++	}
++	down_read(&mm->mmap_sem);
++	num_pinned = get_user_pages_remote(mo->task, mm,
++			effective_address, num_pages, 1, pages, NULL, NULL);
++	up_read(&mm->mmap_sem);
++	mmput(mm);
++
++	if (num_pinned <= 0) {
++		ret = num_pinned;
++		dev_err(&gna_priv->dev,
++			"function get_user_pages_fast() failed\n");
++		goto err_free_pages;
++	}
++	if (num_pinned < num_pages) {
++		ret = -EFAULT;
++		dev_err(&gna_priv->dev,
++			"function get_user_pages_fast() pinned less pages\n");
++		goto err_free_pages;
++	}
++
++	dev_dbg(&gna_priv->dev, "get user pages success %d\n", ret);
++
++	sgt = kmalloc(sizeof(struct sg_table), GFP_KERNEL);
++	if (!sgt) {
++		ret = -ENOMEM;
++		dev_err(&gna_priv->dev,
++			"could not allocate memory for scatter-gather table\n");
++		goto err_put_pages;
++	}
++
++	dev_dbg(&gna_priv->dev, "sgt allocated\n");
++
++	ret = sg_alloc_table_from_pages(
++			sgt, pages, num_pinned, 0, mo->memory_size, GFP_KERNEL);
++	if (ret) {
++		dev_err(&gna_priv->dev, "could not alloc scatter list\n");
++		goto err_free_sgt;
++	}
++
++	if (IS_ERR(sgt->sgl)) {
++		dev_err(&gna_priv->dev, "sgl allocation failed\n");
++		ret = PTR_ERR(sgt->sgl);
++		goto err_free_sgt;
++	}
++
++	dev_dbg(&gna_priv->dev, "sgl allocated\n");
++
++	sgcount = pci_map_sg(
++		gna_priv->pdev, sgt->sgl, sgt->nents, PCI_DMA_BIDIRECTIONAL);
++	if (sgcount <= 0) {
++		dev_err(&gna_priv->dev, "could not map scatter gather list\n");
++		goto err_free_sgl;
++	}
++
++	dev_dbg(&gna_priv->dev, "mapped scatter gather list\n");
++
++	mo->sgt = sgt;
++	mo->sgcount = sgcount;
++	mo->pages = pages;
++	mo->num_pinned = num_pinned;
++
++	return 0;
++
++err_free_sgl:
++	sg_free_table(sgt);
++
++err_free_sgt:
++	kfree(sgt);
++
++err_put_pages:
++	release_pages(pages, num_pinned);
++
++err_free_pages:
++	kvfree(pages);
++
++err_put_task:
++	put_task_struct(mo->task);
++
++err_exit:
++	return ret;
++}
++
++/* must be called with gna_memory_object page_lock held */
++static void gna_put_pages(struct gna_memory_object *mo)
++{
++	struct sg_table *sgt;
++	struct gna_private *gna_priv;
++
++	gna_priv = mo->gna_priv;
++
++	if (!mo->pages) {
++		dev_warn(&gna_priv->dev, "memory object has no pages %llu\n",
++				mo->memory_id);
++		return;
++	}
++
++	sgt = mo->sgt;
++
++	pci_unmap_sg(
++		gna_priv->pdev, sgt->sgl, sgt->nents, PCI_DMA_BIDIRECTIONAL);
++	sg_free_table(sgt);
++	kfree(sgt);
++	mo->sgt = NULL;
++	mo->sgcount = 0;
++
++	release_pages(mo->pages, mo->num_pinned);
++	kvfree(mo->pages);
++	mo->pages = NULL;
++	mo->num_pinned = 0;
++
++	put_task_struct(mo->task);
++}
++
++void gna_memory_free(struct gna_private *gna_priv, struct gna_memory_object *mo)
++{
++	mutex_lock(&gna_priv->memidr_lock);
++	idr_remove(&gna_priv->memory_idr, mo->memory_id);
++	mutex_unlock(&gna_priv->memidr_lock);
++
++#if defined(CONFIG_MMU_NOTIFIER)
++	mutex_lock(&mo->mn_lock);
++	if (mo->gna_mn) {
++		mmu_notifier_unregister(&mo->gna_mn->mn, mo->gna_mn->mm);
++		kfree(mo->gna_mn);
++		mo->gna_mn = NULL;
++	}
++	mutex_unlock(&mo->mn_lock);
++#endif
++
++	cancel_work_sync(&mo->work);
++	kfree(mo);
++}
++
++static void gna_memory_release(struct work_struct *work)
++{
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++
++	mo = container_of(work, struct gna_memory_object, work);
++	gna_priv = mo->gna_priv;
++
++	dev_dbg(&gna_priv->dev, "%s: enter\n", __func__);
++
++	gna_delete_memory_requests(mo->memory_id, gna_priv);
++
++	mo->user_ptr = NULL;
++
++	wake_up_interruptible(&mo->waitq);
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++}
++
++static const struct gna_memory_operations memory_ops = {
++	.get_pages = gna_get_pages,
++	.put_pages = gna_put_pages
++};
++
++#if defined(CONFIG_MMU_NOTIFIER)
++static int gna_userptr_mn_invalidate_range_start(
++	struct mmu_notifier *mn,
++	const struct mmu_notifier_range *mn_range)
++{
++	struct gna_mmu_notifier *gna_mn;
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++
++	gna_mn = container_of(mn, struct gna_mmu_notifier, mn);
++	gna_priv = gna_mn->gna_priv;
++
++	mo = gna_mn->mo;
++
++	dev_dbg(&gna_priv->dev,
++			"memory invalidated, size: %lu, memory size: %llu\n",
++			mn_range->end - mn_range->start, mo->memory_size);
++
++	return 0;
++}
++#endif
++
++#if defined(CONFIG_MMU_NOTIFIER)
++static const struct mmu_notifier_ops gna_userptr_mn_ops = {
++	.invalidate_range_start = gna_userptr_mn_invalidate_range_start,
++};
++#endif
++
++int gna_priv_userptr(struct gna_file_private *file_priv,
++	union gna_memory_map *gna_mem)
++{
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++	struct mm_struct *mm;
++	int ret;
++
++	ret = 0;
++
++	gna_priv = file_priv->gna_priv;
++
++	if (!gna_mem->in.size) {
++		dev_err(&gna_priv->dev, "invalid user memory size\n");
++		return -EINVAL;
++	}
++
++	if (!access_ok(u64_to_user_ptr(gna_mem->in.address), gna_mem->in.size)) {
++		dev_err(&gna_priv->dev, "invalid user pointer\n");
++		return -EINVAL;
++	}
++
++	mo = kzalloc(sizeof(*mo), GFP_KERNEL);
++	if (!mo)
++		return -ENOMEM;
++
++	mo->fd = file_priv->fd;
++	mo->gna_priv = gna_priv;
++	mo->ops = &memory_ops;
++	mo->user_address = gna_mem->in.address;
++	mo->memory_size = gna_mem->in.size;
++	mo->user_ptr = u64_to_user_ptr(gna_mem->in.address);
++	mo->num_pages = ROUND_UP(gna_mem->in.size, PAGE_SIZE) >> PAGE_SHIFT;
++	mo->task = current;
++	INIT_WORK(&mo->work, gna_memory_release);
++	init_waitqueue_head(&mo->waitq);
++	mutex_init(&mo->page_lock);
++
++	mutex_lock(&gna_priv->memidr_lock);
++	mo->memory_id = idr_alloc(&gna_priv->memory_idr, mo, 1, 0, GFP_KERNEL);
++	mutex_unlock(&gna_priv->memidr_lock);
++
++	if (mo->memory_id < 0) {
++		dev_err(&gna_priv->dev, "idr allocation for memory failed\n");
++		ret = -EFAULT;
++		goto err_free_mo;
++	}
++
++	mutex_lock(&file_priv->memlist_lock);
++	list_add_tail(&mo->file_mem_list, &file_priv->memory_list);
++	mutex_unlock(&file_priv->memlist_lock);
++
++	gna_mem->out.memory_id = mo->memory_id;
++	dev_dbg(&gna_priv->dev, "memory id allocated: %llu\n", mo->memory_id);
++
++#if defined(CONFIG_MMU_NOTIFIER)
++	/* register mmu notifier to avoid use-after-free */
++	mutex_init(&mo->mn_lock);
++	mm = current->mm;
++
++	mutex_lock(&mo->mn_lock);
++	mo->gna_mn = kzalloc(sizeof(struct gna_mmu_notifier), GFP_KERNEL);
++	mo->gna_mn->file_priv = file_priv;
++	mo->gna_mn->gna_priv = gna_priv;
++	mo->gna_mn->mo = mo;
++	mo->gna_mn->mn.ops = &gna_userptr_mn_ops;
++	mo->gna_mn->mm = mm;
++
++	down_write(&mm->mmap_sem);
++	ret = __mmu_notifier_register(&mo->gna_mn->mn, mm);
++	up_write(&mm->mmap_sem);
++
++	if (ret) {
++		kfree(mo->gna_mn);
++		mo->gna_mn = NULL;
++	}
++	mutex_unlock(&mo->mn_lock);
++#endif
++
++	return 0;
++
++err_free_mo:
++	kfree(mo);
++	return ret;
++}
+diff --git a/drivers/misc/gna/gna_mem.h b/drivers/misc/gna/gna_mem.h
+new file mode 100644
+index 000000000000..cd1fe7dbbe4c
+--- /dev/null
++++ b/drivers/misc/gna/gna_mem.h
+@@ -0,0 +1,110 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_MEM_H__
++#define __GNA_MEM_H__
++
++#include <linux/mmu_notifier.h>
++#include <linux/types.h>
++#include <linux/wait.h>
++
++#include "gna_hw.h"
++
++union gna_memory_map;
++
++struct gna_file_private;
++
++struct gna_xnn_descriptor {
++	u32 labase;
++	u16 lacount;
++	u16 _rsvd;
++};
++
++struct gna_mmu {
++	u32 vamaxaddr;
++	u8 __res_204[12];
++	u32 pagedir_n[GNA_PGDIRN_LEN];
++};
++
++struct gna_hw_descriptor {
++	u8 __res_0000[256];
++	struct gna_xnn_descriptor xnn_config;
++	u8 __unused[248];
++	struct gna_mmu mmu;
++};
++
++struct descriptor_addr {
++	struct descriptor *descla;
++	dma_addr_t descph;
++};
++
++struct gna_mmu_notifier {
++	struct gna_file_private *file_priv;
++	struct gna_private *gna_priv;
++	struct gna_memory_object *mo;
++	struct mmu_notifier mn;
++	struct mm_struct *mm;
++};
++
++struct gna_memory_object {
++	u64 memory_id;
++
++	const struct gna_memory_operations *ops;
++
++	struct gna_private *gna_priv;
++	struct file *fd;
++
++	void __user *user_ptr;
++	u64 user_address;
++	u64 memory_size;
++
++	void *vaddr;
++
++	struct page **pages;
++	struct sg_table *sgt;
++	int sgcount;
++	int num_pages;
++	int num_pinned;
++	struct mutex page_lock;
++
++	struct task_struct *task;
++
++	struct list_head mem_list;
++
++	struct list_head file_mem_list;
++
++#if defined(CONFIG_MMU_NOTIFIER)
++	struct gna_mmu_notifier *gna_mn;
++	struct mutex mn_lock;
++#endif
++
++	struct work_struct work;
++
++	struct wait_queue_head waitq;
++};
++
++struct gna_memory_operations {
++	/* pins pages */
++	int (*get_pages)(struct gna_memory_object *mo, u64 offset, u64 size);
++
++	/* puts previously pinned pages */
++	void (*put_pages)(struct gna_memory_object *mo);
++};
++
++int gna_buffer_get_size(u64 offset, u64 size);
++
++int gna_priv_userptr(
++	struct gna_file_private *file_priv, union gna_memory_map *gna_mem);
++
++int gna_mmu_alloc(struct gna_private *gna_priv);
++
++void gna_mmu_free(struct gna_private *gna_priv);
++
++void gna_mmu_add(struct gna_private *gna_priv,
++	struct gna_memory_object *object);
++
++void gna_mmu_clear(struct gna_private *gna_priv);
++
++void gna_memory_free(struct gna_private *gna_priv, struct gna_memory_object *mo);
++
++#endif // __GNA_MEM_H__
+diff --git a/drivers/misc/gna/gna_pci.c b/drivers/misc/gna/gna_pci.c
+new file mode 100644
+index 000000000000..a2f9bc37904d
+--- /dev/null
++++ b/drivers/misc/gna/gna_pci.c
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#define FORMAT(fmt) "%s: %d: " fmt, __func__, __LINE__
++#define pr_fmt(fmt) KBUILD_MODNAME ": " FORMAT(fmt)
++
++#include <linux/pci.h>
++
++#include "gna.h"
++
++#include "gna_drv.h"
++
++#define INTEL_GNA_DEVICE(platform, info) \
++	{ PCI_VDEVICE(INTEL, platform), (kernel_ulong_t)(info) }
++
++#define PLATFORM(id) .hwid = (id)
++
++#define GNA_GEN1_FEATURES \
++	.max_hw_mem = 256 * 1024 * 1024, \
++	.num_pagetables = 64, \
++	.num_page_entries = PAGE_SIZE/sizeof(u32), \
++	/* desc_info all in bytes */ \
++	.desc_info = { \
++		.rsvd_size = 256, \
++		.cfg_size = 256, \
++		.desc_size = 784, \
++		.mmu_info = { \
++			.vamax_size = 4, \
++			.rsvd_size = 12, \
++			.pd_size = 4 * 64, \
++		}, \
++	}, \
++	.max_layer_count = 1023
++
++#define GNA_GEN2_FEATURES \
++	GNA_GEN1_FEATURES, \
++	.max_layer_count = 4096
++
++static const struct gna_drv_info cnl_drv_info = {
++	PLATFORM(GNA_DEV_HWID_CNL),
++	GNA_GEN1_FEATURES
++};
++
++static const struct gna_drv_info glk_drv_info = {
++	PLATFORM(GNA_DEV_HWID_GLK),
++	GNA_GEN1_FEATURES
++};
++
++static const struct gna_drv_info ehl_drv_info = {
++	PLATFORM(GNA_DEV_HWID_EHL),
++	GNA_GEN1_FEATURES
++};
++
++static const struct gna_drv_info icl_drv_info = {
++	PLATFORM(GNA_DEV_HWID_ICL),
++	GNA_GEN1_FEATURES
++};
++
++static const struct gna_drv_info jsl_drv_info = {
++	PLATFORM(GNA_DEV_HWID_JSL),
++	GNA_GEN2_FEATURES
++};
++
++static const struct gna_drv_info tgl_drv_info = {
++	PLATFORM(GNA_DEV_HWID_TGL),
++	GNA_GEN2_FEATURES
++};
++
++/* PCI Routines */
++static const struct pci_device_id gna_pci_ids[] = {
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_CNL, &cnl_drv_info),
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_GLK, &glk_drv_info),
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_EHL, &ehl_drv_info),
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_ICL, &icl_drv_info),
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_JSL, &jsl_drv_info),
++	INTEL_GNA_DEVICE(GNA_DEV_HWID_TGL, &tgl_drv_info),
++	{ 0, }
++};
++MODULE_DEVICE_TABLE(pci, gna_pci_ids);
++
++static struct pci_driver gna_driver = {
++	.name = GNA_DRV_NAME,
++	.id_table = gna_pci_ids,
++	.probe = gna_probe,
++	.remove = gna_remove,
++#ifdef CONFIG_PM
++	.driver = {
++		.pm = &gna_pm,
++	},
++#endif
++};
++
++static char *gna_devnode(struct device *dev, umode_t *mode)
++{
++	if (mode)
++		*mode = 0666;
++
++	return kasprintf(GFP_KERNEL, "%s", dev_name(dev));
++}
++
++static int __init gna_init(void)
++{
++	int ret;
++
++	pr_debug("%s: enter\n", __func__);
++
++	mutex_init(&gna_drv_priv.lock);
++
++	gna_class = class_create(THIS_MODULE, "gna");
++	if (IS_ERR(gna_class)) {
++		pr_err("class device create failed\n");
++		return PTR_ERR(gna_class);
++	}
++	gna_class->devnode = gna_devnode;
++
++	mutex_lock(&gna_drv_priv.lock);
++
++	ret = alloc_chrdev_region(&gna_drv_priv.devt, 0, MAX_GNA_DEVICES, "gna");
++	if (ret) {
++		pr_err("could not get major number\n");
++		goto err_destroy_class;
++	}
++
++	pr_debug("major %d\n", MAJOR(gna_drv_priv.devt));
++	pr_debug("minor %d\n", MINOR(gna_drv_priv.devt));
++
++	gna_drv_priv.minor = MINOR(gna_drv_priv.devt);
++
++	mutex_unlock(&gna_drv_priv.lock);
++
++	ret = pci_register_driver(&gna_driver);
++	if (ret) {
++		pr_err("pci register driver failed\n");
++		goto err_unreg_chdev;
++	}
++
++	pr_debug("%s: exit\n", __func__);
++	return 0;
++
++err_unreg_chdev:
++	unregister_chrdev_region(gna_drv_priv.devt, MAX_GNA_DEVICES);
++
++err_destroy_class:
++	class_destroy(gna_class);
++
++	return ret;
++}
++
++static void __exit gna_exit(void)
++{
++	pr_debug("%s: enter\n", __func__);
++
++	pci_unregister_driver(&gna_driver);
++	unregister_chrdev_region(gna_drv_priv.devt, MAX_GNA_DEVICES);
++	class_destroy(gna_class);
++
++	pr_debug("%s: end\n", __func__);
++}
++
++module_init(gna_init);
++module_exit(gna_exit);
++
++MODULE_AUTHOR("Intel Corporation");
++MODULE_DESCRIPTION("Intel GMM & Neural Network Accelerator Driver");
++MODULE_VERSION(GNA_DRV_VER);
++
++MODULE_ALIAS("pci:v00008086d00003190sv*sd*bc*sc*i*");
++MODULE_ALIAS("pci:v00008086d00004511sv*sd*bc*sc*i*");
++MODULE_ALIAS("pci:v00008086d00005A11sv*sd*bc*sc*i*");
++MODULE_ALIAS("pci:v00008086d00008A11sv*sd*bc*sc*i*");
++MODULE_ALIAS("pci:v00008086d00009A11sv*sd*bc*sc*i*");
++
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/misc/gna/gna_request.c b/drivers/misc/gna/gna_request.c
+new file mode 100644
+index 000000000000..9585d1937750
+--- /dev/null
++++ b/drivers/misc/gna/gna_request.c
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include <linux/device.h>
++#include <linux/kref.h>
++#include <linux/pm_runtime.h>
++#include <linux/wait.h>
++#include <linux/workqueue.h>
++
++#include "gna_drv.h"
++#include "gna_request.h"
++
++/* processes request and starts the device */
++static void gna_request_process(struct work_struct *work)
++{
++	struct gna_request *score_request;
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++	struct gna_buffer *buffer;
++	int ret;
++	u64 i;
++
++	score_request = container_of(work, struct gna_request, work);
++	gna_priv = score_request->gna_priv;
++	dev_dbg(&gna_priv->dev,
++		"processing request %llu\n", score_request->request_id);
++
++	spin_lock_bh(&gna_priv->busy_lock);
++	if (gna_priv->busy) {
++		spin_unlock_bh(&gna_priv->busy_lock);
++		dev_dbg(&gna_priv->dev, "gna device is busy, wait\n");
++		wait_event(gna_priv->busy_waitq, !gna_priv->busy);
++		spin_lock_bh(&gna_priv->busy_lock);
++	}
++	gna_priv->busy = true;
++	spin_unlock_bh(&gna_priv->busy_lock);
++
++	spin_lock_bh(&score_request->state_lock);
++	score_request->state = ACTIVE;
++	spin_unlock_bh(&score_request->state_lock);
++
++	spin_lock_bh(&score_request->perf_lock);
++	score_request->drv_perf.pre_processing = rdtsc();
++	spin_unlock_bh(&score_request->perf_lock);
++
++	ret = pm_runtime_get_sync(&gna_priv->pdev->dev);
++	if (ret < 0) {
++		dev_warn_once(&gna_priv->dev,
++			"pm_runtime_get_sync() failed: %d\n", ret);
++		gna_request_set_done(score_request, -ENODEV);
++		goto end;
++	}
++
++	ret = gna_priv->ops->score(score_request);
++	if (ret) {
++		if (pm_runtime_put(&gna_priv->pdev->dev) < 0)
++			dev_warn_once(&gna_priv->dev,
++				"pm_runtime_put() failed: %d\n", ret);
++		goto end;
++	}
++
++	wait_event(gna_priv->busy_waitq, !gna_priv->busy);
++
++	/* request post-processing */
++	buffer = score_request->buffer_list;
++	for (i = 0; i < score_request->buffer_count; i++, buffer++) {
++		mutex_lock(&gna_priv->memidr_lock);
++		mo = idr_find(&gna_priv->memory_idr, buffer->memory_id);
++		mutex_unlock(&gna_priv->memidr_lock);
++		if (mo) {
++			dev_dbg(&gna_priv->dev, "putting pages %llu\n",
++					buffer->memory_id);
++			mutex_lock(&mo->page_lock);
++			mo->ops->put_pages(mo);
++			mutex_unlock(&mo->page_lock);
++		} else {
++			dev_warn(&gna_priv->dev, "mo not found %llu\n",
++					buffer->memory_id);
++		}
++	}
++
++	/* patches_ptr's are already freed by ops->score() function */
++	kvfree(score_request->buffer_list);
++	score_request->buffer_list = NULL;
++	score_request->buffer_count = 0;
++
++	gna_mmu_clear(gna_priv);
++
++	dev_dbg(&gna_priv->dev, "request %llu done, waking processes\n",
++		score_request->request_id);
++	spin_lock_bh(&score_request->state_lock);
++	score_request->state = DONE;
++	spin_unlock_bh(&score_request->state_lock);
++	wake_up_interruptible_all(&score_request->waitq);
++
++end:
++	spin_lock_bh(&score_request->perf_lock);
++	score_request->drv_perf.processing = rdtsc();
++	spin_unlock_bh(&score_request->perf_lock);
++}
++
++struct gna_request *gna_request_create(
++	struct gna_file_private *file_priv,
++	struct gna_compute_cfg *compute_cfg)
++{
++	struct gna_request *score_request;
++	struct gna_private *gna_priv;
++
++	gna_priv = file_priv->gna_priv;
++	if (IS_ERR(gna_priv))
++		return NULL;
++
++	score_request = kzalloc(sizeof(*score_request), GFP_KERNEL|GFP_ATOMIC);
++	if (!score_request)
++		return NULL;
++	kref_init(&score_request->refcount);
++
++	dev_dbg(&gna_priv->dev, "layer_base %d layer_count %d\n",
++		compute_cfg->layer_base, compute_cfg->layer_count);
++
++	score_request->request_id = atomic_inc_return(&gna_priv->request_count);
++	score_request->compute_cfg = *compute_cfg;
++	score_request->fd = file_priv->fd;
++	score_request->gna_priv = gna_priv;
++	score_request->state = NEW;
++	spin_lock_init(&score_request->state_lock);
++	spin_lock_init(&score_request->status_lock);
++	spin_lock_init(&score_request->perf_lock);
++	spin_lock_init(&score_request->hw_lock);
++	init_waitqueue_head(&score_request->waitq);
++	INIT_WORK(&score_request->work, gna_request_process);
++
++	return score_request;
++}
++
++void gna_request_release(struct kref *ref)
++{
++	struct gna_request *score_request =
++		container_of(ref, struct gna_request, refcount);
++	kfree(score_request);
++}
++
++void gna_request_set_done(struct gna_request *score_request, int status)
++{
++	spin_lock_bh(&score_request->status_lock);
++	score_request->status = status;
++	spin_unlock_bh(&score_request->status_lock);
++
++	spin_lock_bh(&score_request->state_lock);
++	score_request->state = DONE;
++	spin_unlock_bh(&score_request->state_lock);
++}
++
++struct gna_request *gna_find_request_by_id(u64 req_id,
++	struct gna_private *gna_priv)
++{
++	struct list_head *reqs_list;
++	struct gna_request *iter_req, *found_req;
++
++	mutex_lock(&gna_priv->reqlist_lock);
++
++	reqs_list = &gna_priv->request_list;
++	found_req = NULL;
++	if (!list_empty(reqs_list)) {
++		list_for_each_entry(iter_req, reqs_list, node) {
++			if (req_id == iter_req->request_id) {
++				found_req = iter_req;
++				kref_get(&found_req->refcount);
++				break;
++			}
++		}
++	}
++
++	mutex_unlock(&gna_priv->reqlist_lock);
++
++	return found_req;
++}
++
++void gna_delete_request_by_id(u64 req_id, struct gna_private *gna_priv)
++{
++	struct list_head *reqs_list;
++	struct gna_request *temp_req, *iter_req;
++
++	mutex_lock(&gna_priv->reqlist_lock);
++
++	reqs_list = &gna_priv->request_list;
++	if (!list_empty(reqs_list)) {
++		list_for_each_entry_safe(iter_req, temp_req, reqs_list, node) {
++			if (iter_req->request_id == req_id) {
++				list_del(&iter_req->node);
++				cancel_work_sync(&iter_req->work);
++				kref_put(&iter_req->refcount, gna_request_release);
++				break;
++			}
++		}
++	}
++
++	mutex_unlock(&gna_priv->reqlist_lock);
++}
++
++void gna_delete_file_requests(struct file *fd, struct gna_private *gna_priv)
++{
++	struct list_head *reqs_list;
++	struct gna_request *temp_req, *iter_req;
++
++	mutex_lock(&gna_priv->reqlist_lock);
++
++	reqs_list = &gna_priv->request_list;
++	if (!list_empty(reqs_list)) {
++		list_for_each_entry_safe(iter_req, temp_req, reqs_list, node) {
++			if (iter_req->fd == fd) {
++				list_del(&iter_req->node);
++				cancel_work_sync(&iter_req->work);
++				kref_put(&iter_req->refcount, gna_request_release);
++				break;
++			}
++		}
++	}
++
++	mutex_unlock(&gna_priv->reqlist_lock);
++}
++
++void gna_delete_memory_requests(u64 memory_id, struct gna_private *gna_priv)
++{
++	struct list_head *reqs_list;
++	struct gna_request *temp_req, *iter_req;
++	int i;
++
++	mutex_lock(&gna_priv->reqlist_lock);
++
++	reqs_list = &gna_priv->request_list;
++	if (!list_empty(reqs_list)) {
++		list_for_each_entry_safe(iter_req, temp_req, reqs_list, node) {
++			for (i = 0; i < iter_req->buffer_count; ++i) {
++				if (iter_req->buffer_list[i].memory_id == memory_id) {
++					BUG_ON(iter_req->state == NEW);
++					list_del(&iter_req->node);
++					cancel_work_sync(&iter_req->work);
++					kref_put(&iter_req->refcount, gna_request_release);
++					break;
++				}
++			}
++		}
++	}
++
++	mutex_unlock(&gna_priv->reqlist_lock);
++}
+diff --git a/drivers/misc/gna/gna_request.h b/drivers/misc/gna/gna_request.h
+new file mode 100644
+index 000000000000..5ad44dfdca47
+--- /dev/null
++++ b/drivers/misc/gna/gna_request.h
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_REQUEST_H__
++#define __GNA_REQUEST_H__
++
++#include "gna.h"
++
++#include "gna_hw.h"
++
++enum gna_request_state {
++	NEW,
++	ACTIVE,
++	DONE,
++};
++
++struct gna_file_private;
++
++struct gna_request {
++	u64 request_id;
++
++	struct kref refcount;
++
++	struct gna_private *gna_priv;
++	struct file *fd;
++
++	/* hardware status set by interrupt handler */
++	u32 hw_status;
++	spinlock_t hw_lock;
++
++	enum gna_request_state state;
++	spinlock_t state_lock;
++
++	int status;
++	spinlock_t status_lock;
++
++	struct gna_hw_perf hw_perf;
++	struct gna_drv_perf drv_perf;
++	spinlock_t perf_lock;
++
++	struct list_head node;
++
++	struct gna_compute_cfg compute_cfg;
++
++	struct gna_buffer *buffer_list;
++	u64 buffer_count;
++
++	struct wait_queue_head waitq;
++	struct work_struct work;
++};
++
++struct gna_request *gna_request_create(
++	struct gna_file_private *file_priv,
++	struct gna_compute_cfg *compute_cfg);
++
++void gna_request_release(struct kref *ref);
++
++void gna_request_set_done(struct gna_request *score_request, int status);
++
++struct gna_request *gna_find_request_by_id(u64 req_id,
++	struct gna_private *gna_priv);
++
++void gna_delete_request_by_id(u64 req_id, struct gna_private *gna_priv);
++
++void gna_delete_file_requests(struct file *fd, struct gna_private *gna_priv);
++
++void gna_delete_memory_requests(u64 memory_id, struct gna_private *gna_priv);
++
++#endif // __GNA_REQUEST_H__
+diff --git a/drivers/misc/gna/gna_score.c b/drivers/misc/gna/gna_score.c
+new file mode 100644
+index 000000000000..c13f4c0b7e12
+--- /dev/null
++++ b/drivers/misc/gna/gna_score.c
+@@ -0,0 +1,678 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright(c) 2017-2020 Intel Corporation
++
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/pci.h>
++#include <linux/pm_runtime.h>
++#include <linux/poll.h>
++#include <linux/sched.h>
++#include <linux/sched/mm.h>
++#include <linux/slab.h>
++#include <linux/time.h>
++#include <linux/types.h>
++#include <linux/uaccess.h>
++
++#include "gna_drv.h"
++#include "gna_request.h"
++#include "gna_score.h"
++
++int gna_validate_score_config(struct gna_compute_cfg *compute_cfg,
++	struct gna_file_private *file_priv)
++{
++	struct gna_private *gna_priv;
++	size_t buffers_size;
++
++	gna_priv = file_priv->gna_priv;
++
++	if (compute_cfg->gna_mode > GNA_MODE_XNN) {
++		dev_err(&gna_priv->dev, "gna mode invalid\n");
++		return -EINVAL;
++	}
++
++	if (compute_cfg->layer_count > gna_priv->info.max_layer_count) {
++		dev_err(&gna_priv->dev, "max layer count exceeded\n");
++		return -EINVAL;
++	}
++
++	if (compute_cfg->buffer_count == 0) {
++		dev_err(&gna_priv->dev, "no buffers\n");
++		return -EINVAL;
++	}
++
++	buffers_size = sizeof(struct gna_buffer) * compute_cfg->buffer_count;
++	if (!access_ok(compute_cfg->buffers_ptr, buffers_size)) {
++		dev_err(&gna_priv->dev, "invalid buffers pointer\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int gna_buffer_fill_patches(
++		struct gna_buffer *buffer,
++		struct gna_private *gna_priv)
++{
++	struct gna_memory_patch *patches;
++	u64 patches_size;
++	u64 patch_count;
++
++	patch_count = buffer->patch_count;
++	if (!patch_count)
++		return 0;
++
++	patches_size = sizeof(struct gna_memory_patch) * patch_count;
++	patches = kvmalloc_array(patch_count, patches_size, GFP_KERNEL);
++	if (!patches)
++		return -ENOMEM;
++
++	if (copy_from_user(patches,
++			   u64_to_user_ptr(buffer->patches_ptr),
++			   patches_size)) {
++		kvfree(patches);
++		dev_err(&gna_priv->dev,
++			"copy %llu patches from user failed\n", patch_count);
++		return -EFAULT;
++	}
++
++	buffer->patches_ptr = (uintptr_t)patches;
++
++	return 0;
++}
++
++static int gna_request_fill_buffers(
++	struct gna_request *score_request,
++	struct gna_compute_cfg *compute_cfg)
++{
++	struct gna_buffer *buffer_list;
++	struct gna_memory_object *mo;
++	struct gna_private *gna_priv;
++	struct gna_buffer *buffer;
++	u64 buffers_total_size;
++	void __user *ptr;
++	u64 buffer_count;
++	u64 memory_id;
++	u64 i, j;
++	int ret;
++	bool skip;
++
++	gna_priv = score_request->gna_priv;
++
++	buffers_total_size = 0;
++	ret = 0;
++
++	/* get memory buffer list */
++	buffer_count = compute_cfg->buffer_count;
++	buffer_list = kvmalloc_array(
++			buffer_count, sizeof(struct gna_buffer), GFP_KERNEL);
++	if (!buffer_list)
++		return -ENOMEM;
++
++	ptr = u64_to_user_ptr(compute_cfg->buffers_ptr);
++	if (copy_from_user(buffer_list, ptr,
++				sizeof(*buffer_list) * buffer_count)) {
++		dev_err(&gna_priv->dev,
++			"copying %llu buffers failed\n", buffer_count);
++		ret = -EFAULT;
++		goto err_free_buffers;
++	}
++
++	buffer = buffer_list;
++	for (i = 0; i < buffer_count; i++, buffer++) {
++		memory_id = buffer->memory_id;
++
++		skip = false;
++		for (j = 0; j < i; j++) {
++			if (buffer_list[j].memory_id == memory_id) {
++				skip = true;
++				break;
++			}
++		}
++		if (skip) {
++			dev_warn_once(&gna_priv->dev,
++				"multiple memory id in score config\n");
++			continue;
++		}
++
++		buffers_total_size +=
++			gna_buffer_get_size(buffer->offset, buffer->size);
++		if (buffers_total_size > gna_priv->info.max_hw_mem) {
++			dev_err(&gna_priv->dev, "buffers total size too big");
++			ret =  -EINVAL;
++			goto err_free_patches;
++		}
++
++		ret = gna_buffer_fill_patches(buffer, gna_priv);
++		if (ret)
++			goto err_free_patches;
++
++		mutex_lock(&gna_priv->memidr_lock);
++		mo = idr_find(&gna_priv->memory_idr, memory_id);
++		if (!mo) {
++			mutex_unlock(&gna_priv->memidr_lock);
++			dev_err(&gna_priv->dev,
++				"memory object %llu not found\n", memory_id);
++			ret = -EINVAL;
++			i++;
++			goto err_free_patches;
++		}
++		mutex_unlock(&gna_priv->memidr_lock);
++	}
++
++	score_request->buffer_list = buffer_list;
++	score_request->buffer_count = buffer_count;
++
++	return 0;
++
++err_free_patches:
++	while (i--)
++		if (buffer_list[i].patch_count)
++			kvfree((void *)buffer_list[i].patches_ptr);
++
++err_free_buffers:
++	kvfree(buffer_list);
++	return ret;
++}
++
++int gna_request_enqueue(struct gna_compute_cfg *compute_cfg,
++	struct gna_file_private *file_priv, u64 *request_id)
++{
++	struct gna_request *score_request;
++	struct gna_private *gna_priv;
++	int ret;
++
++	if (!file_priv)
++		return -EINVAL;
++
++	gna_priv = file_priv->gna_priv;
++
++	score_request = gna_request_create(file_priv, compute_cfg);
++	if (!score_request)
++		return -ENOMEM;
++
++	ret = gna_request_fill_buffers(score_request, compute_cfg);
++	if (ret) {
++		kref_put(&score_request->refcount, gna_request_release);
++		return ret;
++	}
++
++	kref_get(&score_request->refcount);
++	mutex_lock(&gna_priv->reqlist_lock);
++	list_add_tail(&score_request->node, &gna_priv->request_list);
++	mutex_unlock(&gna_priv->reqlist_lock);
++
++	queue_work(gna_priv->request_wq, &score_request->work);
++	kref_put(&score_request->refcount, gna_request_release);
++
++	*request_id = score_request->request_id;
++
++	return 0;
++}
++
++static struct gna_file_private *gna_find_file(struct gna_request *score_request)
++{
++	struct file *fd;
++	struct list_head *list;
++	struct gna_file_private *temp_file;
++	struct gna_file_private *file;
++	struct gna_private *gna_priv;
++
++	fd = score_request->fd;
++	gna_priv = score_request->gna_priv;
++	list = &gna_priv->file_list;
++
++	mutex_lock(&gna_priv->filelist_lock);
++	if (!list_empty(list)) {
++		list_for_each_entry_safe(file, temp_file, list, flist) {
++			if (file->fd == fd) {
++				mutex_unlock(&gna_priv->filelist_lock);
++				return file;
++			}
++		}
++	}
++	mutex_unlock(&gna_priv->filelist_lock);
++	return NULL;
++}
++
++static int gna_parse_hw_status(struct gna_private *gna_priv, u32 hw_status)
++{
++	int status;
++
++	if (hw_status & GNA_ERROR) {
++		dev_dbg(&gna_priv->dev,
++			"GNA completed with errors: %#x\n", hw_status);
++		status = -EIO;
++	} else if (hw_status & GNA_STS_SCORE_COMPLETED) {
++		status = 0;
++		dev_dbg(&gna_priv->dev,
++			"GNA completed successfully: %#x\n", hw_status);
++	} else {
++		dev_err(&gna_priv->dev,
++			"GNA not completed, status: %#x\n", hw_status);
++		status = -ETIME;
++	}
++
++#if defined(CONFIG_INTEL_GNA_DEBUG)
++	if (hw_status & GNA_STS_PARAM_OOR)
++		dev_dbg(&gna_priv->dev, "GNA error: Param Out Range Error\n");
++
++	if (hw_status & GNA_STS_VA_OOR)
++		dev_dbg(&gna_priv->dev, "GNA error: VA Out of Range Error\n");
++
++	if (hw_status & GNA_STS_PCI_MMU_ERR)
++		dev_dbg(&gna_priv->dev, "GNA error: PCI MMU Error\n");
++
++	if (hw_status & GNA_STS_PCI_DMA_ERR)
++		dev_dbg(&gna_priv->dev, "GNA error: PCI MMU Error\n");
++
++	if (hw_status & GNA_STS_PCI_UNEXCOMPL_ERR)
++		dev_dbg(&gna_priv->dev,
++				"GNA error: PCI Unexpected Completion Error\n");
++
++	if (hw_status & GNA_STS_SATURATE)
++		dev_dbg(&gna_priv->dev, "GNA error: Saturation Reached !\n");
++#endif
++
++	return status;
++}
++
++void gna_request_tasklet(unsigned long data)
++{
++	struct gna_request *score_request;
++	struct gna_private *gna_priv;
++	unsigned long irq_flags;
++	void __iomem *addr;
++	u32 stall_cycles;
++	u32 total_cycles;
++	u32 hw_status;
++	int isr_left;
++	int ret;
++
++	score_request = (struct gna_request *) data;
++	gna_priv = score_request->gna_priv;
++	dev_dbg(&gna_priv->dev, "%s: enter\n", __func__);
++
++	del_timer(&gna_priv->isr_timer);
++
++	spin_lock_bh(&score_request->perf_lock);
++	score_request->drv_perf.hw_completed = rdtsc();
++	spin_unlock_bh(&score_request->perf_lock);
++
++	/* get hw status written to device context by interrupt handler */
++	spin_lock_irqsave(&gna_priv->hw_lock, irq_flags);
++	hw_status = gna_priv->hw_status;
++	spin_unlock_irqrestore(&gna_priv->hw_lock, irq_flags);
++
++	/* save hw status in request context */
++	spin_lock_irqsave(&score_request->hw_lock, irq_flags);
++	score_request->hw_status = hw_status;
++	spin_unlock_irqrestore(&score_request->hw_lock, irq_flags);
++
++	spin_lock_bh(&score_request->status_lock);
++	score_request->status = gna_parse_hw_status(gna_priv, hw_status);
++	spin_unlock_bh(&score_request->status_lock);
++
++	addr = gna_priv->bar0.mem_addr;
++	if (hw_status & GNA_STS_STATISTICS_VALID) {
++		dev_dbg(&gna_priv->dev,
++			"GNA statistics calculated successfully\n");
++		total_cycles = gna_reg_read(addr, GNAPTC);
++		stall_cycles = gna_reg_read(addr, GNAPSC);
++
++		spin_lock_bh(&score_request->perf_lock);
++		score_request->hw_perf.total = total_cycles;
++		score_request->hw_perf.stall = stall_cycles;
++		dev_dbg(&gna_priv->dev,
++			"GNAPTC %llu\n", score_request->hw_perf.total);
++		dev_dbg(&gna_priv->dev,
++			"GNAPSC %llu\n", score_request->hw_perf.stall);
++		spin_unlock_bh(&score_request->perf_lock);
++	} else
++		dev_warn_once(&gna_priv->dev, "GNA statistics missing\n");
++
++#if defined(CONFIG_INTEL_GNA_DEBUG)
++	gna_debug_isi(gna_priv, addr);
++#endif
++	gna_abort_hw(gna_priv, addr);
++	ret = pm_runtime_put(&gna_priv->pdev->dev);
++	if (ret < 0)
++		dev_warn_once(&gna_priv->dev,
++			"pm_runtime_put() failed: %d\n", ret);
++
++	spin_lock_bh(&score_request->perf_lock);
++	score_request->drv_perf.completion = rdtsc();
++	spin_unlock_bh(&score_request->perf_lock);
++
++	spin_lock_bh(&gna_priv->busy_lock);
++	gna_priv->busy = false;
++	spin_unlock_bh(&gna_priv->busy_lock);
++	wake_up(&gna_priv->busy_waitq);
++
++	/* reschedule itself if another interrupt came in the meantime */
++	/* unlikely: device queue synchronizes starting GNA device */
++	isr_left = atomic_dec_return(&gna_priv->isr_count);
++	if (isr_left) {
++		dev_dbg(&gna_priv->dev, "scheduling another tasklet\n");
++		tasklet_schedule(&gna_priv->request_tasklet);
++	}
++
++	dev_dbg(&gna_priv->dev, "%s: exit\n", __func__);
++}
++
++void gna_isr_timeout(struct timer_list *timer)
++{
++	struct gna_private *gna_priv;
++	unsigned long irq_flags;
++	void __iomem *addr;
++	u32 hw_status;
++
++	gna_priv = from_timer(gna_priv, timer, isr_timer);
++	dev_dbg(&gna_priv->dev, "%s enter\n", __func__);
++
++	addr = gna_priv->bar0.mem_addr;
++	hw_status = gna_reg_read(addr, GNASTS);
++	spin_lock_irqsave(&gna_priv->hw_lock, irq_flags);
++	gna_priv->hw_status = hw_status;
++	spin_unlock_irqrestore(&gna_priv->hw_lock, irq_flags);
++
++	atomic_inc(&gna_priv->isr_count);
++	tasklet_schedule(&gna_priv->request_tasklet);
++
++	dev_dbg(&gna_priv->dev, "%s exit\n", __func__);
++}
++
++static int gna_do_patch_memory(struct gna_private *gna_priv,
++		struct gna_memory_object *mo, struct gna_memory_patch *patch)
++{
++	unsigned long addr;
++	u8 __user *dest;
++	size_t copied;
++	size_t size;
++	u64 value;
++
++	value = patch->value;
++	size = patch->size;
++	dest = (u8 *)mo->vaddr + patch->offset;
++	dev_dbg(&gna_priv->dev, "patch offset: %llu, size: %lu, value: %llu\n",
++			patch->offset, size, value);
++
++	switch (size) {
++	case 0:
++		return -EFAULT;
++	case sizeof(u8):
++		*((u8 *)dest) = (u8)value;
++		break;
++	case sizeof(u16):
++		*((u16 *)dest) = (u16)value;
++		break;
++	case sizeof(u32):
++		*((u32 *)dest) = (u32)value;
++		break;
++	case sizeof(u64):
++		*((u64 *)dest) = (u64)value;
++		break;
++	default:
++		addr = (unsigned long)patch->user_ptr;
++		copied = access_process_vm(mo->task, addr,
++				dest, patch->size, GFP_KERNEL);
++		if (copied < patch->size)
++			return -EFAULT;
++	}
++
++	return 0;
++}
++
++static int gna_mem_patch_memory(
++	struct gna_file_private *file_priv,
++	struct gna_buffer *buffer)
++{
++	struct gna_private *gna_priv;
++	struct gna_memory_patch *patch;
++	struct gna_memory_object *mo;
++	void *vaddr;
++	int ret;
++	u32 i;
++
++	ret = 0;
++
++	gna_priv = file_priv->gna_priv;
++
++	dev_dbg(&gna_priv->dev, "memory_id: %llu, patch_count, %llu\n",
++			buffer->memory_id, buffer->patch_count);
++
++	/* get kernel space memory pointer */
++	mutex_lock(&gna_priv->memidr_lock);
++	mo = idr_find(&gna_priv->memory_idr, buffer->memory_id);
++	mutex_unlock(&gna_priv->memidr_lock);
++	if (!mo)
++		return -EINVAL;
++
++	mutex_lock(&mo->page_lock);
++	ret = mo->ops->get_pages(mo, buffer->offset, buffer->size);
++	mutex_unlock(&mo->page_lock);
++	if (ret)
++		return ret;
++
++	if (buffer->patch_count) {
++		vaddr = vm_map_ram(mo->pages, mo->num_pinned, 0, PAGE_KERNEL);
++		if (!vaddr)
++			return -ENOMEM;
++
++		mo->vaddr = vaddr;
++		patch = (struct gna_memory_patch *)buffer->patches_ptr;
++		for (i = 0; i < buffer->patch_count; i++, patch++) {
++			ret = gna_do_patch_memory(gna_priv, mo, patch);
++			if (ret)
++				break;
++		}
++
++		kvfree((void *)buffer->patches_ptr);
++		buffer->patches_ptr = 0;
++		vm_unmap_ram(vaddr, mo->num_pages);
++		mo->vaddr = NULL;
++
++		if (ret)
++			return ret;
++	}
++
++	gna_mmu_add(gna_priv, mo);
++
++	return ret;
++}
++
++int gna_score_wait(struct gna_request *score_request, unsigned int timeout)
++{
++	struct timeval time_val;
++
++	time_val.tv_sec = timeout / 1000;
++	time_val.tv_usec = (timeout % 1000) * 1000;
++	return wait_event_interruptible_timeout(score_request->waitq,
++		score_request->state == DONE, timeval_to_jiffies(&time_val));
++}
++
++static struct gna_buffer *gna_find_buffer(
++	struct gna_buffer *buffer_list, u32 buffer_count,
++	u32 mmu_offset, u32 *memory_offset)
++{
++	struct gna_buffer *buffer;
++	u32 offset;
++	u32 page_offset;
++	u32 memory_size;
++	u32 i;
++
++	offset = 0;
++	for (i = 0; i < buffer_count; i++) {
++		buffer = buffer_list + i;
++		page_offset = buffer->offset & ~PAGE_MASK;
++		memory_size = ROUND_UP(page_offset + buffer->size, PAGE_SIZE);
++		if (mmu_offset < offset + memory_size) {
++			*memory_offset = offset;
++			return buffer;
++		}
++		offset += memory_size;
++	}
++
++	return NULL;
++}
++
++static int gna_copy_gmm_config(
++	struct gna_file_private *file_priv,
++	struct gna_buffer *buffer_list, u32 buffer_count, u32 mmu_offset)
++{
++	struct gna_hw_descriptor *hwdesc;
++	struct gna_private *gna_priv;
++	struct gna_memory_object *mo;
++	struct gna_mmu_object *mmu;
++	struct gna_buffer *buffer;
++	u8 *gmm_desc;
++	void *vaddr;
++	u32 memory_offset;
++	u32 skip_offset;
++
++	gna_priv = file_priv->gna_priv;
++	mmu = &gna_priv->mmu;
++	hwdesc = mmu->hwdesc;
++
++	buffer = gna_find_buffer(buffer_list, buffer_count,
++			mmu_offset, &memory_offset);
++	if (!buffer) {
++		dev_dbg(&gna_priv->dev, "buffer not found\n");
++		return -EINVAL;
++	}
++
++	mutex_lock(&gna_priv->memidr_lock);
++	mo = idr_find(&gna_priv->memory_idr, buffer->memory_id);
++	mutex_unlock(&gna_priv->memidr_lock);
++	if (!mo) {
++		dev_dbg(&gna_priv->dev, "memory object not found\n");
++		return -EFAULT;
++	}
++
++	vaddr = vm_map_ram(mo->pages, mo->num_pinned, 0, PAGE_KERNEL);
++	if (!vaddr) {
++		dev_dbg(&gna_priv->dev, "mappping failed\n");
++		return -EFAULT;
++	}
++
++	skip_offset = ROUND_DOWN(buffer->offset, PAGE_SIZE);
++	gmm_desc = (u8 *)vaddr + skip_offset + (mmu_offset - memory_offset);
++	memcpy(&hwdesc->xnn_config, gmm_desc, GMM_CFG_SIZE);
++	vm_unmap_ram(vaddr, mo->num_pages);
++
++	return 0;
++}
++
++int gna_priv_score(struct gna_request *score_request)
++{
++	struct gna_xnn_descriptor *xnn_config;
++	struct gna_file_private *file_priv;
++	struct gna_compute_cfg *compute_cfg;
++	struct gna_private *gna_priv;
++	struct gna_memory_object *mo;
++	struct gna_mmu_object *mmu;
++	struct gna_buffer *buffer;
++	void __iomem *addr;
++	u64 buffer_count;
++	u32 desc_base;
++	u64 i;
++	int ret;
++	bool mo_valid = true;
++
++	ret = 0;
++
++	gna_priv = score_request->gna_priv;
++
++	file_priv = gna_find_file(score_request);
++	if (!file_priv)
++		goto err_no_gna_file;
++
++	mmu = &gna_priv->mmu;
++	xnn_config = &mmu->hwdesc->xnn_config;
++	compute_cfg = &score_request->compute_cfg;
++
++	dev_dbg(&gna_priv->dev, "updating descriptors in user memory\n");
++
++	buffer = score_request->buffer_list;
++	buffer_count = score_request->buffer_count;
++	dev_dbg(&gna_priv->dev, "buffer count: %llu\n", buffer_count);
++	for (i = 0; i < buffer_count; i++, buffer++) {
++		dev_dbg(&gna_priv->dev, "patch count: %llu\n",
++						buffer->patch_count);
++		ret = gna_mem_patch_memory(file_priv, buffer);
++		if (ret)
++			goto err_put_pages;
++	}
++
++	switch (compute_cfg->gna_mode) {
++	case GNA_MODE_XNN:
++		dev_dbg(&gna_priv->dev,
++			"xNN mode, labase: %d, lacount: %d\n",
++			compute_cfg->layer_base, compute_cfg->layer_count);
++		xnn_config->labase = compute_cfg->layer_base;
++		xnn_config->lacount = compute_cfg->layer_count;
++		break;
++	case GNA_MODE_GMM:
++		dev_dbg(&gna_priv->dev, "GMM mode, offset: %d\n",
++				compute_cfg->layer_base);
++		ret = gna_copy_gmm_config(file_priv,
++				score_request->buffer_list,
++				buffer_count, compute_cfg->layer_base);
++		if (ret)
++			goto err_put_pages_decr;
++		break;
++	default:
++		goto err_put_pages_decr;
++	}
++
++	addr = gna_priv->bar0.mem_addr;
++	desc_base = (u32)(mmu->hwdesc_dma >> PAGE_SHIFT);
++	gna_reg_write(addr, GNADESBASE, desc_base);
++
++	gna_priv->request_tasklet.data = (unsigned long)score_request;
++	gna_start_scoring(gna_priv, addr, compute_cfg);
++
++	return 0;
++
++err_put_pages_decr:
++	i--;
++	buffer--;
++err_put_pages:
++	do {
++		mutex_lock(&gna_priv->memidr_lock);
++		mo = idr_find(&gna_priv->memory_idr, buffer->memory_id);
++		mutex_unlock(&gna_priv->memidr_lock);
++		if (mo) {
++			mutex_lock(&mo->page_lock);
++			mo->ops->put_pages(mo);
++			mutex_unlock(&mo->page_lock);
++		} else {
++			mo_valid = false;
++			dev_warn(&gna_priv->dev, "memory object not found %llu\n",
++				 buffer->memory_id);
++		}
++		buffer--;
++	} while (i--);
++
++err_no_gna_file:
++	if (mo_valid) {
++		i = score_request->buffer_count;
++		while (i--)
++			kvfree((void *)score_request->buffer_list[i].patches_ptr);
++		kvfree(score_request->buffer_list);
++	}
++	score_request->buffer_list = NULL;
++	score_request->buffer_count = 0;
++
++	spin_lock_bh(&gna_priv->busy_lock);
++	gna_priv->busy = false;
++	spin_unlock_bh(&gna_priv->busy_lock);
++	gna_request_set_done(score_request, ret);
++
++	wake_up(&gna_priv->busy_waitq);
++	wake_up_interruptible_all(&score_request->waitq);
++
++	return ret;
++}
+diff --git a/drivers/misc/gna/gna_score.h b/drivers/misc/gna/gna_score.h
+new file mode 100644
+index 000000000000..6ada9d9f736a
+--- /dev/null
++++ b/drivers/misc/gna/gna_score.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Copyright(c) 2017-2020 Intel Corporation */
++
++#ifndef __GNA_SCORE_H__
++#define __GNA_SCORE_H__
++
++#include "gna.h"
++
++#define ROUND_UP(x, n) (((x)+(n)-1u) & ~((n)-1u))
++#define ROUND_DOWN(value, boundary) ((value) & (~((boundary)-1)))
++
++struct gna_private;
++struct gna_file_private;
++struct gna_request;
++
++/* validate user request */
++int gna_validate_score_config(struct gna_compute_cfg *compute_cfg,
++	struct gna_file_private *file_priv);
++
++/* add request to the list */
++int gna_request_enqueue(struct gna_compute_cfg *compute_cfg,
++	struct gna_file_private *file_priv, u64 *request_id);
++
++/* interrupt related functions */
++void gna_isr_timeout(struct timer_list *timer);
++void gna_request_tasklet(unsigned long priv);
++
++/* scoring helper functions */
++int gna_priv_score(struct gna_request *score_request);
++
++int gna_score_wait(struct gna_request *score_request, unsigned int timeout);
++
++#endif // __GNA_SCORE_H__
+-- 
+2.17.1
+
