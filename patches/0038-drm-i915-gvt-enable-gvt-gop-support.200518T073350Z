@@ -1,0 +1,285 @@
+From df7e342f56dbaae6b67080b8ca87075ee76b1e2e Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Tue, 10 Sep 2019 00:22:51 +0800
+Subject: [PATCH 38/91] drm/i915/gvt: enable gvt gop support
+
+Reserve 8MB memory block as graphics memory and pass it to Gop driver as
+the guest framebuffer. This framebuffer guest physical address starts
+from 0xDF000000 and works with fixed display mode 1920x1080@32bpp
+
+Tracked-On: projectacrn/acrn-hypervisor#3624
+Co-developed-by: He Min <min.he@intel.com>
+Signed-off-by: He Min <min.he@intel.com>
+Signed-off-by: Liu Xinyun <xinyun.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c  | 141 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/gvt/display.h  |   1 +
+ drivers/gpu/drm/i915/gvt/gtt.c      |  14 +++
+ drivers/gpu/drm/i915/gvt/gvt.h      |   4 +
+ drivers/gpu/drm/i915/gvt/handlers.c |   2 +
+ drivers/gpu/drm/i915/gvt/vgpu.c     |   1 +
+ drivers/gpu/drm/i915/i915_pvinfo.h  |   2 +
+ 7 files changed, 165 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index ad88642972d6..fb9a522e36fd 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -647,3 +647,144 @@ void intel_vgpu_reset_display(struct intel_vgpu *vgpu)
+ {
+ 	emulate_monitor_status_change(vgpu);
+ }
++
++/*
++ * prepare_gop_fb will allocate a arrange of memory, then map them into the
++ * ggtt table of the guest partition in the aperture.
++ */
++static int prepare_gop_fb(struct intel_vgpu *vgpu, u32 size)
++{
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	struct page **pages = NULL;
++	u32 count, npages = size >> PAGE_SHIFT;
++	struct i915_ggtt *ggtt = &dev_priv->ggtt;
++	struct i915_vma vma;
++	struct drm_mm_node *node = &vgpu->gm.high_gm_node;
++	struct sg_table st;
++	unsigned int cache_level = HAS_LLC(dev_priv) ?
++				I915_CACHE_LLC : I915_CACHE_NONE;
++	int ret = 0;
++
++	pages = kmalloc_array(npages, sizeof(struct page *), GFP_KERNEL);
++	if (!pages)
++		return -ENOMEM;
++
++	for (count = 0; count < npages; count++) {
++		struct page *page = alloc_page(GFP_KERNEL);
++
++		if (!page) {
++			ret = -ENOMEM;
++			goto free_pgs;
++		}
++		pages[count] = page;
++
++		intel_gvt_hypervisor_map_gfn_to_mfn(vgpu,
++				(GOP_FB_BASE >> PAGE_SHIFT) + count,
++				page_to_pfn(page), 1, true);
++	}
++
++	ret = sg_alloc_table_from_pages(&st, pages, npages,
++			0, npages << PAGE_SHIFT, GFP_KERNEL);
++	if (ret)
++		goto free_pgs;
++
++	if (!dma_map_sg(&dev_priv->drm.pdev->dev, st.sgl, st.nents,
++				PCI_DMA_BIDIRECTIONAL)) {
++		ret = -ENOMEM;
++		goto free_sg;
++	}
++
++	memset(&vma, 0, sizeof(vma));
++	vma.node.start = node->start;
++	vma.node.size = size;
++	vma.pages = &st;
++	ggtt->vm.insert_entries(&ggtt->vm, &vma, cache_level, 0);
++	sg_free_table(&st);
++
++	vgpu->gm.gop_fb_pages = pages;
++	vgpu->gm.gop_fb_size = count;
++	return 0;
++
++free_sg:
++	sg_free_table(&st);
++
++free_pgs:
++	release_pages(pages, count);
++	kfree(pages);
++	return ret;
++}
++
++#define GOP_DISPLAY_WIDTH 1920
++#define GOP_DISPLAY_HEIGHT 1080
++static int setup_gop_display(struct intel_vgpu *vgpu)
++{
++	int ret = 0;
++	unsigned int pipe, plane;
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	bool found = false;
++	u32 width = GOP_DISPLAY_WIDTH, height = GOP_DISPLAY_HEIGHT;
++	u32 stride, ctl, surf;
++	unsigned long irqflags;
++
++
++	/* we will display the gop output on the first plane the vgpu ownes */
++	for_each_pipe(dev_priv, pipe) {
++		for_each_universal_plane(dev_priv, pipe, plane) {
++			if (vgpu->gvt->pipe_info[pipe].plane_owner[plane]
++				    == vgpu->id) {
++				found = true;
++				break;
++			}
++		}
++		if (found)
++			break;
++	}
++
++	if (!found) {
++		gvt_dbg_dpy("Failed to find owned plane for %d", vgpu->id);
++		return -ENODEV;
++	}
++
++	/* Sizes are 0 based */
++	stride = width * 4 / 64; /* 32bit per pixel */
++	width--;
++	height--;
++	surf = vgpu->gm.high_gm_node.start;
++	ctl = PLANE_CTL_ENABLE | PLANE_CTL_FORMAT_XRGB_8888;
++	ctl |= PLANE_CTL_PIPE_GAMMA_ENABLE |
++		PLANE_CTL_PIPE_CSC_ENABLE |
++		PLANE_CTL_PLANE_GAMMA_DISABLE;
++	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
++	I915_WRITE_FW(PLANE_OFFSET(pipe, plane), 0);
++	I915_WRITE_FW(PLANE_STRIDE(pipe, plane), stride);
++	I915_WRITE_FW(PLANE_SIZE(pipe, plane), (height << 16) | width);
++	I915_WRITE_FW(PLANE_AUX_DIST(pipe, plane), 0xFFFFF000);
++	I915_WRITE_FW(PLANE_AUX_OFFSET(pipe, plane), 0);
++	I915_WRITE_FW(PLANE_POS(pipe, plane), 0);
++	I915_WRITE_FW(PLANE_CTL(pipe, plane), ctl);
++	I915_WRITE_FW(PLANE_SURF(pipe, plane), surf);
++	POSTING_READ_FW(PLANE_SURF(pipe, plane));
++	spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags);
++	return ret;
++}
++
++#define GOP_FB_SIZE 0x800000  /* 8M FB size */
++int intel_vgpu_g2v_setup_gop(struct intel_vgpu *vgpu)
++{
++	int ret = 0;
++
++	if (vgpu->gm.gop_fb_pages)
++		goto Done;
++
++	ret = prepare_gop_fb(vgpu, GOP_FB_SIZE);
++	if (ret) {
++		gvt_dbg_dpy("gop prepared failed %d\n", ret);
++		goto Done;
++	}
++
++	ret = setup_gop_display(vgpu);
++	if (ret)
++		gvt_dbg_dpy("gop display setup failed %d\n", ret);
++Done:
++	return 0;
++}
+diff --git a/drivers/gpu/drm/i915/gvt/display.h b/drivers/gpu/drm/i915/gvt/display.h
+index e6d3912bc730..ab938ade4045 100644
+--- a/drivers/gpu/drm/i915/gvt/display.h
++++ b/drivers/gpu/drm/i915/gvt/display.h
+@@ -182,4 +182,5 @@ void intel_vgpu_clean_display(struct intel_vgpu *vgpu);
+ 
+ int pipe_is_enabled(struct intel_vgpu *vgpu, int pipe);
+ 
++int intel_vgpu_g2v_setup_gop(struct intel_vgpu *vgpu);
+ #endif
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index d8a05a69848b..53d1ac3bb834 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -2660,6 +2660,18 @@ static void intel_vgpu_destroy_ggtt_mm(struct intel_vgpu *vgpu)
+ 	vgpu->gtt.ggtt_mm = NULL;
+ }
+ 
++static void clean_gvt_gop(struct intel_vgpu *vgpu)
++{
++	int i;
++
++	for (i = 0; i < vgpu->gm.gop_fb_size; i++)
++		intel_gvt_hypervisor_map_gfn_to_mfn(vgpu,
++			(GOP_FB_BASE >> PAGE_SHIFT) + i,
++			page_to_pfn(vgpu->gm.gop_fb_pages[i]), 1, false);
++
++	release_pages(vgpu->gm.gop_fb_pages, vgpu->gm.gop_fb_size);
++	kfree(vgpu->gm.gop_fb_pages);
++}
+ /**
+  * intel_vgpu_clean_gtt - clean up per-vGPU graphics memory virulization
+  * @vgpu: a vGPU
+@@ -2675,6 +2687,8 @@ void intel_vgpu_clean_gtt(struct intel_vgpu *vgpu)
+ 	intel_vgpu_destroy_all_ppgtt_mm(vgpu);
+ 	intel_vgpu_destroy_ggtt_mm(vgpu);
+ 	kfree(vgpu->cached_guest_entry);
++	if (vgpu->gm.gop_fb_pages)
++		clean_gvt_gop(vgpu);
+ 	release_scratch_page_tree(vgpu);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 7a12fc6636a1..bc44716f9792 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -89,6 +89,8 @@ struct intel_vgpu_gm {
+ 	struct sg_table *st;
+ 	struct drm_mm_node low_gm_node;
+ 	struct drm_mm_node high_gm_node;
++	struct page **gop_fb_pages;
++	u32 gop_fb_size;
+ };
+ 
+ #define INTEL_GVT_MAX_NUM_FENCES 32
+@@ -128,6 +130,8 @@ struct intel_vgpu_irq {
+ 		       INTEL_GVT_EVENT_MAX);
+ };
+ 
++#define GOP_FB_BASE	0xDF000000
++
+ struct intel_vgpu_opregion {
+ 	bool mapped;
+ 	void *va;
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index d0939209a52b..01865702b5fb 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1289,6 +1289,8 @@ static int handle_g2v_notification(struct intel_vgpu *vgpu, int notification)
+ 	case VGT_G2V_EXECLIST_CONTEXT_DESTROY:
+ 	case 1:	/* Remove this in guest driver. */
+ 		break;
++	case VGT_G2V_GOP_SETUP:
++		return intel_vgpu_g2v_setup_gop(vgpu);
+ 	default:
+ 		gvt_vgpu_err("Invalid PV notification %d\n", notification);
+ 	}
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 08e99dd14344..ef18802e2cea 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -52,6 +52,7 @@ void populate_pvinfo_page(struct intel_vgpu *vgpu)
+ 	vgpu_vreg_t(vgpu, vgtif_reg(vgt_caps)) = VGT_CAPS_FULL_48BIT_PPGTT;
+ 	vgpu_vreg_t(vgpu, vgtif_reg(vgt_caps)) |= VGT_CAPS_HWSP_EMULATION;
+ 	vgpu_vreg_t(vgpu, vgtif_reg(vgt_caps)) |= VGT_CAPS_HUGE_GTT;
++	vgpu_vreg_t(vgpu, vgtif_reg(vgt_caps)) |= VGT_CAPS_GOP_SUPPORT;
+ 
+ 	vgpu_vreg_t(vgpu, vgtif_reg(avail_rs.mappable_gmadr.base)) =
+ 		vgpu_aperture_gmadr_base(vgpu);
+diff --git a/drivers/gpu/drm/i915/i915_pvinfo.h b/drivers/gpu/drm/i915/i915_pvinfo.h
+index fd26872f15b6..f8ae2f37c9fa 100644
+--- a/drivers/gpu/drm/i915/i915_pvinfo.h
++++ b/drivers/gpu/drm/i915/i915_pvinfo.h
+@@ -57,6 +57,7 @@ enum vgt_g2v_type {
+ 	VGT_G2V_PPGTT_L4_INSERT,
+ 	VGT_G2V_GGTT_INSERT,
+ 	VGT_G2V_GGTT_CLEAR,
++	VGT_G2V_GOP_SETUP,
+ 	VGT_G2V_MAX,
+ };
+ 
+@@ -135,6 +136,7 @@ enum pvmmio_levels {
+ #define VGT_CAPS_FULL_48BIT_PPGTT	BIT(2)
+ #define VGT_CAPS_HWSP_EMULATION		BIT(3)
+ #define VGT_CAPS_HUGE_GTT		BIT(4)
++#define VGT_CAPS_GOP_SUPPORT		BIT(5)
+ 
+ #define PVMMIO_LEVEL(dev_priv, level) \
+ 	(intel_vgpu_active(dev_priv) && (i915_modparams.enable_pvmmio & level))
+-- 
+2.17.1
+
