@@ -1,0 +1,47 @@
+From ac668d901eca39dcf6e95c184988a4d3fbb54255 Mon Sep 17 00:00:00 2001
+From: Junming Liu <junming.liu@intel.com>
+Date: Fri, 30 Aug 2019 18:07:27 +0000
+Subject: [PATCH 40/91] drm/i915/gvt: Fix GFX_MODE handling
+
+Enter failsafe if vgpu tries to change GFX_MODE controlled by host.
+
+Tracked-On: projectacrn/acrn-hypervisor#3630
+Signed-off-by: Junming Liu <junming.liu@intel.com>
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/handlers.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 1f12f6470370..a5d7a4263017 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1803,8 +1803,22 @@ static int ring_mode_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	bool enable_execlist;
+ 	int ret;
+ 
++	(*(u32 *)p_data) &= ~_MASKED_BIT_ENABLE(1);
++	if (IS_COFFEELAKE(vgpu->gvt->dev_priv))
++		(*(u32 *)p_data) &= ~_MASKED_BIT_ENABLE(2);
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 
++	if (data & _MASKED_BIT_ENABLE(1)) {
++		enter_failsafe_mode(vgpu, GVT_FAILSAFE_UNSUPPORTED_GUEST);
++		return 0;
++	}
++
++	if (IS_COFFEELAKE(vgpu->gvt->dev_priv) &&
++	    data & _MASKED_BIT_ENABLE(2)) {
++		enter_failsafe_mode(vgpu, GVT_FAILSAFE_UNSUPPORTED_GUEST);
++		return 0;
++	}
++
+ 	/* when PPGTT mode enabled, we will check if guest has called
+ 	 * pvinfo, if not, we will treat this guest as non-gvtg-aware
+ 	 * guest, and stop emulating its cfg space, mmio, gtt, etc.
+-- 
+2.17.1
+

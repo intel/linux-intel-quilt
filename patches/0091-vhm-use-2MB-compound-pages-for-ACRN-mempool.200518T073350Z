@@ -1,0 +1,58 @@
+From 8abec6c5ebdace7220ecfa35b317c76f62e29c31 Mon Sep 17 00:00:00 2001
+From: Shuo A Liu <shuo.a.liu@intel.com>
+Date: Thu, 7 May 2020 18:32:19 +0800
+Subject: [PATCH 91/91] vhm: use 2MB compound pages for ACRN mempool
+
+The hypercall HC_GET_PLATFORM_INFO may require a large memory buffer for
+its VM config if a large number of VMs should be reported (roughly 2400
+bytes are needed per VM).
+
+Since this buffer needs to be contiguous in the GPA space, use the
+__GFP_COMP flag to indicate the use of compound pages. Statically use
+the size of 2MB for each buffer, as this is enough for any reasonable
+amount of VMs the hypervisor may have and also aligns with the design of
+2MB huge pages.
+
+Tracked-On: projectacrn/acrn-hypervisor#4753
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c | 8 +++++---
+ drivers/vhm/vhm_mempool.c  | 2 +-
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 30bca6c11b11..f766e14f6be6 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -978,10 +978,12 @@ static int __init vhm_init(void)
+ 	acrn_ioreq_driver_init();
+ 
+ 	/*
+-	 * The biggest consumer is the get_platform_info hypercall, and the size
+-	 * it requires is a function of the number of the physical CPUs
++	 * The biggest consumer is the get_platform_info hypercall. Statically
++	 * use 2MB as this is enough for any reasonable amount of VMs the
++	 * hypervisor may have in its VM config and also aligns with the design
++	 * of 2MB huge pages.
+ 	 */
+-	acrn_mempool_init(16, nr_cpu_ids * 2560 + 512);
++	acrn_mempool_init(16, SZ_2M);
+ 	pr_info("vhm: Virtio & Hypervisor service module initialized\n");
+ 	return 0;
+ }
+diff --git a/drivers/vhm/vhm_mempool.c b/drivers/vhm/vhm_mempool.c
+index f6101c682610..982baa083227 100644
+--- a/drivers/vhm/vhm_mempool.c
++++ b/drivers/vhm/vhm_mempool.c
+@@ -39,7 +39,7 @@ void *acrn_mempool_alloc(gfp_t gfp_flag)
+ 	if (acrn_mempool == NULL)
+ 		return NULL;
+ 
+-	return mempool_alloc(acrn_mempool, gfp_flag);
++	return mempool_alloc(acrn_mempool, gfp_flag | __GFP_COMP);
+ }
+ EXPORT_SYMBOL_GPL(acrn_mempool_alloc);
+ 
+-- 
+2.17.1
+

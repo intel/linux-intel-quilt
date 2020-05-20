@@ -1,0 +1,48 @@
+From 2f260bc42bec40b1ab6cc3c0f34d86a30a088161 Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Tue, 14 May 2019 10:39:01 +0800
+Subject: [PATCH 14/91] sep: Change some stack variable of hypercall parameter
+ as static
+
+The UTILITY_Read_Cpuid needs to call the acrn_hypercall2 directly to
+query the cpuid_info in hypervisor. And the physical address of stack
+variable is passed as the parameter . This can't work with VMAP_STACK
+enabled.  At the same time as it is used only once in the initialization
+stage, it is changed as the static. In such case the virt_to_phys still
+can work and it can avoid the allocation failure.
+
+Tracked-On: projectacrn/acrn-hypervisor#1318
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: Yin Fengwei <fengwei.yin@intel.com>
+---
+ drivers/platform/x86/sepdk/sep/utility.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/platform/x86/sepdk/sep/utility.c b/drivers/platform/x86/sepdk/sep/utility.c
+index 65fa379ff0a8..df72c1889fd2 100755
+--- a/drivers/platform/x86/sepdk/sep/utility.c
++++ b/drivers/platform/x86/sepdk/sep/utility.c
+@@ -117,17 +117,17 @@ VOID UTILITY_Read_Cpuid(U64 cpuid_function, U64 *rax_value,
+ 
+ #if defined(DRV_SEP_ACRN_ON)
+ 	if (cpuid_function != 0x40000000) {
+-		struct profiling_pcpuid pcpuid;
++		static struct profiling_pcpuid pcpuid;
+ 		memset(&pcpuid, 0, sizeof(struct profiling_pcpuid));
+ 		pcpuid.leaf = (U32)cpuid_function;
+ 		if (rcx_value != NULL) {
+ 			pcpuid.subleaf = (U32)*rcx_value;
+ 		}
+ 
+-		BUG_ON(!virt_addr_valid(&pcpuid));
++		//BUG_ON(!virt_addr_valid(&pcpuid));
+ 
+ 		if (acrn_hypercall2(HC_PROFILING_OPS, PROFILING_GET_PCPUID,
+-				virt_to_phys(&pcpuid)) != OS_SUCCESS) {
++				slow_virt_to_phys(&pcpuid)) != OS_SUCCESS) {
+ 			SEP_DRV_LOG_ERROR_FLOW_OUT(
+ 				"[ACRN][HC:GET_PCPUID][%s]: Failed to get CPUID info",
+ 				__func__);
+-- 
+2.17.1
+

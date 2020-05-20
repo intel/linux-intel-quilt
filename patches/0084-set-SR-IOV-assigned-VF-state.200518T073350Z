@@ -1,0 +1,67 @@
+From 06bcbba430cd2b87a059c0612a47b91fba9f7e8d Mon Sep 17 00:00:00 2001
+From: Yuan Liu <yuan1.liu@intel.com>
+Date: Fri, 13 Mar 2020 11:10:18 +0800
+Subject: [PATCH 84/91] set SR-IOV assigned VF state
+
+If a SR-IOV VF PCI device is assigned to guest VM or deassigned
+from a guest VM, set corresponding assigned flag of the device.
+SR-IOV PF can't disable VFs if it already has the assigned VF.
+
+v2): Replace pci_scan_single_device with pci_get_slot to get
+     an existed pci device.
+
+Tracked-On:projectacrn/acrn-hypervisor#4433
+Signed-off-by: Yuan Liu <yuan1.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 74615e0a6ab4..5727f6afa366 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -154,6 +154,24 @@ static ssize_t vhm_dev_write(struct file *filep, const char *buffer,
+ 	return 0;
+ }
+ 
++static void update_assigned_vf_state(uint16_t bdf, bool is_assigned)
++{
++	struct pci_dev *dev = NULL;
++
++	dev = pci_get_slot(pci_find_bus(0, PCI_BUS_NUM(bdf)),
++			(bdf & 0xFF));
++
++	if (dev) {
++		if (dev->is_virtfn) {
++			if (is_assigned)
++				pci_set_dev_assigned(dev);
++			else
++				pci_clear_dev_assigned(dev);
++		}
++		pci_dev_put(dev);
++	}
++}
++
+ static long vhm_dev_ioctl(struct file *filep,
+ 		unsigned int ioctl_num, unsigned long ioctl_param)
+ {
+@@ -482,6 +500,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 				(void *)ioctl_param, sizeof(*pcidev))) {
+ 			ret = -EFAULT;
+ 		} else {
++			update_assigned_vf_state(pcidev->phys_bdf, true);
+ 			ret = hcall_assign_pcidev(vm->vmid, virt_to_phys(pcidev));
+ 			if (ret < 0) {
+ 				pr_err("vhm: failed to assign pci device!\n");
+@@ -502,6 +521,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 				(void *)ioctl_param, sizeof(*pcidev))) {
+ 			ret = -EFAULT;
+ 		} else {
++			update_assigned_vf_state(pcidev->phys_bdf, false);
+ 			ret = hcall_deassign_pcidev(vm->vmid, virt_to_phys(pcidev));
+ 			if (ret < 0) {
+ 				pr_err("vhm: failed to deassign pci device!\n");
+-- 
+2.17.1
+

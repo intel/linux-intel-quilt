@@ -1,0 +1,89 @@
+From f08f4fc7d59425f043de361d8e340c30d666249d Mon Sep 17 00:00:00 2001
+From: Zhao Yakui <yakui.zhao@intel.com>
+Date: Fri, 12 Apr 2019 14:54:59 +0800
+Subject: [PATCH 09/91] acrn/vhm: Change some stack variable of hypercall
+ parameter as static
+
+When loading acrn trace/hv_log module, it needs to call the
+hcall_get_hw_info to query the cpu info in hypervisor. And the physical
+address of stack variable is passed as the parameter of
+hcall_get_hw_info. This can't work with VMAP_STACK enabled.  At the same
+time as it is used only once in the initialization stage, it is changed
+as the static. In such case the virt_to_phys still can work and it can
+avoid the allocation failure.  Similiarly the hc_api_version is also
+changed as static efore initializing acrn memory-pool.
+
+v1->v2: Remove the unnecessary memset for static definition
+v2->v3: Use the slow_virt_to_phys to get the GPA of static variable in
+trace/hvlog module
+
+Tracked-On: projectacrn/acrn-hypervisor#1318
+Signed-off-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: Yin Fengwei <fengwei.yin@intel.com>
+---
+ drivers/acrn/acrn_hvlog.c  | 5 ++---
+ drivers/acrn/acrn_trace.c  | 5 ++---
+ drivers/char/vhm/vhm_dev.c | 2 +-
+ 3 files changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/acrn/acrn_hvlog.c b/drivers/acrn/acrn_hvlog.c
+index c6b2a981f1df..b26fac2134ff 100644
+--- a/drivers/acrn/acrn_hvlog.c
++++ b/drivers/acrn/acrn_hvlog.c
+@@ -354,7 +354,7 @@ static void deinit_hvlog_dev(uint32_t hvlog_type)
+ static int __init acrn_hvlog_init(void)
+ {
+ 	int idx, ret = 0;
+-	struct acrn_hw_info hw_info;
++	static struct acrn_hw_info hw_info;
+ 	uint64_t cur_logbuf, last_logbuf;
+ 
+ 	if (x86_hyper_type != X86_HYPER_ACRN) {
+@@ -374,8 +374,7 @@ static int __init acrn_hvlog_init(void)
+ 		return 0;
+ 	}
+ 
+-	memset(&hw_info, 0, sizeof(struct acrn_hw_info));
+-	ret = hcall_get_hw_info(virt_to_phys(&hw_info));
++	ret = hcall_get_hw_info(slow_virt_to_phys(&hw_info));
+ 	if (!ret)
+ 		pcpu_nr = hw_info.cpu_num;
+ 
+diff --git a/drivers/acrn/acrn_trace.c b/drivers/acrn/acrn_trace.c
+index 136564da644f..915aad0a8b72 100644
+--- a/drivers/acrn/acrn_trace.c
++++ b/drivers/acrn/acrn_trace.c
+@@ -178,15 +178,14 @@ static int __init acrn_trace_init(void)
+ 	int i, cpu;
+ 	shared_buf_t *sbuf;
+ 	struct miscdevice *miscdev;
+-	struct acrn_hw_info hw_info;
++	static struct acrn_hw_info hw_info;
+ 
+ 	if (x86_hyper_type != X86_HYPER_ACRN) {
+ 		pr_err("acrn_trace: not support acrn hypervisor!\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	memset(&hw_info, 0, sizeof(struct acrn_hw_info));
+-	ret = hcall_get_hw_info(virt_to_phys(&hw_info));
++	ret = hcall_get_hw_info(slow_virt_to_phys(&hw_info));
+ 	if (!ret)
+ 		pcpu_num = hw_info.cpu_num;
+ 
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 768d510e0909..2dcdbef01bd3 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -837,7 +837,7 @@ static struct attribute_group vhm_attr_group = {
+ static int __init vhm_init(void)
+ {
+ 	unsigned long flag;
+-	struct hc_api_version api_version = {0, 0};
++	static struct hc_api_version api_version;
+ 
+ 	if (x86_hyper_type != X86_HYPER_ACRN)
+ 		return -ENODEV;
+-- 
+2.17.1
+
