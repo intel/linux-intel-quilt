@@ -1,0 +1,80 @@
+From 6d499b72b3241271f03337a04281b155187f6fce Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Fri, 10 Apr 2020 18:30:19 +0800
+Subject: [PATCH 27/42] net: stmmac: Update suspend/resume flow when Network
+ Proxy is enabled
+
+Update the content of stmmac_suspend_main(), stmmac_suspend_common(),
+stmmac_resume_main(), and stmmac_resume_common(), so that they are
+aligned with stmmac_suspend() and stmmac_resume():
+
+1.	Add netif_carrier_off() in the beginning of suspend flow - to
+	make sure network stack stop sending TX frame out.
+2.	Add del_timer_sync() in the suspend flow.
+3.	Add stmmac_clean_all_tx_rings in the suspend flow - to ensure
+	driver enters low power state without leaving behind Tx frame
+	that are in Tx DMA ring but not yet returned through Tx Done
+	operation.
+4.	Move netif_device_attach() to the end of resume flow - to only
+	mark netdev is ready for data path.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 2b671f8f98eb..b2f629953509 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -6638,14 +6638,20 @@ EXPORT_SYMBOL_GPL(stmmac_dvr_remove);
+  */
+ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ {
++	u32 chan;
+ 	int ret;
+ 
+ 	mutex_lock(&priv->lock);
+ 
+ 	netif_device_detach(ndev);
+ 
++	netif_carrier_off(priv->dev);
++
+ 	stmmac_disable_all_queues(priv);
+ 
++	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
++		del_timer_sync(&priv->tx_queue[chan].txtimer);
++
+ 	/* Remove phy converter */
+ 	if (priv->plat->remove_phy_conv) {
+ 		ret = priv->plat->remove_phy_conv(priv->mii);
+@@ -6660,6 +6666,8 @@ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ 	stmmac_stop_all_dma(priv);
+ 	stmmac_stop_mac_tx(priv, priv->ioaddr);
+ 
++	stmmac_clean_all_tx_rings(priv);
++
+ 	mutex_unlock(&priv->lock);
+ 
+ 	priv->speed = SPEED_UNKNOWN;
+@@ -6908,8 +6916,6 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev)
+ 			stmmac_mdio_reset(priv->mii);
+ 	}
+ 
+-	netif_device_attach(ndev);
+-
+ 	stmmac_resume_common(priv, ndev);
+ 
+ 	if (!device_may_wakeup(priv->device)) {
+@@ -6933,6 +6939,8 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev)
+ 		}
+ 	}
+ 
++	netif_device_attach(ndev);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(stmmac_resume_main);
+-- 
+2.17.1
+
