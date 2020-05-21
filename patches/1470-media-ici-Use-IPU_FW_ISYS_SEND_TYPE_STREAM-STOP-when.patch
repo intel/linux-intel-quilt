@@ -1,0 +1,78 @@
+From 66ba99f8fc7921a95bf7a64aa492a0adde64ffb3 Mon Sep 17 00:00:00 2001
+From: Puunithaaraj Gopal <puunithaaraj.gopal@intel.com>
+Date: Wed, 19 Jun 2019 00:46:52 +0800
+Subject: [PATCH 1470/1552] media: ici: Use IPU_FW_ISYS_SEND_TYPE_STREAM STOP
+ when use_stream_stop is set to true
+
+Stream close timeout observed when a sensor is detached due to driver
+sends FLUSH call to firmware. To prevent this, set driver to sends STOP
+call to firmware which resets the DPHY.
+
+Change-Id: If85cbf4347b5ff36feba6ba71ecccc2b1908375d
+Tracked-On: HSD-1507308042
+Tracked-On: PKT-2253
+Signed-off-by: Puunithaaraj Gopal <puunithaaraj.gopal@intel.com>
+---
+ drivers/media/pci/intel/ici/ici-isys-stream.c | 15 ++++++++++++++-
+ drivers/media/pci/intel/ipu-isys-video.c      |  2 ++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/pci/intel/ici/ici-isys-stream.c b/drivers/media/pci/intel/ici/ici-isys-stream.c
+index 8daa33e..d2acd90 100644
+--- a/drivers/media/pci/intel/ici/ici-isys-stream.c
++++ b/drivers/media/pci/intel/ici/ici-isys-stream.c
+@@ -6,6 +6,7 @@
+ #include "./ici/ici-isys.h"
+ #ifdef ICI_ENABLED
+ 
++#include <linux/module.h>
+ #include <linux/delay.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/kthread.h>
+@@ -593,14 +594,26 @@ static int start_stream_firmware(struct ici_isys_stream *as)
+ 	return rval;
+ }
+ 
++static bool use_stream_stop;
++module_param(use_stream_stop, bool, 0660);
++MODULE_PARM_DESC(use_stream_stop, "Use STOP command if running in CSI capture mode");
++
+ static void stop_streaming_firmware(struct ici_isys_stream *as)
+ {
+ 	struct ici_isys_pipeline *ip = &as->ip;
+ 	struct device *dev = &as->isys->adev->dev;
+ 	int rval, tout;
++	enum ipu_fw_isys_send_type send_type =
++		IPU_FW_ISYS_SEND_TYPE_STREAM_FLUSH;
+ 
+ 	reinit_completion(&ip->stream_stop_completion);
+-	rval = ipu_lib_call(stream_flush, as->isys, ip->stream_handle);
++
++	/* Use STOP command if running in CSI FE capture */
++	if (use_stream_stop)
++		send_type = IPU_FW_ISYS_SEND_TYPE_STREAM_STOP;
++
++	rval = ici_fw_isys_simple_cmd(as->isys, ip->stream_handle, send_type);
++
+ 	if (rval < 0) {
+ 		dev_err(dev, "can't stop stream (%d)\n", rval);
+ 	} else {
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index 49a42e1..e3d1054 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -1372,9 +1372,11 @@ static void stop_streaming_firmware(struct ipu_isys_video *av)
+ 
+ 	reinit_completion(&ip->stream_stop_completion);
+ 
++#ifdef ICI_ENABLED
+ 	/* Use STOP command if running in CSI capture mode */
+ 	if (use_stream_stop)
+ 		send_type = IPU_FW_ISYS_SEND_TYPE_STREAM_STOP;
++#endif
+ 
+ 	mutex_lock(&av->isys->mutex);
+ 	rval = ipu_fw_isys_simple_cmd(av->isys, ip->stream_handle,
+-- 
+2.7.4
+

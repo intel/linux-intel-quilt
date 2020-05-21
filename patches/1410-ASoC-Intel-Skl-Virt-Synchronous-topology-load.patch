@@ -1,0 +1,662 @@
+From 17e0800243089c02db36794610f6f06a906ea976 Mon Sep 17 00:00:00 2001
+From: Wojciech Jablonski <wojciech.jablonski@intel.com>
+Date: Tue, 19 Mar 2019 15:09:22 +0100
+Subject: [PATCH 1410/1552] ASoC: Intel: Skl: Virt: Synchronous topology load
+
+Currently topology of Guest OS is sent asynchronously over virtio
+in multiple chunks, which is complicated and hard to maintain.
+This patch provides generic mechanism for sending files from
+Service OS to Guest OS in a single virtio message as well as employs
+this mechanism for sending the topology. Moreover the patch adds
+retransmissions for messages that are sent upon probing of
+virtio FE, because those initial messages are prone to timeout
+due to lost interrupts.
+
+Change-Id: I520e68eea38a762242f22f36fdac4275c0e10451
+Tracked-On: OAM-80927
+Signed-off-by: Wojciech Jablonski <wojciech.jablonski@intel.com>
+---
+ sound/soc/intel/skylake/virtio/skl-virtio-be.c     | 202 ++++++++++++---------
+ sound/soc/intel/skylake/virtio/skl-virtio-be.h     |   1 +
+ sound/soc/intel/skylake/virtio/skl-virtio-common.h |  43 +++--
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.c     | 167 +++++++++--------
+ sound/soc/intel/skylake/virtio/skl-virtio-fe.h     |  15 +-
+ 5 files changed, 237 insertions(+), 191 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.c b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+index f9a819a..64e2071 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.c
+@@ -637,76 +637,6 @@ static int vbe_skl_pcm_hw_params(const struct skl *sdev, int vm_id,
+ 	return ret;
+ }
+ 
+-static int vbe_skl_send_tplg_data(struct snd_skl_vbe *vbe,
+-	const struct skl *sdev, const struct firmware *tplg,
+-	int vm_id)
+-{
+-	struct vfe_pending_msg tplg_msg;
+-	struct vfe_tplg_data *tplg_data = &tplg_msg.msg.tplg_data;
+-	int rem_data = tplg->size, offset;
+-	u8 *data_ptr = (u8 *)tplg->data;
+-	struct virtio_vq_info *vq = &vbe->vqs[SKL_VIRTIO_IPC_NOT_RX_VQ];
+-
+-	tplg_msg.sizeof_msg = sizeof(struct vfe_tplg_data);
+-	tplg_data->msg_type = VFE_MSG_TPLG_DATA;
+-
+-	for (offset = 0; offset < tplg->size;
+-		offset += SKL_VIRTIO_TPLG_CHUNK_SIZE,
+-		rem_data -= SKL_VIRTIO_TPLG_CHUNK_SIZE) {
+-
+-		tplg_data->offset = offset;
+-		tplg_data->chunk_size = rem_data > SKL_VIRTIO_TPLG_CHUNK_SIZE ?
+-			SKL_VIRTIO_TPLG_CHUNK_SIZE : rem_data;
+-		memcpy(tplg_data->data, data_ptr, tplg_data->chunk_size);
+-		data_ptr += tplg_data->chunk_size;
+-
+-		vbe_skl_send_or_enqueue(vbe, vq, &tplg_msg);
+-	}
+-
+-	return 0;
+-}
+-
+-static int vbe_skl_tplg_info(struct snd_skl_vbe *vbe, struct skl *skl,
+-	int vm_id, const struct vbe_ipc_msg *msg)
+-{
+-	struct skl_tplg_domain *tplg_domain;
+-	const struct firmware *tplg;
+-	char *tplg_name;
+-	int ret;
+-	struct vfe_tplg_info *tplg_info = msg->rx_data;
+-
+-	if (!tplg_info)
+-		return -EINVAL;
+-
+-	tplg_domain = vbe_skl_find_tplg_domain_by_name(skl,
+-		msg->header->domain_name);
+-	if (!tplg_domain) {
+-		dev_err(vbe->dev,
+-			"Could not find topology definition for Guest %s",
+-			msg->header->domain_name);
+-		return -EINVAL;
+-	}
+-
+-	tplg_name = tplg_domain->tplg_name;
+-	ret = request_firmware(&tplg, tplg_name, vbe->dev);
+-	if (ret < 0)
+-		return ret;
+-
+-	strncpy(tplg_info->tplg_name, tplg_domain->tplg_name,
+-		ARRAY_SIZE(tplg_info->tplg_name));
+-	tplg_info->domain_id = tplg_domain->domain_id;
+-	tplg_info->chunk_size = SKL_VIRTIO_TPLG_CHUNK_SIZE;
+-	tplg_info->size = tplg->size;
+-	tplg_info->chunks = tplg_info->size / SKL_VIRTIO_TPLG_CHUNK_SIZE +
+-		tplg_info->size % SKL_VIRTIO_TPLG_CHUNK_SIZE ? 1 : 0;
+-
+-	vbe_skl_send_tplg_data(vbe, skl, tplg, vm_id);
+-
+-	release_firmware(tplg);
+-
+-	return 0;
+-}
+-
+ static int vbe_skl_pcm_trigger(struct skl *sdev, int vm_id,
+ 		struct vbe_substream_info *substr_info,
+ 		struct vbe_ipc_msg *msg)
+@@ -811,31 +741,133 @@ static int vbe_skl_cfg_hda(struct skl *sdev, int vm_id,
+ 	return 0;
+ }
+ 
+-static int vbe_skl_msg_cfg_handle(struct snd_skl_vbe *vbe,
+-		struct skl *sdev, int vm_id, struct vbe_ipc_msg *msg)
++static const struct firmware *vbe_find_res_hndl(struct snd_skl_vbe *vbe,
++		int type, const char *name)
+ {
+-	switch (msg->header->cmd) {
+-	case VFE_MSG_CFG_HDA:
+-		return vbe_skl_cfg_hda(sdev, vm_id, msg);
+-	default:
+-		dev_err(vbe->dev, "Unknown command %d for config get message.\n",
+-				msg->header->cmd);
++	struct snd_skl_vbe_client *client;
++	const struct firmware *fw;
++
++	switch (type) {
++	case VFE_TOPOLOGY_RES:
++		client = list_first_entry_or_null(&vbe->client_list,
++				struct snd_skl_vbe_client, list);
++		fw = client->tplg;
+ 		break;
++	default:
++		fw = NULL;
+ 	}
+ 
++	if (fw)
++		return fw;
++
++	dev_err(vbe->dev, "Unable to find resource [%d](%.*s)\n",
++			type, SKL_LIB_NAME_LENGTH, name);
++	return NULL;
++}
++
++static int vbe_skl_cfg_resource_info(struct snd_skl_vbe *vbe, int vm_id,
++		const struct vbe_ipc_msg *msg)
++{
++	struct vfe_resource_info *res_info = msg->rx_data;
++	const struct firmware *fw;
++
++	if (!res_info || msg->rx_size != sizeof(*res_info))
++		return -EINVAL;
++
++	res_info->size = 0;
++
++	fw = vbe_find_res_hndl(vbe, res_info->type, res_info->name);
++
++	if (!fw)
++		return -EBADF;
++
++	res_info->size = fw->size;
++
+ 	return 0;
+ }
+ 
+-int vbe_skl_msg_tplg_handle(struct snd_skl_vbe *vbe,
++static int vbe_skl_cfg_resource_desc(struct snd_skl_vbe *vbe, int vm_id,
++		const struct vbe_ipc_msg *msg)
++{
++	u8 *fw_data;
++	int ret = 0;
++	const struct firmware *fw;
++	struct vfe_resource_desc *res_desc = msg->rx_data;
++
++	if (!res_desc || msg->rx_size != sizeof(*res_desc))
++		return -EINVAL;
++
++	fw = vbe_find_res_hndl(vbe, res_desc->type, res_desc->name);
++
++	if (!fw) {
++		ret = -EBADF;
++		goto ret_val;
++	}
++
++	if (fw->size != res_desc->size) {
++		ret = -EINVAL;
++		goto ret_val;
++	}
++
++	fw_data = map_guest_phys(vm_id, res_desc->phys_addr,
++			res_desc->size);
++	memcpy(fw_data, fw->data, res_desc->size);
++	unmap_guest_phys(vm_id, res_desc->phys_addr);
++
++ret_val:
++	res_desc->ret = ret;
++	return ret;
++}
++
++static int vbe_skl_cfg_domain(struct snd_skl_vbe *vbe, int vm_id,
++		const struct vbe_ipc_msg *msg)
++{
++	struct skl_tplg_domain *tplg_domain;
++	struct vfe_domain_info *domain_info = msg->rx_data;
++	int ret;
++	struct snd_skl_vbe_client *client = list_first_entry_or_null(
++			&vbe->client_list, struct snd_skl_vbe_client, list);
++
++	if (!domain_info || msg->rx_size != sizeof(*domain_info))
++		return -EINVAL;
++
++	if (!client) {
++		ret = -EINVAL;
++		goto ret_val;
++	}
++
++	tplg_domain = vbe_skl_find_tplg_domain_by_name(vbe->sdev,
++		msg->header->domain_name);
++	if (!tplg_domain) {
++		ret = -EACCES;
++		goto ret_val;
++	}
++
++	domain_info->domain_id = tplg_domain->domain_id;
++	ret = request_firmware(&client->tplg,
++		tplg_domain->tplg_name, vbe->dev);
++
++ret_val:
++	domain_info->ret = ret;
++	return domain_info->ret;
++}
++
++static int vbe_skl_msg_cfg_handle(struct snd_skl_vbe *vbe,
+ 		struct skl *sdev, int vm_id, struct vbe_ipc_msg *msg)
+ {
+ 	switch (msg->header->cmd) {
+-	case VFE_MSG_TPLG_INFO:
+-		return vbe_skl_tplg_info(vbe, sdev, vm_id, msg);
++	case VFE_MSG_CFG_HDA:
++		return vbe_skl_cfg_hda(sdev, vm_id, msg);
++	case VFE_MSG_CFG_RES_INFO:
++		return vbe_skl_cfg_resource_info(vbe, vm_id, msg);
++	case VFE_MSG_CFG_RES_DESC:
++		return vbe_skl_cfg_resource_desc(vbe, vm_id, msg);
++	case VFE_MSG_CFG_DOMAIN:
++		return vbe_skl_cfg_domain(vbe, vm_id, msg);
+ 	default:
+-		dev_err(vbe->dev, "Unknown command %d for tplg.\n",
+-			msg->header->cmd);
+-	break;
++		dev_err(vbe->dev, "Unknown command %d for config get message.\n",
++				msg->header->cmd);
++		break;
+ 	}
+ 
+ 	return 0;
+@@ -931,8 +963,6 @@ static int vbe_skl_not_fwd(struct snd_skl_vbe *vbe,
+ 		return vbe_skl_msg_pcm_handle(vbe, sdev, vm_id, &msg);
+ 	case VFE_MSG_KCTL:
+ 		return vbe_skl_msg_kcontrol_handle(vbe, vm_id, &msg);
+-	case VFE_MSG_TPLG:
+-		return vbe_skl_msg_tplg_handle(vbe, sdev, vm_id, &msg);
+ 	case VFE_MSG_CFG:
+ 		return vbe_skl_msg_cfg_handle(vbe, sdev, vm_id, &msg);
+ 	}
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index 0d6f950..42e5c2b 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -89,6 +89,7 @@ struct snd_skl_vbe_client {
+ 	struct list_head substr_info_list;
+ 	struct list_head list;
+ 	struct vhm_request *req_buf;
++	const struct firmware *tplg;
+ };
+ 
+ struct vskl {
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-common.h b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+index 64e9804..8590867 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-common.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-common.h
+@@ -9,6 +9,7 @@
+ 
+ #include <sound/asound.h>
+ #include "../skl.h"
++#include "../skl-sst-ipc.h"
+ 
+ #ifndef __SOUND_SOC_SKL_VIRTIO_COMMON_H
+ #define __SOUND_SOC_SKL_VIRTIO_COMMON_H
+@@ -29,7 +30,6 @@
+ #define SKL_VIRTIO_IPC_REPLY 1
+ 
+ #define SKL_VIRTIO_DOMAIN_NAME_LEN 20
+-#define SKL_VIRTIO_TPLG_CHUNK_SIZE 1536
+ 
+ struct vfe_stream_pos_desc {
+ 	u64 hw_ptr;
+@@ -166,19 +166,23 @@ struct vfe_hw_pos_request {
+ 	u64 stream_pos;
+ };
+ 
+-struct vfe_tplg_info {
+-	char tplg_name[SNDRV_CTL_ELEM_ID_NAME_MAXLEN];
++struct vfe_domain_info {
++	s32 ret;
+ 	u32 domain_id;
+-	u32 chunk_size;
+-	u32 chunks;
++};
++
++struct vfe_resource_info {
++	char name[SKL_LIB_NAME_LENGTH];
++	u32 type;
+ 	u64 size;
+ };
+ 
+-struct vfe_tplg_data {
+-	int msg_type;
+-	u32 offset;
+-	u32 chunk_size;
+-	u8 data[SKL_VIRTIO_TPLG_CHUNK_SIZE];
++struct vfe_resource_desc {
++	char name[SKL_LIB_NAME_LENGTH];
++	u64 phys_addr;
++	u32 size;
++	u32 type;
++	s32 ret;
+ };
+ 
+ struct vfe_kctl_noti {
+@@ -190,7 +194,6 @@ struct vfe_kctl_noti {
+ union inbox_msg {
+ 	struct vfe_hw_pos_request posn;
+ 	struct vfe_kctl_noti kctln;
+-	struct vfe_tplg_data tplg_data;
+ };
+ 
+ struct vfe_pending_msg {
+@@ -202,12 +205,16 @@ struct vfe_pending_msg {
+ #define VFE_MSG_TYPE_OFFSET 8
+ #define VFE_MSG_TYPE_MASK (0xFF << VFE_MSG_TYPE_OFFSET)
+ 
++enum vfe_resource_type {
++	VFE_TOPOLOGY_RES = 1,
++	VFE_FIRMWARE_RES = 2,
++	VFE_LIBRARY_RES = 3,
++};
++
+ enum vfe_ipc_msg_type {
+ 	VFE_MSG_PCM = 1 << VFE_MSG_TYPE_OFFSET,
+ 	VFE_MSG_KCTL = 2 << VFE_MSG_TYPE_OFFSET,
+-	VFE_MSG_TPLG = 3 << VFE_MSG_TYPE_OFFSET,
+-	VFE_MSG_CFG = 4 << VFE_MSG_TYPE_OFFSET,
+-	VFE_MSG_POS = 5 << VFE_MSG_TYPE_OFFSET,
++	VFE_MSG_CFG = 3 << VFE_MSG_TYPE_OFFSET,
+ 
+ 	VFE_MSG_PCM_OPEN = VFE_MSG_PCM | 0x01,
+ 	VFE_MSG_PCM_CLOSE = VFE_MSG_PCM | 0x02,
+@@ -217,12 +224,10 @@ enum vfe_ipc_msg_type {
+ 
+ 	VFE_MSG_KCTL_SET = VFE_MSG_KCTL | 0x01,
+ 
+-	VFE_MSG_TPLG_INFO = VFE_MSG_TPLG | 0x01,
+-	VFE_MSG_TPLG_DATA = VFE_MSG_TPLG | 0x02,
+-
+ 	VFE_MSG_CFG_HDA = VFE_MSG_CFG | 0x01,
+-
+-	VFE_MSG_POS_NOTI = VFE_MSG_POS | 0x01,
++	VFE_MSG_CFG_RES_INFO = VFE_MSG_CFG | 0x02,
++	VFE_MSG_CFG_RES_DESC = VFE_MSG_CFG | 0x03,
++	VFE_MSG_CFG_DOMAIN = VFE_MSG_CFG | 0x04,
+ };
+ 
+ struct kctl_wrapper {
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+index 2c33bcf..96c2309 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.c
+@@ -556,6 +556,23 @@ int vfe_send_msg(struct snd_skl_vfe *vfe,
+ 		tx_size, rx_data, rx_size, VFE_MSG_MSEC_TIMEOUT);
+ }
+ 
++static int vfe_send_msg_retry(struct snd_skl_vfe *vfe,
++	struct vfe_msg_header *msg_header, void *tx_data, int tx_size,
++	void *rx_data, int rx_size)
++{
++	int idx, ret;
++
++	for (idx = 0; idx <= VFE_MSG_MAX_RETRY_NUM; ++idx) {
++		ret = vfe_send_msg(vfe, msg_header, tx_data, tx_size,
++				rx_data, rx_size);
++		if (ret != -ETIMEDOUT)
++			break;
++		dev_err(&vfe->vdev->dev, "Timeout, try once again\n");
++	}
++
++	return ret;
++}
++
+ static int vfe_send_kctl_msg(struct snd_kcontrol *kcontrol,
+ 	struct snd_ctl_elem_value *ucontrol, struct vfe_kctl_result *result)
+ {
+@@ -698,33 +715,6 @@ static void vfe_handle_posn(struct work_struct *work)
+ 	vfe_pcm_recover(substream_desc->substream);
+ }
+ 
+-static void vfe_handle_tplg(struct snd_skl_vfe *vfe,
+-	struct vfe_tplg_data *tplg_data)
+-{
+-	u8 *data_ptr;
+-
+-	dev_dbg(&vfe->vdev->dev,
+-		"Tplg chunk received offset %d chunk size %d\n",
+-		tplg_data->offset, tplg_data->chunk_size);
+-
+-	mutex_lock(&vfe->tplg.tplg_lock);
+-
+-	if (!vfe->tplg.tplg_data.data)
+-		goto err_handler;
+-
+-	data_ptr = (u8 *)vfe->tplg.tplg_data.data + tplg_data->offset;
+-	memcpy(data_ptr, tplg_data->data, tplg_data->chunk_size);
+-	vfe->tplg.data_ready += tplg_data->chunk_size;
+-
+-	if (vfe->tplg.data_ready >= vfe->tplg.tplg_data.size) {
+-		vfe->tplg.load_completed = true;
+-		wake_up(&vfe->tplg.waitq);
+-	}
+-
+-err_handler:
+-	mutex_unlock(&vfe->tplg.tplg_lock);
+-}
+-
+ static void vfe_tx_message_loop(struct work_struct *work)
+ {
+ 	enum vfe_ipc_msg_status msg_status;
+@@ -782,10 +772,6 @@ static void vfe_rx_message_loop(struct work_struct *work)
+ 			kctl_ipc_handle(domain_id, &kctln->kcontrol,
+ 				&kctln->kcontrol_value, &result);
+ 			break;
+-		case VFE_MSG_TPLG_DATA:
+-			vfe_handle_tplg(vfe,
+-				(struct vfe_tplg_data *)header);
+-			break;
+ 		default:
+ 			dev_err(&vfe->vdev->dev,
+ 				"Invalid msg Type (%d)\n", header->msg_type);
+@@ -1260,7 +1246,7 @@ static int vfe_skl_init_hbus(struct snd_skl_vfe *vfe, struct skl *skl)
+ 
+ 	msg_header.cmd = VFE_MSG_CFG_HDA;
+ 
+-	ret = vfe_send_msg(vfe, &msg_header, NULL, 0,
++	ret = vfe_send_msg_retry(vfe, &msg_header, NULL, 0,
+ 		&hda_cfg, sizeof(hda_cfg));
+ 	if (ret < 0)
+ 		return ret;
+@@ -1336,68 +1322,97 @@ void vfe_skl_pci_dev_release(struct device *dev)
+ {
+ }
+ 
+-static int vfe_request_topology(struct skl *skl, const struct firmware **fw)
++int vfe_request_ext_resource(const struct firmware **fw,
++		const char *name, u32 type)
+ {
++	struct vfe_msg_header msg_header;
++	struct vfe_resource_info res_info;
++	struct vfe_resource_desc res_desc;
+ 	int ret;
++	u8 *data_ptr;
++	struct firmware *new_fw;
+ 	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
+ 
+-	ret = wait_event_timeout(vfe->tplg.waitq,
+-		vfe->tplg.load_completed,
+-		msecs_to_jiffies(VFE_TPLG_LOAD_TIMEOUT));
++	msg_header.cmd = VFE_MSG_CFG_RES_INFO;
++	res_info.type = type;
++	strncpy(res_info.name, name, ARRAY_SIZE(res_info.name));
++	ret = vfe_send_msg_retry(vfe, &msg_header,
++		NULL, 0, &res_info, sizeof(res_info));
+ 
+-	if (ret == 0) {
+-		dev_err(&vfe->vdev->dev,
+-			"Failed to receive topology from BE service");
+-		return -ETIMEDOUT;
+-	}
++	if (ret < 0)
++		return ret;
+ 
+-	*fw = &vfe->tplg.tplg_data;
++	if (res_info.size == 0)
++		return -EINVAL;
+ 
+-	return 0;
++	new_fw = kzalloc(sizeof(struct firmware) + res_info.size, GFP_KERNEL);
++	if (!new_fw)
++		return -ENOMEM;
++
++	data_ptr = (u8 *)new_fw + sizeof(struct firmware);
++
++	msg_header.cmd = VFE_MSG_CFG_RES_DESC;
++	res_desc.phys_addr = virt_to_phys((void *)data_ptr);
++	res_desc.size = res_info.size;
++	res_desc.type = type;
++	strncpy(res_desc.name, name, ARRAY_SIZE(res_desc.name));
++	ret = vfe_send_msg_retry(vfe, &msg_header,
++		NULL, 0, &res_desc, sizeof(res_desc));
++
++	if (ret < 0)
++		goto ret_err;
++
++	ret = res_desc.ret;
++
++	if (ret >= 0) {
++		new_fw->data = data_ptr;
++		new_fw->size = res_info.size;
++		*fw = new_fw;
++		return ret;
++	}
++
++ret_err:
++	kfree(new_fw);
++	return ret;
+ }
+ 
+-static int vfe_init_tplg(struct snd_skl_vfe *vfe, struct skl *skl)
++static int vfe_register_domain(struct snd_skl_vfe *vfe)
+ {
++	struct vfe_domain_info domain_info;
+ 	struct vfe_msg_header msg_header;
+-	struct vfe_tplg_info tplg_info;
+ 	int ret;
+-	u8 *tplg_data;
+-
+ 
+-	mutex_init(&vfe->tplg.tplg_lock);
+-	init_waitqueue_head(&vfe->tplg.waitq);
+-	vfe->tplg.load_completed = false;
+-
+-	skl->skl_sst->request_tplg = vfe_request_topology;
++	msg_header.cmd = VFE_MSG_CFG_DOMAIN;
++	ret = vfe_send_msg_retry(vfe, &msg_header,
++		NULL, 0, &domain_info, sizeof(domain_info));
+ 
+-	mutex_lock(&vfe->tplg.tplg_lock);
+-	msg_header.cmd = VFE_MSG_TPLG_INFO;
+-	ret = vfe_send_msg(vfe, &msg_header,
+-		NULL, 0, &tplg_info, sizeof(tplg_info));
+ 	if (ret < 0)
+-		goto error_handl;
+-
+-	//TODO: get result from vBE
++		return ret;
+ 
+-	tplg_data = devm_kzalloc(&vfe->vdev->dev,
+-		tplg_info.size, GFP_KERNEL);
+-	if (!tplg_data) {
+-		ret = -ENOMEM;
+-		goto error_handl;
+-	}
++	domain_id = domain_info.domain_id;
++	return domain_info.ret;
++}
+ 
+-	domain_id = tplg_info.domain_id;
+-	vfe->tplg.tplg_data.data = tplg_data;
+-	vfe->tplg.tplg_data.size = tplg_info.size;
+-	strncpy(skl->tplg_name, tplg_info.tplg_name,
+-		ARRAY_SIZE(skl->tplg_name));
++static int vfe_request_topology(struct skl *skl, const struct firmware **fw)
++{
++	struct snd_skl_vfe *vfe = get_virtio_audio_fe();
++	int ret;
+ 
+-error_handl:
+-	mutex_unlock(&vfe->tplg.tplg_lock);
++	ret = vfe_request_ext_resource(&vfe->tplg,
++			skl->tplg_name, VFE_TOPOLOGY_RES);
++	*fw = vfe->tplg;
+ 
+ 	return ret;
+ }
+ 
++static void vfe_init_tplg(struct skl *skl)
++{
++	const char *tplg_name = "virt_tplg";
++
++	skl->skl_sst->request_tplg = vfe_request_topology;
++	strncpy(skl->tplg_name, tplg_name, ARRAY_SIZE(skl->tplg_name));
++}
++
+ static int vfe_skl_init(struct virtio_device *vdev)
+ {
+ 	int err;
+@@ -1437,9 +1452,7 @@ static int vfe_skl_init(struct virtio_device *vdev)
+ 	if (err < 0)
+ 		goto error;
+ 
+-	err = vfe_init_tplg(vfe, skl);
+-	if (err < 0)
+-		goto error;
++	vfe_init_tplg(skl);
+ 
+ 	err = vfe_platform_register(vfe, &vdev->dev);
+ 	if (err < 0)
+@@ -1538,6 +1551,10 @@ static int vfe_init(struct virtio_device *vdev)
+ 
+ 	vfe->send_dsp_ipc_msg = vfe_send_dsp_ipc_msg;
+ 
++	ret = vfe_register_domain(vfe);
++	if (ret < 0)
++		goto skl_err;
++
+ 	vfe_send_queues(vdev);
+ 
+ 	vfe_init_irq_queue(vfe);
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+index afd042d..4c05e3a 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-fe.h
+@@ -15,7 +15,7 @@
+ #define VFE_MSG_MSEC_TIMEOUT 100
+ #define VFE_MSG_TRIGGER_TIMEOUT 500
+ #define VFE_MSG_NO_TIMEOUT 0
+-#define VFE_TPLG_LOAD_TIMEOUT 1000
++#define VFE_MSG_MAX_RETRY_NUM 3
+ #define VFE_MSG_BUFF_NUM 3
+ 
+ struct vfe_substream_info {
+@@ -30,14 +30,6 @@ struct vfe_substream_info {
+ 	struct list_head list;
+ };
+ 
+-struct vskl_vfe_tplg {
+-	struct firmware tplg_data;
+-	u64 data_ready;
+-
+-	struct mutex tplg_lock;
+-	wait_queue_head_t waitq;
+-	bool load_completed;
+-};
+ 
+ struct snd_skl_vfe {
+ 	struct skl sdev;
+@@ -46,7 +38,7 @@ struct snd_skl_vfe {
+ 	struct ipc_message *msg;
+ 	void *in_buff[VFE_MSG_BUFF_NUM];
+ 
+-	struct vskl_vfe_tplg tplg;
++	const struct firmware *tplg;
+ 
+ 	struct work_struct init_work;
+ 
+@@ -79,5 +71,6 @@ struct snd_skl_vfe {
+ 
+ void vfe_handle_timedout_not_tx_msg(struct snd_skl_vfe *vfe,
+ 	struct vfe_ipc_msg *msg);
+-
++int vfe_request_ext_resource(const struct firmware **fw,
++		const char *name, u32 type);
+ #endif
+-- 
+2.7.4
+

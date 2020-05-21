@@ -1,0 +1,42 @@
+From a8bf8b096d5689a1da475e2a7d0cd3086ef411cb Mon Sep 17 00:00:00 2001
+From: Dongwon Kim <dongwon.kim@intel.com>
+Date: Tue, 18 Jun 2019 00:55:32 -0700
+Subject: [PATCH 1449/1552] dma-buf/hyper_dmabuf: release double check exported
+
+remote sync-OPS_RELEASE checks 'exported' once more to prevent
+the case where it was removed already while waiting to acquire
+the mutex.
+
+Signed-off-by: Dongwon Kim <dongwon.kim@intel.com>
+---
+ drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
+index 03cdedf8..3ce8162 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_remote_sync.c
+@@ -158,13 +158,15 @@ int hyper_dmabuf_remote_sync(hyper_dmabuf_id_t hid, int ops)
+ 		break;
+ 
+ 	case HYPER_DMABUF_OPS_RELEASE:
+-		dev_dbg(hy_drv_priv->dev,
+-			"id:%d key:%d %d %d} released, ref left: %d\n",
+-			 exported->hid.id, exported->hid.rng_key[0],
+-			 exported->hid.rng_key[1], exported->hid.rng_key[2],
+-			 exported->active - 1);
+ 		mutex_lock(&hy_drv_priv->lock);
+ 
++		/* find a coresponding SGT for the id */
++		exported = hyper_dmabuf_find_exported(hid);
++		if (!exported) {
++			mutex_unlock(&hy_drv_priv->lock);
++			break;
++		}
++
+ 		exported->active--;
+ 
+ 		/* If there are still importers just break, if no then
+-- 
+2.7.4
+
