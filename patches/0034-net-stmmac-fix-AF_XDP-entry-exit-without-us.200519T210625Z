@@ -1,0 +1,327 @@
+From db7afc218c2a4976d1fbfa667352020fe9a5cb68 Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Tue, 17 Mar 2020 14:45:57 +0800
+Subject: [PATCH 34/42] net: stmmac: fix AF_XDP entry/exit without using
+ stmmac_reset
+
+Previous AF_XDP implementation uses stmmac_reset to transition
+between normal and xdp modes, regardless of queue.
+
+Several fixes come into play here as there are multiple
+intertwining bugs that made us resort to using stmmac_reset.
+
+- First, we used xdp_prog to determine whether the driver is in
+  xdp mode or not. Using only the xdp_prog is not sufficient as
+  there are times when xdp_prog don't match the state that a
+  particular code should be executed in. This is resolved using
+  a new flag "cur_mode_is_normal". This removes the need for
+  stmmac_reset in stmmac_xdp_setup.
+
+- Second, stmmac_qp_enable/qp_disable only accounted for the
+  transition into xdp mode but not vice versa. The queue triplets
+  involved should be enabled/disabled whether it is entering
+  or exiting xdp mode.
+
+- Third, the stmmac_dma_control was being executed before
+  stmmac_txrx_ch_init. This was the cause of the DMAR errors
+  and not being able to transmit/receive. Flipping the order
+  fixes this.
+
+  TOCHECK: This also appears to resolve the incorrect
+  dma addressing of RX UMEM ring?
+
+- Fourth, stmmac_dma_interrupt_status was not called in the
+  XDP ZC case of stmmac_msi_intr_rx, this caused the DMA interrupt
+  bits to not get cleared, causing the interrupt to fire
+  continuously and the driver to fail to disable/re-enable the
+  queue properly.
+
+Other notes, the driver can now transmit and receive AF_XDP packets
+almost instantly without packet losses. However, it is definitively
+not instant. PTP4L relies on timely return of TX hw timestamps and
+there are occassional instances where the hw timestamp is not
+returned to PTP4L in time (during the normal->xdp or xdp->normal
+transition) and will cause PTP4L to lose sync for a period of time.
+
+The driver is also not able to host multiple XDP queue sets
+simultaneously. A future fix is required to enable saving the
+xdp states while it is still in xdp-mode.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  | 12 ++-
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 98 ++++++++++---------
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.c  |  2 +-
+ 3 files changed, 62 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 5e896e80beb5..6bd8f4320869 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -300,6 +300,9 @@ struct stmmac_priv {
+ 	/* WA for EST */
+ 	int est_hw_del;
+ 
++	/* Flag to track driver state from normal->xdp or vice versa */
++	bool cur_mode_is_normal;
++
+ 	/* XDP BPF Program */
+ 	struct bpf_prog *xdp_prog;
+ 
+@@ -358,7 +361,11 @@ static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
+ 
+ static inline bool queue_is_xdp(struct stmmac_priv *priv, u32 queue_index)
+ {
+-	return (priv->tx_queue_is_xdp[queue_index] == true);
++	if (priv->tx_queue_is_xdp[queue_index] &&
++	    !priv->cur_mode_is_normal)
++		return true;
++
++	return false;
+ }
+ 
+ static inline void set_queue_xdp(struct stmmac_priv *priv, u32 queue_index)
+@@ -374,6 +381,9 @@ static inline void clear_queue_xdp(struct stmmac_priv *priv, u32 queue_index)
+ static inline struct stmmac_tx_queue *get_tx_queue(struct stmmac_priv *priv,
+ 						   u32 queue_index)
+ {
++	if (queue_is_xdp(priv, queue_index) && !priv->cur_mode_is_normal)
++		return &priv->tx_queue[queue_index];
++
+ 	return queue_is_xdp(priv, queue_index) ?
+ 	       &priv->xdp_queue[queue_index - priv->plat->num_queue_pairs] :
+ 	       &priv->tx_queue[queue_index];
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index d8dd6bfc871d..35518d86eab9 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1685,7 +1685,8 @@ static void dma_free_tx_skbufs(struct stmmac_priv *priv, u32 queue)
+ 	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 	int i;
+ 
+-	if (queue_is_xdp(priv, queue) && tx_q->xsk_umem) {
++	if (queue_is_xdp(priv, queue) && tx_q->xsk_umem &&
++	    !priv->cur_mode_is_normal) {
+ 		stmmac_xsk_clean_tx_queue(tx_q);
+ 	} else {
+ 		for (i = 0; i < priv->dma_tx_size; i++)
+@@ -3449,6 +3450,8 @@ static int stmmac_open(struct net_device *dev)
+ 	if (!priv->dma_tx_size)
+ 		priv->dma_tx_size = DMA_DEFAULT_TX_SIZE;
+ 
++	priv->cur_mode_is_normal = true;
++
+ 	ret = alloc_dma_desc_resources(priv);
+ 	if (ret < 0) {
+ 		netdev_err(priv->dev, "%s: DMA descriptors allocation failed\n",
+@@ -5197,14 +5200,23 @@ static irqreturn_t stmmac_msi_intr_rx(int irq, void *data)
+ 		return IRQ_HANDLED;
+ 	}
+ 
+-	/* Skip napi for XDP ZC queues to reduce latency.
+-	 * Penalties of not using NAPI should be minimal for XDP's case.
+-	 * Otherwise, users can increase the Rx interrupt coalesce.
+-	 */
+ 	if (rx_q->xsk_umem && priv->xdp_prog) {
+-		stmmac_disable_dma_irq(priv, priv->ioaddr, chan);
+-		stmmac_rx_zc(priv, priv->dma_rx_size, chan);
+-		stmmac_enable_dma_irq(priv, priv->ioaddr, chan);
++		int status = stmmac_dma_interrupt_status(priv, priv->ioaddr,
++							 &priv->xstats,
++							 chan,
++							 DMA_DIR_RX);
++
++		if ((status & handle_rx) &&
++		    chan < priv->plat->num_queue_pairs) {
++			/* Skip napi for XDP ZC queues to reduce latency.
++			 * Penalties of not using NAPI should be minimal for
++			 * XDP's case. Alternatively, users can increase the Rx
++			 * interrupt coalesce.
++			 */
++			stmmac_disable_dma_irq(priv, priv->ioaddr, chan);
++			stmmac_rx_zc(priv, priv->dma_rx_size, chan);
++			stmmac_enable_dma_irq(priv, priv->ioaddr, chan);
++		}
+ 	} else {
+ 		stmmac_napi_check(priv, chan, DMA_DIR_RX);
+ 	}
+@@ -5375,13 +5387,11 @@ static void stmmac_napi_control(struct stmmac_priv *priv, u16 qid, bool en)
+ 	if (en) {
+ 		napi_enable(&ch->rx_napi);
+ 		napi_enable(&ch->tx_napi);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			napi_enable(&xdp_ch->tx_napi);
++		napi_enable(&xdp_ch->tx_napi);
+ 	} else {
+ 		napi_disable(&ch->rx_napi);
+ 		napi_disable(&ch->tx_napi);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			napi_disable(&xdp_ch->tx_napi);
++		napi_disable(&xdp_ch->tx_napi);
+ 	}
+ }
+ 
+@@ -5424,9 +5434,6 @@ static int stmmac_txrx_irq_control(struct stmmac_priv *priv, u16 qid, bool en)
+ 			goto irq_err;
+ 		}
+ 
+-		if (!queue_is_xdp(priv, qid + qp_num))
+-			goto irq_done;
+-
+ 		if (priv->tx_irq[qid + qp_num] == 0)
+ 			goto irq_err;
+ 
+@@ -5452,15 +5459,11 @@ static int stmmac_txrx_irq_control(struct stmmac_priv *priv, u16 qid, bool en)
+ 			free_irq(priv->tx_irq[qid],
+ 					get_tx_queue(priv, qid));
+ 
+-		if (!queue_is_xdp(priv, qid + qp_num))
+-			goto irq_done;
+-
+ 		if (priv->tx_irq[qid + qp_num] > 0)
+ 			free_irq(priv->tx_irq[qid + qp_num],
+ 					get_tx_queue(priv, qid + qp_num));
+ 	}
+ 
+-irq_done:
+ 	return 0;
+ 
+ irq_err:
+@@ -5474,13 +5477,11 @@ static void stmmac_txrx_dma_control(struct stmmac_priv *priv, u16 qid, bool en)
+ 	if (en) {
+ 		stmmac_start_rx_dma(priv, qid);
+ 		stmmac_start_tx_dma(priv, qid);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			stmmac_start_tx_dma(priv, qid + qp_num);
++		stmmac_start_tx_dma(priv, qid + qp_num);
+ 	} else {
+ 		stmmac_stop_rx_dma(priv, qid);
+ 		stmmac_stop_tx_dma(priv, qid);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			stmmac_stop_tx_dma(priv, qid + qp_num);
++		stmmac_stop_tx_dma(priv, qid + qp_num);
+ 	}
+ }
+ 
+@@ -5496,18 +5497,15 @@ static void stmmac_txrx_desc_control(struct stmmac_priv *priv, u16 qid, bool en)
+ 
+ 		alloc_dma_rx_desc_resources_q(priv, qid);
+ 		alloc_dma_tx_desc_resources_q(priv, qid);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			alloc_dma_tx_desc_resources_q(priv, qid + qp_num);
++		alloc_dma_tx_desc_resources_q(priv, qid + qp_num);
+ 
+ 		init_dma_rx_desc_ring(priv, qid, 0);
+ 		init_dma_tx_desc_ring(priv, qid);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			init_dma_tx_desc_ring(priv, qid + qp_num);
++		init_dma_tx_desc_ring(priv, qid + qp_num);
+ 	} else {
+ 		free_dma_rx_desc_resources_q(priv, qid);
+ 		free_dma_tx_desc_resources_q(priv, qid);
+-		if (queue_is_xdp(priv, qid + qp_num))
+-			free_dma_tx_desc_resources_q(priv, qid + qp_num);
++		free_dma_tx_desc_resources_q(priv, qid + qp_num);
+ 
+ 		if (!stmmac_enabled_xdp(priv)) {
+ 			clear_queue_xdp(priv, qid);
+@@ -5541,12 +5539,13 @@ static void stmmac_txrx_ch_init(struct stmmac_priv *priv, u16 qid)
+ 	stmmac_set_tx_tail_ptr(priv, priv->ioaddr,
+ 			       tx_q->tx_tail_addr, tx_q->queue_index);
+ 
+-	if (queue_is_xdp(priv, qid + qp_num)) {
+-		xdp_q->tx_tail_addr = xdp_q->dma_tx_phy;
+-		stmmac_set_tx_tail_ptr(priv, priv->ioaddr,
+-				       xdp_q->tx_tail_addr,
+-				       xdp_q->queue_index);
+-	}
++	stmmac_init_tx_chan(priv, priv->ioaddr, priv->plat->dma_cfg,
++			    xdp_q->dma_tx_phy, xdp_q->queue_index);
++
++	xdp_q->tx_tail_addr = xdp_q->dma_tx_phy;
++	stmmac_set_tx_tail_ptr(priv, priv->ioaddr,
++			       xdp_q->tx_tail_addr,
++			       xdp_q->queue_index);
+ }
+ 
+ /**
+@@ -5570,8 +5569,8 @@ int stmmac_queue_pair_enable(struct stmmac_priv *priv, u16 qid)
+ 	}
+ 
+ 	stmmac_txrx_desc_control(priv, qid, true);
+-	stmmac_txrx_dma_control(priv, qid, true);
+ 	stmmac_txrx_ch_init(priv, qid);
++	stmmac_txrx_dma_control(priv, qid, true);
+ 
+ 	ret = stmmac_txrx_irq_control(priv, qid, true);
+ 	if (ret)
+@@ -5669,6 +5668,7 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	int frame_size = priv->dev->mtu + ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN;
+ 	struct bpf_prog *old_prog;
+ 	bool need_reset;
++	int err;
+ 	int i;
+ 
+ 	/* Don't allow frames that span over multiple buffers */
+@@ -5678,23 +5678,25 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	if (!stmmac_enabled_xdp(priv) && !prog)
+ 		return 0;
+ 
+-	/* When turning XDP on->off/off->on we reset and rebuild the rings. */
++	/* Turning AF_XDP ZC on->off/off->on requires rebuild of rings */
+ 	need_reset = (stmmac_enabled_xdp(priv) != !!prog);
+ 
+-	if (need_reset && netif_running(priv->dev))
+-		stmmac_release(priv->dev);
++	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
++		err = stmmac_queue_pair_disable(priv, i);
++		if (err)
++			return err;
++	}
+ 
+ 	old_prog = xchg(&priv->xdp_prog, prog);
+ 
+-	if (need_reset && netif_running(priv->dev))
+-		stmmac_open(priv->dev);
++	/* Begin transition between normal->xdp or xdp->normal */
++	priv->cur_mode_is_normal = !priv->cur_mode_is_normal;
+ 
+-	/* RX, TX & TX XDP queues are mapped to independent DMA Channels.
+-	 * In the case whereby IP is configured to have assymmetric RX
+-	 * and TX channels, we only set xdp_prog for the RX & TX queue pair.
+-	 */
+-	for (i = 0; i < priv->plat->num_queue_pairs; i++)
+-		WRITE_ONCE(priv->rx_queue[i].xdp_prog, priv->xdp_prog);
++	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
++		err = stmmac_queue_pair_enable(priv, i);
++		if (err)
++			return err;
++	}
+ 
+ 	if (old_prog)
+ 		bpf_prog_put(old_prog);
+@@ -5702,7 +5704,7 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	/* Kick start the NAPI context if there is an AF_XDP socket open
+ 	 * on that queue id. This so that receiving will start.
+ 	 */
+-	if (need_reset && prog)
++	if (need_reset && !priv->cur_mode_is_normal)
+ 		for (i = 0; i < priv->plat->num_queue_pairs; i++)
+ 			if (priv->xdp_queue[i].xsk_umem)
+ 				(void)stmmac_xsk_wakeup(priv->dev, i,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index 7ede1936e1d8..41d4293fa9f6 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -948,7 +948,7 @@ int stmmac_xsk_wakeup(struct net_device *dev, u32 queue, u32 flags)
+ 	struct stmmac_tx_queue *xdp_q;
+ 	struct stmmac_channel *ch;
+ 
+-	xdp_q = &priv->xdp_queue[queue];
++	xdp_q = &priv->tx_queue[queue + qp_num];
+ 	ch = &priv->channel[queue + qp_num];
+ 
+ 	if (test_bit(STMMAC_DOWN, &priv->state))
+-- 
+2.17.1
+
