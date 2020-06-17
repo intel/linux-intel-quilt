@@ -1,0 +1,56 @@
+From 6a509fe39325ad69ed22dad715983abd0caef548 Mon Sep 17 00:00:00 2001
+From: Junming Liu <junming.liu@intel.com>
+Date: Fri, 30 Aug 2019 18:11:45 +0000
+Subject: [PATCH 43/91] drm/i915/gvt: refine ggtt range validation
+
+The vgpu ggtt range should be in vgpu aperture or hidden range. This
+patch enforce begin and end address check and guarantee both of them are
+in the valid range.
+
+For size=0, it will regress to vgpu_gmadr_is_valid(), will refine
+this usage in a later fix.
+
+Tracked-On: projectacrn/acrn-hypervisor#3630
+Signed-off-by: Junming Liu <junming.liu@intel.com>
+Signed-off-by: Xiong Zhang <xiong.y.zhang@intel.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gtt.c | 20 +++++++++++++-------
+ 1 file changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index 53d1ac3bb834..19f51903f4b8 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -53,13 +53,19 @@ static int preallocated_oos_pages = 2048;
+  */
+ bool intel_gvt_ggtt_validate_range(struct intel_vgpu *vgpu, u64 addr, u32 size)
+ {
+-	if ((!vgpu_gmadr_is_valid(vgpu, addr)) || (size
+-			&& !vgpu_gmadr_is_valid(vgpu, addr + size - 1))) {
+-		gvt_vgpu_err("invalid range gmadr 0x%llx size 0x%x\n",
+-				addr, size);
+-		return false;
+-	}
+-	return true;
++	if (size == 0)
++		return vgpu_gmadr_is_valid(vgpu, addr);
++
++	if (vgpu_gmadr_is_aperture(vgpu, addr) &&
++	    vgpu_gmadr_is_aperture(vgpu, addr + size - 1))
++		return true;
++	else if (vgpu_gmadr_is_hidden(vgpu, addr) &&
++		 vgpu_gmadr_is_hidden(vgpu, addr + size - 1))
++		return true;
++
++	gvt_dbg_mm("Invalid ggtt range at 0x%llx, size: 0x%x\n",
++		     addr, size);
++	return false;
+ }
+ 
+ /* translate a guest gmadr to host gmadr */
+-- 
+2.17.1
+

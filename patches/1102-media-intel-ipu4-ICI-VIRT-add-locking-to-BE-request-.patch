@@ -1,0 +1,51 @@
+From 20dfebe4a0b4a0638ed7a21b2559f5d8f409a62f Mon Sep 17 00:00:00 2001
+From: Ong Hock Yu <ong.hock.yu@intel.com>
+Date: Tue, 28 May 2019 23:48:53 +0000
+Subject: [PATCH 1102/1225] media: intel-ipu4: [ICI/VIRT] add locking to BE
+ request queue access
+
+Under race condition, the request queue get messed up between
+put and get call to the queue. The fix is to add spinlock to
+these call.
+
+Change-Id: I842b0a26b0864128b3b881411071595d41d758f4
+Tracked-On: PKT-2287
+Tracked-On: HSDES-1507210582
+Signed-off-by: Ong Hock Yu <ong.hock.yu@intel.com>
+---
+ .../intel/virtio/intel-ipu4-virtio-be-request-queue.c    | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-request-queue.c b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-request-queue.c
+index cee9b55..53e059c 100644
+--- a/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-request-queue.c
++++ b/drivers/media/pci/intel/virtio/intel-ipu4-virtio-be-request-queue.c
+@@ -47,11 +47,23 @@ void ipu4_virtio_be_req_queue_free(void)
+ 
+ struct ipu4_virtio_req_info *ipu4_virtio_be_req_queue_get(void)
+ {
+-	return ipu4_virtio_ring_pop(&ipu4_virtio_be_req_queue);
++	struct ipu4_virtio_req_info *req;
++	unsigned long flags = 0;
++
++	spin_lock_irqsave(&ipu4_virtio_be_req_queue.lock, flags);
++	req = ipu4_virtio_ring_pop(&ipu4_virtio_be_req_queue);
++	spin_unlock_irqrestore(&ipu4_virtio_be_req_queue.lock, flags);
++	return req;
+ }
+ 
+ int ipu4_virtio_be_req_queue_put(
+ 			struct ipu4_virtio_req_info *req)
+ {
+-	return ipu4_virtio_ring_push(&ipu4_virtio_be_req_queue, req);
++	unsigned long flags = 0;
++	int status;
++
++	spin_lock_irqsave(&ipu4_virtio_be_req_queue.lock, flags);
++	status = ipu4_virtio_ring_push(&ipu4_virtio_be_req_queue, req);
++	spin_unlock_irqrestore(&ipu4_virtio_be_req_queue.lock, flags);
++	return status;
+ }
+-- 
+2.7.4
+

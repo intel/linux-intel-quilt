@@ -1,0 +1,78 @@
+From 3c98e1d91fa5d08bba666e555bbe6bfaf5865ba9 Mon Sep 17 00:00:00 2001
+From: Junming Liu <junming.liu@intel.com>
+Date: Fri, 30 Aug 2019 18:10:47 +0000
+Subject: [PATCH 42/91] drm/i915/gvt: addressed guest GPU hang with HWS index
+ mode
+
+with the introduce of "switch to use HWS indices rather than address",
+guest GPU hang observed when running workloads which will update the
+seqno to the real HW HWSP, not vitural GPU HWSP and then cause GPU hang.
+
+this patch is to revoke index mode in PIPE_CTRL and MI_FLUSH_DW and
+patch guest GPU HWSP address value to these commands.
+
+Tracked-On: projectacrn/acrn-hypervisor#3630
+Signed-off-by: Junming Liu <junming.liu@intel.com>
+Signed-off-by: Xiaolin Zhang <xiaolin.zhang@intel.com>
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cmd_parser.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cmd_parser.c b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+index 150ba0f07a5d..3db229220036 100644
+--- a/drivers/gpu/drm/i915/gvt/cmd_parser.c
++++ b/drivers/gpu/drm/i915/gvt/cmd_parser.c
+@@ -1115,6 +1115,7 @@ static int cmd_handler_pipe_control(struct parser_exec_state *s)
+ 	bool index_mode = false;
+ 	unsigned int post_sync;
+ 	int ret = 0;
++	u32 hws_pga, val;
+ 
+ 	post_sync = (cmd_val(s, 1) & PIPE_CONTROL_POST_SYNC_OP_MASK) >> 14;
+ 
+@@ -1138,6 +1139,15 @@ static int cmd_handler_pipe_control(struct parser_exec_state *s)
+ 					index_mode = true;
+ 				ret |= cmd_address_audit(s, gma, sizeof(u64),
+ 						index_mode);
++				if (ret)
++					return ret;
++				if (index_mode) {
++					hws_pga = s->vgpu->hws_pga[s->ring_id];
++					gma = hws_pga + gma;
++					patch_value(s, cmd_ptr(s, 2), gma);
++					val = cmd_val(s, 1) & (~(1 << 21));
++					patch_value(s, cmd_ptr(s, 1), val);
++				}
+ 			}
+ 		}
+ 	}
+@@ -1607,6 +1617,7 @@ static int cmd_handler_mi_flush_dw(struct parser_exec_state *s)
+ 	unsigned long gma;
+ 	bool index_mode = false;
+ 	int ret = 0;
++	u32 hws_pga, val;
+ 
+ 	/* Check post-sync and ppgtt bit */
+ 	if (((cmd_val(s, 0) >> 14) & 0x3) && (cmd_val(s, 1) & (1 << 2))) {
+@@ -1617,6 +1628,15 @@ static int cmd_handler_mi_flush_dw(struct parser_exec_state *s)
+ 		if (cmd_val(s, 0) & (1 << 21))
+ 			index_mode = true;
+ 		ret = cmd_address_audit(s, gma, sizeof(u64), index_mode);
++		if (ret)
++			return ret;
++		if (index_mode) {
++			hws_pga = s->vgpu->hws_pga[s->ring_id];
++			gma = hws_pga + gma;
++			patch_value(s, cmd_ptr(s, 1), gma);
++			val = cmd_val(s, 0) & (~(1 << 21));
++			patch_value(s, cmd_ptr(s, 0), val);
++		}
+ 	}
+ 	/* Check notify bit */
+ 	if ((cmd_val(s, 0) & (1 << 8)))
+-- 
+2.17.1
+

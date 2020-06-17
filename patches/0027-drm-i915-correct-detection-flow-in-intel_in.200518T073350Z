@@ -1,0 +1,52 @@
+From 682e9fe7cdcca7653501a19d10cbc47b7be40e70 Mon Sep 17 00:00:00 2001
+From: Cai Yulong <yulongc@hwtc.com.cn>
+Date: Wed, 22 May 2019 12:24:08 +0800
+Subject: [PATCH 27/91] drm/i915: correct detection flow in
+ intel_initial_modeset
+
+The intel_initial_modeset driver use drm_connector_funcs.detect() to
+detect connector status, this is not working on the connectors without
+detect callback, this patch follows the mechanism in
+drm_helper_probe_detect to return the "connector_status_connected" for
+the connectors without detect callback.
+
+Tracked-On: projectacrn/acrn-hypervisor#3133
+Signed-off-by: Cai Yulong <yulongc@hwtc.com.cn>
+---
+ drivers/gpu/drm/i915/intel_initial_modeset.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_initial_modeset.c b/drivers/gpu/drm/i915/intel_initial_modeset.c
+index 222c6b6f429c..4f9b1cf4bc1f 100644
+--- a/drivers/gpu/drm/i915/intel_initial_modeset.c
++++ b/drivers/gpu/drm/i915/intel_initial_modeset.c
+@@ -80,9 +80,14 @@ static bool use_connector(struct drm_connector *connector)
+ 			break;
+ 		}
+ 
+-		connector->status = connector->funcs->detect(connector, true);
+-		if (connector->status != connector_status_connected) {
+-			connector->force = cl_mode->force;
++		if (connector->funcs && connector->funcs->detect) {
++			connector->status =
++			   connector->funcs->detect(connector, true);
++			if (connector->status != connector_status_connected) {
++				connector->force = cl_mode->force;
++				connector->status = connector_status_connected;
++			}
++		} else {
+ 			connector->status = connector_status_connected;
+ 		}
+ 		return true;
+@@ -316,6 +321,8 @@ static void modeset_config_fn(struct work_struct *work)
+ 			else if (connector->helper_private && connector->helper_private->detect_ctx)
+ 				connector->status = connector->helper_private->detect_ctx(connector,
+ 									    NULL, true);
++			else
++				connector->status = connector_status_connected;
+ 			drm_modeset_unlock(&dev->mode_config.connection_mutex);
+ 
+ 			if (connector->status == connector_status_connected) {
+-- 
+2.17.1
+

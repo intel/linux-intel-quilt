@@ -1,0 +1,185 @@
+From 8afb9fa3a8337821c0529d6fae93117b90871da1 Mon Sep 17 00:00:00 2001
+From: Casey Schaufler <casey@schaufler-ca.com>
+Date: Tue, 28 Aug 2018 11:40:43 -0700
+Subject: [PATCH 1192/1225] LSM: Use multiple secids in security module
+ interfaces
+
+This is the first of two parts required to change the
+security module infrastructure from using a u32 to
+identify extended security attributes to using a pointer
+to a structure containing the information required for
+the set of security modules involved. You can't put an
+SELinux secid, a Smack secid and an AppArmor secid
+all into a u32. They don't fit. Schemes that map a
+single u32 into sets of u32s are frought with data
+management issues and as a result are not suitable for
+use in the variety of ways secids manifest themselves
+in the Linux kernel.
+
+This patch changes the interfaces to the security modules
+to use a "struct secids" pointer where they used a u32
+before. There are changes in networking code where the
+layering isn't so clean as I would like it to be.
+
+Signed-off-by: Casey Schaufler <casey@schaufler-ca.com>
+---
+ net/netlabel/netlabel_kapi.c      |  2 +-
+ net/netlabel/netlabel_unlabeled.c | 13 ++++++++-----
+ net/netlabel/netlabel_user.h      |  2 +-
+ net/xfrm/xfrm_policy.c            |  2 +-
+ security/security.c               | 20 ++++++++++++++++----
+ 5 files changed, 27 insertions(+), 12 deletions(-)
+
+diff --git a/net/netlabel/netlabel_kapi.c b/net/netlabel/netlabel_kapi.c
+index 9cf89cd..7194d25 100644
+--- a/net/netlabel/netlabel_kapi.c
++++ b/net/netlabel/netlabel_kapi.c
+@@ -244,7 +244,7 @@ int netlbl_cfg_unlbl_static_add(struct net *net,
+ 
+ 	return netlbl_unlhsh_add(net,
+ 				 dev_name, addr, mask, addr_len,
+-				 secid, audit_info);
++				 secid->common, audit_info);
+ }
+ 
+ /**
+diff --git a/net/netlabel/netlabel_unlabeled.c b/net/netlabel/netlabel_unlabeled.c
+index c14bdb2..bf1d9f4 100644
+--- a/net/netlabel/netlabel_unlabeled.c
++++ b/net/netlabel/netlabel_unlabeled.c
+@@ -389,6 +389,7 @@ int netlbl_unlhsh_add(struct net *net,
+ 	struct audit_buffer *audit_buf = NULL;
+ 	char *secctx = NULL;
+ 	u32 secctx_len;
++	struct secids ids;
+ 
+ 	if (addr_len != sizeof(struct in_addr) &&
+ 	    addr_len != sizeof(struct in6_addr))
+@@ -421,7 +422,8 @@ int netlbl_unlhsh_add(struct net *net,
+ 		const struct in_addr *addr4 = addr;
+ 		const struct in_addr *mask4 = mask;
+ 
+-		ret_val = netlbl_unlhsh_add_addr4(iface, addr4, mask4, secid);
++		ids.common = secid;
++		ret_val = netlbl_unlhsh_add_addr4(iface, addr4, mask4, &ids);
+ 		if (audit_buf != NULL)
+ 			netlbl_af4list_audit_addr(audit_buf, 1,
+ 						  dev_name,
+@@ -434,7 +436,8 @@ int netlbl_unlhsh_add(struct net *net,
+ 		const struct in6_addr *addr6 = addr;
+ 		const struct in6_addr *mask6 = mask;
+ 
+-		ret_val = netlbl_unlhsh_add_addr6(iface, addr6, mask6, secid);
++		ids.common = secid;
++		ret_val = netlbl_unlhsh_add_addr6(iface, addr6, mask6, &ids);
+ 		if (audit_buf != NULL)
+ 			netlbl_af6list_audit_addr(audit_buf, 1,
+ 						  dev_name,
+@@ -1125,7 +1128,7 @@ static int netlbl_unlabel_staticlist_gen(u32 cmd,
+ 		if (ret_val != 0)
+ 			goto list_cb_failure;
+ 
+-		secid = addr4->secid;
++		secid = addr4->secid.common;
+ 	} else {
+ 		ret_val = nla_put_in6_addr(cb_arg->skb,
+ 					   NLBL_UNLABEL_A_IPV6ADDR,
+@@ -1139,7 +1142,7 @@ static int netlbl_unlabel_staticlist_gen(u32 cmd,
+ 		if (ret_val != 0)
+ 			goto list_cb_failure;
+ 
+-		secid = addr6->secid;
++		secid = addr6->secid.common;
+ 	}
+ 
+ 	ret_val = security_secid_to_secctx(&secid, &secctx, &secctx_len);
+@@ -1544,7 +1547,7 @@ int __init netlbl_unlabel_defconf(void)
+ 	/* Only the kernel is allowed to call this function and the only time
+ 	 * it is called is at bootup before the audit subsystem is reporting
+ 	 * messages so don't worry to much about these values. */
+-	security_task_getsecid(current, &audit_info.secid);
++	security_task_getsecid(current, &audit_info.secid.common);
+ 	audit_info.loginuid = GLOBAL_ROOT_UID;
+ 	audit_info.sessionid = 0;
+ 
+diff --git a/net/netlabel/netlabel_user.h b/net/netlabel/netlabel_user.h
+index 4a397cd..782ee19 100644
+--- a/net/netlabel/netlabel_user.h
++++ b/net/netlabel/netlabel_user.h
+@@ -48,7 +48,7 @@
+ static inline void netlbl_netlink_auditinfo(struct sk_buff *skb,
+ 					    struct netlbl_audit *audit_info)
+ {
+-	security_task_getsecid(current, &audit_info->secid);
++	security_task_getsecid(current, &audit_info->secid.common);
+ 	audit_info->loginuid = audit_get_loginuid(current);
+ 	audit_info->sessionid = audit_get_sessionid(current);
+ }
+diff --git a/net/xfrm/xfrm_policy.c b/net/xfrm/xfrm_policy.c
+index 0a962b6..56954a7 100644
+--- a/net/xfrm/xfrm_policy.c
++++ b/net/xfrm/xfrm_policy.c
+@@ -2304,7 +2304,7 @@ int __xfrm_decode_session(struct sk_buff *skb, struct flowi *fl,
+ 
+ 	afinfo->decode_session(skb, fl, reverse);
+ 
+-	err = security_xfrm_decode_session(skb, &fl->flowi_secid);
++	err = security_xfrm_decode_session(skb, &fl->flowi_secid.common);
+ 	rcu_read_unlock();
+ 	return err;
+ }
+diff --git a/security/security.c b/security/security.c
+index 8fabed8..163f1c2 100644
+--- a/security/security.c
++++ b/security/security.c
+@@ -1540,7 +1540,10 @@ EXPORT_SYMBOL(security_cred_getsecid);
+ 
+ int security_kernel_act_as(struct cred *new, struct secids *secid)
+ {
+-	return call_int_hook(kernel_act_as, 0, new, secid);
++	struct secids ids;
++
++	ids.common = secid;
++	return call_int_hook(kernel_act_as, 0, new, &ids);
+ }
+ 
+ int security_kernel_create_files_as(struct cred *new, struct inode *inode)
+@@ -2484,7 +2487,10 @@ int security_xfrm_state_alloc_acquire(struct xfrm_state *x,
+ 				      struct xfrm_sec_ctx *polsec,
+ 				      struct secids *secid)
+ {
+-	return call_int_hook(xfrm_state_alloc_acquire, 0, x, polsec, secid);
++	struct secids ids;
++
++	ids.common = secid;
++	return call_int_hook(xfrm_state_alloc_acquire, 0, x, polsec, &ids);
+ }
+ 
+ int security_xfrm_state_delete(struct xfrm_state *x)
+@@ -2501,7 +2507,10 @@ void security_xfrm_state_free(struct xfrm_state *x)
+ int security_xfrm_policy_lookup(struct xfrm_sec_ctx *ctx,
+ 					struct secids *fl_secid, u8 dir)
+ {
+-	return call_int_hook(xfrm_policy_lookup, 0, ctx, fl_secid, dir);
++	struct secids ids;
++
++	ids.common = fl_secid;
++	return call_int_hook(xfrm_policy_lookup, 0, ctx, &ids, dir);
+ }
+ 
+ int security_xfrm_state_pol_flow_match(struct xfrm_state *x,
+@@ -2603,7 +2612,10 @@ void security_audit_rule_free(void *lsmrule)
+ int security_audit_rule_match(struct secids *secid, u32 field, u32 op,
+ 			      void *lsmrule, struct audit_context *actx)
+ {
+-	return call_int_hook(audit_rule_match, 0, secid, field, op, lsmrule,
++	struct secids ids;
++
++	ids.common = secid;
++	return call_int_hook(audit_rule_match, 0, &ids, field, op, lsmrule,
+ 				actx);
+ }
+ #endif /* CONFIG_AUDIT */
+-- 
+2.7.4
+

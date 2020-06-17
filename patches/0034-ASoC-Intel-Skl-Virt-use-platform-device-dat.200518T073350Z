@@ -1,0 +1,96 @@
+From ec5343adcd8c1220c67ad4f7d2e24422db6604ed Mon Sep 17 00:00:00 2001
+From: Cai Yulong <yulongc@hwtc.com.cn>
+Date: Mon, 24 Jun 2019 17:30:51 +0800
+Subject: [PATCH 34/91] ASoC: Intel: Skl: Virt: use platform device data to
+ pass virtio private data
+
+call dev_set_drvdata before the driver initialization will have a warning
+printed by kernel device core, use platform_device_add_data instead.
+
+Tracked-On: projectacrn/acrn-hypervisor#3449
+Signed-off-by: Cai Yulong <yulongc@hwtc.com.cn>
+---
+ sound/soc/intel/skylake/skl.c                 | 26 ++++++++++++++-----
+ .../soc/intel/skylake/virtio/skl-virt-audio.c |  4 +--
+ .../soc/intel/skylake/virtio/skl-virtio-be.h  |  2 +-
+ 3 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/skl.c b/sound/soc/intel/skylake/skl.c
+index c16ad3b65bb3..396fc48d1d90 100644
+--- a/sound/soc/intel/skylake/skl.c
++++ b/sound/soc/intel/skylake/skl.c
+@@ -606,16 +606,30 @@ int skl_virt_device_register(struct skl *skl)
+ 	ret = platform_device_add(pdev);
+ 	if (ret) {
+ 		dev_err(bus->dev, "failed to add virtualization device\n");
+-		platform_device_put(pdev);
+-		return -EIO;
++		ret = -EIO;
++		goto out_pdev_put;
+ 	}
+-	pdata = devm_kzalloc(&pdev->dev,
+-		sizeof(struct skl_virt_pdata), GFP_KERNEL);
++
++	pdata = kzalloc(sizeof(struct skl_virt_pdata), GFP_KERNEL);
++	if (pdata == NULL) {
++		ret = -ENOMEM;
++		goto out_pdev_put;
++	}
++
+ 	pdata->skl = skl;
+-	dev_set_drvdata(&pdev->dev, pdata);
+ 	skl->virt_dev = pdev;
++	ret = platform_device_add_data(pdev, pdata,
++			sizeof(struct skl_virt_pdata));
++	if (ret) {
++		dev_err(bus->dev, "failed to add platform data\n");
++		ret = -EIO;
++	}
+ 
+-	return 0;
++	kfree(pdata);
++out_pdev_put:
++	if (ret)
++		platform_device_put(pdev);
++	return ret;
+ }
+ 
+ void skl_virt_device_unregister(struct skl *skl)
+diff --git a/sound/soc/intel/skylake/virtio/skl-virt-audio.c b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+index 3ebbd623d7e3..b89d178e4dd0 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virt-audio.c
++++ b/sound/soc/intel/skylake/virtio/skl-virt-audio.c
+@@ -356,7 +356,7 @@ static int vskl_probe(struct platform_device *pdev)
+ {
+ 	struct vskl *vskl;
+ 	int ret;
+-	struct skl_virt_pdata *pdata = dev_get_drvdata(&pdev->dev);
++	struct skl_virt_pdata *pdata = dev_get_platdata(&pdev->dev);
+ 
+ 	if (!pdata || !pdata->skl) {
+ 		dev_err(&pdev->dev, "Failed to find native Skylake audio driver");
+@@ -380,7 +380,7 @@ static int vskl_remove(struct platform_device *pdev)
+ {
+ 	int ret;
+ 	struct vskl *vskl;
+-	struct skl_virt_pdata *pdata = dev_get_drvdata(&pdev->dev);
++	struct skl_virt_pdata *pdata = dev_get_platdata(&pdev->dev);
+ 
+ 	vskl = pdata->private_data;
+ 	if (!vskl)
+diff --git a/sound/soc/intel/skylake/virtio/skl-virtio-be.h b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+index 42e5c2b79fa9..9a97653da7c1 100644
+--- a/sound/soc/intel/skylake/virtio/skl-virtio-be.h
++++ b/sound/soc/intel/skylake/virtio/skl-virtio-be.h
+@@ -26,7 +26,7 @@ struct vskl;
+ struct snd_skl_vbe;
+ 
+ #define skl_get_vrtdata(skl) \
+-	(dev_get_drvdata(&skl->virt_dev->dev))
++	(dev_get_platdata(&skl->virt_dev->dev))
+ #define skl_get_vrtpdata(skl) \
+ 	((struct skl_virt_pdata *)(skl_get_vrtdata(skl)))
+ #define skl_to_vskl(skl) \
+-- 
+2.17.1
+

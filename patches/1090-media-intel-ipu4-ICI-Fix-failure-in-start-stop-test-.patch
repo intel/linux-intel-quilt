@@ -1,0 +1,67 @@
+From 8110ef069004169b18257a597904cdd55038070e Mon Sep 17 00:00:00 2001
+From: "Poluri, Sarat Chandra" <sarat.chandra.poluri@intel.com>
+Date: Wed, 1 May 2019 16:49:39 -0700
+Subject: [PATCH 1090/1225] media: intel-ipu4: [ICI] Fix failure in start stop
+ test with multi-streaming.
+
+Issue:
+libcamhal calls reset_active_links on closing one stream that resets the
+pipeline for the other stream.
+
+Fix:
+Only allow the resetting of flags for inactive pipeline. This is also necessary
+for fault isolation in multi-streaming across UOS and SOS.
+
+Change-Id: I09e77f628067a1766a57bcb3be1e3c6786c4ca87
+Tracked-On: PKT-2287
+Tracked-On: HSDES-1409170083
+Signed-off-by: Poluri, Sarat Chandra <sarat.chandra.poluri@intel.com>
+---
+ drivers/media/pci/intel/ici/ici-isys-pipeline-device.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ici/ici-isys-pipeline-device.c b/drivers/media/pci/intel/ici/ici-isys-pipeline-device.c
+index a4e4d77..f5cb117 100644
+--- a/drivers/media/pci/intel/ici/ici-isys-pipeline-device.c
++++ b/drivers/media/pci/intel/ici/ici-isys-pipeline-device.c
+@@ -191,6 +191,8 @@ static int ici_setup_link(struct file *file, void *fh,
+ 			file->private_data;
+ 	struct ici_isys_node *src_node, *sink_node;
+ 	struct node_pipe *np;
++	struct ici_isys_pipeline *ip;
++	bool flags_reset;
+ 
+ 	src_node = find_node(pipe_dev, link->source.node_id);
+ 	if (!src_node)
+@@ -201,18 +203,24 @@ static int ici_setup_link(struct file *file, void *fh,
+ 		return -ENODEV;
+ 
+ 	np = find_pipe(src_node, link);
++	ip = ici_nodepipe_to_pipeline(src_node->pipe);
++	flags_reset = ip && ip->streaming && !link->flags;
+ 
+ 	if (np) {
+-		np->flags = link->flags;
++		if (!flags_reset)
++			np->flags = link->flags;
+ 	} else {
+ 		dev_warn(&pipe_dev->dev, "Link not found\n");
+ 		return -ENODEV;
+ 	}
+ 
+ 	np = find_pipe(sink_node, link);
+-	if (np)
+-		np->flags = link->flags | ICI_LINK_FLAG_BACKLINK;
+-	else
++	ip = ici_nodepipe_to_pipeline(sink_node->pipe);
++	flags_reset = ip && ip->streaming && !link->flags;
++	if (np) {
++		if (!flags_reset)
++			np->flags = link->flags | ICI_LINK_FLAG_BACKLINK;
++	} else
+ 		dev_warn(&pipe_dev->dev, "Backlink not found\n");
+ 
+ 	return rval;
+-- 
+2.7.4
+

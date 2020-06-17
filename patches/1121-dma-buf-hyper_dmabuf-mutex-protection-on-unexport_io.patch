@@ -1,0 +1,57 @@
+From e8596c0bab912778ccab98be7e529e3df0555ab3 Mon Sep 17 00:00:00 2001
+From: Dongwon Kim <dongwon.kim@intel.com>
+Date: Tue, 18 Jun 2019 00:40:36 -0700
+Subject: [PATCH 1121/1225] dma-buf/hyper_dmabuf: mutex protection on
+ unexport_ioctl
+
+Make unexport ioctl to acquire mutex operation to prevent from scheduling
+unexport operation for the 'exported' that is currently in remove process
+or has already been unexported and removed.
+
+Signed-off-by: Dongwon Kim <dongwon.kim@intel.com>
+---
+ drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+index 17b24d2..b18f703 100644
+--- a/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
++++ b/drivers/dma-buf/hyper_dmabuf/hyper_dmabuf_ioctl.c
+@@ -699,6 +699,8 @@ int hyper_dmabuf_unexport_ioctl(struct file *filp, void *data)
+ 
+ 	dev_dbg(hy_drv_priv->dev, "%s entry\n", __func__);
+ 
++	mutex_lock(&hy_drv_priv->lock);
++
+ 	/* find dmabuf in export list */
+ 	exported = hyper_dmabuf_find_exported(unexport_attr->hid);
+ 
+@@ -708,19 +710,23 @@ int hyper_dmabuf_unexport_ioctl(struct file *filp, void *data)
+ 		unexport_attr->hid.rng_key[1], unexport_attr->hid.rng_key[2]);
+ 
+ 	/* failed to find corresponding entry in export list */
+-	if (exported == NULL) {
++	if (!exported) {
+ 		unexport_attr->status = -ENOENT;
++		mutex_unlock(&hy_drv_priv->lock);
+ 		return -ENOENT;
+ 	}
+ 
+-	if (exported->unexport_sched)
++	if (exported->unexport_sched) {
++		mutex_unlock(&hy_drv_priv->lock);
+ 		return 0;
++	}
+ 
+ 	exported->unexport_sched = true;
+ 	INIT_DELAYED_WORK(&exported->unexport, delayed_unexport);
+ 	schedule_delayed_work(&exported->unexport,
+ 			      msecs_to_jiffies(unexport_attr->delay_ms));
+ 
++	mutex_unlock(&hy_drv_priv->lock);
+ 	dev_dbg(hy_drv_priv->dev, "%s exit\n", __func__);
+ 	return 0;
+ }
+-- 
+2.7.4
+

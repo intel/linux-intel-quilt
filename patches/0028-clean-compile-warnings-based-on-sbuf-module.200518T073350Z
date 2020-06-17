@@ -1,0 +1,88 @@
+From 51d5a3e6a6ee908ef8a355452e831bee348759f1 Mon Sep 17 00:00:00 2001
+From: fuyanX <yanx.fu@intel.com>
+Date: Tue, 28 May 2019 23:03:56 +0800
+Subject: [PATCH 28/91] clean compile warnings based on sbuf module
+
+As sbuf's interface(sbuf_share_setup) is modified in ACRN2724,
+the corresponding modules which based on sbuf should be modified
+to clean the compile warnings.
+
+Tracked-On: projectacrn/acrn-hypervisor#3027
+Signed-off-by: YanX Fu <yanx.fu@intel.com>
+Reviewed-by: Yin Fengwei <fengwei.yin@intel.com>
+---
+ drivers/platform/x86/sepdk/inc/lwpmudrv.h   | 2 +-
+ drivers/platform/x86/sepdk/sep/lwpmudrv.c   | 4 ++--
+ drivers/platform/x86/socwatchhv/swhv_acrn.c | 7 ++++---
+ 3 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/platform/x86/sepdk/inc/lwpmudrv.h b/drivers/platform/x86/sepdk/inc/lwpmudrv.h
+index d682ab632127..a0e50fc33609 100644
+--- a/drivers/platform/x86/sepdk/inc/lwpmudrv.h
++++ b/drivers/platform/x86/sepdk/inc/lwpmudrv.h
+@@ -450,7 +450,7 @@ typedef struct vm_switch_trace vm_switch_trace_t;
+ shared_buf_t *sbuf_allocate(uint32_t ele_num, uint32_t ele_size);
+ void sbuf_free(shared_buf_t *sbuf);
+ int sbuf_get(shared_buf_t *sbuf, uint8_t *data);
+-int sbuf_share_setup(uint32_t pcpu_id, uint32_t sbuf_id, shared_buf_t *sbuf);
++int sbuf_share_setup(uint32_t pcpu_id, uint32_t sbuf_id, uint64_t gpa);
+ 
+ extern shared_buf_t **samp_buf_per_cpu;
+ 
+diff --git a/drivers/platform/x86/sepdk/sep/lwpmudrv.c b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+index 5c5906dabbd5..918249135cfa 100644
+--- a/drivers/platform/x86/sepdk/sep/lwpmudrv.c
++++ b/drivers/platform/x86/sepdk/sep/lwpmudrv.c
+@@ -1058,7 +1058,7 @@ static OS_STATUS lwpmudrv_Initialize_Driver(PVOID buf_usr_to_drv,
+ 			}
+ 
+ 			status = sbuf_share_setup(cpu_num, ACRN_SEP,
+-						  samp_buf_per_cpu[cpu_num]);
++				virt_to_phys(samp_buf_per_cpu[cpu_num]));
+ 			if (status < 0) {
+ 				status = OS_FAULT;
+ 				pr_err("Failed to set up sampbuf on cpu%d\n",
+@@ -4423,7 +4423,7 @@ static OS_STATUS lwpmudrv_Finish_Stop(void)
+ #else
+ 		for (cpu = 0; cpu < GLOBAL_STATE_num_cpus(driver_state);
+ 		     cpu++) {
+-			sbuf_share_setup(cpu, ACRN_SEP, NULL);
++			sbuf_share_setup(cpu, ACRN_SEP, 0);
+ 			sbuf_free(samp_buf_per_cpu[cpu]);
+ 		}
+ 		samp_buf_per_cpu = CONTROL_Free_Memory(samp_buf_per_cpu);
+diff --git a/drivers/platform/x86/socwatchhv/swhv_acrn.c b/drivers/platform/x86/socwatchhv/swhv_acrn.c
+index 962db47cec45..35a803978390 100644
+--- a/drivers/platform/x86/socwatchhv/swhv_acrn.c
++++ b/drivers/platform/x86/socwatchhv/swhv_acrn.c
+@@ -167,7 +167,8 @@ int swhv_init_per_cpu_buffers(void)
+ 	/* TODO understand the use of this API */
+ 	foreach_cpu(cpu, pcpu_num)
+ 	{
+-		ret = sbuf_share_setup(cpu, ACRN_SOCWATCH, sbuf_per_cpu[cpu]);
++		ret = sbuf_share_setup(cpu, ACRN_SOCWATCH,
++				virt_to_phys(sbuf_per_cpu[cpu]));
+ 		if (ret < 0) {
+ 			pw_pr_error("Failed to setup buffer for cpu %d\n", cpu);
+ 			goto out_sbuf;
+@@ -177,7 +178,7 @@ int swhv_init_per_cpu_buffers(void)
+ 	return PW_SUCCESS;
+ out_sbuf:
+ 	for (i = --cpu; i >= 0; i--) {
+-		sbuf_share_setup(i, ACRN_SOCWATCH, NULL);
++		sbuf_share_setup(i, ACRN_SOCWATCH, 0);
+ 	}
+ 	cpu = pcpu_num;
+ 
+@@ -203,7 +204,7 @@ void swhv_destroy_per_cpu_buffers(void)
+ 		 */
+ 
+ 		/* set sbuf pointer to NULL in HV */
+-		sbuf_share_setup(cpu, ACRN_SOCWATCH, NULL);
++		sbuf_share_setup(cpu, ACRN_SOCWATCH, 0);
+ 
+ 		/* free sbuf, sbuf_per_cpu[cpu] should be set NULL */
+ 		sbuf_free(sbuf_per_cpu[cpu]);
+-- 
+2.17.1
+
