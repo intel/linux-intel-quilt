@@ -1,0 +1,141 @@
+From 02eb4365a9280b3a9454e4eb3086d8471b441de5 Mon Sep 17 00:00:00 2001
+From: Kan Liang <kan.liang@linux.intel.com>
+Date: Thu, 28 May 2020 08:19:28 -0700
+Subject: [PATCH 02/11] perf/x86/intel/uncore: Record the size of mapped area
+
+Perf cannot validate an address before the actual access to MMIO space
+of some uncore units, e.g. IMC on TGL. Accessing an invalid address,
+which exceeds mapped area, can trigger oops.
+
+Perf never records the size of mapped area. Generic functions, e.g.
+uncore_mmio_read_counter(), cannot get the correct size for address
+validation.
+
+Add mmio_map_size in intel_uncore_type to record the size of mapped
+area. Print warning message if ioremap fails.
+
+Signed-off-by: Kan Liang <kan.liang@linux.intel.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://lkml.kernel.org/r/1590679169-61823-2-git-send-email-kan.liang@linux.intel.com
+---
+ arch/x86/events/intel/uncore.h       |  1 +
+ arch/x86/events/intel/uncore_snb.c   | 13 +++++++++++--
+ arch/x86/events/intel/uncore_snbep.c |  9 +++++++--
+ 3 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/events/intel/uncore.h b/arch/x86/events/intel/uncore.h
+index 1204dcc9fe9b..e374befc54e3 100644
+--- a/arch/x86/events/intel/uncore.h
++++ b/arch/x86/events/intel/uncore.h
+@@ -61,6 +61,7 @@ struct intel_uncore_type {
+ 		unsigned msr_offset;
+ 		unsigned mmio_offset;
+ 	};
++	unsigned mmio_map_size;
+ 	unsigned num_shared_regs:8;
+ 	unsigned single_fixed:1;
+ 	unsigned pair_ctr_ctl:1;
+diff --git a/arch/x86/events/intel/uncore_snb.c b/arch/x86/events/intel/uncore_snb.c
+index 45d334bed43f..636e86e046cc 100644
+--- a/arch/x86/events/intel/uncore_snb.c
++++ b/arch/x86/events/intel/uncore_snb.c
+@@ -415,6 +415,7 @@ static const struct attribute_group snb_uncore_imc_format_group = {
+ 
+ static void snb_uncore_imc_init_box(struct intel_uncore_box *box)
+ {
++	struct intel_uncore_type *type = box->pmu->type;
+ 	struct pci_dev *pdev = box->pci_dev;
+ 	int where = SNB_UNCORE_PCI_IMC_BAR_OFFSET;
+ 	resource_size_t addr;
+@@ -430,7 +431,10 @@ static void snb_uncore_imc_init_box(struct intel_uncore_box *box)
+ 
+ 	addr &= ~(PAGE_SIZE - 1);
+ 
+-	box->io_addr = ioremap(addr, SNB_UNCORE_PCI_IMC_MAP_SIZE);
++	box->io_addr = ioremap(addr, type->mmio_map_size);
++	if (!box->io_addr)
++		pr_warn("perf uncore: Failed to ioremap for %s.\n", type->name);
++
+ 	box->hrtimer_duration = UNCORE_SNB_IMC_HRTIMER_INTERVAL;
+ }
+ 
+@@ -586,6 +590,7 @@ static struct intel_uncore_type snb_uncore_imc = {
+ 	.num_counters   = 2,
+ 	.num_boxes	= 1,
+ 	.num_freerunning_types	= SNB_PCI_UNCORE_IMC_FREERUNNING_TYPE_MAX,
++	.mmio_map_size	= SNB_UNCORE_PCI_IMC_MAP_SIZE,
+ 	.freerunning	= snb_uncore_imc_freerunning,
+ 	.event_descs	= snb_uncore_imc_events,
+ 	.format_group	= &snb_uncore_imc_format_group,
+@@ -1091,6 +1096,7 @@ static void tgl_uncore_imc_freerunning_init_box(struct intel_uncore_box *box)
+ {
+ 	struct pci_dev *pdev = tgl_uncore_get_mc_dev();
+ 	struct intel_uncore_pmu *pmu = box->pmu;
++	struct intel_uncore_type *type = pmu->type;
+ 	resource_size_t addr;
+ 	u32 mch_bar;
+ 
+@@ -1113,7 +1119,9 @@ static void tgl_uncore_imc_freerunning_init_box(struct intel_uncore_box *box)
+ 	addr |= ((resource_size_t)mch_bar << 32);
+ #endif
+ 
+-	box->io_addr = ioremap(addr, TGL_UNCORE_PCI_IMC_MAP_SIZE);
++	box->io_addr = ioremap(addr, type->mmio_map_size);
++	if (!box->io_addr)
++		pr_warn("perf uncore: Failed to ioremap for %s.\n", type->name);
+ }
+ 
+ static struct intel_uncore_ops tgl_uncore_imc_freerunning_ops = {
+@@ -1139,6 +1147,7 @@ static struct intel_uncore_type tgl_uncore_imc_free_running = {
+ 	.num_counters		= 3,
+ 	.num_boxes		= 2,
+ 	.num_freerunning_types	= TGL_MMIO_UNCORE_IMC_FREERUNNING_TYPE_MAX,
++	.mmio_map_size		= TGL_UNCORE_PCI_IMC_MAP_SIZE,
+ 	.freerunning		= tgl_uncore_imc_freerunning,
+ 	.ops			= &tgl_uncore_imc_freerunning_ops,
+ 	.event_descs		= tgl_uncore_imc_events,
+diff --git a/arch/x86/events/intel/uncore_snbep.c b/arch/x86/events/intel/uncore_snbep.c
+index ad20220af303..40406571740a 100644
+--- a/arch/x86/events/intel/uncore_snbep.c
++++ b/arch/x86/events/intel/uncore_snbep.c
+@@ -4383,6 +4383,7 @@ static struct pci_dev *snr_uncore_get_mc_dev(int id)
+ static void snr_uncore_mmio_init_box(struct intel_uncore_box *box)
+ {
+ 	struct pci_dev *pdev = snr_uncore_get_mc_dev(box->dieid);
++	struct intel_uncore_type *type = box->pmu->type;
+ 	unsigned int box_ctl = uncore_mmio_box_ctl(box);
+ 	resource_size_t addr;
+ 	u32 pci_dword;
+@@ -4398,9 +4399,11 @@ static void snr_uncore_mmio_init_box(struct intel_uncore_box *box)
+ 
+ 	addr += box_ctl;
+ 
+-	box->io_addr = ioremap(addr, SNR_IMC_MMIO_SIZE);
+-	if (!box->io_addr)
++	box->io_addr = ioremap(addr, type->mmio_map_size);
++	if (!box->io_addr) {
++		pr_warn("perf uncore: Failed to ioremap for %s.\n", type->name);
+ 		return;
++	}
+ 
+ 	writel(IVBEP_PMON_BOX_CTL_INT, box->io_addr);
+ }
+@@ -4487,6 +4490,7 @@ static struct intel_uncore_type snr_uncore_imc = {
+ 	.event_mask	= SNBEP_PMON_RAW_EVENT_MASK,
+ 	.box_ctl	= SNR_IMC_MMIO_PMON_BOX_CTL,
+ 	.mmio_offset	= SNR_IMC_MMIO_OFFSET,
++	.mmio_map_size	= SNR_IMC_MMIO_SIZE,
+ 	.ops		= &snr_uncore_mmio_ops,
+ 	.format_group	= &skx_uncore_format_group,
+ };
+@@ -4527,6 +4531,7 @@ static struct intel_uncore_type snr_uncore_imc_free_running = {
+ 	.num_counters		= 3,
+ 	.num_boxes		= 1,
+ 	.num_freerunning_types	= SNR_IMC_FREERUNNING_TYPE_MAX,
++	.mmio_map_size		= SNR_IMC_MMIO_SIZE,
+ 	.freerunning		= snr_imc_freerunning,
+ 	.ops			= &snr_uncore_imc_freerunning_ops,
+ 	.event_descs		= snr_uncore_imc_freerunning_events,
+-- 
+2.17.1
+
