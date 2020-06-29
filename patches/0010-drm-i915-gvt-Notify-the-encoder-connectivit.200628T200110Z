@@ -1,0 +1,106 @@
+From e3c56b3d4c3bf2f87899abc116d8a97488e6e3ee Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Fri, 17 Apr 2020 09:08:47 +0800
+Subject: [PATCH 10/24] drm/i915/gvt: Notify the encoder connectivity change to
+ GVT properly
+
+Previously the connectivity change is notified in encoder disable and
+enable routine. However for encoder like eDP, it's always connected as
+programmed by BIOS. When only connector to this encoder is enabled,
+direct display doesn't get chance to be notified forever so can't
+properly map the port to vGPU. The issue could happens on some platforms
+that have eDP encoder enabled in VBT and has connector like VGA/HDMI
+connected to it.
+
+Since encoder status will always be notified to opregion by i915, move
+the notification action to intel_opregion_notify_encoder() so that
+direct display could be notified about the status change, not only at
+enable and disable routine, but also at encoder sanitization.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit c390193c21f8f0d99ec2a45cb05b23ec04db8eb5)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_display.c  | 16 ----------------
+ drivers/gpu/drm/i915/display/intel_opregion.c | 10 ++++++++++
+ 2 files changed, 10 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index b47434a01a23..39cc72019b64 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -6792,9 +6792,6 @@ static void intel_encoders_enable(struct intel_crtc *crtc,
+ 	struct drm_connector_state *conn_state;
+ 	struct drm_connector *conn;
+ 	int i;
+-#if IS_ENABLED(CONFIG_DRM_I915_GVT)
+-	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+-#endif
+ 
+ 	for_each_new_connector_in_state(&state->base, conn, conn_state, i) {
+ 		struct intel_encoder *encoder =
+@@ -6807,11 +6804,6 @@ static void intel_encoders_enable(struct intel_crtc *crtc,
+ 			encoder->enable(encoder, crtc_state, conn_state);
+ 		intel_opregion_notify_encoder(encoder, true);
+ 	}
+-#if IS_ENABLED(CONFIG_DRM_I915_GVT)
+-	if (dev_priv->gvt)
+-		queue_work(system_unbound_wq,
+-			   &dev_priv->gvt->connector_change_work);
+-#endif
+ }
+ 
+ static void intel_encoders_disable(struct intel_crtc *crtc,
+@@ -6821,9 +6813,6 @@ static void intel_encoders_disable(struct intel_crtc *crtc,
+ 	struct drm_connector_state *old_conn_state;
+ 	struct drm_connector *conn;
+ 	int i;
+-#if IS_ENABLED(CONFIG_DRM_I915_GVT)
+-	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+-#endif
+ 
+ 	for_each_old_connector_in_state(&state->base, conn, old_conn_state, i) {
+ 		struct intel_encoder *encoder =
+@@ -6836,11 +6825,6 @@ static void intel_encoders_disable(struct intel_crtc *crtc,
+ 		if (encoder->disable)
+ 			encoder->disable(encoder, old_crtc_state, old_conn_state);
+ 	}
+-#if IS_ENABLED(CONFIG_DRM_I915_GVT)
+-	if (dev_priv->gvt)
+-		queue_work(system_unbound_wq,
+-			   &dev_priv->gvt->connector_change_work);
+-#endif
+ }
+ 
+ static void intel_encoders_post_disable(struct intel_crtc *crtc,
+diff --git a/drivers/gpu/drm/i915/display/intel_opregion.c b/drivers/gpu/drm/i915/display/intel_opregion.c
+index 969ade623691..3ef16b0db67d 100644
+--- a/drivers/gpu/drm/i915/display/intel_opregion.c
++++ b/drivers/gpu/drm/i915/display/intel_opregion.c
+@@ -38,6 +38,10 @@
+ #include "intel_display_types.h"
+ #include "intel_opregion.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ #define OPREGION_HEADER_OFFSET 0
+ #define OPREGION_ACPI_OFFSET   0x100
+ #define   ACPI_CLID 0x01ac /* current lid state indicator */
+@@ -410,6 +414,12 @@ int intel_opregion_notify_encoder(struct intel_encoder *intel_encoder,
+ 
+ 	parm |= type << (16 + port * 3);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt)
++		queue_work(system_unbound_wq,
++			   &dev_priv->gvt->connector_change_work);
++#endif
++
+ 	return swsci(dev_priv, SWSCI_SBCB_DISPLAY_POWER_STATE, parm, NULL);
+ }
+ 
+-- 
+2.17.1
+

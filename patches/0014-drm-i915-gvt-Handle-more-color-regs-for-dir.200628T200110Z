@@ -1,0 +1,619 @@
+From bea5be91c454fba45d08d02508a9017c2c0461f3 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Fri, 24 Apr 2020 10:06:58 +0800
+Subject: [PATCH 14/24] drm/i915/gvt: Handle more color regs for direct display
+
+Host are now using more color regs in different mode (text, GUI), while
+different guests may use different settings. Without handling these regs
+the screen will display with incorrect color/gamma.
+
+Below regs are handled:
+SKL_BOTTOM_COLOR
+GAMMA_MODE
+PIPE_CSC_MODE
+PIPE_CSC_COEFF_RY_GY
+PIPE_CSC_COEFF_BY
+PIPE_CSC_COEFF_RU_GU
+PIPE_CSC_COEFF_BU
+PIPE_CSC_COEFF_RV_GV
+PIPE_CSC_COEFF_BV
+PIPE_CSC_PREOFF_HI
+PIPE_CSC_PREOFF_ME
+PIPE_CSC_PREOFF_LO
+PIPE_CSC_POSTOFF_HI
+PIPE_CSC_POSTOFF_ME
+PIPE_CSC_POSTOFF_LO
+LGC_PALETTE
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit 3233246c4dc24752017b64c6a2c477a47823cdd3)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_color.c   |  91 +++++++++-
+ drivers/gpu/drm/i915/display/intel_display.c |  39 +++-
+ drivers/gpu/drm/i915/gvt/display.c           |  53 ++++++
+ drivers/gpu/drm/i915/gvt/display.h           |   2 +
+ drivers/gpu/drm/i915/gvt/gvt.h               |  16 ++
+ drivers/gpu/drm/i915/gvt/handlers.c          | 182 +++++++++++++------
+ 6 files changed, 318 insertions(+), 65 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_color.c b/drivers/gpu/drm/i915/display/intel_color.c
+index 3980e8b50c28..27026038dc92 100644
+--- a/drivers/gpu/drm/i915/display/intel_color.c
++++ b/drivers/gpu/drm/i915/display/intel_color.c
+@@ -25,6 +25,10 @@
+ #include "intel_color.h"
+ #include "intel_display_types.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ #define CTM_COEFF_SIGN	(1ULL << 63)
+ 
+ #define CTM_COEFF_1_0	(1ULL << 32)
+@@ -156,6 +160,29 @@ static void ilk_update_pipe_csc(struct intel_crtc *crtc,
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+ 	enum pipe pipe = crtc->pipe;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++
++	if (gvt) {
++		pipe_regs = &gvt->pipe_info[pipe].dom0_pipe_regs;
++		pipe_regs->csc_preoff_hi = preoff[0];
++		pipe_regs->csc_preoff_me = preoff[1];
++		pipe_regs->csc_preoff_lo = preoff[2];
++		pipe_regs->csc_coeff_rygy = coeff[0] << 16 | coeff[1];
++		pipe_regs->csc_coeff_by = coeff[2] << 16;
++		pipe_regs->csc_coeff_rugu = coeff[3] << 16 | coeff[4];
++		pipe_regs->csc_coeff_bu = coeff[5] << 16;
++		pipe_regs->csc_coeff_rvgv = coeff[6] << 16 | coeff[7];
++		pipe_regs->csc_coeff_bv = coeff[8] << 16;
++		pipe_regs->csc_postoff_hi = postoff[0];
++		pipe_regs->csc_postoff_me = postoff[0];
++		pipe_regs->csc_postoff_lo = postoff[0];
++
++		if (gvt->pipe_info[pipe].owner)
++			return;
++	}
++#endif
+ 
+ 	I915_WRITE(PIPE_CSC_PREOFF_HI(pipe), preoff[0]);
+ 	I915_WRITE(PIPE_CSC_PREOFF_ME(pipe), preoff[1]);
+@@ -273,6 +300,14 @@ static void ilk_load_csc_matrix(const struct intel_crtc_state *crtc_state)
+ 	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+ 	bool limited_color_range = ilk_csc_limited_range(crtc_state);
++	bool skip = false;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++
++	if (gvt && gvt->pipe_info[crtc->pipe].owner)
++		skip = true;
++#endif
+ 
+ 	if (crtc_state->hw.ctm) {
+ 		u16 coeff[9];
+@@ -304,7 +339,14 @@ static void ilk_load_csc_matrix(const struct intel_crtc_state *crtc_state)
+ 				    ilk_csc_off_zero);
+ 	}
+ 
+-	I915_WRITE(PIPE_CSC_MODE(crtc->pipe), crtc_state->csc_mode);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (gvt) {
++		pipe_regs = &gvt->pipe_info[crtc->pipe].dom0_pipe_regs;
++		pipe_regs->csc_mode = crtc_state->csc_mode;
++	}
++#endif
++	if (!skip)
++		I915_WRITE(PIPE_CSC_MODE(crtc->pipe), crtc_state->csc_mode);
+ }
+ 
+ static void icl_load_csc_matrix(const struct intel_crtc_state *crtc_state)
+@@ -408,6 +450,14 @@ static void i9xx_load_luts_internal(const struct intel_crtc_state *crtc_state,
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+ 	enum pipe pipe = crtc->pipe;
+ 	int i;
++	bool skip = false;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++
++	if (gvt && gvt->pipe_info[pipe].owner)
++		skip = true;
++#endif
+ 
+ 	if (HAS_GMCH(dev_priv)) {
+ 		if (intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DSI))
+@@ -425,10 +475,19 @@ static void i9xx_load_luts_internal(const struct intel_crtc_state *crtc_state,
+ 				(drm_color_lut_extract(lut[i].green, 8) << 8) |
+ 				drm_color_lut_extract(lut[i].blue, 8);
+ 
+-			if (HAS_GMCH(dev_priv))
+-				I915_WRITE(PALETTE(pipe, i), word);
+-			else
+-				I915_WRITE(LGC_PALETTE(pipe, i), word);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++			if (gvt) {
++				pipe_regs = &gvt->pipe_info[pipe].dom0_pipe_regs;
++				pipe_regs->lgc_palette[i] = word;
++			}
++#endif
++
++			if (!skip) {
++				if (HAS_GMCH(dev_priv))
++					I915_WRITE(PALETTE(pipe, i), word);
++				else
++					I915_WRITE(LGC_PALETTE(pipe, i), word);
++			}
+ 		}
+ 	}
+ }
+@@ -482,6 +541,14 @@ static void skl_color_commit(const struct intel_crtc_state *crtc_state)
+ 	struct drm_i915_private *dev_priv = to_i915(crtc->base.dev);
+ 	enum pipe pipe = crtc->pipe;
+ 	u32 val = 0;
++	bool skip = false;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++
++	if (gvt && gvt->pipe_info[pipe].owner)
++		skip = true;
++#endif
+ 
+ 	/*
+ 	 * We don't (yet) allow userspace to control the pipe background color,
+@@ -492,9 +559,19 @@ static void skl_color_commit(const struct intel_crtc_state *crtc_state)
+ 		val |= SKL_BOTTOM_COLOR_GAMMA_ENABLE;
+ 	if (crtc_state->csc_enable)
+ 		val |= SKL_BOTTOM_COLOR_CSC_ENABLE;
+-	I915_WRITE(SKL_BOTTOM_COLOR(pipe), val);
+ 
+-	I915_WRITE(GAMMA_MODE(crtc->pipe), crtc_state->gamma_mode);
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (gvt) {
++		pipe_regs = &gvt->pipe_info[pipe].dom0_pipe_regs;
++		pipe_regs->bottom_color = val;
++		pipe_regs->gamma_mode = crtc_state->gamma_mode;
++	}
++#endif
++
++	if (!skip) {
++		I915_WRITE(SKL_BOTTOM_COLOR(pipe), val);
++		I915_WRITE(GAMMA_MODE(pipe), crtc_state->gamma_mode);
++	}
+ 
+ 	if (INTEL_GEN(dev_priv) >= 11)
+ 		icl_load_csc_matrix(crtc_state);
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 39cc72019b64..16f0740e1383 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -11172,6 +11172,10 @@ static bool haswell_get_pipe_config(struct intel_crtc *crtc,
+ 	enum intel_display_power_domain power_domain;
+ 	u64 power_domain_mask;
+ 	bool active;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++#endif
+ 
+ 	intel_crtc_init_scalers(crtc, pipe_config);
+ 
+@@ -11239,6 +11243,15 @@ static bool haswell_get_pipe_config(struct intel_crtc *crtc,
+ 	if (INTEL_GEN(dev_priv) >= 9) {
+ 		u32 tmp = I915_READ(SKL_BOTTOM_COLOR(crtc->pipe));
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++		if (gvt && gvt->pipe_info[crtc->pipe].owner) {
++			pipe_regs = &gvt->pipe_info[crtc->pipe].dom0_pipe_regs;
++			pipe_config->gamma_mode = pipe_regs->gamma_mode;
++			pipe_config->csc_mode = pipe_regs->csc_mode;
++			tmp = pipe_regs->bottom_color;
++		}
++#endif
++
+ 		if (tmp & SKL_BOTTOM_COLOR_GAMMA_ENABLE)
+ 			pipe_config->gamma_enable = true;
+ 
+@@ -17779,6 +17792,14 @@ static void intel_sanitize_crtc(struct intel_crtc *crtc,
+ 	struct drm_i915_private *dev_priv = to_i915(dev);
+ 	struct intel_crtc_state *crtc_state = to_intel_crtc_state(crtc->base.state);
+ 	enum transcoder cpu_transcoder = crtc_state->cpu_transcoder;
++	bool skip = false;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	struct intel_gvt *gvt = dev_priv->gvt;
++	struct intel_dom0_pipe_regs *pipe_regs = NULL;
++
++	if (gvt && gvt->pipe_info[crtc->pipe].owner)
++		skip = true;
++#endif
+ 
+ 	/* Clear any frame start delays used for debugging left by the BIOS */
+ 	if (crtc->active && !transcoder_is_dsi(cpu_transcoder)) {
+@@ -17805,10 +17826,20 @@ static void intel_sanitize_crtc(struct intel_crtc *crtc,
+ 		 * Disable any background color set by the BIOS, but enable the
+ 		 * gamma and CSC to match how we program our planes.
+ 		 */
+-		if (INTEL_GEN(dev_priv) >= 9)
+-			I915_WRITE(SKL_BOTTOM_COLOR(crtc->pipe),
+-				   SKL_BOTTOM_COLOR_GAMMA_ENABLE |
+-				   SKL_BOTTOM_COLOR_CSC_ENABLE);
++		if (INTEL_GEN(dev_priv) >= 9) {
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++			if (gvt) {
++				pipe_regs = &gvt->pipe_info[crtc->pipe].dom0_pipe_regs;
++				pipe_regs->bottom_color =
++					SKL_BOTTOM_COLOR_GAMMA_ENABLE |
++					SKL_BOTTOM_COLOR_CSC_ENABLE;
++			}
++#endif
++			if (!skip)
++				I915_WRITE(SKL_BOTTOM_COLOR(crtc->pipe),
++					   SKL_BOTTOM_COLOR_GAMMA_ENABLE |
++					   SKL_BOTTOM_COLOR_CSC_ENABLE);
++		}
+ 	}
+ 
+ 	/* Adjust the state of the output pipe according to whether we
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 92b3a7f9b7e2..2b1174b9b16d 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -1942,6 +1942,8 @@ void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
+ 		      vgpu_vreg_t(new_v, PIPESRC(v_pipe)) :
+ 		      d0_pipe_regs->pipesrc);
+ 
++	intel_gvt_flush_pipe_color(gvt, pipe, new_v);
++
+ 	for (scaler = 0; scaler < max_scaler; scaler++) {
+ 		I915_WRITE_FW(SKL_PS_CTRL(pipe, scaler), new_v ?
+ 			      disp_path->scaler_cfg.ctrl[scaler] :
+@@ -2074,6 +2076,57 @@ void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
+ 	drm_modeset_unlock(&crtc->base.mutex);
+ }
+ 
++void intel_gvt_flush_pipe_color(struct intel_gvt *gvt, enum pipe pipe,
++				struct intel_vgpu *vgpu)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct intel_dom0_pipe_regs *pipe_regs =
++		&gvt->pipe_info[pipe].dom0_pipe_regs;
++	int i;
++
++	if (vgpu) {
++		I915_WRITE_FW(SKL_BOTTOM_COLOR(pipe), vgpu_vreg_t(vgpu, SKL_BOTTOM_COLOR(pipe)));
++		I915_WRITE_FW(GAMMA_MODE(pipe), vgpu_vreg_t(vgpu, GAMMA_MODE(pipe)));
++		I915_WRITE_FW(PIPE_CSC_MODE(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_MODE(pipe)));
++		I915_WRITE_FW(PIPE_CSC_PREOFF_HI(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_PREOFF_HI(pipe)));
++		I915_WRITE_FW(PIPE_CSC_PREOFF_ME(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_PREOFF_ME(pipe)));
++		I915_WRITE_FW(PIPE_CSC_PREOFF_LO(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_PREOFF_LO(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_RY_GY(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_RY_GY(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_BY(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_BY(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_RU_GU(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_RU_GU(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_BU(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_BU(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_RV_GV(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_RV_GV(pipe)));
++		I915_WRITE_FW(PIPE_CSC_COEFF_BV(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_COEFF_BV(pipe)));
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_HI(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_POSTOFF_HI(pipe)));
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_ME(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_POSTOFF_ME(pipe)));
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_LO(pipe), vgpu_vreg_t(vgpu, PIPE_CSC_POSTOFF_LO(pipe)));
++		for (i = 0; i < 256; i++) {
++			I915_WRITE_FW(LGC_PALETTE(pipe, i),
++				      vgpu_vreg_t(vgpu, LGC_PALETTE(pipe, i)));
++		}
++	} else {
++		I915_WRITE_FW(SKL_BOTTOM_COLOR(pipe), pipe_regs->bottom_color);
++		I915_WRITE_FW(GAMMA_MODE(pipe), pipe_regs->gamma_mode);
++		I915_WRITE_FW(PIPE_CSC_MODE(pipe), pipe_regs->csc_mode);
++		I915_WRITE_FW(PIPE_CSC_PREOFF_HI(pipe), pipe_regs->csc_preoff_hi);
++		I915_WRITE_FW(PIPE_CSC_PREOFF_ME(pipe), pipe_regs->csc_preoff_me);
++		I915_WRITE_FW(PIPE_CSC_PREOFF_LO(pipe), pipe_regs->csc_preoff_lo);
++		I915_WRITE_FW(PIPE_CSC_COEFF_RY_GY(pipe), pipe_regs->csc_coeff_rygy);
++		I915_WRITE_FW(PIPE_CSC_COEFF_BY(pipe), pipe_regs->csc_coeff_by);
++		I915_WRITE_FW(PIPE_CSC_COEFF_RU_GU(pipe), pipe_regs->csc_coeff_rugu);
++		I915_WRITE_FW(PIPE_CSC_COEFF_BU(pipe), pipe_regs->csc_coeff_bu);
++		I915_WRITE_FW(PIPE_CSC_COEFF_RV_GV(pipe), pipe_regs->csc_coeff_rvgv);
++		I915_WRITE_FW(PIPE_CSC_COEFF_BV(pipe), pipe_regs->csc_coeff_bv);
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_HI(pipe), pipe_regs->csc_postoff_hi);
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_ME(pipe), pipe_regs->csc_postoff_me);
++		I915_WRITE_FW(PIPE_CSC_POSTOFF_LO(pipe), pipe_regs->csc_postoff_lo);
++		for (i = 0; i < 256; i++) {
++			I915_WRITE_FW(LGC_PALETTE(pipe, i),
++				      pipe_regs->lgc_palette[i]);
++		}
++	}
++}
++
+ static void intel_gvt_switch_display_work(struct work_struct *w)
+ {
+ 	struct intel_gvt *gvt = container_of(w,
+diff --git a/drivers/gpu/drm/i915/gvt/display.h b/drivers/gpu/drm/i915/gvt/display.h
+index 6258da1f1e6a..b3a7ad17ea47 100644
+--- a/drivers/gpu/drm/i915/gvt/display.h
++++ b/drivers/gpu/drm/i915/gvt/display.h
+@@ -248,6 +248,8 @@ void intel_vgpu_clean_display(struct intel_vgpu *vgpu);
+ void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
+ 				   struct intel_vgpu *old_v,
+ 				   struct intel_vgpu *new_v);
++void intel_gvt_flush_pipe_color(struct intel_gvt *gvt, enum pipe pipe,
++				struct intel_vgpu *vgpu);
+ 
+ int pipe_is_enabled(struct intel_vgpu *vgpu, enum pipe pipe);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index e6df1e94f602..71e775be4c56 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -303,6 +303,22 @@ struct intel_dom0_pipe_regs {
+ 	u32 scaler_win_pos[I915_MAX_PIPES];
+ 	u32 scaler_win_size[I915_MAX_PIPES];
+ 	u32 scaler_pwr_gate[I915_MAX_PIPES];
++	u32 bottom_color;
++	u32 gamma_mode;
++	u32 csc_mode;
++	u32 csc_preoff_hi;
++	u32 csc_preoff_me;
++	u32 csc_preoff_lo;
++	u32 csc_coeff_rygy;
++	u32 csc_coeff_by;
++	u32 csc_coeff_rugu;
++	u32 csc_coeff_bu;
++	u32 csc_coeff_rvgv;
++	u32 csc_coeff_bv;
++	u32 csc_postoff_hi;
++	u32 csc_postoff_me;
++	u32 csc_postoff_lo;
++	u32 lgc_palette[256];
+ };
+ 
+ struct intel_dom0_plane_regs {
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 796869f26f16..790ed2bc8f3f 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -1193,6 +1193,91 @@ static int skl_cursor_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	return 0;
+ }
+ 
++static int skl_mmio_write_pipe_dist(struct intel_vgpu *vgpu,
++				    unsigned int offset, void *p_data,
++				    unsigned int bytes, unsigned int bitpos)
++{
++	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
++	struct intel_vgpu_display *disp_cfg = &vgpu->disp_cfg;
++	struct intel_vgpu_display_path *disp_path = NULL, *n;
++	enum pipe pipe = (((offset) >> bitpos) & 0x3);
++	enum pipe phy_pipe = INVALID_PIPE;
++	unsigned int dist = 1 << bitpos;
++
++	write_vreg(vgpu, offset, p_data, bytes);
++
++	list_for_each_entry_safe(disp_path, n, &disp_cfg->path_list, list) {
++		if (disp_path->pipe == pipe) {
++			phy_pipe = disp_path->p_pipe;
++			break;
++		}
++	}
++
++	if (disp_path &&
++	    phy_pipe != INVALID_PIPE &&
++	    vgpu->gvt->pipe_info[phy_pipe].owner == vgpu->id) {
++		struct drm_device *drm_dev = &dev_priv->drm;
++		struct intel_crtc *intel_crtc = NULL;
++		unsigned long irqflags = 0;
++		unsigned int phy_offset = offset + (phy_pipe - pipe) * dist;
++
++		mmio_hw_access_pre(dev_priv);
++
++		for_each_intel_crtc(drm_dev, intel_crtc) {
++			drm_modeset_lock(&intel_crtc->base.mutex, NULL);
++			if (disp_path->p_pipe == intel_crtc->pipe)
++				break;
++			drm_modeset_unlock(&intel_crtc->base.mutex);
++		}
++
++		if (!intel_crtc) {
++			gvt_dbg_dpy("No active host crtc for pipe dist mmio update for vgpu:%d, pipe:%d->%d, offset:0x%x->0x%x\n",
++				    vgpu->id, pipe, phy_pipe, offset, phy_offset);
++			return 0;
++		}
++
++		mutex_lock(&disp_cfg->sw_lock);
++		spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
++
++		I915_WRITE_FW(_MMIO(phy_offset), vgpu_vreg(vgpu, offset));
++
++		spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags);
++		mutex_unlock(&disp_cfg->sw_lock);
++		drm_modeset_unlock(&intel_crtc->base.mutex);
++		mmio_hw_access_post(dev_priv);
++	}
++
++	return 0;
++}
++
++static int skl_bottom_color_mmio_write(struct intel_vgpu *vgpu,
++				       unsigned int offset, void *p_data,
++				       unsigned int bytes)
++{
++	return skl_mmio_write_pipe_dist(vgpu, offset, p_data, bytes, 12);
++}
++
++static int skl_gamma_mode_mmio_write(struct intel_vgpu *vgpu,
++				     unsigned int offset, void *p_data,
++				     unsigned int bytes)
++{
++	return skl_mmio_write_pipe_dist(vgpu, offset, p_data, bytes, 11);
++}
++
++static int skl_csc_mmio_write(struct intel_vgpu *vgpu,
++			      unsigned int offset, void *p_data,
++			      unsigned int bytes)
++{
++	return skl_mmio_write_pipe_dist(vgpu, offset, p_data, bytes, 8);
++}
++
++static int skl_lgc_palette_mmio_write(struct intel_vgpu *vgpu,
++				      unsigned int offset, void *p_data,
++				      unsigned int bytes)
++{
++	return skl_mmio_write_pipe_dist(vgpu, offset, p_data, bytes, 11);
++}
++
+ static int trigger_aux_channel_interrupt(struct intel_vgpu *vgpu,
+ 		unsigned int reg)
+ {
+@@ -2262,10 +2347,11 @@ static int csfe_chicken1_mmio_write(struct intel_vgpu *vgpu,
+ #define MMIO_RING_RO(prefix, d, f, rm, r, w) \
+ 	MMIO_RING_F(prefix, 4, F_RO | f, 0, rm, d, r, w)
+ 
+-#define MMIO_PIPES_SDH(prefix, plane, s, d, r, w) do { \
++#define MMIO_PIPES_SDH(prefix, s, d, r, w) do { \
+ 	int pipe; \
+-	for_each_pipe(dev_priv, pipe) \
+-		MMIO_F(prefix(pipe, plane), s, 0, 0, 0, d, r, w); \
++	for_each_pipe(dev_priv, pipe) { \
++		MMIO_F(prefix(pipe), s, 0, 0, 0, d, r, w); \
++	} \
+ } while (0)
+ 
+ #define MMIO_PLANES_SDH(prefix, s, d, r, w) do { \
+@@ -2275,6 +2361,9 @@ static int csfe_chicken1_mmio_write(struct intel_vgpu *vgpu,
+ 			MMIO_F(prefix(pipe, plane), s, 0, 0, 0, d, r, w); \
+ } while (0)
+ 
++#define MMIO_PIPES_DH(prefix, d, r, w) \
++	MMIO_PIPES_SDH(prefix, 4, d, r, w)
++
+ #define MMIO_PLANES_DH(prefix, d, r, w) \
+ 	MMIO_PLANES_SDH(prefix, 4, d, r, w)
+ 
+@@ -2744,47 +2833,19 @@ static int init_generic_mmio_info(struct intel_gvt *gvt)
+ 
+ 	MMIO_D(IPS_CTL, D_ALL);
+ 
+-	MMIO_D(PIPE_CSC_COEFF_RY_GY(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BY(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RU_GU(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BU(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RV_GV(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BV(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_MODE(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_HI(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_ME(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_LO(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_HI(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_ME(PIPE_A), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_LO(PIPE_A), D_ALL);
+-
+-	MMIO_D(PIPE_CSC_COEFF_RY_GY(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BY(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RU_GU(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BU(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RV_GV(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BV(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_MODE(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_HI(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_ME(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_LO(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_HI(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_ME(PIPE_B), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_LO(PIPE_B), D_ALL);
+-
+-	MMIO_D(PIPE_CSC_COEFF_RY_GY(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BY(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RU_GU(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BU(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_RV_GV(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_COEFF_BV(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_MODE(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_HI(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_ME(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_PREOFF_LO(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_HI(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_ME(PIPE_C), D_ALL);
+-	MMIO_D(PIPE_CSC_POSTOFF_LO(PIPE_C), D_ALL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RY_GY, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BY, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RU_GU, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BU, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RV_GV, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BV, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_MODE, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_HI, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_ME, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_LO, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_HI, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_ME, D_PRE_SKL, NULL, NULL);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_LO, D_PRE_SKL, NULL, NULL);
+ 
+ 	MMIO_D(PREC_PAL_INDEX(PIPE_A), D_ALL);
+ 	MMIO_D(PREC_PAL_DATA(PIPE_A), D_ALL);
+@@ -2836,9 +2897,7 @@ static int init_generic_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_F(_MMIO(0x49190), 0x14, 0, 0, 0, D_ALL, NULL, NULL);
+ 	MMIO_F(_MMIO(0x49290), 0x14, 0, 0, 0, D_ALL, NULL, NULL);
+ 
+-	MMIO_D(GAMMA_MODE(PIPE_A), D_ALL);
+-	MMIO_D(GAMMA_MODE(PIPE_B), D_ALL);
+-	MMIO_D(GAMMA_MODE(PIPE_C), D_ALL);
++	MMIO_PIPES_DH(GAMMA_MODE, D_PRE_SKL, NULL, NULL);
+ 
+ 	MMIO_D(HSW_TVIDEO_DIP_CTL(TRANSCODER_A), D_ALL);
+ 	MMIO_D(HSW_TVIDEO_DIP_CTL(TRANSCODER_B), D_ALL);
+@@ -3509,10 +3568,6 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(_MMIO(0x65f08), D_SKL_PLUS);
+ 	MMIO_D(_MMIO(0x320f0), D_SKL_PLUS);
+ 
+-	MMIO_D(_MMIO(0x70034), D_SKL_PLUS);
+-	MMIO_D(_MMIO(0x71034), D_SKL_PLUS);
+-	MMIO_D(_MMIO(0x72034), D_SKL_PLUS);
+-
+ 	MMIO_D(_MMIO(0x44500), D_SKL_PLUS);
+ #define CSFE_CHICKEN1_REG(base) _MMIO((base) + 0xD4)
+ 	MMIO_RING_DFH(CSFE_CHICKEN1_REG, D_SKL_PLUS, F_MODE_MASK | F_CMD_ACCESS,
+@@ -3526,6 +3581,22 @@ static int init_skl_mmio_info(struct intel_gvt *gvt)
+ 	MMIO_D(GAMT_CHKN_BIT_REG, D_KBL | D_CFL);
+ 	MMIO_D(GEN9_CTX_PREEMPT_REG, D_SKL_PLUS);
+ 
++	MMIO_PIPES_DH(SKL_BOTTOM_COLOR, D_SKL_PLUS, NULL, skl_bottom_color_mmio_write);
++	MMIO_PIPES_DH(GAMMA_MODE, D_SKL_PLUS, NULL, skl_gamma_mode_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_MODE, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RY_GY, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BY, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RU_GU, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BU, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_RV_GV, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_COEFF_BV, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_HI, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_ME, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_PREOFF_LO, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_HI, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_ME, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++	MMIO_PIPES_DH(PIPE_CSC_POSTOFF_LO, D_SKL_PLUS, NULL, skl_csc_mmio_write);
++
+ 	return 0;
+ }
+ 
+@@ -3749,9 +3820,12 @@ static struct gvt_mmio_block mmio_blocks[] = {
+ 	{D_ALL, _MMIO(MCHBAR_MIRROR_BASE_SNB), 0x40000, NULL, NULL},
+ 	{D_ALL, _MMIO(VGT_PVINFO_PAGE), VGT_PVINFO_SIZE,
+ 		pvinfo_mmio_read, pvinfo_mmio_write},
+-	{D_ALL, LGC_PALETTE(PIPE_A, 0), 1024, NULL, NULL},
+-	{D_ALL, LGC_PALETTE(PIPE_B, 0), 1024, NULL, NULL},
+-	{D_ALL, LGC_PALETTE(PIPE_C, 0), 1024, NULL, NULL},
++	{D_PRE_SKL, LGC_PALETTE(PIPE_A, 0), 1024, NULL, NULL},
++	{D_PRE_SKL, LGC_PALETTE(PIPE_B, 0), 1024, NULL, NULL},
++	{D_PRE_SKL, LGC_PALETTE(PIPE_C, 0), 1024, NULL, NULL},
++	{D_SKL_PLUS, LGC_PALETTE(PIPE_A, 0), 1024, NULL, skl_lgc_palette_mmio_write},
++	{D_SKL_PLUS, LGC_PALETTE(PIPE_B, 0), 1024, NULL, skl_lgc_palette_mmio_write},
++	{D_SKL_PLUS, LGC_PALETTE(PIPE_C, 0), 1024, NULL, skl_lgc_palette_mmio_write},
+ };
+ 
+ /**
+-- 
+2.17.1
+

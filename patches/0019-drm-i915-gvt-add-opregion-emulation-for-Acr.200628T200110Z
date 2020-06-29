@@ -1,0 +1,175 @@
+From cfccf6cdb14c939442ea2a63cf2dfcc5f9589201 Mon Sep 17 00:00:00 2001
+From: Liu Xinyun <xinyun.liu@intel.com>
+Date: Wed, 13 Mar 2019 13:07:58 +0800
+Subject: [PATCH 19/24] drm/i915/gvt: add opregion emulation for AcrnGT
+
+Some OS failed to initialize display if there is no opregion detected.
+So emulate opregion even if the host doesn't have a valid one. The faked
+opregion has two sections, the information head and the vbt mailbox.
+Both are populated with crafted values for display mode setting.
+
+V4: remove wm register register access code
+V3: revise commit message
+V2: remove real opregion check code per Min's suggestion
+
+Tracked-On: projectacrn/acrn-hypervisor#3106
+Signed-off-by: Xinyun Liu <xinyun.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+Reviewed-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/acrngt.c    | 29 ++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/gvt/cfg_space.c |  7 +++++++
+ drivers/gpu/drm/i915/gvt/gvt.h       |  1 +
+ drivers/gpu/drm/i915/gvt/opregion.c  | 24 +++++++++++++++++++++--
+ 4 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/acrngt.c b/drivers/gpu/drm/i915/gvt/acrngt.c
+index 5677567bf11b..70de0d0badf9 100644
+--- a/drivers/gpu/drm/i915/gvt/acrngt.c
++++ b/drivers/gpu/drm/i915/gvt/acrngt.c
+@@ -853,6 +853,34 @@ static void acrngt_dma_unmap_guest_page(unsigned long handle,
+ {
+ }
+ 
++static int acrngt_set_opregion(void *p_vgpu)
++{
++	struct intel_vgpu *vgpu = (struct intel_vgpu *)p_vgpu;
++	void *base;
++	u32 asls;
++	int i;
++
++	gvt_dbg_dpy("acrngt set opregion\n");
++
++	base = vgpu_opregion(vgpu)->va;
++	if (!base)
++		return -ENOMEM;
++
++	/* hard code opregion to [0xDFFFD000, 0xE0000000]
++	 * ToDo:
++	 * 1. reserve the region in dm then use it in OVMF and kernel
++	 * 2. pass the offset to acrngt through kernel parameter
++	 */
++	asls = 0xDFFFD000;
++	*(u32 *)(vgpu_cfg_space(vgpu) + INTEL_GVT_PCI_OPREGION) = asls;
++
++	for (i = 0; i < INTEL_GVT_OPREGION_PAGES; i++) {
++		vgpu_opregion(vgpu)->gfn[i] = (asls >> PAGE_SHIFT) + i;
++	}
++
++	return 0;
++}
++
+ struct intel_gvt_mpt acrn_gvt_mpt = {
+ 	.type = INTEL_GVT_HYPERVISOR_ACRN,
+ 	.host_init = acrngt_host_init,
+@@ -870,6 +898,7 @@ struct intel_gvt_mpt acrn_gvt_mpt = {
+ 	.dma_map_guest_page = acrngt_dma_map_guest_page,
+ 	.dma_unmap_guest_page = acrngt_dma_unmap_guest_page,
+ 	.set_trap_area = acrngt_set_trap_area,
++	.set_opregion = acrngt_set_opregion,
+ };
+ EXPORT_SYMBOL_GPL(acrn_gvt_mpt);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index 1fe65f2eafa6..427bbc7a099f 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -122,6 +122,13 @@ int intel_vgpu_emulate_cfg_read(struct intel_vgpu *vgpu, unsigned int offset,
+ 	if (WARN_ON(offset + bytes > vgpu->gvt->device_info.cfg_space_size))
+ 		return -EINVAL;
+ 
++	if (rounddown(offset, 4) == INTEL_GVT_PCI_OPREGION) {
++		if (!vgpu_opregion(vgpu)->mapped) {
++			gvt_dbg_dpy("set up virtual opregion mapping\n");
++			map_vgpu_opregion(vgpu, true);
++		}
++	}
++
+ 	memcpy(p_data, vgpu_cfg_space(vgpu) + offset, bytes);
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 94f00268fe38..61baa2d05498 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -670,6 +670,7 @@ static inline u64 intel_vgpu_get_bar_gpa(struct intel_vgpu *vgpu, int bar)
+ void intel_vgpu_clean_opregion(struct intel_vgpu *vgpu);
+ int intel_vgpu_init_opregion(struct intel_vgpu *vgpu);
+ int intel_vgpu_opregion_base_write_handler(struct intel_vgpu *vgpu, u32 gpa);
++int map_vgpu_opregion(struct intel_vgpu *vgpu, bool map);
+ 
+ int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci);
+ void populate_pvinfo_page(struct intel_vgpu *vgpu);
+diff --git a/drivers/gpu/drm/i915/gvt/opregion.c b/drivers/gpu/drm/i915/gvt/opregion.c
+index 867e7629025b..f81bc1edd1a7 100644
+--- a/drivers/gpu/drm/i915/gvt/opregion.c
++++ b/drivers/gpu/drm/i915/gvt/opregion.c
+@@ -256,7 +256,7 @@ int intel_vgpu_init_opregion(struct intel_vgpu *vgpu)
+ 	return 0;
+ }
+ 
+-static int map_vgpu_opregion(struct intel_vgpu *vgpu, bool map)
++int map_vgpu_opregion(struct intel_vgpu *vgpu, bool map)
+ {
+ 	u64 mfn;
+ 	int i, ret;
+@@ -268,6 +268,10 @@ static int map_vgpu_opregion(struct intel_vgpu *vgpu, bool map)
+ 			gvt_vgpu_err("fail to get MFN from VA\n");
+ 			return -EINVAL;
+ 		}
++
++		gvt_dbg_dpy("Round[%d] gfn: %x ==> mfn: %llx \n", i,
++				vgpu_opregion(vgpu)->gfn[i], mfn);
++
+ 		ret = intel_gvt_hypervisor_map_gfn_to_mfn(vgpu,
+ 				vgpu_opregion(vgpu)->gfn[i],
+ 				mfn, 1, map);
+@@ -315,6 +319,19 @@ int intel_vgpu_opregion_base_write_handler(struct intel_vgpu *vgpu, u32 gpa)
+ 		for (i = 0; i < INTEL_GVT_OPREGION_PAGES; i++)
+ 			vgpu_opregion(vgpu)->gfn[i] = (gpa >> PAGE_SHIFT) + i;
+ 
++		ret = map_vgpu_opregion(vgpu, true);
++		break;
++	case INTEL_GVT_HYPERVISOR_ACRN:
++		if (gpa == 0) {
++			return 0;
++		}
++
++		if (vgpu_opregion(vgpu)->mapped)
++			map_vgpu_opregion(vgpu, false);
++
++		for (i = 0; i < INTEL_GVT_OPREGION_PAGES; i++)
++			vgpu_opregion(vgpu)->gfn[i] = (gpa >> PAGE_SHIFT) + i;
++
+ 		ret = map_vgpu_opregion(vgpu, true);
+ 		break;
+ 	default:
+@@ -337,7 +354,8 @@ void intel_vgpu_clean_opregion(struct intel_vgpu *vgpu)
+ 	if (!vgpu_opregion(vgpu)->va)
+ 		return;
+ 
+-	if (intel_gvt_host.hypervisor_type == INTEL_GVT_HYPERVISOR_XEN) {
++	if (intel_gvt_host.hypervisor_type == INTEL_GVT_HYPERVISOR_XEN ||
++		intel_gvt_host.hypervisor_type == INTEL_GVT_HYPERVISOR_ACRN) {
+ 		if (vgpu_opregion(vgpu)->mapped)
+ 			map_vgpu_opregion(vgpu, false);
+ 	} else if (intel_gvt_host.hypervisor_type == INTEL_GVT_HYPERVISOR_KVM) {
+@@ -473,6 +491,7 @@ int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci)
+ 
+ 	switch (intel_gvt_host.hypervisor_type) {
+ 	case INTEL_GVT_HYPERVISOR_XEN:
++	case INTEL_GVT_HYPERVISOR_ACRN:
+ 		scic = *((u32 *)vgpu_opregion(vgpu)->va +
+ 					INTEL_GVT_OPREGION_SCIC);
+ 		parm = *((u32 *)vgpu_opregion(vgpu)->va +
+@@ -538,6 +557,7 @@ int intel_vgpu_emulate_opregion_request(struct intel_vgpu *vgpu, u32 swsci)
+ out:
+ 	switch (intel_gvt_host.hypervisor_type) {
+ 	case INTEL_GVT_HYPERVISOR_XEN:
++	case INTEL_GVT_HYPERVISOR_ACRN:
+ 		*((u32 *)vgpu_opregion(vgpu)->va +
+ 					INTEL_GVT_OPREGION_SCIC) = scic;
+ 		*((u32 *)vgpu_opregion(vgpu)->va +
+-- 
+2.17.1
+

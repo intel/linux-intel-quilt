@@ -1,0 +1,123 @@
+From dddad52224d85442b6e036e656a3af431ba2ba68 Mon Sep 17 00:00:00 2001
+From: Weinan Li <weinan.z.li@intel.com>
+Date: Tue, 17 Apr 2018 14:37:26 +0800
+Subject: [PATCH 05/24] drm/i915/gvt: force to active the high-performance mode
+ during vGPU busy
+
+With the RPS interrupt, KMD can adjust the GPU frequency dynamically for
+power saving. It works well in the non-virtualized environment, but there
+is more latency imported by VMM and virtual interrupt handler which may
+break the RPS policy work model, and GPU works in inefficient mode. Here
+we force to active the high-performance mode when detect vgpu is busy until
+the GPU runs into idle.
+
+(cherry picked from c0fd26d469ba)
+
+drm/i915/gvt: refine the active_high_performance_mode code
+
+move the force active high-performance mode logic into one work item to
+avoid long time softirq delay and suspicious RCU usage.
+
+(cherry picked from f63219399ff3)
+
+(cherry picked from 82561366c8e6)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gt/intel_rps.c  |  2 +-
+ drivers/gpu/drm/i915/gt/intel_rps.h  |  2 ++
+ drivers/gpu/drm/i915/gvt/gvt.h       |  1 +
+ drivers/gpu/drm/i915/gvt/scheduler.c | 21 +++++++++++++++++++++
+ 4 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.c b/drivers/gpu/drm/i915/gt/intel_rps.c
+index 20d6ee148afc..f9cfd67df075 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.c
++++ b/drivers/gpu/drm/i915/gt/intel_rps.c
+@@ -107,7 +107,7 @@ static void rps_reset_interrupts(struct intel_rps *rps)
+ 	spin_unlock_irq(&gt->irq_lock);
+ }
+ 
+-static void rps_disable_interrupts(struct intel_rps *rps)
++void rps_disable_interrupts(struct intel_rps *rps)
+ {
+ 	struct intel_gt *gt = rps_to_gt(rps);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.h b/drivers/gpu/drm/i915/gt/intel_rps.h
+index 9518c66c9792..54d9d61691ca 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.h
++++ b/drivers/gpu/drm/i915/gt/intel_rps.h
+@@ -35,4 +35,6 @@ void gen5_rps_irq_handler(struct intel_rps *rps);
+ void gen6_rps_irq_handler(struct intel_rps *rps, u32 pm_iir);
+ void gen11_rps_irq_handler(struct intel_rps *rps, u32 pm_iir);
+ 
++void rps_disable_interrupts(struct intel_rps *rps);
++
+ #endif /* INTEL_RPS_H */
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index b47c6acaf9c0..05cd1969f055 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -341,6 +341,7 @@ struct intel_gvt {
+ 	} engine_mmio_list;
+ 
+ 	struct dentry *debugfs_root;
++	struct work_struct active_hp_work;
+ };
+ 
+ static inline struct intel_gvt *to_gvt(struct drm_i915_private *i915)
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index b82a9a764f80..6d78277aad6e 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -39,6 +39,7 @@
+ #include "gem/i915_gem_pm.h"
+ #include "gt/intel_context.h"
+ #include "gt/intel_ring.h"
++#include "gt/intel_rps.h"
+ 
+ #include "i915_drv.h"
+ #include "gvt.h"
+@@ -224,6 +225,23 @@ static void save_ring_hw_state(struct intel_vgpu *vgpu, int ring_id)
+ 	vgpu_vreg(vgpu, i915_mmio_reg_offset(reg)) = I915_READ_FW(reg);
+ }
+ 
++static void active_hp_work(struct work_struct *work)
++{
++	struct intel_gvt *gvt =
++		container_of(work, struct intel_gvt, active_hp_work);
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct intel_rps *rps = &dev_priv->gt.rps;
++
++	rps_disable_interrupts(rps);
++
++	if (READ_ONCE(dev_priv->gt.rps.cur_freq) !=
++	    READ_ONCE(dev_priv->gt.rps.max_freq)) {
++		mutex_lock(&rps->lock);
++		intel_rps_set(rps, dev_priv->gt.rps.max_freq);
++		mutex_unlock(&rps->lock);
++	}
++}
++
+ static int shadow_context_status_change(struct notifier_block *nb,
+ 		unsigned long action, void *data)
+ {
+@@ -265,6 +283,7 @@ static int shadow_context_status_change(struct notifier_block *nb,
+ 			gvt_dbg_sched("skip ring %d mmio switch for vgpu%d\n",
+ 				      ring_id, workload->vgpu->id);
+ 		spin_unlock_irqrestore(&scheduler->mmio_context_lock, flags);
++		schedule_work(&gvt->active_hp_work);
+ 		atomic_set(&workload->shadow_ctx_active, 1);
+ 		break;
+ 	case INTEL_CONTEXT_SCHEDULE_OUT:
+@@ -1125,6 +1144,8 @@ int intel_gvt_init_workload_scheduler(struct intel_gvt *gvt)
+ 		atomic_notifier_chain_register(&engine->context_status_notifier,
+ 					&gvt->shadow_ctx_notifier_block[i]);
+ 	}
++	INIT_WORK(&gvt->active_hp_work, active_hp_work);
++
+ 	return 0;
+ err:
+ 	intel_gvt_clean_workload_scheduler(gvt);
+-- 
+2.17.1
+

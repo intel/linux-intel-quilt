@@ -1,0 +1,128 @@
+From f1075ff615e2c2b67dc283fa37ad02f2700a2325 Mon Sep 17 00:00:00 2001
+From: Weinan Li <weinan.z.li@intel.com>
+Date: Mon, 25 Feb 2019 15:43:39 +0800
+Subject: [PATCH 07/24] drm/i915/gvt: declare the vgpu active flag as atomic_t
+
+Refine the vgpu active flag access as atomic access, it may be accessed
+by multiple threads in GVT-g.
+
+(cherry picked from 3c6d268f4904)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from 29d088d2443a)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/debugfs.c   |  2 +-
+ drivers/gpu/drm/i915/gvt/dmabuf.c    |  3 ++-
+ drivers/gpu/drm/i915/gvt/gvt.h       |  4 ++--
+ drivers/gpu/drm/i915/gvt/scheduler.c |  2 +-
+ drivers/gpu/drm/i915/gvt/vgpu.c      | 11 ++++++-----
+ 5 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/debugfs.c b/drivers/gpu/drm/i915/gvt/debugfs.c
+index 285f6011a537..7b9b15bd631d 100644
+--- a/drivers/gpu/drm/i915/gvt/debugfs.c
++++ b/drivers/gpu/drm/i915/gvt/debugfs.c
+@@ -197,7 +197,7 @@ void intel_gvt_debugfs_add_vgpu(struct intel_vgpu *vgpu)
+ 	snprintf(name, 16, "vgpu%d", vgpu->id);
+ 	vgpu->debugfs = debugfs_create_dir(name, vgpu->gvt->debugfs_root);
+ 
+-	debugfs_create_bool("active", 0444, vgpu->debugfs, &vgpu->active);
++	debugfs_create_atomic_t("active", 0444, vgpu->debugfs, &vgpu->active);
+ 	debugfs_create_file("mmio_diff", 0444, vgpu->debugfs, vgpu,
+ 			    &vgpu_mmio_diff_fops);
+ 	debugfs_create_file("scan_nonprivbb", 0644, vgpu->debugfs, vgpu,
+diff --git a/drivers/gpu/drm/i915/gvt/dmabuf.c b/drivers/gpu/drm/i915/gvt/dmabuf.c
+index 423c6c9bfd97..66479c5f0568 100644
+--- a/drivers/gpu/drm/i915/gvt/dmabuf.c
++++ b/drivers/gpu/drm/i915/gvt/dmabuf.c
+@@ -91,7 +91,8 @@ static void dmabuf_gem_object_free(struct kref *kref)
+ 	struct list_head *pos;
+ 	struct intel_vgpu_dmabuf_obj *dmabuf_obj;
+ 
+-	if (vgpu && vgpu->active && !list_empty(&vgpu->dmabuf_obj_list_head)) {
++	if (vgpu && atomic_read(&vgpu->active) &&
++	    !list_empty(&vgpu->dmabuf_obj_list_head)) {
+ 		list_for_each(pos, &vgpu->dmabuf_obj_list_head) {
+ 			dmabuf_obj = container_of(pos,
+ 					struct intel_vgpu_dmabuf_obj, list);
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 05cd1969f055..89dd15b31649 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -170,7 +170,7 @@ struct intel_vgpu {
+ 	struct mutex vgpu_lock;
+ 	int id;
+ 	unsigned long handle; /* vGPU handle used by hypervisor MPT modules */
+-	bool active;
++	atomic_t active;
+ 	bool pv_notified;
+ 	bool failsafe;
+ 	unsigned int resetting_eng;
+@@ -454,7 +454,7 @@ void intel_vgpu_write_fence(struct intel_vgpu *vgpu,
+ 
+ #define for_each_active_vgpu(gvt, vgpu, id) \
+ 	idr_for_each_entry((&(gvt)->vgpu_idr), (vgpu), (id)) \
+-		for_each_if(vgpu->active)
++		for_each_if(atomic_read(&vgpu->active))
+ 
+ static inline void intel_vgpu_write_pci_bar(struct intel_vgpu *vgpu,
+ 					    u32 offset, u32 val, bool low)
+diff --git a/drivers/gpu/drm/i915/gvt/scheduler.c b/drivers/gpu/drm/i915/gvt/scheduler.c
+index 6d78277aad6e..5b1157de844a 100644
+--- a/drivers/gpu/drm/i915/gvt/scheduler.c
++++ b/drivers/gpu/drm/i915/gvt/scheduler.c
+@@ -770,7 +770,7 @@ static struct intel_vgpu_workload *pick_next_workload(
+ 		goto out;
+ 	}
+ 
+-	if (!scheduler->current_vgpu->active ||
++	if (!atomic_read(&scheduler->current_vgpu->active) ||
+ 	    list_empty(workload_q_head(scheduler->current_vgpu, ring_id)))
+ 		goto out;
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 236f70e5c3cf..8ca5f589edf3 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -213,7 +213,9 @@ static void intel_gvt_update_vgpu_types(struct intel_gvt *gvt)
+ void intel_gvt_activate_vgpu(struct intel_vgpu *vgpu)
+ {
+ 	mutex_lock(&vgpu->gvt->lock);
+-	vgpu->active = true;
++
++	atomic_set(&vgpu->active, true);
++
+ 	mutex_unlock(&vgpu->gvt->lock);
+ }
+ 
+@@ -228,8 +230,7 @@ void intel_gvt_activate_vgpu(struct intel_vgpu *vgpu)
+ void intel_gvt_deactivate_vgpu(struct intel_vgpu *vgpu)
+ {
+ 	mutex_lock(&vgpu->vgpu_lock);
+-
+-	vgpu->active = false;
++	atomic_set(&vgpu->active, false);
+ 
+ 	if (atomic_read(&vgpu->submission.running_workload_num)) {
+ 		mutex_unlock(&vgpu->vgpu_lock);
+@@ -278,7 +279,7 @@ void intel_gvt_destroy_vgpu(struct intel_vgpu *vgpu)
+ {
+ 	struct intel_gvt *gvt = vgpu->gvt;
+ 
+-	WARN(vgpu->active, "vGPU is still active!\n");
++	WARN(atomic_read(&vgpu->active), "vGPU is still active!\n");
+ 
+ 	/*
+ 	 * remove idr first so later clean can judge if need to stop
+@@ -343,7 +344,7 @@ struct intel_vgpu *intel_gvt_create_idle_vgpu(struct intel_gvt *gvt)
+ 	if (ret)
+ 		goto out_free_vgpu;
+ 
+-	vgpu->active = false;
++	atomic_set(&vgpu->active, false);
+ 
+ 	return vgpu;
+ 
+-- 
+2.17.1
+
