@@ -1,0 +1,123 @@
+From af5c107dbadcf3645c6ddfe092f522914dcaca12 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Wed, 27 May 2020 10:24:36 +0800
+Subject: [PATCH 30/78] net: stmmac: add
+ stmmac_all_queue_pairs_enable|disable() for XDP setup
+
+We introduce stmmac_all_queue_pairs_enable|disable() here for ease of
+use in stmmac_xdp_setup()'s "need_reset" condition before and after
+there is a change of BPF/XDP program.
+
+In stmmac_all_queue_pairs_enable(), we update the range for xmit queue
+section specific in 'normal_tx_queue_count' based on if BPF/XDP mode
+is ON or OFF.
+
+For both stmmac_all_queue_pairs_enable|disable(), we use priv->lock
+mutex to protect again race condition.
+
+Lastly, we only kick xsk_wakeup() in the situation whereby there is
+BPF/XDP program loaded too.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 54 ++++++++++++++++---
+ 1 file changed, 48 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 6b371e5b79c7..719bb012e9eb 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5757,6 +5757,30 @@ int stmmac_queue_pair_enable(struct stmmac_priv *priv, u16 qid)
+ 	return 0;
+ }
+ 
++int stmmac_all_queue_pairs_enable(struct stmmac_priv *priv)
++{
++	int i;
++
++	mutex_lock(&priv->lock);
++
++	if (stmmac_enabled_xdp(priv))
++		priv->plat->normal_tx_queue_count = priv->plat->num_queue_pairs;
++	else
++		priv->plat->normal_tx_queue_count =
++						   priv->plat->tx_queues_to_use;
++
++	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
++		int err = stmmac_queue_pair_enable(priv, i);
++
++		if (err)
++			return err;
++	}
++
++	mutex_unlock(&priv->lock);
++
++	return 0;
++}
++
+ /**
+  * stmmac_queue_pair_disable - Disables a queue pair
+  * @priv: driver private structure
+@@ -5787,6 +5811,24 @@ int stmmac_queue_pair_disable(struct stmmac_priv *priv, u16 qid)
+ 	return ret;
+ }
+ 
++int stmmac_all_queue_pairs_disable(struct stmmac_priv *priv)
++{
++	int i;
++
++	mutex_lock(&priv->lock);
++
++	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
++		int err = stmmac_queue_pair_disable(priv, i);
++
++		if (err)
++			return err;
++	}
++
++	mutex_unlock(&priv->lock);
++
++	return 0;
++}
++
+ /**
+  * stmmac_xdp_xmit - Implements ndo_xdp_xmit
+  * @dev: netdev
+@@ -5858,16 +5900,16 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	/* Turning AF_XDP ZC on->off/off->on requires rebuild of rings */
+ 	need_reset = (stmmac_enabled_xdp(priv) != !!prog);
+ 
+-	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
+-		err = stmmac_queue_pair_disable(priv, i);
++	if (need_reset) {
++		err = stmmac_all_queue_pairs_disable(priv);
+ 		if (err)
+ 			return err;
+ 	}
+ 
+ 	old_prog = xchg(&priv->xdp_prog, prog);
+ 
+-	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
+-		err = stmmac_queue_pair_enable(priv, i);
++	if (need_reset) {
++		err = stmmac_all_queue_pairs_enable(priv);
+ 		if (err)
+ 			return err;
+ 	}
+@@ -5878,11 +5920,11 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	/* Kick start the NAPI context if there is an AF_XDP socket open
+ 	 * on that queue id. This so that receiving will start.
+ 	 */
+-	if (need_reset)
++	if (need_reset && prog)
+ 		for (i = 0; i < priv->plat->num_queue_pairs; i++)
+ 			if (priv->xdp_queue[i].xsk_umem)
+ 				(void)stmmac_xsk_wakeup(priv->dev, i,
+-							XDP_WAKEUP_TX);
++							XDP_WAKEUP_RX);
+ 
+ 	return 0;
+ }
+-- 
+2.17.1
+

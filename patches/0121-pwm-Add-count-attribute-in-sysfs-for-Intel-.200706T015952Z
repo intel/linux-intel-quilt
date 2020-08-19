@@ -1,0 +1,133 @@
+From 226f94eb6586f50ad9e43544f6ec28d934e696af Mon Sep 17 00:00:00 2001
+From: "Lai, Poey Seng" <poey.seng.lai@intel.com>
+Date: Fri, 10 May 2019 14:11:04 +0800
+Subject: [PATCH 121/131] pwm: Add count attribute in sysfs for Intel Keem Bay
+
+In Keem Bay, the number of repetitions for the period/waveform
+can be configured from userspace. This requires addition of a sysfs
+attribute to get/set the repetition count. Setting this value to 0
+will result in continuous repetition of the waveform until the
+channel is disabled or reconfigured.
+
+Signed-off-by: Lai, Poey Seng <poey.seng.lai@intel.com>
+Signed-off-by: Vineetha G. Jaya Kumaran <vineetha.g.jaya.kumaran@intel.com>
+---
+ Documentation/ABI/testing/sysfs-class-pwm |  9 ++++++
+ drivers/pwm/core.c                        |  3 +-
+ drivers/pwm/sysfs.c                       | 37 +++++++++++++++++++++++
+ include/linux/pwm.h                       |  2 ++
+ 4 files changed, 50 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/ABI/testing/sysfs-class-pwm b/Documentation/ABI/testing/sysfs-class-pwm
+index c20e61354561..87e219f27fbc 100644
+--- a/Documentation/ABI/testing/sysfs-class-pwm
++++ b/Documentation/ABI/testing/sysfs-class-pwm
+@@ -86,3 +86,12 @@ Description:
+ 		Capture information about a PWM signal. The output format is a
+ 		pair unsigned integers (period and duty cycle), separated by a
+ 		single space.
++
++What:		/sys/class/pwm/pwmchipN/pwmX/count
++Date:		April 2020
++KernelVersion:	5.6
++Contact:	Vineetha G. Jaya Kumaran <vineetha.g.jaya.kumaran@intel.com>
++Description:
++		Sets the repetition count of a PWM waveform. A value of 0 will
++		result in continuous repetition of the waveform until the
++		channel is disabled or reconfigured.
+diff --git a/drivers/pwm/core.c b/drivers/pwm/core.c
+index f877e77d9184..36aa9af5eaa8 100644
+--- a/drivers/pwm/core.c
++++ b/drivers/pwm/core.c
+@@ -464,7 +464,8 @@ int pwm_apply_state(struct pwm_device *pwm, const struct pwm_state *state)
+ 	if (state->period == pwm->state.period &&
+ 	    state->duty_cycle == pwm->state.duty_cycle &&
+ 	    state->polarity == pwm->state.polarity &&
+-	    state->enabled == pwm->state.enabled)
++	    state->enabled == pwm->state.enabled &&
++	    state->count == pwm->state.count)
+ 		return 0;
+ 
+ 	if (chip->ops->apply) {
+diff --git a/drivers/pwm/sysfs.c b/drivers/pwm/sysfs.c
+index 2389b8669846..3c474fad17b4 100644
+--- a/drivers/pwm/sysfs.c
++++ b/drivers/pwm/sysfs.c
+@@ -215,11 +215,47 @@ static ssize_t capture_show(struct device *child,
+ 	return sprintf(buf, "%u %u\n", result.period, result.duty_cycle);
+ }
+ 
++static ssize_t count_store(struct device *child,
++			      struct device_attribute *attr,
++			      const char *buf, size_t size)
++{
++	struct pwm_export *export = child_to_pwm_export(child);
++	struct pwm_device *pwm = export->pwm;
++	struct pwm_state state;
++	unsigned int val;
++	int ret;
++
++	ret = kstrtouint(buf, 0, &val);
++	if (ret)
++		return ret;
++
++	mutex_lock(&export->lock);
++	pwm_get_state(pwm, &state);
++	state.count = val;
++	ret = pwm_apply_state(pwm, &state);
++	mutex_unlock(&export->lock);
++
++	return ret ? : size;
++}
++
++static ssize_t count_show(struct device *child,
++			    struct device_attribute *attr,
++			    char *buf)
++{
++	const struct pwm_device *pwm = child_to_pwm_device(child);
++	struct pwm_state state;
++
++	pwm_get_state(pwm, &state);
++
++	return sprintf(buf, "%d\n", state.count);
++}
++
+ static DEVICE_ATTR_RW(period);
+ static DEVICE_ATTR_RW(duty_cycle);
+ static DEVICE_ATTR_RW(enable);
+ static DEVICE_ATTR_RW(polarity);
+ static DEVICE_ATTR_RO(capture);
++static DEVICE_ATTR_RW(count);
+ 
+ static struct attribute *pwm_attrs[] = {
+ 	&dev_attr_period.attr,
+@@ -227,6 +263,7 @@ static struct attribute *pwm_attrs[] = {
+ 	&dev_attr_enable.attr,
+ 	&dev_attr_polarity.attr,
+ 	&dev_attr_capture.attr,
++	&dev_attr_count.attr,
+ 	NULL
+ };
+ ATTRIBUTE_GROUPS(pwm);
+diff --git a/include/linux/pwm.h b/include/linux/pwm.h
+index b2c9c460947d..d8a3d05584f4 100644
+--- a/include/linux/pwm.h
++++ b/include/linux/pwm.h
+@@ -52,12 +52,14 @@ enum {
+  * struct pwm_state - state of a PWM channel
+  * @period: PWM period (in nanoseconds)
+  * @duty_cycle: PWM duty cycle (in nanoseconds)
++ * @count: Repeat count of PWM waveforms.
+  * @polarity: PWM polarity
+  * @enabled: PWM enabled status
+  */
+ struct pwm_state {
+ 	unsigned int period;
+ 	unsigned int duty_cycle;
++	unsigned int count;
+ 	enum pwm_polarity polarity;
+ 	bool enabled;
+ };
+-- 
+2.17.1
+

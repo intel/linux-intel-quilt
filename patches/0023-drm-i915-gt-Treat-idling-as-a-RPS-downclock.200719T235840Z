@@ -1,0 +1,49 @@
+From 22c9559d9172ef454af0767d36e982335b8b1e75 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 3 Jul 2020 12:42:25 +0800
+Subject: [PATCH 23/45] drm/i915/gt: Treat idling as a RPS downclock event
+
+If we park/unpark faster than we can respond to RPS events, we never
+will process a downclock event after expiring a waitboost, and thus we
+will forever restart the GPU at max clocks even if the workload switches
+and doesn't justify full power.
+
+Closes: https://gitlab.freedesktop.org/drm/intel/issues/1500
+Fixes: 3e7abf814193 ("drm/i915: Extract GT render power state management")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Andi Shyti <andi.shyti@intel.com>
+Cc: Lyude Paul <lyude@redhat.com>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200322163225.28791-1-chris@chris-wilson.co.uk
+Signed-off-by: Romli, Khairul Anuar <khairul.anuar.romli@intel.com>
+---
+ drivers/gpu/drm/i915/gt/intel_rps.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.c b/drivers/gpu/drm/i915/gt/intel_rps.c
+index f9cfd67df075..50456baa0fca 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.c
++++ b/drivers/gpu/drm/i915/gt/intel_rps.c
+@@ -763,6 +763,19 @@ void intel_rps_park(struct intel_rps *rps)
+ 	intel_uncore_forcewake_get(rps_to_uncore(rps), FORCEWAKE_MEDIA);
+ 	rps_set(rps, rps->idle_freq);
+ 	intel_uncore_forcewake_put(rps_to_uncore(rps), FORCEWAKE_MEDIA);
++
++	/*
++	 * Since we will try and restart from the previously requested
++	 * frequency on unparking, treat this idle point as a downclock
++	 * interrupt and reduce the frequency for resume. If we park/unpark
++	 * more frequently than the rps worker can run, we will not respond
++	 * to any EI and never see a change in frequency.
++	 *
++	 * (Note we accommodate Cherryview's limitation of only using an
++	 * even bin by applying it to all.)
++	*/
++	rps->cur_freq =
++		max_t(int, round_down(rps->cur_freq - 1, 2), rps->min_freq);
+ }
+ 
+ void intel_rps_boost(struct i915_request *rq)
+-- 
+2.17.1
+

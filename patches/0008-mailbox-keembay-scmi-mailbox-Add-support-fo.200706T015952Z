@@ -1,0 +1,282 @@
+From 59181def3d5cb21f561b4bffe1d6bd4302898af2 Mon Sep 17 00:00:00 2001
+From: Paul Murphy <paul.j.murphy@intel.com>
+Date: Tue, 24 Mar 2020 12:58:31 +0000
+Subject: [PATCH 008/131] mailbox: keembay-scmi-mailbox: Add support for Keem
+ Bay mailbox
+
+Keem Bay SoC has a ARM trusted firmware-based secure monitor which
+acts as the SCP for the purposes of power management over SCMI.
+
+This driver implements the transport layer for SCMI to function.
+
+Doclink: http://infocenter.arm.com/help/topic/com.arm.doc.den0056b/DEN0056B_System_Control_and_Management_Interface_v2_0.pdf
+
+Reviewed-by: Dinh Nguyen <dinguyen@kernel.org>
+Signed-off-by: Paul Murphy <paul.j.murphy@intel.com>
+---
+ MAINTAINERS                            |   6 +
+ drivers/mailbox/Kconfig                |   9 ++
+ drivers/mailbox/Makefile               |   2 +
+ drivers/mailbox/keembay-scmi-mailbox.c | 203 +++++++++++++++++++++++++
+ 4 files changed, 220 insertions(+)
+ create mode 100644 drivers/mailbox/keembay-scmi-mailbox.c
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 5860780d155a..99e317f22bdd 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -8896,6 +8896,12 @@ F:	Documentation/devicetree/bindings/firmware/intel,keembay-vpu-ipc.yaml
+ F:	drivers/firmware/keembay-vpu-ipc.c
+ F:	include/linux/keembay-vpu-ipc.h
+ 
++KEEMBAY SCMI MAILBOX DRIVER
++M:	Paul Murphy <paul.j.murphy@intel.com>
++S:	Maintained
++F:	Documentation/devicetree/bindings/mailbox/intel,keembay-scmi-mailbox.yaml
++F:	drivers/mailbox/keembay-scmi-mailbox.c
++
+ KEENE FM RADIO TRANSMITTER DRIVER
+ M:	Hans Verkuil <hverkuil@xs4all.nl>
+ L:	linux-media@vger.kernel.org
+diff --git a/drivers/mailbox/Kconfig b/drivers/mailbox/Kconfig
+index ab4eb750bbdd..dcc4cc3e0aad 100644
+--- a/drivers/mailbox/Kconfig
++++ b/drivers/mailbox/Kconfig
+@@ -16,6 +16,15 @@ config ARM_MHU
+ 	  The controller has 3 mailbox channels, the last of which can be
+ 	  used in Secure mode only.
+ 
++config KEEMBAY_SCMI_MBOX
++	tristate "Keem Bay SoC SCMI Mailbox"
++	depends on HAVE_ARM_SMCCC
++	help
++	  An implementation of a mailbox implemented using 'smc' calls to the
++	  ARM secure world monitor. This enables communication with an 'SCP'
++	  running in the secure world on Keem Bay SoCs.
++	  Say Y here if you want to build the Keem Bay SoC SCMI Mailbox.
++
+ config IMX_MBOX
+ 	tristate "i.MX Mailbox"
+ 	depends on ARCH_MXC || COMPILE_TEST
+diff --git a/drivers/mailbox/Makefile b/drivers/mailbox/Makefile
+index c22fad6f696b..8aa38bb6025b 100644
+--- a/drivers/mailbox/Makefile
++++ b/drivers/mailbox/Makefile
+@@ -48,3 +48,5 @@ obj-$(CONFIG_STM32_IPCC) 	+= stm32-ipcc.o
+ obj-$(CONFIG_MTK_CMDQ_MBOX)	+= mtk-cmdq-mailbox.o
+ 
+ obj-$(CONFIG_ZYNQMP_IPI_MBOX)	+= zynqmp-ipi-mailbox.o
++
++obj-$(CONFIG_KEEMBAY_SCMI_MBOX)	+= keembay-scmi-mailbox.o
+diff --git a/drivers/mailbox/keembay-scmi-mailbox.c b/drivers/mailbox/keembay-scmi-mailbox.c
+new file mode 100644
+index 000000000000..6f13b21f4f80
+--- /dev/null
++++ b/drivers/mailbox/keembay-scmi-mailbox.c
+@@ -0,0 +1,203 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keem Bay SCMI mailbox driver.
++ *
++ * Copyright (c) 2019-2020 Intel Corporation.
++ */
++
++#include <linux/arm-smccc.h>
++#include <linux/kernel.h>
++#include <linux/mailbox_controller.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++
++/* Function id of SiP service */
++#define KMB_SIP_SVC_SCMI 0xFF19
++
++/*
++ * Number of channels this mailbox supports: 1 channel,
++ * between AP and SCP.
++ */
++#define NUM_CHANNELS 1
++
++/* How long to wait before triggering the mailbox receive event */
++#define NOTIFY_WAIT_TIME_NS 50
++
++/**
++ * struct keembay_scmi_mbox
++ * @mbox:	Mailbox controller struct
++ * @dev:	Platform device
++ * @shmem_res:	Resource describing memory region shared between secure and
++ *		non-secure world
++ * @notify_hrt:	Timer to asynchronously trigger a mbox received data event
++ */
++struct keembay_scmi_mbox {
++	struct mbox_controller mbox;
++	struct device *dev;
++	struct resource shmem_res;
++	struct hrtimer notify_hrt;
++};
++
++static int keembay_scmi_request(u32 base_address)
++{
++	struct arm_smccc_res res;
++	u64 function_id;
++	u16 function_number = KMB_SIP_SVC_SCMI;
++
++	function_id = ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_32,
++					 ARM_SMCCC_OWNER_SIP, function_number);
++
++	arm_smccc_smc(function_id, base_address, 0, 0, 0, 0, 0, 0, &res);
++
++	return res.a0;
++}
++
++static enum hrtimer_restart keembay_scmi_async_notify(struct hrtimer *hrtimer)
++{
++	struct keembay_scmi_mbox *mbox =
++		container_of(hrtimer, struct keembay_scmi_mbox, notify_hrt);
++	struct mbox_chan *chan = &mbox->mbox.chans[0];
++
++	mbox_chan_received_data(chan, NULL);
++
++	return HRTIMER_NORESTART;
++}
++
++static int keembay_scmi_mailbox_send_data(struct mbox_chan *chan, void *data)
++{
++	struct keembay_scmi_mbox *mbox = chan->con_priv;
++	struct device *dev = mbox->dev;
++	int rc;
++
++	/*
++	 * Handle case where timer is still on and a new message arrives.
++	 * We only have one timer, if it were to happen that a second
++	 * request came in and we failed to respond as expected to the
++	 * first, the caller's state machine may end up in an unexpected
++	 * state.
++	 */
++	if (hrtimer_active(&mbox->notify_hrt)) {
++		dev_warn(dev, "Mailbox was busy when request arrived.\n");
++		return -EBUSY;
++	}
++
++	rc = keembay_scmi_request((u32)mbox->shmem_res.start);
++	if (rc < 0) {
++		dev_warn(dev, "Failed to send message to SCP: %d\n", rc);
++		return rc;
++	}
++
++	/*
++	 * If there is an asynchronous interrupt pending, trigger it
++	 * via timer. We will know that, because secure world will
++	 * respond with > 0 return value.
++	 */
++	if (rc) {
++		hrtimer_start(&mbox->notify_hrt,
++			      ns_to_ktime(NOTIFY_WAIT_TIME_NS),
++			      HRTIMER_MODE_REL);
++	}
++
++	return 0;
++}
++
++static bool keembay_scmi_mailbox_last_tx_done(struct mbox_chan *chan)
++{
++	return true;
++}
++
++static int keembay_scmi_mailbox_startup(struct mbox_chan *chan)
++{
++	struct keembay_scmi_mbox *mbox = chan->con_priv;
++
++	hrtimer_init(&mbox->notify_hrt, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	mbox->notify_hrt.function = keembay_scmi_async_notify;
++
++	return 0;
++}
++
++static const struct mbox_chan_ops scmi_mbox_ops = {
++	.startup = keembay_scmi_mailbox_startup,
++	.send_data = keembay_scmi_mailbox_send_data,
++	.last_tx_done = keembay_scmi_mailbox_last_tx_done,
++};
++
++static int keembay_scmi_get_shmem_res(struct device *dev, struct resource *res)
++{
++	struct device_node *node;
++	int rc;
++
++	node = of_parse_phandle(dev->of_node, "memory-region", 0);
++	if (!node) {
++		dev_err(dev, "Couldn't find region.\n");
++		return -EINVAL;
++	}
++
++	rc = of_address_to_resource(node, 0, res);
++	of_node_put(node);
++	if (rc)
++		dev_err(dev, "Couldn't resolve region.\n");
++
++	return rc;
++}
++
++static int keembay_scmi_mailbox_probe(struct platform_device *pdev)
++{
++	struct keembay_scmi_mbox *scmi_mbox;
++	struct device *dev = &pdev->dev;
++	int ret;
++
++	scmi_mbox = devm_kzalloc(dev, sizeof(*scmi_mbox), GFP_KERNEL);
++	if (!scmi_mbox)
++		return -ENOMEM;
++
++	ret = keembay_scmi_get_shmem_res(dev, &scmi_mbox->shmem_res);
++	if (ret) {
++		dev_err(dev, "Failed to get SCMI shared region resource.\n");
++		return ret;
++	}
++
++	scmi_mbox->mbox.dev = dev;
++	scmi_mbox->mbox.txdone_poll = true;
++	scmi_mbox->mbox.txpoll_period = 5;
++	scmi_mbox->mbox.ops = &scmi_mbox_ops;
++	scmi_mbox->mbox.num_chans = NUM_CHANNELS;
++	scmi_mbox->mbox.chans = devm_kcalloc(dev, scmi_mbox->mbox.num_chans,
++					     sizeof(*scmi_mbox->mbox.chans),
++					     GFP_KERNEL);
++	if (!scmi_mbox->mbox.chans)
++		return -ENOMEM;
++	scmi_mbox->mbox.chans[0].con_priv = scmi_mbox;
++
++	ret = devm_mbox_controller_register(dev, &scmi_mbox->mbox);
++	if (ret)
++		return ret;
++
++	scmi_mbox->dev = dev;
++
++	platform_set_drvdata(pdev, scmi_mbox);
++
++	return 0;
++}
++
++static const struct of_device_id keembay_scmi_mailbox_of_match[] = {
++	{
++		.compatible = "intel,keembay-scmi-mailbox",
++	},
++	{}
++};
++
++static struct platform_driver keembay_scmi_mailbox_driver = {
++	.driver = {
++			.name = "keembay-scmi-mailbox",
++			.of_match_table = keembay_scmi_mailbox_of_match,
++		},
++	.probe = keembay_scmi_mailbox_probe,
++};
++module_platform_driver(keembay_scmi_mailbox_driver);
++
++MODULE_DESCRIPTION("Keem Bay SCMI mailbox driver");
++MODULE_AUTHOR("Paul Murphy <paul.j.murphy@intel.com>");
++MODULE_LICENSE("GPL v2");
+-- 
+2.17.1
+

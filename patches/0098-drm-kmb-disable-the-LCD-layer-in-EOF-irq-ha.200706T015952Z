@@ -1,0 +1,200 @@
+From 2455c18568b14b0655906bf46240760603815826 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Wed, 29 Jan 2020 05:27:08 -0800
+Subject: [PATCH 098/131] drm/kmb: disable the LCD layer in EOF irq handler
+
+When disabling/enabling LCD layers, the change takes effect
+immediately and does not wait for EOF (end of frame). If we
+disable an LCD layer in kmb_plane_atomic_disable, then the frame
+reappears with incorrect display offsets.
+
+The solution is to mark the plane as disabled when
+kmb_plane_atomic_disable is called but actually disable the LCD
+layer when EOF irq is being handled.
+
+Also only enable one plane (video plane0) as there is no use case for
+multiple planes.
+
+Signed-off-by: Edmund Dea <edmund.j.dea@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_drv.c   | 37 +++++++++++++++++++++++++++------
+ drivers/gpu/drm/kmb/kmb_drv.h   |  1 +
+ drivers/gpu/drm/kmb/kmb_plane.c | 24 +++++++--------------
+ drivers/gpu/drm/kmb/kmb_plane.h |  9 +++++++-
+ 4 files changed, 48 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index 2ccfd99140ea..90375eca87d4 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -62,6 +62,8 @@ static struct clk *clk_mipi_cfg;
+ 
+ struct drm_bridge *adv_bridge;
+ 
++extern struct layer_status plane_status[KMB_MAX_PLANES];
++
+ int kmb_display_clk_enable(void)
+ {
+ 	int ret = 0;
+@@ -367,25 +369,48 @@ static void kmb_setup_mode_config(struct drm_device *drm)
+ static irqreturn_t handle_lcd_irq(struct drm_device *dev)
+ {
+ 	unsigned long status, val;
++	int plane_id;
++	struct kmb_drm_private *dev_p = dev->dev_private;
+ 
+ 	status = kmb_read_lcd(dev->dev_private, LCD_INT_STATUS);
+ 	if (status & LCD_INT_EOF) {
+ 		/* TODO - handle EOF interrupt? */
+-		kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR, LCD_INT_EOF);
++		kmb_write_lcd(dev_p, LCD_INT_CLEAR, LCD_INT_EOF);
++
++		/* When disabling/enabling LCD layers, the change takes effect
++		 * immediately and does not wait for EOF (end of frame).
++		 * When kmb_plane_atomic_disable is called, mark the plane as
++		 * disabled but actually disable the plane when EOF irq is
++		 * being handled.
++		 */
++		for (plane_id = LAYER_0; plane_id < KMB_MAX_PLANES;
++				plane_id++) {
++			if (plane_status[plane_id].disable) {
++				kmb_clr_bitmask_lcd(dev_p,
++					LCD_LAYERn_DMA_CFG(plane_id),
++					LCD_DMA_LAYER_ENABLE);
++
++				kmb_clr_bitmask_lcd(dev_p, LCD_CONTROL,
++					plane_status[plane_id].ctrl);
++
++				plane_status[plane_id].disable = false;
++			}
++		}
+ 	}
++
+ 	if (status & LCD_INT_LINE_CMP) {
+ 		/* clear line compare interrupt */
+-		kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR,
+-			      LCD_INT_LINE_CMP);
++		kmb_write_lcd(dev_p, LCD_INT_CLEAR, LCD_INT_LINE_CMP);
+ 	}
++
+ 	if (status & LCD_INT_LAYER) {
+ 		/* Clear layer interrupts */
+-		kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR, LCD_INT_LAYER);
++		kmb_write_lcd(dev_p, LCD_INT_CLEAR, LCD_INT_LAYER);
+ 	}
+ 
+ 	if (status & LCD_INT_VERT_COMP) {
+ 		/* Read VSTATUS */
+-		val = kmb_read_lcd(dev->dev_private, LCD_VSTATUS);
++		val = kmb_read_lcd(dev_p, LCD_VSTATUS);
+ 		val = (val & LCD_VSTATUS_VERTICAL_STATUS_MASK);
+ 		switch (val) {
+ 		case LCD_VSTATUS_COMPARE_VSYNC:
+@@ -401,7 +426,7 @@ static irqreturn_t handle_lcd_irq(struct drm_device *dev)
+ 	}
+ 
+ 	/* Clear all interrupts */
+-	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_CLEAR, ~0x0);
++	kmb_set_bitmask_lcd(dev_p, LCD_INT_CLEAR, 1);
+ 	return IRQ_HANDLED;
+ }
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.h b/drivers/gpu/drm/kmb/kmb_drv.h
+index 4916b217c5a7..83824f728d72 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.h
++++ b/drivers/gpu/drm/kmb/kmb_drv.h
+@@ -39,6 +39,7 @@
+ 
+ #define crtc_to_kmb_priv(x)	container_of(x, struct kmb_drm_private, crtc)
+ 
++
+ struct kmb_drm_private {
+ 	struct drm_device drm;
+ 	void __iomem *lcd_mmio;
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.c b/drivers/gpu/drm/kmb/kmb_plane.c
+index 9e6f86bda07d..7696f402ad00 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.c
++++ b/drivers/gpu/drm/kmb/kmb_plane.c
+@@ -42,6 +42,8 @@
+ #include "kmb_regs.h"
+ #include "kmb_drv.h"
+ 
++struct layer_status plane_status[KMB_MAX_PLANES];
++
+ const uint32_t layer_irqs[] = {
+ 	LCD_INT_VL0,
+ 	LCD_INT_VL1,
+@@ -83,34 +85,24 @@ static void kmb_plane_atomic_disable(struct drm_plane *plane,
+ 				     struct drm_plane_state *state)
+ {
+ 	struct kmb_plane *kmb_plane = to_kmb_plane(plane);
+-	int ctrl = 0;
+-	struct kmb_drm_private *dev_p;
+-	int plane_id;
+-
+-	dev_p = plane->dev->dev_private;
+-	plane_id = kmb_plane->id;
++	int plane_id = kmb_plane->id;
+ 
+ 	switch (plane_id) {
+ 	case LAYER_0:
+-		ctrl = LCD_CTRL_VL1_ENABLE;
++		plane_status[plane_id].ctrl = LCD_CTRL_VL1_ENABLE;
+ 		break;
+ 	case LAYER_1:
+-		ctrl = LCD_CTRL_VL2_ENABLE;
++		plane_status[plane_id].ctrl = LCD_CTRL_VL2_ENABLE;
+ 		break;
+ 	case LAYER_2:
+-		ctrl = LCD_CTRL_GL1_ENABLE;
++		plane_status[plane_id].ctrl = LCD_CTRL_GL1_ENABLE;
+ 		break;
+ 	case LAYER_3:
+-		ctrl = LCD_CTRL_GL2_ENABLE;
++		plane_status[plane_id].ctrl = LCD_CTRL_GL2_ENABLE;
+ 		break;
+ 	}
+ 
+-	kmb_clr_bitmask_lcd(dev_p, LCD_LAYERn_DMA_CFG(plane_id),
+-			    LCD_DMA_LAYER_ENABLE);
+-	kmb_clr_bitmask_lcd(dev_p, LCD_CONTROL, ctrl);
+-	DRM_DEBUG("%s : %d lcd_ctrl = 0x%x lcd_int_enable=0x%x\n",
+-		  __func__, __LINE__, kmb_read_lcd(dev_p, LCD_CONTROL),
+-		  kmb_read_lcd(dev_p, LCD_INT_ENABLE));
++	plane_status[plane_id].disable = true;
+ }
+ 
+ unsigned int set_pixel_format(u32 format)
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.h b/drivers/gpu/drm/kmb/kmb_plane.h
+index 1872ed0cf40c..ae8e308fac3f 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.h
++++ b/drivers/gpu/drm/kmb/kmb_plane.h
+@@ -61,9 +61,11 @@ enum layer_id {
+ 	LAYER_1,
+ 	LAYER_2,
+ 	LAYER_3,
+-	KMB_MAX_PLANES,
++//	KMB_MAX_PLANES,
+ };
+ 
++#define KMB_MAX_PLANES 1
++
+ enum sub_plane_id {
+ 	Y_PLANE,
+ 	U_PLANE,
+@@ -125,6 +127,11 @@ static const u32 csc_coef_lcd[] = {
+ 	-179, 125, -226
+ };
+ 
++struct layer_status {
++	bool disable;
++	u32 ctrl;
++};
++
+ struct kmb_plane *kmb_plane_init(struct drm_device *drm);
+ void kmb_plane_destroy(struct drm_plane *plane);
+ #endif /* __KMB_PLANE_H__ */
+-- 
+2.17.1
+

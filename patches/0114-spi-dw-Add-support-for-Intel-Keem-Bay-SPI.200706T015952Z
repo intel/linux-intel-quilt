@@ -1,0 +1,71 @@
+From 3359befe199161b3d968467a238d18ca867f8f14 Mon Sep 17 00:00:00 2001
+From: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Date: Tue, 5 May 2020 21:06:16 +0800
+Subject: [PATCH 114/131] spi: dw: Add support for Intel Keem Bay SPI
+
+Add support for Intel Keem Bay SPI controller, which uses DesignWare
+DWC_ssi core. Bit 31 of CTRLR0 register is added for Keem Bay, to
+configure the device as a master or as a slave serial peripheral.
+
+Signed-off-by: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Link: https://lore.kernel.org/r/20200505130618.554-6-wan.ahmad.zainie.wan.mohamad@intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ drivers/spi/spi-dw-mmio.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/spi/spi-dw-mmio.c b/drivers/spi/spi-dw-mmio.c
+index 73ed3ba43358..0d5b46e5faf0 100644
+--- a/drivers/spi/spi-dw-mmio.c
++++ b/drivers/spi/spi-dw-mmio.c
+@@ -43,6 +43,13 @@ struct dw_spi_mmio {
+ #define MSCC_SPI_MST_SW_MODE_SW_PIN_CTRL_MODE	BIT(13)
+ #define MSCC_SPI_MST_SW_MODE_SW_SPI_CS(x)	(x << 5)
+ 
++/*
++ * For Keem Bay, CTRLR0[31] is used to select controller mode.
++ * 0: SSI is slave
++ * 1: SSI is master
++ */
++#define KEEMBAY_CTRLR0_SSIC_IS_MST		BIT(31)
++
+ struct dw_spi_mscc {
+ 	struct regmap       *syscon;
+ 	void __iomem        *spi_mst;
+@@ -154,6 +161,24 @@ static int dw_spi_dwc_ssi_init(struct platform_device *pdev,
+ 	return 0;
+ }
+ 
++static u32 dw_spi_update_cr0_keembay(struct spi_controller *master,
++				     struct spi_device *spi,
++				     struct spi_transfer *transfer)
++{
++	u32 cr0 = dw_spi_update_cr0_v1_01a(master, spi, transfer);
++
++	return cr0 | KEEMBAY_CTRLR0_SSIC_IS_MST;
++}
++
++static int dw_spi_keembay_init(struct platform_device *pdev,
++			       struct dw_spi_mmio *dwsmmio)
++{
++	/* Register hook to configure CTRLR0 */
++	dwsmmio->dws.update_cr0 = dw_spi_update_cr0_keembay;
++
++	return 0;
++}
++
+ static int dw_spi_mmio_probe(struct platform_device *pdev)
+ {
+ 	int (*init_func)(struct platform_device *pdev,
+@@ -248,6 +273,7 @@ static const struct of_device_id dw_spi_mmio_of_match[] = {
+ 	{ .compatible = "mscc,jaguar2-spi", .data = dw_spi_mscc_jaguar2_init},
+ 	{ .compatible = "amazon,alpine-dw-apb-ssi", .data = dw_spi_alpine_init},
+ 	{ .compatible = "snps,dwc-ssi-1.01a", .data = dw_spi_dwc_ssi_init},
++	{ .compatible = "intel,keembay-ssi", .data = dw_spi_keembay_init},
+ 	{ /* end of table */}
+ };
+ MODULE_DEVICE_TABLE(of, dw_spi_mmio_of_match);
+-- 
+2.17.1
+

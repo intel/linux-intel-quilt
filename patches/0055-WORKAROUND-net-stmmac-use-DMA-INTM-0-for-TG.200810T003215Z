@@ -1,0 +1,63 @@
+From 3422fa00e9eb14be0a195efcceb7993a7006491a Mon Sep 17 00:00:00 2001
+From: "Wong, Vincent Por Yin" <vincent.por.yin.wong@intel.com>
+Date: Wed, 1 Jul 2020 15:47:50 +0800
+Subject: [PATCH 55/78] WORKAROUND: net: stmmac: use DMA INTM 0 for TGL
+ platforms
+
+During multi-queue TX/RX traffic, the driver may hang and get
+reset by the kernel repeatedly. Root caused to this setting which
+may re-surface a bug when using External Timestamping (aka AUXTS).
+A proper fix is still required, as this seems to be TGL-specific.
+
+Signed-off-by: Wong, Vincent Por Yin <vincent.por.yin.wong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c | 5 ++++-
+ drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c | 3 +++
+ include/linux/stmmac.h                           | 1 +
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+index 9ef903ddf175..9bef3d8d7423 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+@@ -165,7 +165,10 @@ static void dwmac4_dma_init(void __iomem *ioaddr,
+ 
+ 	value = readl(ioaddr + DMA_BUS_MODE);
+ 
+-	if (dma_cfg->multi_msi_en) {
++	if (dma_cfg->multi_msi_en && dma_cfg->tgl_wa) {
++		value &= ~DMA_BUS_MODE_INTM_MASK;
++		value |= (DMA_BUS_MODE_INTM_MODE0 << DMA_BUS_MODE_INTM_SHIFT);
++	} else if (dma_cfg->multi_msi_en) {
+ 		value &= ~DMA_BUS_MODE_INTM_MASK;
+ 		value |= (DMA_BUS_MODE_INTM_MODE1 << DMA_BUS_MODE_INTM_SHIFT);
+ 	}
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index fb934ca1a565..4c55a02e155d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -542,6 +542,9 @@ static int tgl_common_data(struct pci_dev *pdev,
+ 	/* Maximum TX XDP queue */
+ 	plat->max_combined = 2;
+ 
++	/* WORKAROUND: TGL has to use DMA INTM 0 to avoid intermittent reset */
++	plat->dma_cfg->tgl_wa = 1;
++
+ 	/* TX and RX Marvell 88E2110 PHY latency (ns) */
+ 	plat->phy_tx_latency_10 = 6652;
+ 	plat->phy_tx_latency_100 = 1152;
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index 1e4ca05441dd..fa4c82c0558b 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -94,6 +94,7 @@ struct stmmac_dma_cfg {
+ 	int mixed_burst;
+ 	bool aal;
+ 	bool multi_msi_en;
++	bool tgl_wa;
+ };
+ 
+ #define AXI_BLEN	7
+-- 
+2.17.1
+

@@ -1,0 +1,186 @@
+From 109ed6793e80883baa438f07d99a71e4bb95bac9 Mon Sep 17 00:00:00 2001
+From: Jose Abreu <Jose.Abreu@synopsys.com>
+Date: Mon, 11 Nov 2019 15:42:35 +0100
+Subject: [PATCH 04/78] net: stmmac: gmac4+: Add Split Header support
+
+GMAC4+ cores also support the Split Header feature.
+
+Add the support for Split Header feature in the RX path following the
+same implementation logic that XGMAC followed.
+
+Signed-off-by: Jose Abreu <Jose.Abreu@synopsys.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit 8c6fc097a2f4acf2e9c217e04e2620bf98cfddd3)
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac4.h  |  7 +++++++
+ .../ethernet/stmicro/stmmac/dwmac4_descs.c    | 21 ++++++++++++++++---
+ .../ethernet/stmicro/stmmac/dwmac4_descs.h    |  1 +
+ .../net/ethernet/stmicro/stmmac/dwmac4_dma.c  | 19 +++++++++++++++++
+ .../net/ethernet/stmicro/stmmac/dwmac4_dma.h  |  1 +
+ 5 files changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+index c9f0b20ed1ac..f56990fca6e4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+@@ -14,6 +14,7 @@
+ 
+ /*  MAC registers */
+ #define GMAC_CONFIG			0x00000000
++#define GMAC_EXT_CONFIG			0x00000004
+ #define GMAC_PACKET_FILTER		0x00000008
+ #define GMAC_HASH_TAB(x)		(0x10 + (x) * 4)
+ #define GMAC_VLAN_TAG			0x00000050
+@@ -222,6 +223,11 @@ enum power_event {
+ #define GMAC_CONFIG_TE			BIT(1)
+ #define GMAC_CONFIG_RE			BIT(0)
+ 
++/* MAC extended config */
++#define GMAC_CONFIG_HDSMS		GENMASK(22, 20)
++#define GMAC_CONFIG_HDSMS_SHIFT		20
++#define GMAC_CONFIG_HDSMS_256		(0x2 << GMAC_CONFIG_HDSMS_SHIFT)
++
+ /* MAC HW features0 bitmap */
+ #define GMAC_HW_FEAT_SAVLANINS		BIT(27)
+ #define GMAC_HW_FEAT_TSSTSSEL		GENMASK(26, 25)
+@@ -246,6 +252,7 @@ enum power_event {
+ #define GMAC_HW_FEAT_AVSEL		BIT(20)
+ #define GMAC_HW_TSOEN			BIT(18)
+ #define GMAC_HW_FEAT_ADDR64		GENMASK(15, 14)
++#define GMAC_HW_FEAT_SPHEN		BIT(17)
+ #define GMAC_HW_TXFIFOSIZE		GENMASK(10, 6)
+ #define GMAC_HW_RXFIFOSIZE		GENMASK(4, 0)
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
+index e596610bee77..169c87a1e54d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
+@@ -83,9 +83,10 @@ static int dwmac4_wrback_get_rx_status(void *data, struct stmmac_extra_stats *x,
+ 	if (unlikely(rdes3 & RDES3_OWN))
+ 		return dma_own;
+ 
+-	/* Verify rx error by looking at the last segment. */
+-	if (likely(!(rdes3 & RDES3_LAST_DESCRIPTOR)))
++	if (unlikely(rdes3 & RDES3_CONTEXT_DESCRIPTOR))
+ 		return discard_frame;
++	if (likely(!(rdes3 & RDES3_LAST_DESCRIPTOR)))
++		return rx_not_ls;
+ 
+ 	if (unlikely(rdes3 & RDES3_ERROR_SUMMARY)) {
+ 		if (unlikely(rdes3 & RDES3_GIANT_PACKET))
+@@ -188,7 +189,7 @@ static void dwmac4_set_tx_owner(struct dma_desc *p)
+ 
+ static void dwmac4_set_rx_owner(struct dma_desc *p, int disable_rx_ic)
+ {
+-	p->des3 = cpu_to_le32(RDES3_OWN | RDES3_BUFFER1_VALID_ADDR);
++	p->des3 |= cpu_to_le32(RDES3_OWN | RDES3_BUFFER1_VALID_ADDR);
+ 
+ 	if (!disable_rx_ic)
+ 		p->des3 |= cpu_to_le32(RDES3_INT_ON_COMPLETION_EN);
+@@ -526,6 +527,18 @@ static void dwmac4_set_vlan(struct dma_desc *p, u32 type)
+ 	p->des2 |= cpu_to_le32(type & TDES2_VLAN_TAG_MASK);
+ }
+ 
++static int dwmac4_get_rx_header_len(struct dma_desc *p, unsigned int *len)
++{
++	*len = le32_to_cpu(p->des2) & RDES2_HL;
++	return 0;
++}
++
++static void dwmac4_set_sec_addr(struct dma_desc *p, dma_addr_t addr)
++{
++	p->des2 = cpu_to_le32(lower_32_bits(addr));
++	p->des3 = cpu_to_le32(upper_32_bits(addr) | RDES3_BUFFER2_VALID_ADDR);
++}
++
+ const struct stmmac_desc_ops dwmac4_desc_ops = {
+ 	.tx_status = dwmac4_wrback_get_tx_status,
+ 	.rx_status = dwmac4_wrback_get_rx_status,
+@@ -555,6 +568,8 @@ const struct stmmac_desc_ops dwmac4_desc_ops = {
+ 	.set_sarc = dwmac4_set_sarc,
+ 	.set_vlan_tag = dwmac4_set_vlan_tag,
+ 	.set_vlan = dwmac4_set_vlan,
++	.get_rx_header_len = dwmac4_get_rx_header_len,
++	.set_sec_addr = dwmac4_set_sec_addr,
+ };
+ 
+ static void dwmac5_rd_init_tx_desc(struct dma_desc *p, int mode, int end)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
+index bc115cac4ced..c63a83618e31 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
+@@ -110,6 +110,7 @@
+ #define RDES2_L4_FILTER_MATCH		BIT(28)
+ #define RDES2_L3_L4_FILT_NB_MATCH_MASK	GENMASK(27, 26)
+ #define RDES2_L3_L4_FILT_NB_MATCH_SHIFT	26
++#define RDES2_HL			GENMASK(9, 0)
+ 
+ /* RDES3 (write back format) */
+ #define RDES3_PACKET_SIZE_MASK		GENMASK(14, 0)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+index 5386e7f16337..8673d1819e16 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+@@ -381,6 +381,7 @@ static void dwmac4_get_hw_feature(void __iomem *ioaddr,
+ 	dma_cap->hash_tb_sz = (hw_cap & GMAC_HW_HASH_TB_SZ) >> 24;
+ 	dma_cap->av = (hw_cap & GMAC_HW_FEAT_AVSEL) >> 20;
+ 	dma_cap->tsoen = (hw_cap & GMAC_HW_TSOEN) >> 18;
++	dma_cap->sphen = (hw_cap & GMAC_HW_FEAT_SPHEN) >> 17;
+ 
+ 	dma_cap->addr64 = (hw_cap & GMAC_HW_FEAT_ADDR64) >> 14;
+ 	switch (dma_cap->addr64) {
+@@ -479,6 +480,22 @@ static void dwmac4_set_bfsize(void __iomem *ioaddr, int bfsize, u32 chan)
+ 	writel(value, ioaddr + DMA_CHAN_RX_CONTROL(chan));
+ }
+ 
++static void dwmac4_enable_sph(void __iomem *ioaddr, bool en, u32 chan)
++{
++	u32 value = readl(ioaddr + GMAC_EXT_CONFIG);
++
++	value &= ~GMAC_CONFIG_HDSMS;
++	value |= GMAC_CONFIG_HDSMS_256; /* Segment max 256 bytes */
++	writel(value, ioaddr + GMAC_EXT_CONFIG);
++
++	value = readl(ioaddr + DMA_CHAN_CONTROL(chan));
++	if (en)
++		value |= DMA_CONTROL_SPH;
++	else
++		value &= ~DMA_CONTROL_SPH;
++	writel(value, ioaddr + DMA_CHAN_CONTROL(chan));
++}
++
+ const struct stmmac_dma_ops dwmac4_dma_ops = {
+ 	.reset = dwmac4_dma_reset,
+ 	.init = dwmac4_dma_init,
+@@ -505,6 +522,7 @@ const struct stmmac_dma_ops dwmac4_dma_ops = {
+ 	.enable_tso = dwmac4_enable_tso,
+ 	.qmode = dwmac4_qmode,
+ 	.set_bfsize = dwmac4_set_bfsize,
++	.enable_sph = dwmac4_enable_sph,
+ };
+ 
+ const struct stmmac_dma_ops dwmac410_dma_ops = {
+@@ -533,6 +551,7 @@ const struct stmmac_dma_ops dwmac410_dma_ops = {
+ 	.enable_tso = dwmac4_enable_tso,
+ 	.qmode = dwmac4_qmode,
+ 	.set_bfsize = dwmac4_set_bfsize,
++	.enable_sph = dwmac4_enable_sph,
+ };
+ 
+ static void dwmac5_dma_init_tx_chan(void __iomem *ioaddr,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
+index 340b3d8fda4b..271944ebebcd 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.h
+@@ -117,6 +117,7 @@
+ #define DMA_CHAN_STATUS(x)		(DMA_CHANX_BASE_ADDR(x) + 0x60)
+ 
+ /* DMA Control X */
++#define DMA_CONTROL_SPH			BIT(24)
+ #define DMA_CONTROL_MSS_MASK		GENMASK(13, 0)
+ 
+ /* DMA Tx Channel X Control register defines */
+-- 
+2.17.1
+

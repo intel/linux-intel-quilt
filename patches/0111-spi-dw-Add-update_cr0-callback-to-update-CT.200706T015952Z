@@ -1,0 +1,160 @@
+From 8fd80fd1caaabca09e5d699f586aacfd80cbaf42 Mon Sep 17 00:00:00 2001
+From: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Date: Tue, 5 May 2020 21:06:13 +0800
+Subject: [PATCH 111/131] spi: dw: Add update_cr0() callback to update CTRLR0
+
+This patch adds update_cr0() callback, in struct dw_spi.
+
+Existing code that configure register CTRLR0 is moved into a new
+function, dw_spi_update_cr0(), and this will be the default.
+
+Suggested-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Link: https://lore.kernel.org/r/20200505130618.554-3-wan.ahmad.zainie.wan.mohamad@intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ drivers/spi/spi-dw-mid.c  |  4 ++++
+ drivers/spi/spi-dw-mmio.c | 19 +++++++++++++++++--
+ drivers/spi/spi-dw.c      | 29 +++++++++++++++++++++--------
+ drivers/spi/spi-dw.h      |  5 +++++
+ 4 files changed, 47 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/spi/spi-dw-mid.c b/drivers/spi/spi-dw-mid.c
+index b07710c76fc9..ec2b9bc04a62 100644
+--- a/drivers/spi/spi-dw-mid.c
++++ b/drivers/spi/spi-dw-mid.c
+@@ -324,5 +324,9 @@ int dw_spi_mid_init(struct dw_spi *dws)
+ 	dws->dma_rx = &mid_dma_rx;
+ 	dws->dma_ops = &mid_dma_ops;
+ #endif
++
++	/* Register hook to configure CTRLR0 */
++	dws->update_cr0 = dw_spi_update_cr0;
++
+ 	return 0;
+ }
+diff --git a/drivers/spi/spi-dw-mmio.c b/drivers/spi/spi-dw-mmio.c
+index bd46fca3f094..4180fa5174dc 100644
+--- a/drivers/spi/spi-dw-mmio.c
++++ b/drivers/spi/spi-dw-mmio.c
+@@ -105,6 +105,9 @@ static int dw_spi_mscc_init(struct platform_device *pdev,
+ 	dwsmmio->dws.set_cs = dw_spi_mscc_set_cs;
+ 	dwsmmio->priv = dwsmscc;
+ 
++	/* Register hook to configure CTRLR0 */
++	dwsmmio->dws.update_cr0 = dw_spi_update_cr0;
++
+ 	return 0;
+ }
+ 
+@@ -127,6 +130,18 @@ static int dw_spi_alpine_init(struct platform_device *pdev,
+ {
+ 	dwsmmio->dws.cs_override = 1;
+ 
++	/* Register hook to configure CTRLR0 */
++	dwsmmio->dws.update_cr0 = dw_spi_update_cr0;
++
++	return 0;
++}
++
++static int dw_spi_dw_apb_init(struct platform_device *pdev,
++			      struct dw_spi_mmio *dwsmmio)
++{
++	/* Register hook to configure CTRLR0 */
++	dwsmmio->dws.update_cr0 = dw_spi_update_cr0;
++
+ 	return 0;
+ }
+ 
+@@ -219,7 +234,7 @@ static int dw_spi_mmio_remove(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id dw_spi_mmio_of_match[] = {
+-	{ .compatible = "snps,dw-apb-ssi", },
++	{ .compatible = "snps,dw-apb-ssi", .data = dw_spi_dw_apb_init},
+ 	{ .compatible = "mscc,ocelot-spi", .data = dw_spi_mscc_ocelot_init},
+ 	{ .compatible = "mscc,jaguar2-spi", .data = dw_spi_mscc_jaguar2_init},
+ 	{ .compatible = "amazon,alpine-dw-apb-ssi", .data = dw_spi_alpine_init},
+@@ -228,7 +243,7 @@ static const struct of_device_id dw_spi_mmio_of_match[] = {
+ MODULE_DEVICE_TABLE(of, dw_spi_mmio_of_match);
+ 
+ static const struct acpi_device_id dw_spi_mmio_acpi_match[] = {
+-	{"HISI0173", 0},
++	{"HISI0173", (kernel_ulong_t)dw_spi_dw_apb_init},
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(acpi, dw_spi_mmio_acpi_match);
+diff --git a/drivers/spi/spi-dw.c b/drivers/spi/spi-dw.c
+index 59dfb1e4b49c..bd6f114a7039 100644
+--- a/drivers/spi/spi-dw.c
++++ b/drivers/spi/spi-dw.c
+@@ -265,6 +265,26 @@ static irqreturn_t dw_spi_irq(int irq, void *dev_id)
+ 	return dws->transfer_handler(dws);
+ }
+ 
++/* Configure CTRLR0 for DW_apb_ssi */
++u32 dw_spi_update_cr0(struct spi_controller *master, struct spi_device *spi,
++		      struct spi_transfer *transfer)
++{
++	struct dw_spi *dws = spi_controller_get_devdata(master);
++	struct chip_data *chip = spi_get_ctldata(spi);
++	u32 cr0;
++
++	/* Default SPI mode is SCPOL = 0, SCPH = 0 */
++	cr0 = (transfer->bits_per_word - 1)
++		| (chip->type << SPI_FRF_OFFSET)
++		| ((((spi->mode & SPI_CPOL) ? 1 : 0) << SPI_SCOL_OFFSET) |
++		   (((spi->mode & SPI_CPHA) ? 1 : 0) << SPI_SCPH_OFFSET) |
++		   (((spi->mode & SPI_LOOP) ? 1 : 0) << SPI_SRL_OFFSET))
++		| (chip->tmode << SPI_TMOD_OFFSET);
++
++	return cr0;
++}
++EXPORT_SYMBOL_GPL(dw_spi_update_cr0);
++
+ static int dw_spi_transfer_one(struct spi_controller *master,
+ 		struct spi_device *spi, struct spi_transfer *transfer)
+ {
+@@ -304,14 +324,7 @@ static int dw_spi_transfer_one(struct spi_controller *master,
+ 	dws->n_bytes = DIV_ROUND_UP(transfer->bits_per_word, BITS_PER_BYTE);
+ 	dws->dma_width = DIV_ROUND_UP(transfer->bits_per_word, BITS_PER_BYTE);
+ 
+-	/* Default SPI mode is SCPOL = 0, SCPH = 0 */
+-	cr0 = (transfer->bits_per_word - 1)
+-		| (chip->type << SPI_FRF_OFFSET)
+-		| ((((spi->mode & SPI_CPOL) ? 1 : 0) << SPI_SCOL_OFFSET) |
+-			(((spi->mode & SPI_CPHA) ? 1 : 0) << SPI_SCPH_OFFSET) |
+-			(((spi->mode & SPI_LOOP) ? 1 : 0) << SPI_SRL_OFFSET))
+-		| (chip->tmode << SPI_TMOD_OFFSET);
+-
++	cr0 = dws->update_cr0(master, spi, transfer);
+ 	dw_writel(dws, DW_SPI_CTRLR0, cr0);
+ 
+ 	/* Check if current transfer is a DMA transaction */
+diff --git a/drivers/spi/spi-dw.h b/drivers/spi/spi-dw.h
+index 978878cb2210..d734ab9cba93 100644
+--- a/drivers/spi/spi-dw.h
++++ b/drivers/spi/spi-dw.h
+@@ -115,6 +115,8 @@ struct dw_spi {
+ 	u16			bus_num;
+ 	u16			num_cs;		/* supported slave numbers */
+ 	void (*set_cs)(struct spi_device *spi, bool enable);
++	u32 (*update_cr0)(struct spi_controller *master, struct spi_device *spi,
++			  struct spi_transfer *transfer);
+ 
+ 	/* Current message transfer state info */
+ 	size_t			len;
+@@ -241,6 +243,9 @@ extern int dw_spi_add_host(struct device *dev, struct dw_spi *dws);
+ extern void dw_spi_remove_host(struct dw_spi *dws);
+ extern int dw_spi_suspend_host(struct dw_spi *dws);
+ extern int dw_spi_resume_host(struct dw_spi *dws);
++extern u32 dw_spi_update_cr0(struct spi_controller *master,
++			     struct spi_device *spi,
++			     struct spi_transfer *transfer);
+ 
+ /* platform related setup */
+ extern int dw_spi_mid_init(struct dw_spi *dws); /* Intel MID platforms */
+-- 
+2.17.1
+

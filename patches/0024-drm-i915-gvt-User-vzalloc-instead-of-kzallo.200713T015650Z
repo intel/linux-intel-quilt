@@ -1,0 +1,52 @@
+From 7dc2a647e12e2269cba6e9fabe012a009f6414f9 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Tue, 9 Jun 2020 14:57:30 +0800
+Subject: [PATCH 24/27] drm/i915/gvt: User vzalloc() instead of kzalloc() for
+ vGPU ggtt backup
+
+Depends on different vGPU type, kzalloc() could request too large
+physical contiguous memory which is not necessary for saving vGPU ggtt.
+It may fail to save ggtt during host suspend.
+
+Use vzalloc() instead.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/gtt.c | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index c6a02f0da16c..e5054d863900 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -2518,7 +2518,7 @@ static void intel_vgpu_destroy_ggtt_mm(struct intel_vgpu *vgpu)
+ 	vgpu->gtt.ggtt_mm = NULL;
+ 
+ 	if (vgpu->ggtt_entries) {
+-		kfree(vgpu->ggtt_entries);
++		vfree(vgpu->ggtt_entries);
+ 		vgpu->ggtt_entries = NULL;
+ 	}
+ }
+@@ -2877,8 +2877,7 @@ void intel_gvt_save_ggtt(struct intel_gvt *gvt)
+ 	for_each_active_vgpu(gvt, vgpu, id) {
+ 		num_low = vgpu_aperture_sz(vgpu) >> PAGE_SHIFT;
+ 		num_hi = vgpu_hidden_sz(vgpu) >> PAGE_SHIFT;
+-		vgpu->ggtt_entries = kzalloc((num_low + num_hi) *
+-				sizeof(u64), GFP_KERNEL);
++		vgpu->ggtt_entries = vzalloc((num_low + num_hi) * sizeof(u64));
+ 		if (!vgpu->ggtt_entries)
+ 			continue;
+ 
+@@ -2923,7 +2922,7 @@ void intel_gvt_restore_ggtt(struct intel_gvt *gvt)
+ 		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
+ 		memcpy(addr, (u64 *)vgpu->ggtt_entries + num_low, num_hi);
+ 
+-		kfree(vgpu->ggtt_entries);
++		vfree(vgpu->ggtt_entries);
+ 		vgpu->ggtt_entries = NULL;
+ 	}
+ }
+-- 
+2.17.1
+

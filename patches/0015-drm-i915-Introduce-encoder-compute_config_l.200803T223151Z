@@ -1,0 +1,98 @@
+From dcbdd7247906e0a55b99c62ef3a0e3c42c59c039 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Fri, 14 Feb 2020 03:41:24 -0800
+Subject: [PATCH 15/18] drm/i915: Introduce encoder->compute_config_late()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add an optional secondary encoder state compute hook. This gets
+called after the normak .compute_config() has been called for
+all the encoders in the state. Thus in the new hook we can rely
+on all derived state populated by .compute_config() to be already
+set up. Should be useful for MST and port sync master/slave
+transcoder selection.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Reviewed-by: Manasi Navare <manasi.d.navare@intel.com>
+Signed-off-by: Uma Shankar <uma.shankar@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200214114126.13192-1-manasi.d.navare@intel.com
+---
+ drivers/gpu/drm/i915/display/intel_display.c  | 39 +++++++++++++++++++
+ .../drm/i915/display/intel_display_types.h    |  3 ++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index ecd9cf615cdf..29d284b579b1 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -13434,6 +13434,35 @@ intel_modeset_pipe_config(struct intel_crtc_state *pipe_config)
+ 	return 0;
+ }
+ 
++static int
++intel_modeset_pipe_config_late(struct intel_crtc_state *crtc_state)
++{
++	struct intel_atomic_state *state =
++		to_intel_atomic_state(crtc_state->uapi.state);
++	struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
++	struct drm_connector_state *conn_state;
++	struct drm_connector *connector;
++	int i;
++
++	for_each_new_connector_in_state(&state->base, connector,
++					conn_state, i) {
++		struct intel_encoder *encoder =
++			to_intel_encoder(conn_state->best_encoder);
++		int ret;
++
++		if (conn_state->crtc != &crtc->base ||
++		    !encoder->compute_config_late)
++			continue;
++
++		ret = encoder->compute_config_late(encoder, crtc_state,
++						   conn_state);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
+ bool intel_fuzzy_clock_check(int clock1, int clock2)
+ {
+ 	int diff;
+@@ -14851,6 +14880,16 @@ static int intel_atomic_check(struct drm_device *dev,
+ 		ret = intel_modeset_pipe_config(new_crtc_state);
+ 		if (ret)
+ 			goto fail;
++	}
++
++	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state,
++					    new_crtc_state, i) {
++		if (!needs_modeset(new_crtc_state))
++			continue;
++
++		ret = intel_modeset_pipe_config_late(new_crtc_state);
++		if (ret)
++			goto fail;
+ 
+ 		intel_crtc_check_fastset(old_crtc_state, new_crtc_state);
+ 
+diff --git a/drivers/gpu/drm/i915/display/intel_display_types.h b/drivers/gpu/drm/i915/display/intel_display_types.h
+index 3cdf44fa4164..7e66682b4377 100644
+--- a/drivers/gpu/drm/i915/display/intel_display_types.h
++++ b/drivers/gpu/drm/i915/display/intel_display_types.h
+@@ -139,6 +139,9 @@ struct intel_encoder {
+ 	int (*compute_config)(struct intel_encoder *,
+ 			      struct intel_crtc_state *,
+ 			      struct drm_connector_state *);
++	int (*compute_config_late)(struct intel_encoder *,
++				   struct intel_crtc_state *,
++				   struct drm_connector_state *);
+ 	void (*update_prepare)(struct intel_atomic_state *,
+ 			       struct intel_encoder *,
+ 			       struct intel_crtc *);
+-- 
+2.17.1
+

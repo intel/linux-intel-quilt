@@ -1,0 +1,69 @@
+From 12ed383d30c90b1b980b7e8dc908337e9ede0284 Mon Sep 17 00:00:00 2001
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Date: Fri, 18 Oct 2019 16:21:29 +0300
+Subject: [PATCH 38/45] spi: dw: Move runtime PM enable/disable from common to
+ platform driver part
+
+After commit 1e6959832510 ("spi: dw: Add basic runtime PM support")
+there is following warning from PCI enumerated DesignWare SPI controller
+during probe:
+
+	dw_spi_pci 0000:00:13.0: Unbalanced pm_runtime_enable!
+
+Runtime PM is already enabled for PCI devices by the PCI core and doing
+it again in common DW SPI code leads to unbalanced enable calls.
+
+Fix this by moving the runtime PM enable/disable calls to the platform
+driver part of the driver.
+
+Cc: Phil Edworthy <phil.edworthy@renesas.com>
+Signed-off-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Reviewed-by: Andy Shevchenko <andy.shevchenko@gmail.com>
+Link: https://lore.kernel.org/r/20191018132131.31608-1-jarkko.nikula@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+(cherry picked from commit b9fc2d207e547664271030c1f99fc08c92fcf3f8)
+Signed-off-by: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+---
+ drivers/spi/spi-dw-mmio.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/spi/spi-dw-mmio.c b/drivers/spi/spi-dw-mmio.c
+index 0d5b46e5faf0..f0e164011b19 100644
+--- a/drivers/spi/spi-dw-mmio.c
++++ b/drivers/spi/spi-dw-mmio.c
+@@ -9,6 +9,7 @@
+ #include <linux/err.h>
+ #include <linux/interrupt.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ #include <linux/spi/spi.h>
+ #include <linux/scatterlist.h>
+@@ -242,6 +243,8 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
+ 			goto out;
+ 	}
+ 
++	pm_runtime_enable(&pdev->dev);
++
+ 	ret = dw_spi_add_host(&pdev->dev, dws);
+ 	if (ret)
+ 		goto out;
+@@ -250,6 +253,7 @@ static int dw_spi_mmio_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ out:
++	pm_runtime_disable(&pdev->dev);
+ 	clk_disable_unprepare(dwsmmio->pclk);
+ out_clk:
+ 	clk_disable_unprepare(dwsmmio->clk);
+@@ -261,6 +265,7 @@ static int dw_spi_mmio_remove(struct platform_device *pdev)
+ 	struct dw_spi_mmio *dwsmmio = platform_get_drvdata(pdev);
+ 
+ 	dw_spi_remove_host(&dwsmmio->dws);
++	pm_runtime_disable(&pdev->dev);
+ 	clk_disable_unprepare(dwsmmio->pclk);
+ 	clk_disable_unprepare(dwsmmio->clk);
+ 
+-- 
+2.17.1
+

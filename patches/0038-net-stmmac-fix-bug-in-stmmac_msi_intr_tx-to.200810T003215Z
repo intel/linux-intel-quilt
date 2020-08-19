@@ -1,0 +1,90 @@
+From 35b13e0c92d5640407397d0d71a10afbed047087 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Thu, 4 Jun 2020 21:48:01 +0800
+Subject: [PATCH 38/78] net: stmmac: fix bug in stmmac_msi_intr_tx() to handle
+ xdp_queue[chan]
+
+We simplify and correct the way to obtain "priv" here instead of using
+container_of() which needs to point to xdp_queue[] for XDP TX.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h   |  1 +
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c  | 18 +++++++++++-------
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 8c48e93a797d..64ba81a883c6 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -173,6 +173,7 @@ struct stmmac_flow_entry {
+ 
+ struct stmmac_priv {
+ 	/* Frequently used values are kept adjacent for cache effect */
++	bool tx_timer_scheduled[MTL_MAX_TX_QUEUES];
+ 	u32 tx_coal_frames[MTL_MAX_TX_QUEUES];
+ 	u32 tx_coal_timer[MTL_MAX_TX_QUEUES];
+ 	u32 rx_coal_frames[MTL_MAX_RX_QUEUES];
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index eab53d5c7f75..64f064087766 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2387,8 +2387,7 @@ static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
+ 
+ 	/* We still have pending packets, let's call for a new scheduling */
+ 	if (tx_q->dirty_tx != tx_q->cur_tx)
+-		mod_timer(&tx_q->txtimer,
+-			  STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]));
++		stmmac_tx_timer_arm(priv, queue);
+ 
+ 	if (!queue_is_xdp(priv, queue))
+ 		__netif_tx_unlock_bh(netdev_get_tx_queue(priv->dev, queue));
+@@ -2692,8 +2691,11 @@ void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue)
+ {
+ 	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 
+-	mod_timer(&tx_q->txtimer,
+-		  STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]));
++	if (!priv->tx_timer_scheduled[queue]) {
++		mod_timer(&tx_q->txtimer,
++			  STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]));
++		priv->tx_timer_scheduled[queue] = true;
++	}
+ }
+ 
+ /**
+@@ -2717,6 +2719,9 @@ static void stmmac_tx_timer(struct timer_list *t)
+ 		stmmac_disable_dma_irq(priv, priv->ioaddr, ch->index, 0, 1);
+ 		spin_unlock_irqrestore(&ch->lock, flags);
+ 		__napi_schedule(&ch->tx_napi);
++		priv->tx_timer_scheduled[tx_q->queue_index] = false;
++	} else {
++		stmmac_tx_timer_arm(priv, tx_q->queue_index);
+ 	}
+ }
+ 
+@@ -2725,6 +2730,7 @@ static void stmmac_add_txtimer_q(struct stmmac_priv *priv, u32 queue)
+ 	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 
+ 	timer_setup(&tx_q->txtimer, stmmac_tx_timer, 0);
++	priv->tx_timer_scheduled[queue] = false;
+ }
+ 
+ static void stmmac_remove_txtimer_q(struct stmmac_priv *priv, u32 queue)
+@@ -5320,12 +5326,10 @@ static irqreturn_t stmmac_safety_interrupt(int irq, void *dev_id)
+ static irqreturn_t stmmac_msi_intr_tx(int irq, void *data)
+ {
+ 	struct stmmac_tx_queue *tx_q = (struct stmmac_tx_queue *)data;
++	struct stmmac_priv *priv = tx_q->priv_data;
+ 	int chan = tx_q->queue_index;
+-	struct stmmac_priv *priv;
+ 	int status;
+ 
+-	priv = container_of(tx_q, struct stmmac_priv, tx_queue[chan]);
+-
+ 	if (unlikely(!data)) {
+ 		netdev_err(priv->dev, "%s: invalid dev pointer\n", __func__);
+ 		return IRQ_NONE;
+-- 
+2.17.1
+

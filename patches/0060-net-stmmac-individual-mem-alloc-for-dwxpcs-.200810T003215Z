@@ -1,0 +1,215 @@
+From 9dbc58a9e0879235a44628875222f042cc7965d6 Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Mon, 20 Jul 2020 15:26:45 +0800
+Subject: [PATCH 60/78] net: stmmac: individual mem alloc for dwxpcs plat data
+
+Single memory allocation dwxpcs_platform_data and mdio_board_info is prone
+to data being overwritten when there are multi-instances of the driver.
+IRQ number being overwritten will cause kernel panice where the same irq
+is being free twice. Allocating individual memory in the platform data
+will solve this issue.
+
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 49 ++++++++++++++-----
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c  | 42 +++++++---------
+ include/linux/stmmac.h                        |  9 ++--
+ 3 files changed, 62 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index e4a0221965f3..07c8eccd52ac 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -54,6 +54,7 @@
+ #include "intel_serdes.h"
+ #include "stmmac_tsn.h"
+ #include "stmmac_xsk.h"
++#include <linux/dwxpcs.h>
+ #ifdef CONFIG_STMMAC_NETWORK_PROXY
+ #include "stmmac_netproxy.h"
+ #endif
+@@ -3658,9 +3659,16 @@ static int stmmac_open(struct net_device *dev)
+ 
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->setup_phy_conv) {
+-		ret = priv->plat->setup_phy_conv(priv->mii, priv->phy_conv_irq,
+-						 priv->plat->phy_addr,
+-						 priv->plat->speed_2500_en);
++		struct dwxpcs_platform_data *pdata;
++		const void *intel_pdata = priv->plat->intel_bi->platform_data;
++
++		pdata = (struct dwxpcs_platform_data *)intel_pdata;
++		pdata->irq = priv->phy_conv_irq;
++		pdata->ext_phy_addr = priv->plat->phy_addr;
++		pdata->speed_2500_en = priv->plat->speed_2500_en;
++
++		ret = priv->plat->setup_phy_conv(priv->mii,
++						 priv->plat->intel_bi);
+ 
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+@@ -3745,7 +3753,8 @@ static int stmmac_release(struct net_device *dev)
+ 
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->remove_phy_conv) {
+-		ret = priv->plat->remove_phy_conv(priv->mii);
++		ret = priv->plat->remove_phy_conv(priv->mii,
++						  priv->plat->intel_bi);
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+ 				   "%s: ERROR: remove phy conv (error: %d)\n",
+@@ -7036,7 +7045,8 @@ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ 
+ 	/* Remove phy converter */
+ 	if (priv->plat->remove_phy_conv) {
+-		ret = priv->plat->remove_phy_conv(priv->mii);
++		ret = priv->plat->remove_phy_conv(priv->mii,
++						  priv->plat->intel_bi);
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+ 				   "%s: ERROR: remove phy conv (error: %d)\n",
+@@ -7153,7 +7163,8 @@ int stmmac_suspend(struct device *dev)
+ 
+ 	/* Remove phy converter */
+ 	if (priv->plat->remove_phy_conv) {
+-		ret = priv->plat->remove_phy_conv(priv->mii);
++		ret = priv->plat->remove_phy_conv(priv->mii,
++						  priv->plat->intel_bi);
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+ 				   "%s: ERROR: remove phy conv (error: %d)\n",
+@@ -7318,9 +7329,16 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev)
+ 
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->setup_phy_conv) {
+-		ret = priv->plat->setup_phy_conv(priv->mii, priv->phy_conv_irq,
+-						 priv->plat->phy_addr,
+-						 priv->plat->speed_2500_en);
++		struct dwxpcs_platform_data *pdata;
++		const void *intel_pdata = priv->plat->intel_bi->platform_data;
++
++		pdata = (struct dwxpcs_platform_data *)intel_pdata;
++		pdata->irq = priv->phy_conv_irq;
++		pdata->ext_phy_addr = priv->plat->phy_addr;
++		pdata->speed_2500_en = priv->plat->speed_2500_en;
++
++		ret = priv->plat->setup_phy_conv(priv->mii,
++						 priv->plat->intel_bi);
+ 
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+@@ -7450,9 +7468,16 @@ int stmmac_resume(struct device *dev)
+ 
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->setup_phy_conv) {
+-		ret = priv->plat->setup_phy_conv(priv->mii, priv->phy_conv_irq,
+-						 priv->plat->phy_addr,
+-						 priv->plat->speed_2500_en);
++		struct dwxpcs_platform_data *pdata;
++		const void *intel_pdata = priv->plat->intel_bi->platform_data;
++
++		pdata = (struct dwxpcs_platform_data *)intel_pdata;
++		pdata->irq = priv->phy_conv_irq;
++		pdata->ext_phy_addr = priv->plat->phy_addr;
++		pdata->speed_2500_en = priv->plat->speed_2500_en;
++
++		ret = priv->plat->setup_phy_conv(priv->mii,
++						 priv->plat->intel_bi);
+ 
+ 		if (ret < 0) {
+ 			netdev_err(priv->dev,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 4a3b6c449582..df95ac66c12e 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -146,35 +146,18 @@ static const struct stmmac_pci_info stmmac_pci_info = {
+ 	.setup = stmmac_default_data,
+ };
+ 
+-static struct dwxpcs_platform_data intel_mgbe_pdata = {
+-	.mode = DWXPCS_MODE_SGMII_AN,
+-};
+-
+-static struct mdio_board_info intel_mgbe_bdinfo = {
+-	.bus_id = "stmmac-1",
+-	.modalias = "dwxpcs",
+-	.mdio_addr = 0x16,
+-	.platform_data = &intel_mgbe_pdata,
+-};
+-
+-static int setup_intel_mgbe_phy_conv(struct mii_bus *bus, int irq,
+-				     int phy_addr, bool speed_2500_en)
++static int setup_intel_mgbe_phy_conv(struct mii_bus *bus,
++				     struct mdio_board_info *bi)
+ {
+-	struct dwxpcs_platform_data *pdata = &intel_mgbe_pdata;
+-
+-	pdata->irq = irq;
+-	pdata->ext_phy_addr = phy_addr;
+-	pdata->speed_2500_en = speed_2500_en;
+-
+-	return mdiobus_create_device(bus, &intel_mgbe_bdinfo);
++	return mdiobus_create_device(bus, bi);
+ }
+ 
+-static int remove_intel_mgbe_phy_conv(struct mii_bus *bus)
++static int remove_intel_mgbe_phy_conv(struct mii_bus *bus,
++				      struct mdio_board_info *bi)
+ {
+-	struct mdio_board_info *bdinfo = &intel_mgbe_bdinfo;
+ 	struct mdio_device *mdiodev;
+ 
+-	mdiodev = mdiobus_get_mdio_device(bus, bdinfo->mdio_addr);
++	mdiodev = mdiobus_get_mdio_device(bus, bi->mdio_addr);
+ 
+ 	if (!mdiodev)
+ 		return -1;
+@@ -299,6 +282,19 @@ static int intel_mgbe_common_data(struct pci_dev *pdev,
+ 	plat->maxmtu = JUMBO_LEN;
+ 
+ 	if (plat->phy_interface == PHY_INTERFACE_MODE_SGMII) {
++		plat->xpcs_pdata = devm_kzalloc(&pdev->dev,
++						sizeof(*plat->xpcs_pdata),
++						GFP_KERNEL);
++		plat->xpcs_pdata->mode = DWXPCS_MODE_SGMII_AN;
++
++		plat->intel_bi = devm_kzalloc(&pdev->dev,
++					      sizeof(*plat->intel_bi),
++					      GFP_KERNEL);
++		plat->intel_bi->bus_id = "stmmac-1";
++		strncpy(plat->intel_bi->modalias, "dwxpcs", MDIO_NAME_SIZE);
++		plat->intel_bi->mdio_addr = 0x16;
++		plat->intel_bi->platform_data = plat->xpcs_pdata;
++
+ 		plat->setup_phy_conv = setup_intel_mgbe_phy_conv;
+ 		plat->remove_phy_conv = remove_intel_mgbe_phy_conv;
+ 		plat->has_serdes = 1;
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index fa4c82c0558b..f55ec48c3b9a 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -173,9 +173,10 @@ struct plat_stmmacenet_data {
+ 	int (*init)(struct platform_device *pdev, void *priv);
+ 	void (*exit)(struct platform_device *pdev, void *priv);
+ 	struct mac_device_info *(*setup)(void *priv);
+-	int (*setup_phy_conv)(struct mii_bus *bus, int irq,
+-	     int phy_addr, bool speed_2500_en);
+-	int (*remove_phy_conv)(struct mii_bus *bus);
++	int (*setup_phy_conv)(struct mii_bus *bus,
++			      struct mdio_board_info *bi);
++	int (*remove_phy_conv)(struct mii_bus *bus,
++			       struct mdio_board_info *bi);
+ 	void *bsp_priv;
+ 	struct clk *stmmac_clk;
+ 	struct clk *pclk;
+@@ -261,5 +262,7 @@ struct plat_stmmacenet_data {
+ 	u64 xpcs_rx_latency_100;
+ 	u64 xpcs_rx_latency_10;
+ 	bool eee_timer;
++	struct mdio_board_info *intel_bi;
++	struct dwxpcs_platform_data *xpcs_pdata;
+ };
+ #endif
+-- 
+2.17.1
+

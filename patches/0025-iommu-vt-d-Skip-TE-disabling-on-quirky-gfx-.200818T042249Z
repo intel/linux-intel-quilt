@@ -1,0 +1,137 @@
+From 151d3816bb4fc9f5cf7bb0c0dce18e00523146ef Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Mon, 17 Aug 2020 17:46:55 +0800
+Subject: [PATCH 25/25] iommu/vt-d: Skip TE disabling on quirky gfx dedicated
+ iommu
+
+Upstream commit with same subject b1012ca8dc4f9b1a1
+
+The VT-d spec requires (10.4.4 Global Command Register, TE field) that:
+
+Hardware implementations supporting DMA draining must drain any in-flight
+DMA read/write requests queued within the Root-Complex before completing
+the translation enable command and reflecting the status of the command
+through the TES field in the Global Status register.
+
+Unfortunately, some integrated graphic devices fail to do so after some
+kind of power state transition. As the result, the system might stuck in
+iommu_disable_translation(), waiting for the completion of TE transition.
+
+This provides a quirk list for those devices and skips TE disabling if
+the qurik hits.
+
+Fixes: https://bugzilla.kernel.org/show_bug.cgi?id=208363
+Fixes: https://bugzilla.kernel.org/show_bug.cgi?id=206571
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+Tested-by: Koba Ko <koba.ko@canonical.com>
+Tested-by: Jun Miao <jun.miao@windriver.com>
+Cc: Ashok Raj <ashok.raj@intel.com>
+Cc: stable@vger.kernel.org
+Link: https://lore.kernel.org/r/20200723013437.2268-1-baolu.lu@linux.intel.com
+Signed-off-by: Joerg Roedel <jroedel@suse.de>
+---
+ drivers/iommu/dmar.c        |  1 +
+ drivers/iommu/intel-iommu.c | 27 +++++++++++++++++++++++++++
+ include/linux/dmar.h        |  1 +
+ include/linux/intel-iommu.h |  2 ++
+ 4 files changed, 31 insertions(+)
+
+diff --git a/drivers/iommu/dmar.c b/drivers/iommu/dmar.c
+index 30ac0ba55864..e17b0e73db71 100644
+--- a/drivers/iommu/dmar.c
++++ b/drivers/iommu/dmar.c
+@@ -1098,6 +1098,7 @@ static int alloc_iommu(struct dmar_drhd_unit *drhd)
+ 	}
+ 
+ 	drhd->iommu = iommu;
++	iommu->drhd = drhd;
+ 
+ 	return 0;
+ 
+diff --git a/drivers/iommu/intel-iommu.c b/drivers/iommu/intel-iommu.c
+index cdc1f4736a11..745005dc40d9 100644
+--- a/drivers/iommu/intel-iommu.c
++++ b/drivers/iommu/intel-iommu.c
+@@ -367,6 +367,7 @@ static int intel_iommu_strict;
+ static int intel_iommu_superpage = 1;
+ static int iommu_identity_mapping;
+ static int intel_no_bounce;
++static int iommu_skip_te_disable;
+ 
+ #define IDENTMAP_ALL		1
+ #define IDENTMAP_GFX		2
+@@ -1595,6 +1596,10 @@ static void iommu_disable_translation(struct intel_iommu *iommu)
+ 	u32 sts;
+ 	unsigned long flag;
+ 
++	if (iommu_skip_te_disable && iommu->drhd->gfx_dedicated &&
++	    (cap_read_drain(iommu->cap) || cap_write_drain(iommu->cap)))
++		return;
++
+ 	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+ 	iommu->gcmd &= ~DMA_GCMD_TE;
+ 	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
+@@ -4163,6 +4168,7 @@ static void __init init_no_remapping_devices(void)
+ 
+ 		/* This IOMMU has *only* gfx devices. Either bypass it or
+ 		   set the gfx_mapped flag, as appropriate */
++		drhd->gfx_dedicated = 1;
+ 		if (!dmar_map_gfx) {
+ 			drhd->ignored = 1;
+ 			for_each_active_dev_scope(drhd->devices,
+@@ -6104,6 +6110,27 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0044, quirk_calpella_no_shadow_g
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0062, quirk_calpella_no_shadow_gtt);
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x006a, quirk_calpella_no_shadow_gtt);
+ 
++static void quirk_igfx_skip_te_disable(struct pci_dev *dev)
++{
++	unsigned short ver;
++
++	if (!IS_GFX_DEVICE(dev))
++		return;
++
++	ver = (dev->device >> 8) & 0xff;
++	if (ver != 0x45 && ver != 0x46 && ver != 0x4c &&
++	    ver != 0x4e && ver != 0x8a && ver != 0x98 &&
++	    ver != 0x9a)
++		return;
++
++	if (risky_device(dev))
++		return;
++
++	pci_info(dev, "Skip IOMMU disabling for graphics\n");
++	iommu_skip_te_disable = 1;
++}
++DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_ANY_ID, quirk_igfx_skip_te_disable);
++
+ /* On Tylersburg chipsets, some BIOSes have been known to enable the
+    ISOCH DMAR unit for the Azalia sound device, but not give it any
+    TLB entries, which causes it to deadlock. Check for that.  We do
+diff --git a/include/linux/dmar.h b/include/linux/dmar.h
+index f397e52c2d9d..d81c089fda68 100644
+--- a/include/linux/dmar.h
++++ b/include/linux/dmar.h
+@@ -48,6 +48,7 @@ struct dmar_drhd_unit {
+ 	u16	segment;		/* PCI domain		*/
+ 	u8	ignored:1; 		/* ignore drhd		*/
+ 	u8	include_all:1;
++	u8	gfx_dedicated:1;	/* graphic dedicated	*/
+ 	struct intel_iommu *iommu;
+ };
+ 
+diff --git a/include/linux/intel-iommu.h b/include/linux/intel-iommu.h
+index 1e5dad8b8e59..a2115c1cae07 100644
+--- a/include/linux/intel-iommu.h
++++ b/include/linux/intel-iommu.h
+@@ -556,6 +556,8 @@ struct intel_iommu {
+ 	struct iommu_device iommu;  /* IOMMU core code handle */
+ 	int		node;
+ 	u32		flags;      /* Software defined flags */
++
++	struct dmar_drhd_unit *drhd;
+ };
+ 
+ /* PCI domain-device relationship */
+-- 
+2.17.1
+

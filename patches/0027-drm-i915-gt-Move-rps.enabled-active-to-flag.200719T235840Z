@@ -1,0 +1,243 @@
+From b09fd4b561c7f808e7ef8161b84123e0b32ebba6 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 6 Jul 2020 16:54:00 +0800
+Subject: [PATCH 27/45] drm/i915/gt: Move rps.enabled/active to flags
+
+Pull the boolean intel_rps.enabled and intel_rps.active into a single
+flags field, in preparation for more.
+
+In latest drm-tip implementation include changes in selftest. Due
+to the dependencies is not yet implemented in selftest in this kernel,
+the changes in selftest is not carried.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200429205446.3259-2-chris@chris-wilson.co.uk
+
+Signed-off-by: Romli, Khairul Anuar <khairul.anuar.romli@intel.com>
+---
+ drivers/gpu/drm/i915/gt/intel_rps.c       | 43 ++++++++++++++---------
+ drivers/gpu/drm/i915/gt/intel_rps.h       | 27 ++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_rps_types.h |  9 +++--
+ drivers/gpu/drm/i915/i915_debugfs.c       |  5 +--
+ 4 files changed, 64 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.c b/drivers/gpu/drm/i915/gt/intel_rps.c
+index 89677bb1ae4f..e6e50fa8e244 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.c
++++ b/drivers/gpu/drm/i915/gt/intel_rps.c
+@@ -641,7 +641,7 @@ void intel_rps_mark_interactive(struct intel_rps *rps, bool interactive)
+ {
+ 	mutex_lock(&rps->power.mutex);
+ 	if (interactive) {
+-		if (!rps->power.interactive++ && rps->active)
++		if (!rps->power.interactive++ && intel_rps_is_active(rps))
+ 			rps_set_power(rps, HIGH_POWER);
+ 	} else {
+ 		GEM_BUG_ON(!rps->power.interactive);
+@@ -707,7 +707,7 @@ static int rps_set(struct intel_rps *rps, u8 val)
+ 
+ void intel_rps_unpark(struct intel_rps *rps)
+ {
+-	if (!rps->enabled)
++	if (!intel_rps_is_enabled(rps))
+ 		return;
+ 
+ 	/*
+@@ -715,7 +715,7 @@ void intel_rps_unpark(struct intel_rps *rps)
+ 	 * performance, jump directly to RPe as our starting frequency.
+ 	 */
+ 	mutex_lock(&rps->lock);
+-	rps->active = true;
++	intel_rps_set_active(rps);
+ 	intel_rps_set(rps,
+ 		clamp(rps->cur_freq,
+ 		rps->min_freq_softlimit,
+@@ -735,13 +735,12 @@ void intel_rps_park(struct intel_rps *rps)
+ {
+ 	struct drm_i915_private *i915 = rps_to_i915(rps);
+ 
+-	if (!rps->enabled)
++	if (!intel_rps_clear_active(rps))
+ 		return;
+ 
+ 	if (INTEL_GEN(i915) >= 6)
+ 		rps_disable_interrupts(rps);
+ 
+-	rps->active = false;
+ 	if (rps->last_freq <= rps->idle_freq)
+ 		return;
+ 
+@@ -781,7 +780,7 @@ void intel_rps_boost(struct i915_request *rq)
+ 	struct intel_rps *rps = &rq->engine->gt->rps;
+ 	unsigned long flags;
+ 
+-	if (i915_request_signaled(rq) || !rps->active)
++	if (i915_request_signaled(rq) || !intel_rps_is_active(rps))
+ 		return;
+ 
+ 	/* Serializes with i915_request_retire() */
+@@ -807,7 +806,7 @@ int intel_rps_set(struct intel_rps *rps, u8 val)
+ 	GEM_BUG_ON(val > rps->max_freq);
+ 	GEM_BUG_ON(val < rps->min_freq);
+ 
+-	if (rps->active) {
++	if (intel_rps_is_active(rps)) {
+ 		err = rps_set(rps, val);
+ 
+ 		/*
+@@ -1185,22 +1184,27 @@ void intel_rps_enable(struct intel_rps *rps)
+ {
+ 	struct drm_i915_private *i915 = rps_to_i915(rps);
+ 	struct intel_uncore *uncore = rps_to_uncore(rps);
++	bool enabled = false;
+ 
+ 	intel_uncore_forcewake_get(uncore, FORCEWAKE_ALL);
+-	if (IS_CHERRYVIEW(i915))
+-		rps->enabled = chv_rps_enable(rps);
++	if (rps->max_freq <= rps->min_freq)
++		/* leave disabled, no room for dynamic reclocking */;
++	else if (IS_CHERRYVIEW(i915))
++		enabled = chv_rps_enable(rps);
+ 	else if (IS_VALLEYVIEW(i915))
+-		rps->enabled = vlv_rps_enable(rps);
++		enabled = vlv_rps_enable(rps);
+ 	else if (INTEL_GEN(i915) >= 9)
+-		rps->enabled = gen9_rps_enable(rps);
++		enabled = gen9_rps_enable(rps);
+ 	else if (INTEL_GEN(i915) >= 8)
+-		rps->enabled = gen8_rps_enable(rps);
++		enabled = gen8_rps_enable(rps);
+ 	else if (INTEL_GEN(i915) >= 6)
+-		rps->enabled = gen6_rps_enable(rps);
++		enabled = gen6_rps_enable(rps);
+ 	else if (IS_IRONLAKE_M(i915))
+-		rps->enabled = gen5_rps_enable(rps);
++		enabled = gen5_rps_enable(rps);
++	else
++		MISSING_CASE(INTEL_GEN(i915));
+ 	intel_uncore_forcewake_put(uncore, FORCEWAKE_ALL);
+-	if (!rps->enabled)
++	if (!enabled)
+ 		return;
+ 
+ 	WARN_ON(rps->max_freq < rps->min_freq);
+@@ -1208,6 +1212,8 @@ void intel_rps_enable(struct intel_rps *rps)
+ 
+ 	WARN_ON(rps->efficient_freq < rps->min_freq);
+ 	WARN_ON(rps->efficient_freq > rps->max_freq);
++
++	intel_rps_set_enabled(rps);
+ }
+ 
+ static void gen6_rps_disable(struct intel_rps *rps)
+@@ -1219,7 +1225,7 @@ void intel_rps_disable(struct intel_rps *rps)
+ {
+ 	struct drm_i915_private *i915 = rps_to_i915(rps);
+ 
+-	rps->enabled = false;
++	intel_rps_clear_enabled(rps);
+ 
+ 	if (INTEL_GEN(i915) >= 6)
+ 		gen6_rps_disable(rps);
+@@ -1473,6 +1479,11 @@ static void rps_work(struct work_struct *work)
+ 
+ 	mutex_lock(&rps->lock);
+ 
++	if (!intel_rps_is_active(rps)) {
++		mutex_unlock(&rps->lock);
++		return;
++	}
++
+ 	pm_iir |= vlv_wa_c0_ei(rps, pm_iir);
+ 
+ 	adj = rps->last_adj;
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.h b/drivers/gpu/drm/i915/gt/intel_rps.h
+index 54d9d61691ca..11beea38a9de 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.h
++++ b/drivers/gpu/drm/i915/gt/intel_rps.h
+@@ -37,4 +37,31 @@ void gen11_rps_irq_handler(struct intel_rps *rps, u32 pm_iir);
+ 
+ void rps_disable_interrupts(struct intel_rps *rps);
+ 
++static inline bool intel_rps_is_enabled(const struct intel_rps *rps)
++{
++	return test_bit(INTEL_RPS_ENABLED, &rps->flags);
++}
++
++static inline void intel_rps_set_enabled(struct intel_rps *rps)
++{
++	set_bit(INTEL_RPS_ENABLED, &rps->flags);
++}
++
++static inline void intel_rps_clear_enabled(struct intel_rps *rps)
++{
++	clear_bit(INTEL_RPS_ENABLED, &rps->flags);
++}
++static inline bool intel_rps_is_active(const struct intel_rps *rps)
++{
++	return test_bit(INTEL_RPS_ACTIVE, &rps->flags);
++}
++static inline void intel_rps_set_active(struct intel_rps *rps)
++{
++	set_bit(INTEL_RPS_ACTIVE, &rps->flags);
++}
++static inline bool intel_rps_clear_active(struct intel_rps *rps)
++{
++	return test_and_clear_bit(INTEL_RPS_ACTIVE, &rps->flags);
++}
++
+ #endif /* INTEL_RPS_H */
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps_types.h b/drivers/gpu/drm/i915/gt/intel_rps_types.h
+index c2e279154bd5..28b2467cf860 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_rps_types.h
+@@ -31,6 +31,12 @@ struct intel_rps_ei {
+ 	u32 media_c0;
+ };
+ 
++
++enum {
++	INTEL_RPS_ENABLED = 0,
++	INTEL_RPS_ACTIVE,
++};
++
+ struct intel_rps {
+ 	struct mutex lock; /* protects enabling and the worker */
+ 
+@@ -39,8 +45,7 @@ struct intel_rps {
+ 	 * dev_priv->irq_lock
+ 	 */
+ 	struct work_struct work;
+-	bool enabled;
+-	bool active;
++	unsigned long flags;
+ 	u32 pm_iir;
+ 
+ 	/* PM interrupt bits that should never be masked */
+diff --git a/drivers/gpu/drm/i915/i915_debugfs.c b/drivers/gpu/drm/i915/i915_debugfs.c
+index e11e87acd1ef..70ebd010bc56 100644
+--- a/drivers/gpu/drm/i915/i915_debugfs.c
++++ b/drivers/gpu/drm/i915/i915_debugfs.c
+@@ -1649,7 +1649,8 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 		}
+ 	}
+ 
+-	seq_printf(m, "RPS enabled? %d\n", rps->enabled);
++	seq_printf(m, "RPS enabled? %s\n", yesno(intel_rps_is_enabled(rps)));
++	seq_printf(m, "RPS active? %s\n", yesno(intel_rps_is_active(rps)));
+ 	seq_printf(m, "GPU busy? %s\n", yesno(dev_priv->gt.awake));
+ 	seq_printf(m, "Boosts outstanding? %d\n",
+ 		   atomic_read(&rps->num_waiters));
+@@ -1669,7 +1670,7 @@ static int i915_rps_boost_info(struct seq_file *m, void *data)
+ 
+ 	seq_printf(m, "Wait boosts: %d\n", atomic_read(&rps->boosts));
+ 
+-	if (INTEL_GEN(dev_priv) >= 6 && rps->enabled && dev_priv->gt.awake) {
++	if (INTEL_GEN(dev_priv) >= 6 && intel_rps_is_active(rps)) {
+ 		u32 rpup, rpupei;
+ 		u32 rpdown, rpdownei;
+ 
+-- 
+2.17.1
+

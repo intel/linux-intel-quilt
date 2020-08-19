@@ -1,0 +1,90 @@
+From 542457604bdc9104e5f3989a350f6bb2ffcb71ce Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Wed, 27 May 2020 09:45:22 +0800
+Subject: [PATCH 27/78] net: stmmac: set num_queue_pairs and
+ normal_tx_queue_count in stmmac_open()
+
+Instead of setting the value of num_queue_pairs & normal_tx_queue_count
+deep inside alloc_dma_tx_desc_resources(), we move the setting into
+stmmac_open(). Also, we remove the setting of clear_queue_xdp() and
+set_queue_xdp() too as these functions should now be called inside
+stmmac_queue_pair_enable() only.
+
+Note: Now onwards, all transition of normal to XDP mode will always happen
+through queue_pair_enable() only.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 45 +++++++------------
+ 1 file changed, 16 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index e0eb5c0d6fd8..daa62a7ee005 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2007,39 +2007,11 @@ static int alloc_dma_tx_desc_resources_q(struct stmmac_priv *priv, u32 queue)
+  */
+ static int alloc_dma_tx_desc_resources(struct stmmac_priv *priv)
+ {
+-	u32 tx_count = priv->plat->tx_queues_to_use;
+-	u32 qp_count;
+ 	u32 queue;
+ 	int ret;
+ 
+-	/* Setup RX, TX & TX XDP queue pair count if uninitialized */
+-	if (!priv->plat->num_queue_pairs)
+-		priv->plat->num_queue_pairs = priv->plat->max_combined;
+-
+-	qp_count = priv->plat->num_queue_pairs;
+-
+-	/* When XDP is enabled, Tx XDP queue is assigned with higher
+-	 * TxQ starting from num_queue_pairs. For example, for IP
+-	 * with 8 HW DMA channels and num_queue_pairs=4 then:
+-	 * Tx DMA channels     = 0, 1, 2, 3
+-	 * Tx XDP DMA channels = 4, 5, 6, 7
+-	 */
+-	if (stmmac_enabled_xdp(priv)) {
+-		for (queue = 0; queue < qp_count; queue++) {
+-			clear_queue_xdp(priv, queue);
+-			set_queue_xdp(priv, queue + qp_count);
+-		}
+-		priv->plat->normal_tx_queue_count = qp_count;
+-	} else {
+-		for (queue = 0; queue < qp_count; queue++) {
+-			clear_queue_xdp(priv, queue);
+-			clear_queue_xdp(priv, queue + qp_count);
+-		}
+-		priv->plat->normal_tx_queue_count = tx_count;
+-	}
+-
+ 	/* TX queues buffers and DMA */
+-	for (queue = 0; queue < tx_count; queue++) {
++	for (queue = 0; queue < priv->plat->tx_queues_to_use; queue++) {
+ 		ret = alloc_dma_tx_desc_resources_q(priv, queue);
+ 		if (ret)
+ 			return ret;
+@@ -3542,6 +3514,21 @@ static int stmmac_open(struct net_device *dev)
+ 		}
+ 	}
+ 
++	/* Setup RX, TX & TX XDP queue pair count if uninitialized. Another
++	 * update is possible via stmmac_reinit_queues() triggered by ethtool.
++	 */
++	if (!priv->plat->num_queue_pairs)
++		priv->plat->num_queue_pairs = priv->plat->max_combined;
++
++	/* Configure normal_tx_queue_count here as the value of num_queue_pairs
++	 * can be changed through stmmac_reinit_queues triggered by ethool
++	 */
++	if (stmmac_enabled_xdp(priv))
++		priv->plat->normal_tx_queue_count = priv->plat->num_queue_pairs;
++	else
++		priv->plat->normal_tx_queue_count =
++						   priv->plat->tx_queues_to_use;
++
+ 	if (!priv->dma_rx_size)
+ 		priv->dma_rx_size = DMA_DEFAULT_RX_SIZE;
+ 	if (!priv->dma_tx_size)
+-- 
+2.17.1
+

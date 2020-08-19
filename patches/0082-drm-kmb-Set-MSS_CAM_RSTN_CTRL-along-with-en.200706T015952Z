@@ -1,0 +1,417 @@
+From 69db1ccd21955906ab22a4fc07f036210326f422 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Wed, 2 Oct 2019 02:27:15 -0700
+Subject: [PATCH 082/131] drm/kmb: Set MSS_CAM_RSTN_CTRL along with enable
+
+Also moved num_planes init before load, time out for dsi
+fixed kmb regs read/write to only pass dev_p and few other minor
+changes.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_drv.c   | 32 +++++++++++++---------------
+ drivers/gpu/drm/kmb/kmb_drv.h   | 34 +++++++++++++++---------------
+ drivers/gpu/drm/kmb/kmb_dsi.c   | 37 +++++++++++++++++++++++++--------
+ drivers/gpu/drm/kmb/kmb_plane.c | 27 +++++++++++++++---------
+ drivers/gpu/drm/kmb/kmb_regs.h  |  1 +
+ 5 files changed, 77 insertions(+), 54 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index efc6baecfe22..d268490cea8d 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -78,11 +78,12 @@ static int kmb_display_clk_enable(void)
+ 		return ret;
+ 	}
+ 
+-	ret = clk_prepare_enable(clk_msscam);
++/*	ret = clk_prepare_enable(clk_msscam);
+ 	if (ret) {
+ 		DRM_ERROR("Failed to enable MSSCAM clock: %d\n", ret);
+ 		return ret;
+ 	}
++	*/
+ 
+ 	ret = clk_prepare_enable(clk_mipi_ecfg);
+ 	if (ret) {
+@@ -136,6 +137,8 @@ static void __iomem *kmb_map_mmio(struct platform_device *pdev, char *name)
+ 		release_mem_region(res->start, size);
+ 		return ERR_PTR(-ENOMEM);
+ 	}
++	DRM_INFO("%s : %d mapped %s mmio size = %d\n", __func__, __LINE__,
++			name, size);
+ 	return mem;
+ }
+ 
+@@ -150,13 +153,6 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 	int ret = 0;
+ 	unsigned long clk;
+ 
+-	/* Map LCD MMIO registers */
+-	dev_p->lcd_mmio = kmb_map_mmio(pdev, "lcd_regs");
+-	if (IS_ERR(dev_p->lcd_mmio)) {
+-		DRM_ERROR("failed to map LCD registers\n");
+-		return -ENOMEM;
+-	}
+-
+ 	/* Map MIPI MMIO registers */
+ 	dev_p->mipi_mmio = kmb_map_mmio(pdev, "mipi_regs");
+ 	if (IS_ERR(dev_p->mipi_mmio)) {
+@@ -165,6 +161,13 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		return -ENOMEM;
+ 	}
+ 
++	/* Map LCD MMIO registers */
++	dev_p->lcd_mmio = kmb_map_mmio(pdev, "lcd_regs");
++	if (IS_ERR(dev_p->lcd_mmio)) {
++		DRM_ERROR("failed to map LCD registers\n");
++		return -ENOMEM;
++	}
++
+ 	/* This is only for MIPI_TX_MSS_LCD_MIPI_CFG and MSS_CAM_CLK_CTRL
+ 	 * register
+ 	 */
+@@ -189,12 +192,6 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		goto setup_fail;
+ 	}
+ 
+-	clk_msscam = clk_get(&pdev->dev, "clk_msscam");
+-	if (IS_ERR(clk_msscam)) {
+-		DRM_ERROR("clk_get() failed clk_msscam\n");
+-		goto setup_fail;
+-	}
+-
+ 	clk_mipi_ecfg = clk_get(&pdev->dev, "clk_mipi_ecfg");
+ 	if (IS_ERR(clk_mipi_ecfg)) {
+ 		DRM_ERROR("clk_get() failed clk_mipi_ecfg\n");
+@@ -215,7 +212,6 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 	if (clk_get_rate(clk_lcd) != KMB_LCD_DEFAULT_CLK) {
+ 		DRM_ERROR("failed to set to clk_lcd to %d\n",
+ 				KMB_LCD_DEFAULT_CLK);
+-		goto setup_fail;
+ 	}
+ 	DRM_INFO("Setting LCD clock to %d Mhz ret = %d\n",
+ 			KMB_LCD_DEFAULT_CLK/1000000, ret);
+@@ -265,8 +261,8 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 	}
+ 
+ 	/* enable MSS_CAM_CLK_CTRL for MIPI TX and LCD */
+-	kmb_set_bitmask_msscam(dev_p, MSS_CAM_CLK_CTRL, LCD | MIPI_COMMON |
+-			MIPI_TX0);
++	kmb_set_bitmask_msscam(dev_p, MSS_CAM_CLK_CTRL, 0xfff);
++	kmb_set_bitmask_msscam(dev_p, MSS_CAM_RSTN_CTRL, 0xfff);
+ #ifdef WIP
+ 	/* Register irqs here - section 17.3 in databook
+ 	 * lists LCD at 79 and 82 for MIPI under MSS CPU -
+@@ -529,6 +525,7 @@ static int kmb_probe(struct platform_device *pdev)
+ 		dev_set_drvdata(dev, drm);
+ 
+ 	/* Load driver */
++	lcd->n_layers = KMB_MAX_PLANES;
+ 	ret = kmb_load(drm, 0);
+ 	if (ret == -EPROBE_DEFER) {
+ 		DRM_INFO("wait for external bridge driver DT\n");
+@@ -551,7 +548,6 @@ static int kmb_probe(struct platform_device *pdev)
+ 	/* Register graphics device with the kernel */
+ 	ret = drm_dev_register(drm, 0);
+ 
+-	lcd->n_layers = KMB_MAX_PLANES;
+ 	if (ret)
+ 		goto err_register;
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.h b/drivers/gpu/drm/kmb/kmb_drv.h
+index 596f4fe50b60..1511cd1682a8 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.h
++++ b/drivers/gpu/drm/kmb/kmb_drv.h
+@@ -28,9 +28,9 @@
+ 
+ #include "kmb_regs.h"
+ 
+-#define KMB_MAX_WIDTH			16384	/*max width in pixels */
+-#define KMB_MAX_HEIGHT			16384	/*max height in pixels */
+-#define KMB_LCD_DEFAULT_CLK		200000000
++#define KMB_MAX_WIDTH			1920 /*max width in pixels */
++#define KMB_MAX_HEIGHT			1080 /*max height in pixels */
++#define KMB_LCD_DEFAULT_CLK		24000000
+ #define KMB_MIPI_DEFAULT_CLK		24000000
+ 
+ struct kmb_drm_private {
+@@ -130,17 +130,17 @@ static inline u32 kmb_read_lcd(struct kmb_drm_private *dev_p, unsigned int reg)
+ static inline void kmb_set_bitmask_lcd(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 mask)
+ {
+-	u32 reg_val = kmb_read_lcd(dev_p->lcd_mmio, reg);
++	u32 reg_val = kmb_read_lcd(dev_p, reg);
+ 
+-	kmb_write_lcd(dev_p->lcd_mmio, reg, (reg_val | mask));
++	kmb_write_lcd(dev_p, reg, (reg_val | mask));
+ }
+ 
+ static inline void kmb_clr_bitmask_lcd(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 mask)
+ {
+-	u32 reg_val = kmb_read_lcd(dev_p->lcd_mmio, reg);
++	u32 reg_val = kmb_read_lcd(dev_p, reg);
+ 
+-	kmb_write_lcd(dev_p->lcd_mmio, reg, (reg_val & (~mask)));
++	kmb_write_lcd(dev_p, reg, (reg_val & (~mask)));
+ }
+ 
+ static inline u32 kmb_read_mipi(struct kmb_drm_private *dev_p, unsigned int reg)
+@@ -151,46 +151,46 @@ static inline u32 kmb_read_mipi(struct kmb_drm_private *dev_p, unsigned int reg)
+ static inline void kmb_write_bits_mipi(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 offset, u32 num_bits, u32 value)
+ {
+-	u32 reg_val = kmb_read_mipi(dev_p->mipi_mmio, reg);
++	u32 reg_val = kmb_read_mipi(dev_p, reg);
+ 	u32 mask = (1 << num_bits) - 1;
+ 
+ 	value &= mask;
+ 	mask <<= offset;
+ 	reg_val &= (~mask);
+ 	reg_val |= (value << offset);
+-	kmb_write_mipi(dev_p->mipi_mmio, reg, reg_val);
++	kmb_write_mipi(dev_p, reg, reg_val);
+ }
+ 
+ static inline void kmb_set_bit_mipi(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 offset)
+ {
+-	u32 reg_val = kmb_read_mipi(dev_p->mipi_mmio, reg);
++	u32 reg_val = kmb_read_mipi(dev_p, reg);
+ 
+-	kmb_write_mipi(dev_p->mipi_mmio, reg, reg_val | (1 << offset));
++	kmb_write_mipi(dev_p, reg, reg_val | (1 << offset));
+ }
+ 
+ static inline void kmb_clr_bit_mipi(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 offset)
+ {
+-	u32 reg_val = kmb_read_mipi(dev_p->mipi_mmio, reg);
++	u32 reg_val = kmb_read_mipi(dev_p, reg);
+ 
+-	kmb_write_mipi(dev_p->mipi_mmio, reg, reg_val & (~(1 << offset)));
++	kmb_write_mipi(dev_p, reg, reg_val & (~(1 << offset)));
+ }
+ 
+ static inline void kmb_set_bitmask_mipi(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 mask)
+ {
+-	u32 reg_val = kmb_read_mipi(dev_p->mipi_mmio, reg);
++	u32 reg_val = kmb_read_mipi(dev_p, reg);
+ 
+-	kmb_write_mipi(dev_p->mipi_mmio, reg, (reg_val | mask));
++	kmb_write_mipi(dev_p, reg, (reg_val | mask));
+ }
+ 
+ static inline void kmb_clr_bitmask_mipi(struct kmb_drm_private *dev_p,
+ 		unsigned int reg, u32 mask)
+ {
+-	u32 reg_val = kmb_read_mipi(dev_p->mipi_mmio, reg);
++	u32 reg_val = kmb_read_mipi(dev_p, reg);
+ 
+-	kmb_write_mipi(dev_p->mipi_mmio, reg, (reg_val & (~mask)));
++	kmb_write_mipi(dev_p, reg, (reg_val & (~mask)));
+ }
+ int kmb_setup_crtc(struct drm_device *dev);
+ void kmb_set_scanout(struct kmb_drm_private *lcd);
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+index 24c57cef536b..e2337d9b3ec5 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.c
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -227,12 +227,12 @@ kmb_dsi_mode_valid(struct drm_connector *connector,
+ 
+ static int kmb_dsi_get_modes(struct drm_connector *connector)
+ {
+-	struct drm_display_mode *mode;
+-	struct kmb_connector *kmb_connector = to_kmb_connector(connector);
++	int num_modes = 0;
+ 
+-	mode = drm_mode_duplicate(connector->dev, kmb_connector->fixed_mode);
+-	drm_mode_probed_add(connector, mode);
+-	return 1;
++	num_modes = drm_add_modes_noedid(connector,
++			connector->dev->mode_config.max_width,
++			connector->dev->mode_config.max_height);
++	return num_modes;
+ }
+ 
+ static void kmb_dsi_connector_destroy(struct drm_connector *connector)
+@@ -502,6 +502,8 @@ static u32 mipi_tx_fg_section_cfg_regs(struct kmb_drm_private *dev_p,
+ 	cfg |= ((ph_cfg->data_mode & MIPI_TX_SECT_DM_MASK)
+ 		<< MIPI_TX_SECT_DM_SHIFT);	/* bits [24:25] */
+ 	cfg |= MIPI_TX_SECT_DMA_PACKED;
++	DRM_INFO("%s : %d ctrl=%d frame_id=%d section=%d cfg=%x\n",
++			__func__, __LINE__, ctrl_no, frame_id, section, cfg);
+ 	kmb_write_mipi(dev_p, (MIPI_TXm_HS_FGn_SECTo_PH(ctrl_no, frame_id,
+ 					section)), cfg);
+ 	/*unpacked bytes */
+@@ -574,7 +576,7 @@ static void mipi_tx_fg_cfg_regs(struct kmb_drm_private *dev_p,
+ 	u32 ppl_llp_ratio;
+ 	u32 ctrl_no = MIPI_CTRL6, reg_adr, val, offset;
+ 
+-	/*Get system clock for blanking period cnfigurations */
++	/*Get system clock for blanking period cnfigurations*/
+ 	/*TODO need to get system clock from clock driver */
+ 	/* Assume 700 Mhz system clock for now */
+ 	sysclk = 700;
+@@ -593,6 +595,7 @@ static void mipi_tx_fg_cfg_regs(struct kmb_drm_private *dev_p,
+ 	reg_adr = MIPI_TXm_HS_FGn_NUM_LINES(ctrl_no, frame_gen);
+ 	kmb_write_mipi(dev_p, reg_adr, fg_cfg->v_active);
+ 
++	DRM_INFO("%s : %d\n", __func__, __LINE__);
+ 	/*vsync width */
+ 	/*
+ 	 *there are 2 registers for vsync width -VSA in lines for channels 0-3
+@@ -646,6 +649,7 @@ static void mipi_tx_fg_cfg_regs(struct kmb_drm_private *dev_p,
+ 	reg_adr = MIPI_TXm_HS_LLP_H_BACKPORCHn(ctrl_no, frame_gen);
+ 	kmb_write_mipi(dev_p, reg_adr, fg_cfg->h_backporch * (fg_cfg->bpp / 8));
+ 
++	DRM_INFO("%s : %d\n", __func__, __LINE__);
+ 	/* llp h frontporch */
+ 	reg_adr = MIPI_TXm_HS_LLP_H_FRONTPORCHn(ctrl_no, frame_gen);
+ 	kmb_write_mipi(dev_p, reg_adr,
+@@ -807,13 +811,11 @@ static u32 mipi_tx_init_cntrl(struct kmb_drm_private *dev_p,
+ 	 * set mipitxcctrlcfg
+ 	 */
+ 
+-	DRM_INFO("%s : %d\n", __func__, __LINE__);
+ 	for (frame_id = 0; frame_id < 4; frame_id++) {
+ 		/* find valid frame, assume only one valid frame */
+ 		if (ctrl_cfg->tx_ctrl_cfg.frames[frame_id] == NULL)
+ 			continue;
+ 
+-		DRM_INFO("%s : %d\n", __func__, __LINE__);
+ 		/* Frame Section configuration */
+ 		/*TODO - assume there is only one valid section in a frame, so
+ 		 * bits_per_pclk and word_count are only set once
+@@ -1231,13 +1233,18 @@ static void dphy_wait_fsm(struct kmb_drm_private *dev_p, u32 dphy_no,
+ 		enum dphy_tx_fsm fsm_state)
+ {
+ 	enum dphy_tx_fsm val = DPHY_TX_POWERDWN;
++	int i = 0;
+ 
+ 	do {
+ 		test_mode_send(dev_p, dphy_no, TEST_CODE_FSM_CONTROL, 0x80);
+ 		/*TODO-need to add a time out and return failure */
+ 		val = GET_TEST_DOUT0_3(dev_p, dphy_no);
++		i++;
++		if (i > 50000) {
++			DRM_INFO("%s: timing out\n", __func__);
++			break;
++		}
+ 	} while (val != fsm_state);
+-
+ }
+ 
+ static u32 wait_init_done(struct kmb_drm_private *dev_p, u32 dphy_no,
+@@ -1245,10 +1252,16 @@ static u32 wait_init_done(struct kmb_drm_private *dev_p, u32 dphy_no,
+ {
+ 	u32 stopstatedata = 0;
+ 	u32 data_lanes = (1 << active_lanes) - 1;
++	int i = 0;
+ 
+ 	do {
+ 		stopstatedata = GET_STOPSTATE_DATA(dev_p, dphy_no);
+ 		/*TODO-need to add a time out and return failure */
++		i++;
++		if (i > 50000) {
++			DRM_INFO("%s: timing out", __func__);
++			break;
++		}
+ 	} while (stopstatedata != data_lanes);
+ 
+ 	return 0;
+@@ -1256,9 +1269,15 @@ static u32 wait_init_done(struct kmb_drm_private *dev_p, u32 dphy_no,
+ 
+ static u32 wait_pll_lock(struct kmb_drm_private *dev_p, u32 dphy_no)
+ {
++	int i = 0;
+ 	do {
+ 		;
+ 		/*TODO-need to add a time out and return failure */
++		i++;
++		if (i > 50000) {
++			DRM_INFO("wait_pll_lock: timing out\n");
++			break;
++		}
+ 	} while (!GET_PLL_LOCK(dev_p, dphy_no));
+ 
+ 	return 0;
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.c b/drivers/gpu/drm/kmb/kmb_plane.c
+index 3aa9c3af641e..28e32b362f86 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.c
++++ b/drivers/gpu/drm/kmb/kmb_plane.c
+@@ -499,7 +499,7 @@ struct kmb_plane *kmb_plane_init(struct drm_device *drm)
+ 	struct kmb_plane *plane = NULL;
+ 	struct kmb_plane *primary = NULL;
+ 	int i = 0;
+-	int ret;
++	int ret = 0;
+ 	enum drm_plane_type plane_type;
+ 	const uint32_t *plane_formats;
+ 	int num_plane_formats;
+@@ -508,11 +508,13 @@ struct kmb_plane *kmb_plane_init(struct drm_device *drm)
+ 
+ 		plane = devm_kzalloc(drm->dev, sizeof(*plane), GFP_KERNEL);
+ 
+-		if (!plane)
++		if (!plane) {
++			DRM_ERROR("Failed to allocate plane\n");
+ 			return ERR_PTR(-ENOMEM);
++		}
+ 
+ 		plane_type = (i == 0) ? DRM_PLANE_TYPE_PRIMARY :
+-		    DRM_PLANE_TYPE_OVERLAY;
++			DRM_PLANE_TYPE_OVERLAY;
+ 		if (i < 2) {
+ 			plane_formats = kmb_formats_v;
+ 			num_plane_formats = ARRAY_SIZE(kmb_formats_v);
+@@ -521,13 +523,16 @@ struct kmb_plane *kmb_plane_init(struct drm_device *drm)
+ 			num_plane_formats = ARRAY_SIZE(kmb_formats_g);
+ 		}
+ 
+-		ret =
+-		    drm_universal_plane_init(drm, &plane->base_plane,
+-					     POSSIBLE_CRTCS, &kmb_plane_funcs,
+-					     plane_formats, num_plane_formats,
+-					     NULL, plane_type, "plane %d", i);
+-		if (ret < 0)
++		ret = drm_universal_plane_init(drm, &plane->base_plane,
++				POSSIBLE_CRTCS,
++				&kmb_plane_funcs, plane_formats,
++					num_plane_formats,
++					NULL, plane_type, "plane %d", i);
++		if (ret < 0) {
++			DRM_ERROR("drm_universal_plane_init -failed with ret=%d"
++					, ret);
+ 			goto cleanup;
++		}
+ 
+ 		drm_plane_helper_add(&plane->base_plane,
+ 				     &kmb_plane_helper_funcs);
+@@ -538,6 +543,8 @@ struct kmb_plane *kmb_plane_init(struct drm_device *drm)
+ 		plane->id = i;
+ 	}
+ 
+-cleanup:
+ 	return primary;
++cleanup:
++	kfree(plane);
++	return ERR_PTR(ret);
+ }
+diff --git a/drivers/gpu/drm/kmb/kmb_regs.h b/drivers/gpu/drm/kmb/kmb_regs.h
+index 2377439636ff..9ca7851346f0 100644
+--- a/drivers/gpu/drm/kmb/kmb_regs.h
++++ b/drivers/gpu/drm/kmb/kmb_regs.h
+@@ -713,6 +713,7 @@
+ #define   LCD				(1<<1)
+ #define   MIPI_COMMON			(1<<2)
+ #define   MIPI_TX0			(1<<9)
++#define MSS_CAM_RSTN_CTRL		(0x14)
+ 
+ #define BIT_MASK_16				(0xffff)
+ #endif /* __KMB_REGS_H__ */
+-- 
+2.17.1
+

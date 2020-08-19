@@ -1,0 +1,92 @@
+From 341369399266754e5007dd46cdd26aa7490a89c6 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Tue, 21 Apr 2020 11:57:27 -0700
+Subject: [PATCH 101/131] kmb/drm: Prune unsupported modes
+
+KMB display pipeline is LCD->Mipi->HDMI. Mipi->HDMI converter chip only
+accepts 4-lane input from mipi.
+With 4-lane mipi, KMB hardware can only support 1080p resolution.
+Therefore, limit supported mode to 1080p.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_drv.c   |  4 ++--
+ drivers/gpu/drm/kmb/kmb_drv.h   |  8 +++++---
+ drivers/gpu/drm/kmb/kmb_dsi.c   | 11 +++++++++++
+ drivers/gpu/drm/kmb/kmb_plane.c |  2 ++
+ 4 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index 00c24516b016..4f5db970fe9b 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -359,8 +359,8 @@ static const struct drm_mode_config_funcs kmb_mode_config_funcs = {
+ static void kmb_setup_mode_config(struct drm_device *drm)
+ {
+ 	drm_mode_config_init(drm);
+-	drm->mode_config.min_width = 0;
+-	drm->mode_config.min_height = 0;
++	drm->mode_config.min_width = KMB_MIN_WIDTH;
++	drm->mode_config.min_height = KMB_MIN_HEIGHT;
+ 	drm->mode_config.max_width = KMB_MAX_WIDTH;
+ 	drm->mode_config.max_height = KMB_MAX_HEIGHT;
+ 	drm->mode_config.funcs = &kmb_mode_config_funcs;
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.h b/drivers/gpu/drm/kmb/kmb_drv.h
+index 83824f728d72..eef2d8bba86f 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.h
++++ b/drivers/gpu/drm/kmb/kmb_drv.h
+@@ -28,10 +28,12 @@
+ 
+ #include "kmb_regs.h"
+ 
+-#define FCCTEST
++//#define FCCTEST
+ #define LCD_TEST
+-#define KMB_MAX_WIDTH			1920	/*max width in pixels */
+-#define KMB_MAX_HEIGHT			1080	/*max height in pixels */
++#define KMB_MAX_WIDTH			1920 /*max width in pixels */
++#define KMB_MAX_HEIGHT			1080 /*max height in pixels */
++#define KMB_MIN_WIDTH                   1920 /*max width in pixels */
++#define KMB_MIN_HEIGHT                  1080 /*max height in pixels */
+ #define KMB_LCD_DEFAULT_CLK		250000000
+ #define KMB_MIPI_DEFAULT_CLK		24000000
+ #define KMB_MIPI_DEFAULT_CFG_CLK	24000000
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+index 6ea07acb2163..0b920c982ec2 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.c
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -214,6 +214,17 @@ static enum drm_mode_status
+ kmb_dsi_mode_valid(struct drm_connector *connector,
+ 		   struct drm_display_mode *mode)
+ {
++	struct drm_device *dev = connector->dev;
++	struct drm_mode_config *mode_config = &dev->mode_config;
++
++	if (mode->hdisplay < mode_config->min_width ||
++			mode->hdisplay > mode_config->max_width)
++		return MODE_BAD_HVALUE;
++
++	if (mode->vdisplay < mode_config->min_height ||
++			mode->vdisplay > mode_config->max_height)
++		return MODE_BAD_VVALUE;
++
+ 	return MODE_OK;
+ }
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.c b/drivers/gpu/drm/kmb/kmb_plane.c
+index 7696f402ad00..994070aeeff6 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.c
++++ b/drivers/gpu/drm/kmb/kmb_plane.c
+@@ -78,6 +78,8 @@ static int kmb_plane_atomic_check(struct drm_plane *plane,
+ 
+ 	if (state->crtc_w > KMB_MAX_WIDTH || state->crtc_h > KMB_MAX_HEIGHT)
+ 		return -EINVAL;
++	if (state->crtc_w < KMB_MIN_WIDTH || state->crtc_h < KMB_MIN_HEIGHT)
++		return -EINVAL;
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

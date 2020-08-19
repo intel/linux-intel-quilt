@@ -1,0 +1,113 @@
+From 3a9b5d7ca0c5ab3d60dd735db68d8f8dc1b9affc Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Mon, 6 Jan 2020 07:54:12 -0800
+Subject: [PATCH 091/131] drm/kmb: Enable LCD interrupts during modeset
+
+The issue was that spurious interrupts were happening before the LCD
+controller was enabled and system hangs. Fix is to
+clear LCD interrupts and disable them before modeset
+and re enable them after enabling LCD controller.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_crtc.c |  6 +++++-
+ drivers/gpu/drm/kmb/kmb_drv.c  | 21 +++------------------
+ 2 files changed, 8 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_crtc.c b/drivers/gpu/drm/kmb/kmb_crtc.c
+index 7c4dffe1f033..a8dc1e3cc37d 100644
+--- a/drivers/gpu/drm/kmb/kmb_crtc.c
++++ b/drivers/gpu/drm/kmb/kmb_crtc.c
+@@ -98,6 +98,7 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 	struct videomode vm;
+ 	int vsync_start_offset;
+ 	int vsync_end_offset;
++	unsigned int val = 0;
+ 
+ 	/* initialize mipi */
+ 	kmb_dsi_hw_init(dev, m);
+@@ -108,6 +109,9 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 			m->crtc_hsync_start - m->crtc_hdisplay,
+ 			m->crtc_htotal - m->crtc_hsync_end,
+ 			m->crtc_hsync_end - m->crtc_hsync_start);
++	val = kmb_read_lcd(dev->dev_private, LCD_INT_ENABLE);
++	kmb_clr_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE, val);
++	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_CLEAR, ~0x0);
+ //	vm.vfront_porch = m->crtc_vsync_start - m->crtc_vdisplay;
+ 	vm.vfront_porch = 2;
+ //	vm.vback_porch = m->crtc_vtotal - m->crtc_vsync_end;
+@@ -156,9 +160,9 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 		kmb_write_lcd(dev->dev_private, LCD_VSYNC_START_EVEN, 10);
+ 		kmb_write_lcd(dev->dev_private, LCD_VSYNC_END_EVEN, 10);
+ 	}
+-	/* enable VL1 layer as default */
+ 	kmb_write_lcd(dev->dev_private, LCD_TIMING_GEN_TRIG, ENABLE);
+ 	kmb_set_bitmask_lcd(dev->dev_private, LCD_CONTROL, LCD_CTRL_ENABLE);
++	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE, val);
+ #endif
+ 	/* TBD */
+ 	/* set clocks here */
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index 49fd87ea5c06..531e20c6f8bf 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -57,8 +57,6 @@ static irqreturn_t kmb_isr(int irq, void *arg);
+ 
+ static struct clk *clk_lcd;
+ static struct clk *clk_mipi;
+-static struct clk *clk_msscam;
+-static struct clk *clk_pll0out0;
+ static struct clk *clk_mipi_ecfg;
+ static struct clk *clk_mipi_cfg;
+ 
+@@ -79,12 +77,6 @@ int kmb_display_clk_enable(void)
+ 		DRM_ERROR("Failed to enable MIPI clock: %d\n", ret);
+ 		return ret;
+ 	}
+-/*	ret = clk_prepare_enable(clk_msscam);
+-	if (ret) {
+-		DRM_ERROR("Failed to enable MSSCAM clock: %d\n", ret);
+-		return ret;
+-	}
+-	*/
+ 
+ 	ret = clk_prepare_enable(clk_mipi_ecfg);
+ 	if (ret) {
+@@ -107,8 +99,6 @@ static int kmb_display_clk_disable(void)
+ 		clk_disable_unprepare(clk_lcd);
+ 	if (clk_mipi)
+ 		clk_disable_unprepare(clk_mipi);
+-	if (clk_msscam)
+-		clk_disable_unprepare(clk_msscam);
+ 	if (clk_mipi_ecfg)
+ 		clk_disable_unprepare(clk_mipi_ecfg);
+ 	if (clk_mipi_cfg)
+@@ -200,14 +190,6 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		DRM_ERROR("clk_get() failed clk_mipi\n");
+ 		goto setup_fail;
+ 	}
+-	clk_pll0out0 = clk_get(&pdev->dev, "clk_pll0_out0");
+-	if (IS_ERR(clk_pll0out0))
+-		DRM_ERROR("clk_get() failed clk_pll0_out0\n");
+-
+-	if (clk_pll0out0)
+-		DRM_INFO("Get clk_pll0out0 = %ld\n",
+-				clk_get_rate(clk_pll0out0));
+-
+ 	clk_mipi_ecfg = clk_get(&pdev->dev, "clk_mipi_ecfg");
+ 	if (IS_ERR(clk_mipi_ecfg)) {
+ 		DRM_ERROR("clk_get() failed clk_mipi_ecfg\n");
+@@ -413,6 +395,9 @@ static irqreturn_t handle_lcd_irq(struct drm_device *dev)
+ 			break;
+ 		}
+ 	}
++
++	/* clear all interrupts */
++	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_CLEAR, ~0x0);
+ 	return IRQ_HANDLED;
+ }
+ 
+-- 
+2.17.1
+

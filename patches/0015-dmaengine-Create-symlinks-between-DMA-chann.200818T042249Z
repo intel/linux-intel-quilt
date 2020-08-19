@@ -1,0 +1,139 @@
+From e2fecc40e34293c4c1e2a8a75c2cc53559e79bdd Mon Sep 17 00:00:00 2001
+From: Geert Uytterhoeven <geert+renesas@glider.be>
+Date: Fri, 17 Jan 2020 16:30:56 +0100
+Subject: [PATCH 15/25] dmaengine: Create symlinks between DMA channels and
+ slaves
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently it is not easy to find out which DMA channels are in use, and
+which slave devices are using which channels.
+
+Fix this by creating two symlinks between the DMA channel and the actual
+slave device when a channel is requested:
+  1. A "slave" symlink from DMA channel to slave device,
+  2. A "dma:<name>" symlink slave device to DMA channel.
+When the channel is released, the symlinks are removed again.
+The latter requires keeping track of the slave device and the channel
+name in the dma_chan structure.
+
+Note that this is limited to channel request functions for requesting an
+exclusive slave channel that take a device pointer (dma_request_chan()
+and dma_request_slave_channel*()).
+
+Signed-off-by: Geert Uytterhoeven <geert+renesas@glider.be>
+Tested-by: Niklas Söderlund <niklas.soderlund@ragnatech.se>
+Link: https://lore.kernel.org/r/20200117153056.31363-1-geert+renesas@glider.be
+Signed-off-by: Vinod Koul <vkoul@kernel.org>
+(cherry picked from commit 71723a96b8b1367fefc18f60025dae792477d602)
+Signed-off-by: Raymond Tan <raymond.tan@intel.com>
+---
+ drivers/dma/dmaengine.c   | 37 +++++++++++++++++++++++++++++++------
+ include/linux/dmaengine.h |  4 ++++
+ 2 files changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/dma/dmaengine.c b/drivers/dma/dmaengine.c
+index 51a2f2b1b2de..f3ef4edd4de1 100644
+--- a/drivers/dma/dmaengine.c
++++ b/drivers/dma/dmaengine.c
+@@ -60,6 +60,8 @@ static long dmaengine_ref_count;
+ 
+ /* --- sysfs implementation --- */
+ 
++#define DMA_SLAVE_NAME	"slave"
++
+ /**
+  * dev_to_dma_chan - convert a device pointer to its sysfs container object
+  * @dev - device node
+@@ -730,11 +732,11 @@ struct dma_chan *dma_request_chan(struct device *dev, const char *name)
+ 	if (has_acpi_companion(dev) && !chan)
+ 		chan = acpi_dma_request_slave_chan_by_name(dev, name);
+ 
+-	if (chan) {
+-		/* Valid channel found or requester needs to be deferred */
+-		if (!IS_ERR(chan) || PTR_ERR(chan) == -EPROBE_DEFER)
+-			return chan;
+-	}
++	if (PTR_ERR(chan) == -EPROBE_DEFER)
++		return chan;
++
++	if (!IS_ERR_OR_NULL(chan))
++		goto found;
+ 
+ 	/* Try to find the channel via the DMA filter map(s) */
+ 	mutex_lock(&dma_list_mutex);
+@@ -754,7 +756,23 @@ struct dma_chan *dma_request_chan(struct device *dev, const char *name)
+ 	}
+ 	mutex_unlock(&dma_list_mutex);
+ 
+-	return chan ? chan : ERR_PTR(-EPROBE_DEFER);
++	if (!IS_ERR_OR_NULL(chan))
++		goto found;
++
++	return ERR_PTR(-EPROBE_DEFER);
++
++found:
++	chan->slave = dev;
++	chan->name = kasprintf(GFP_KERNEL, "dma:%s", name);
++	if (!chan->name)
++		return ERR_PTR(-ENOMEM);
++
++	if (sysfs_create_link(&chan->dev->device.kobj, &dev->kobj,
++			      DMA_SLAVE_NAME))
++		dev_err(dev, "Cannot create DMA %s symlink\n", DMA_SLAVE_NAME);
++	if (sysfs_create_link(&dev->kobj, &chan->dev->device.kobj, chan->name))
++		dev_err(dev, "Cannot create DMA %s symlink\n", chan->name);
++	return chan;
+ }
+ EXPORT_SYMBOL_GPL(dma_request_chan);
+ 
+@@ -812,6 +830,13 @@ void dma_release_channel(struct dma_chan *chan)
+ 	/* drop PRIVATE cap enabled by __dma_request_channel() */
+ 	if (--chan->device->privatecnt == 0)
+ 		dma_cap_clear(DMA_PRIVATE, chan->device->cap_mask);
++	if (chan->slave) {
++		sysfs_remove_link(&chan->slave->kobj, chan->name);
++		kfree(chan->name);
++		chan->name = NULL;
++		chan->slave = NULL;
++	}
++	sysfs_remove_link(&chan->dev->device.kobj, DMA_SLAVE_NAME);
+ 	mutex_unlock(&dma_list_mutex);
+ }
+ EXPORT_SYMBOL_GPL(dma_release_channel);
+diff --git a/include/linux/dmaengine.h b/include/linux/dmaengine.h
+index c396f7e7f39d..a9a3d35379a6 100644
+--- a/include/linux/dmaengine.h
++++ b/include/linux/dmaengine.h
+@@ -294,10 +294,12 @@ struct dma_router {
+ /**
+  * struct dma_chan - devices supply DMA channels, clients use them
+  * @device: ptr to the dma device who supplies this channel, always !%NULL
++ * @slave: ptr to the device using this channel
+  * @cookie: last cookie value returned to client
+  * @completed_cookie: last completed cookie for this channel
+  * @chan_id: channel ID for sysfs
+  * @dev: class device for sysfs
++ * @name: backlink name for sysfs
+  * @device_node: used to add this to the device chan list
+  * @local: per-cpu pointer to a struct dma_chan_percpu
+  * @client_count: how many clients are using this channel
+@@ -308,12 +310,14 @@ struct dma_router {
+  */
+ struct dma_chan {
+ 	struct dma_device *device;
++	struct device *slave;
+ 	dma_cookie_t cookie;
+ 	dma_cookie_t completed_cookie;
+ 
+ 	/* sysfs */
+ 	int chan_id;
+ 	struct dma_chan_dev *dev;
++	const char *name;
+ 
+ 	struct list_head device_node;
+ 	struct dma_chan_percpu __percpu *local;
+-- 
+2.17.1
+
