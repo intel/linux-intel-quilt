@@ -1,30 +1,40 @@
-From bf065318059bf65d2ead2a971e8fa899f44148ba Mon Sep 17 00:00:00 2001
+From 0ed55bcce996cc10da2bb6d9829d8d8477831376 Mon Sep 17 00:00:00 2001
 From: Christopher Hall <christopher.s.hall@intel.com>
 Date: Tue, 3 Dec 2019 06:25:44 -0800
-Subject: [PATCH 03/32] drivers/ptp: Add user-space input polling interface
+Subject: [PATCH 03/58] drivers/ptp: Add user-space input polling interface
 
 The Intel PMC Time-Aware GPIO controller doesn't implement interrupts to
 notify software that an input event has occurred. To solve this problem,
 implement a user-space polling interface allowing the application to check
 for input events. The API returns an event count and time. This interface
-(EVENT_COUNT_TSTAMP2) is reused from the output frequency adjustment API.
+(EVENT_COUNT_TSTAMP2) is *reused* from the output frequency adjustment API.
 The event count delta indicates that one or more events have occurred and
 how many events may have been missed.
 
-For periodic input use cases such as PPS input, polling 3x per second is
-sufficient to capture rising and falling edge timestamps.
+For periodic input use cases, polling is fairly efficient. Using PPS input,
+as an example, polling 3x per second is more than sufficient to capture
+rising and falling edge timestamps. Generalizing, the poll period should
+be:
 
-A flag that indicates a pin isn't capable of generating interrupts is added.
-Software should not expect notification through the read() interface on
-pins marked as such. If all pins are marked as poll only, the read interface
-immediately returns an error because no interrupt would ever occur.
+	poll_period = (nominal_input_period / (1 + freq_offset)) / 2
+
+	Where freq_offset = <remote:local clock ratio> - 1;
+
+A flag that indicates a pin isn't capable of generating interrupts is
+added. Software should not expect notification through the read() interface
+on pins marked as such. If all pins are marked as poll only, the read
+interface is marked 'defunct' and immediately returns an error because no
+interrupt would ever occur to exit the wait state.
+
+Signed-off-by: Christopher Hall <christopher.s.hall@intel.com>
+Signed-off-by: Pan, Kris <kris.pan@intel.com>
 ---
  drivers/ptp/ptp_clock.c        | 13 +++++++++++++
  include/uapi/linux/ptp_clock.h |  1 +
  2 files changed, 14 insertions(+)
 
 diff --git a/drivers/ptp/ptp_clock.c b/drivers/ptp/ptp_clock.c
-index ac1f2bf9e888..0ac0dfd3288c 100644
+index acabbe72e55e..e2ef22eb7a41 100644
 --- a/drivers/ptp/ptp_clock.c
 +++ b/drivers/ptp/ptp_clock.c
 @@ -190,6 +190,17 @@ static void ptp_aux_kworker(struct kthread_work *work)

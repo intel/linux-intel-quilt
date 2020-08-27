@@ -1,0 +1,86 @@
+From 2974c3d27d650ca2cb3aa4ce9d799f4074cae56e Mon Sep 17 00:00:00 2001
+From: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Date: Thu, 29 Aug 2019 09:24:13 -0700
+Subject: [PATCH 20/47] x86/mm: Update pte_modify for _PAGE_COW
+
+Pte_modify() changes a PTE to 'newprot'.  It doesn't use the pte_*()
+helpers that a previous patch fixed up, so we need a new site.
+
+Introduce fixup_dirty_pte() to set the dirty bits based on _PAGE_RW, and
+apply the same changes to pmd_modify().
+
+Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+
+v10:
+- Change static_cpu_has() to cpu_feature_enabled().
+- Replace _PAGE_CHG_MASK approach with fixup functions.
+
+Signed-off-by: Pan, Kris <kris.pan@intel.com>
+---
+ arch/x86/include/asm/pgtable.h | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
+index 5f89035d1e60..f4870cd040de 100644
+--- a/arch/x86/include/asm/pgtable.h
++++ b/arch/x86/include/asm/pgtable.h
+@@ -726,6 +726,21 @@ static inline pmd_t pmd_mknotpresent(pmd_t pmd)
+ 
+ static inline u64 flip_protnone_guard(u64 oldval, u64 val, u64 mask);
+ 
++static inline pteval_t fixup_dirty_pte(pteval_t pteval)
++{
++	pte_t pte = __pte(pteval);
++
++	if (pte_dirty(pte)) {
++		pte = pte_mkclean(pte);
++
++		if (pte_flags(pte) & _PAGE_RW)
++			pte = pte_set_flags(pte, _PAGE_DIRTY_HW);
++		else
++			pte = pte_set_flags(pte, _PAGE_COW);
++	}
++	return pte_val(pte);
++}
++
+ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
+ {
+ 	pteval_t val = pte_val(pte), oldval = val;
+@@ -736,16 +751,34 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
+ 	 */
+ 	val &= _PAGE_CHG_MASK;
+ 	val |= check_pgprot(newprot) & ~_PAGE_CHG_MASK;
++	val = fixup_dirty_pte(val);
+ 	val = flip_protnone_guard(oldval, val, PTE_PFN_MASK);
+ 	return __pte(val);
+ }
+ 
++static inline int pmd_write(pmd_t pmd);
++static inline pmdval_t fixup_dirty_pmd(pmdval_t pmdval)
++{
++	pmd_t pmd = __pmd(pmdval);
++
++	if (pmd_dirty(pmd)) {
++		pmd = pmd_mkclean(pmd);
++
++		if (pmd_flags(pmd) & _PAGE_RW)
++			pmd = pmd_set_flags(pmd, _PAGE_DIRTY_HW);
++		else
++			pmd = pmd_set_flags(pmd, _PAGE_COW);
++	}
++	return pmd_val(pmd);
++}
++
+ static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
+ {
+ 	pmdval_t val = pmd_val(pmd), oldval = val;
+ 
+ 	val &= _HPAGE_CHG_MASK;
+ 	val |= check_pgprot(newprot) & ~_HPAGE_CHG_MASK;
++	val = fixup_dirty_pmd(val);
+ 	val = flip_protnone_guard(oldval, val, PHYSICAL_PMD_PAGE_MASK);
+ 	return __pmd(val);
+ }
+-- 
+2.17.1
+

@@ -1,0 +1,85 @@
+From 5811448dd9e265e096add4bc08de5d28e2cb10aa Mon Sep 17 00:00:00 2001
+From: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Date: Fri, 12 Jan 2018 15:04:54 -0800
+Subject: [PATCH 22/47] mm: Introduce VM_SHSTK for shadow stack memory
+
+A Shadow Stack PTE must be read-only and have _PAGE_DIRTY set.  However,
+read-only and Dirty PTEs also exist for copy-on-write (COW) pages.  These
+two cases are handled differently for page faults.  Introduce VM_SHSTK to
+track shadow stack VMAs.
+
+Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+
+v9:
+- Add VM_SHSTK case to arch_vma_name().
+- Revise the commit log to explain why adding a new VM flag.
+
+Signed-off-by: Pan, Kris <kris.pan@intel.com>
+---
+ arch/x86/mm/mmap.c | 2 ++
+ fs/proc/task_mmu.c | 3 +++
+ include/linux/mm.h | 8 ++++++++
+ 3 files changed, 13 insertions(+)
+
+diff --git a/arch/x86/mm/mmap.c b/arch/x86/mm/mmap.c
+index cb91eccc4960..fe77fd6debf1 100644
+--- a/arch/x86/mm/mmap.c
++++ b/arch/x86/mm/mmap.c
+@@ -163,6 +163,8 @@ unsigned long get_mmap_base(int is_legacy)
+ 
+ const char *arch_vma_name(struct vm_area_struct *vma)
+ {
++	if (vma->vm_flags & VM_SHSTK)
++		return "[shadow stack]";
+ 	return NULL;
+ }
+ 
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 8d382d4ec067..434692759265 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -657,6 +657,9 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
+ 		[ilog2(VM_PKEY_BIT4)]	= "",
+ #endif
+ #endif /* CONFIG_ARCH_HAS_PKEYS */
++#ifdef CONFIG_X86_INTEL_SHADOW_STACK_USER
++		[ilog2(VM_SHSTK)]	= "ss",
++#endif
+ 	};
+ 	size_t i;
+ 
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index f3fe7371855c..ac3490df64d8 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -294,11 +294,13 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_HIGH_ARCH_BIT_2	34	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_3	35	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_BIT_4	36	/* bit only usable on 64-bit architectures */
++#define VM_HIGH_ARCH_BIT_5	37	/* bit only usable on 64-bit architectures */
+ #define VM_HIGH_ARCH_0	BIT(VM_HIGH_ARCH_BIT_0)
+ #define VM_HIGH_ARCH_1	BIT(VM_HIGH_ARCH_BIT_1)
+ #define VM_HIGH_ARCH_2	BIT(VM_HIGH_ARCH_BIT_2)
+ #define VM_HIGH_ARCH_3	BIT(VM_HIGH_ARCH_BIT_3)
+ #define VM_HIGH_ARCH_4	BIT(VM_HIGH_ARCH_BIT_4)
++#define VM_HIGH_ARCH_5	BIT(VM_HIGH_ARCH_BIT_5)
+ #endif /* CONFIG_ARCH_USES_HIGH_VMA_FLAGS */
+ 
+ #ifdef CONFIG_ARCH_HAS_PKEYS
+@@ -336,6 +338,12 @@ extern unsigned int kobjsize(const void *objp);
+ # define VM_MPX		VM_NONE
+ #endif
+ 
++#ifdef CONFIG_X86_INTEL_SHADOW_STACK_USER
++# define VM_SHSTK	VM_HIGH_ARCH_5
++#else
++# define VM_SHSTK	VM_NONE
++#endif
++
+ #ifndef VM_GROWSUP
+ # define VM_GROWSUP	VM_NONE
+ #endif
+-- 
+2.17.1
+
