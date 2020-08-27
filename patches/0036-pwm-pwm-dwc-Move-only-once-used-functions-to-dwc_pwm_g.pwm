@@ -1,0 +1,89 @@
+From b65ec6805e271ad9dba1034513457d84595f15e2 Mon Sep 17 00:00:00 2001
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Date: Thu, 7 May 2020 17:08:40 +0300
+Subject: [PATCH 36/52] pwm: pwm-dwc: Move only once used functions to
+ dwc_pwm_get_state()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Review comment from Uwe Kleine-König <u.kleine-koenig@pengutronix.de>:
+	"I wonder if doing the math in .get_state() directly instead of
+	introducing a function with IMHO strange semantics that is only
+	used once would be easier to understand."
+---
+ drivers/pwm/pwm-dwc.c | 48 ++++++++++++++-----------------------------
+ 1 file changed, 15 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/pwm/pwm-dwc.c b/drivers/pwm/pwm-dwc.c
+index 6fb114603546..533cf1feb2c2 100644
+--- a/drivers/pwm/pwm-dwc.c
++++ b/drivers/pwm/pwm-dwc.c
+@@ -90,35 +90,6 @@ static void __dwc_pwm_configure(struct dwc_pwm *dwc, int pwm,
+ 	dwc_pwm_writel(ctrl, dwc->base, DWC_TIM_CTRL(pwm));
+ }
+ 
+-static u32 __dwc_pwm_duty_ns(struct dwc_pwm *dwc, int pwm)
+-{
+-	u32 duty;
+-
+-	duty = dwc_pwm_readl(dwc->base, DWC_TIM_LD_CNT2(pwm));
+-	duty += 1;
+-	duty *= dwc->clk_period_ns;
+-
+-	return duty;
+-}
+-
+-static u32 __dwc_pwm_period_ns(struct dwc_pwm *dwc, int pwm, u32 duty)
+-{
+-	u32 period;
+-
+-	period = dwc_pwm_readl(dwc->base, DWC_TIM_LD_CNT(pwm));
+-	period += 1;
+-	period *= dwc->clk_period_ns;
+-	period += duty;
+-
+-	return period;
+-}
+-
+-static bool __dwc_pwm_is_enabled(struct dwc_pwm *dwc, int pwm)
+-{
+-	return !!(dwc_pwm_readl(dwc->base,
+-				DWC_TIM_CTRL(pwm)) & DWC_TIM_CTRL_EN);
+-}
+-
+ static void __dwc_pwm_set_enable(struct dwc_pwm *dwc, int pwm, int enabled)
+ {
+ 	u32 reg;
+@@ -169,13 +140,24 @@ static void dwc_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
+ 			      struct pwm_state *state)
+ {
+ 	struct dwc_pwm *dwc = to_dwc_pwm(chip);
++	u32 duty, period;
+ 
+ 	pm_runtime_get_sync(dwc->dev);
+ 
+-	state->enabled = __dwc_pwm_is_enabled(dwc, pwm->hwpwm);
+-	state->duty_cycle = __dwc_pwm_duty_ns(dwc, pwm->hwpwm);
+-	state->period = __dwc_pwm_period_ns(dwc, pwm->hwpwm,
+-					    state->duty_cycle);
++	state->enabled = !!(dwc_pwm_readl(dwc->base,
++				DWC_TIM_CTRL(pwm->hwpwm)) & DWC_TIM_CTRL_EN);
++
++	duty = dwc_pwm_readl(dwc->base, DWC_TIM_LD_CNT2(pwm->hwpwm));
++	duty += 1;
++	duty *= dwc->clk_period_ns;
++	state->duty_cycle = duty;
++
++	period = dwc_pwm_readl(dwc->base, DWC_TIM_LD_CNT(pwm->hwpwm));
++	period += 1;
++	period *= dwc->clk_period_ns;
++	period += duty;
++	state->period = period;
++
+ 	state->polarity = PWM_POLARITY_NORMAL;
+ 
+ 	pm_runtime_put_sync(dwc->dev);
+-- 
+2.27.0
+
