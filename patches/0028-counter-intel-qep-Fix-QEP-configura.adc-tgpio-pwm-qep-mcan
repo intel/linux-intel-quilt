@@ -1,0 +1,112 @@
+From 5f4749731919fad24f35c14c61c217f4ece8c067 Mon Sep 17 00:00:00 2001
+From: "Tan, Raymond" <raymond.tan@intel.com>
+Date: Tue, 19 Nov 2019 07:35:03 +0800
+Subject: [PATCH 28/32] counter: intel-qep: Fix QEP configurations failure due
+ to RPM
+
+When the device is in runtime-pm, the MMIO register value will be invalid,
+thus reading and writing will have no effect to the device. This patch adds
+the pm_runtime_* calls to ensure the device is in correct power state
+before any MMIO register programming.
+
+Signed-off-by: Tan, Raymond
+---
+ drivers/counter/intel-qep.c | 24 ++++++++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/counter/intel-qep.c b/drivers/counter/intel-qep.c
+index f235a2ff34d4..35ec619ac25e 100644
+--- a/drivers/counter/intel-qep.c
++++ b/drivers/counter/intel-qep.c
+@@ -271,6 +271,8 @@ static int intel_qep_function_set(struct counter_device *counter,
+ 	struct intel_qep *qep = counter_to_qep(counter);
+ 	u32 reg;
+ 
++	pm_runtime_get_sync(qep->dev);
++
+ 	reg = intel_qep_readl(qep->regs, INTEL_QEPCON);
+ 	if (function == INTEL_QEP_ENCODER_MODE_SWAPPED)
+ 		reg |= INTEL_QEPCON_SWPAB;
+@@ -278,6 +280,8 @@ static int intel_qep_function_set(struct counter_device *counter,
+ 		reg &= ~INTEL_QEPCON_SWPAB;
+ 	intel_qep_writel(qep->regs, INTEL_QEPCON, reg);
+ 
++	pm_runtime_put(qep->dev);
++
+ 	return 0;
+ }
+ 
+@@ -304,6 +308,8 @@ static int intel_qep_action_set(struct counter_device *counter,
+ 	struct intel_qep *qep = counter_to_qep(counter);
+ 	u32 reg;
+ 
++	pm_runtime_get_sync(qep->dev);
++
+ 	reg = intel_qep_readl(qep->regs, INTEL_QEPCON);
+ 
+ 	if (action == INTEL_QEP_SYNAPSE_ACTION_RISING_EDGE)
+@@ -313,6 +319,8 @@ static int intel_qep_action_set(struct counter_device *counter,
+ 
+ 	intel_qep_writel(qep->regs, INTEL_QEPCON, reg);
+ 
++	pm_runtime_put(qep->dev);
++
+ 	return 0;
+ }
+ 
+@@ -383,8 +391,12 @@ static ssize_t ceiling_write(struct counter_device *counter,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	pm_runtime_get_sync(qep->dev);
++
+ 	intel_qep_writel(qep->regs, INTEL_QEPMAX, max);
+ 
++	pm_runtime_put(qep->dev);
++
+ 	return len;
+ }
+ 
+@@ -484,6 +496,8 @@ static ssize_t noise_write(struct counter_device *counter, void *priv,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	pm_runtime_get_sync(qep->dev);
++
+ 	if (max > 0x1fffff)
+ 		max = 0x1ffff;
+ 
+@@ -497,7 +511,9 @@ static ssize_t noise_write(struct counter_device *counter, void *priv,
+ 	}
+ 
+ 	intel_qep_writel(qep->regs, INTEL_QEPCON, reg);
+-	
++
++	pm_runtime_put(qep->dev);
++
+ 	return len;
+ }
+ 
+@@ -529,6 +545,8 @@ static ssize_t preset_enable_write(struct counter_device *counter, void *priv,
+ 	if (ret < 0)
+ 		return ret;
+ 
++	pm_runtime_get_sync(qep->dev);
++
+ 	reg = intel_qep_readl(qep->regs, INTEL_QEPCON);
+ 
+ 	if (val)
+@@ -537,7 +555,9 @@ static ssize_t preset_enable_write(struct counter_device *counter, void *priv,
+ 		reg |= INTEL_QEPCON_COUNT_RST_MODE;
+ 
+ 	intel_qep_writel(qep->regs, INTEL_QEPCON, reg);
+-	
++
++	pm_runtime_put(qep->dev);
++
+ 	return len;
+ }
+ 
+-- 
+2.17.1
+

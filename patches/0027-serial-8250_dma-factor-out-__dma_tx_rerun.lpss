@@ -1,0 +1,69 @@
+From 3b50fc774f72bea3d3985bd36dbeb1e0fb78e363 Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Thu, 11 Feb 2016 17:51:23 +0200
+Subject: [PATCH 27/30] serial: 8250_dma: factor out __dma_tx_rerun()
+
+Split __dma_tx_complete() to two functions like it's currently done for RX
+part. There is no functional change.
+
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/tty/serial/8250/8250_dma.c | 22 ++++++++++++++--------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_dma.c b/drivers/tty/serial/8250/8250_dma.c
+index bef18397f4f8..66516960a1eb 100644
+--- a/drivers/tty/serial/8250/8250_dma.c
++++ b/drivers/tty/serial/8250/8250_dma.c
+@@ -11,19 +11,13 @@
+ 
+ #include "8250.h"
+ 
+-static void __dma_tx_complete(void *param)
++static void __dma_tx_complete(struct uart_8250_port *p, struct uart_8250_dma *dma)
+ {
+-	struct uart_8250_port	*p = param;
+-	struct uart_8250_dma	*dma = p->dma;
+ 	struct circ_buf		*xmit = &p->port.state->xmit;
+-	unsigned long	flags;
+-	int		ret;
+ 
+ 	dma_sync_single_for_cpu(dma->txchan->device->dev, dma->tx_addr,
+ 				UART_XMIT_SIZE, DMA_TO_DEVICE);
+ 
+-	spin_lock_irqsave(&p->port.lock, flags);
+-
+ 	dma->tx_running = 0;
+ 
+ 	xmit->tail += dma->tx_size;
+@@ -32,6 +26,18 @@ static void __dma_tx_complete(void *param)
+ 
+ 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+ 		uart_write_wakeup(&p->port);
++}
++
++static void __dma_tx_rerun(void *param)
++{
++	struct uart_8250_port   *p = param;
++	struct uart_8250_dma	*dma = p->dma;
++	unsigned long	flags;
++	int		ret;
++
++	spin_lock_irqsave(&p->port.lock, flags);
++
++	__dma_tx_complete(p, dma);
+ 
+ 	ret = serial8250_tx_dma(p);
+ 	if (ret)
+@@ -68,7 +74,7 @@ int serial8250_tx_dma(struct uart_8250_port *p)
+ 	}
+ 
+ 	dma->tx_running = 1;
+-	desc->callback = __dma_tx_complete;
++	desc->callback = __dma_tx_rerun;
+ 	desc->callback_param = p;
+ 
+ 	dma->tx_cookie = dmaengine_submit(desc);
+-- 
+2.17.1
+

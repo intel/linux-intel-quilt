@@ -1,0 +1,59 @@
+From e028b6f15c4d184849475bcdc5f1a8379604fc5a Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Mon, 3 Feb 2020 15:31:30 +0200
+Subject: [PATCH 11/30] console: Introduce ->exit() callback
+
+Some consoles might require special operations on unregistering.
+For instance, serial console, when registered in the kernel,
+keeps power on for entire time, until it gets unregistered.
+Example of use:
+
+	->setup(console):
+		pm_runtime_get(...);
+
+	->exit(console):
+		pm_runtime_put(...);
+
+For such cases to have a balance we would provide ->exit() callback.
+
+Link: http://lkml.kernel.org/r/20200203133130.11591-7-andriy.shevchenko@linux.intel.com
+To: linux-kernel@vger.kernel.org
+To: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Reviewed-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Reviewed-by: Petr Mladek <pmladek@suse.com>
+Signed-off-by: Petr Mladek <pmladek@suse.com>
+---
+ include/linux/console.h | 1 +
+ kernel/printk/printk.c  | 3 +++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/include/linux/console.h b/include/linux/console.h
+index f33016b3a401..7a140f4e5d0c 100644
+--- a/include/linux/console.h
++++ b/include/linux/console.h
+@@ -148,6 +148,7 @@ struct console {
+ 	struct tty_driver *(*device)(struct console *, int *);
+ 	void	(*unblank)(void);
+ 	int	(*setup)(struct console *, char *);
++	int	(*exit)(struct console *);
+ 	int	(*match)(struct console *, char *name, int idx, char *options);
+ 	short	flags;
+ 	short	index;
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index f435a17ef988..633f41a11d75 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -2853,6 +2853,9 @@ int unregister_console(struct console *console)
+ 	console_unlock();
+ 	console_sysfs_notify();
+ 
++	if (console->exit)
++		res = console->exit(console);
++
+ 	return res;
+ 
+ out_disable_unlock:
+-- 
+2.17.1
+

@@ -1,0 +1,68 @@
+From f4bd8e5860779bf72d5a4876ad23b6a2a94d2168 Mon Sep 17 00:00:00 2001
+From: "Tan, Raymond" <raymond.tan@intel.com>
+Date: Wed, 20 Nov 2019 01:40:06 +0800
+Subject: [PATCH 21/32] pwm: pwm-dwc: Introduce __dwc_configure_timer wrapper
+ function
+
+Introduce the __dwc_configure_timer function to wrap the programming flow as
+documented in dwc spec as well as adding the RPM get/put API.
+
+Re-design the if/else block to avoid unnecessary flow when disabling the PWM pin
+in utilizing the __dwc_configure_timer wrapper function.
+
+Signed-off-by: Tan, Raymond
+---
+ drivers/pwm/pwm-dwc.c | 29 +++++++++++++++++++++++------
+ 1 file changed, 23 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/pwm/pwm-dwc.c b/drivers/pwm/pwm-dwc.c
+index 30a178955a7a..280bec19976e 100644
+--- a/drivers/pwm/pwm-dwc.c
++++ b/drivers/pwm/pwm-dwc.c
+@@ -129,20 +129,37 @@ static void __dwc_set_enable(struct dwc_pwm *dwc, int pwm, int enabled)
+ 	dwc_writel(dwc->base, DWC_TIM_CTRL(pwm), reg);
+ }
+ 
++static void __dwc_configure_timer(struct dwc_pwm *dwc, struct pwm_device *pdev, const struct pwm_state *state)
++{
++	pm_runtime_get_sync(dwc->dev);
++
++	__dwc_set_enable(dwc, pdev->hwpwm, false);
++	__dwc_configure(dwc, pdev->hwpwm, state->duty_cycle, state->period);
++	__dwc_set_enable(dwc, pdev->hwpwm, state->enabled);
++
++	pm_runtime_put_sync(dwc->dev);
++}
++
+ static int dwc_pwm_apply(struct pwm_chip *pwm, struct pwm_device *pdev,
+ 		const struct pwm_state *state)
+ {
+ 	struct dwc_pwm *dwc = to_dwc(pwm);
+ 
+ 	mutex_lock(&dwc->lock);
+-	if (state->enabled) {
+-		if (!pwm_is_enabled(pdev))
+-			pm_runtime_get_sync(dwc->dev);
+-	} else if (pwm_is_enabled(pdev)) {
++
++	if (!state->enabled & pwm_is_enabled(pdev)) {
++			/* enable -> disable state change */
++			__dwc_set_enable(dwc, pdev->hwpwm, false);
+ 			pm_runtime_put_sync(dwc->dev);
++	} else {
++		if (state->enabled & !pwm_is_enabled(pdev)) {
++			/* disable -> enable state change */
++			pm_runtime_get_sync(dwc->dev);
++		}
++		/* Re-configuring or enabling PWM */
++		__dwc_configure_timer(dwc, pdev, state);
+ 	}
+-	__dwc_configure(dwc, pdev->hwpwm, state->duty_cycle, state->period);
+-	__dwc_set_enable(dwc, pdev->hwpwm, state->enabled);
++
+ 	mutex_unlock(&dwc->lock);
+ 
+ 	return 0;
+-- 
+2.17.1
+

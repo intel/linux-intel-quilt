@@ -1,0 +1,56 @@
+From 6555ea47867302ccaa2dc1c287f267151ee9f713 Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Mon, 3 Feb 2020 15:31:28 +0200
+Subject: [PATCH 09/30] console: Avoid positive return code from
+ unregister_console()
+
+There are only two callers that use the returned code from
+unregister_console():
+
+  - unregister_early_console() in arch/m68k/kernel/early_printk.c
+  - kgdb_unregister_nmi_console() in drivers/tty/serial/kgdb_nmi.c
+
+They both expect to get "0" on success and a non-zero value on error.
+But the current behavior is confusing and buggy:
+
+  - _braille_unregister_console() returns "1" on success
+  - unregister_console() returns "1" on error
+
+Fix and clean up the behavior:
+
+  - Return success when _braille_unregister_console() succeeded
+  - Return a meaningful error code when the console was
+    not registered before
+
+Link: http://lkml.kernel.org/r/20200203133130.11591-5-andriy.shevchenko@linux.intel.com
+To: linux-kernel@vger.kernel.org
+To: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Reviewed-by: Sergey Senozhatsky <sergey.senozhatsky@gmail.com>
+Signed-off-by: Petr Mladek <pmladek@suse.com>
+---
+ kernel/printk/printk.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/printk/printk.c b/kernel/printk/printk.c
+index b0c12c08cac4..61d188f4c672 100644
+--- a/kernel/printk/printk.c
++++ b/kernel/printk/printk.c
+@@ -2816,10 +2816,12 @@ int unregister_console(struct console *console)
+ 		console->name, console->index);
+ 
+ 	res = _braille_unregister_console(console);
+-	if (res)
++	if (res < 0)
+ 		return res;
++	if (res > 0)
++		return 0;
+ 
+-	res = 1;
++	res = -ENODEV;
+ 	console_lock();
+ 	if (console_drivers == console) {
+ 		console_drivers=console->next;
+-- 
+2.17.1
+
