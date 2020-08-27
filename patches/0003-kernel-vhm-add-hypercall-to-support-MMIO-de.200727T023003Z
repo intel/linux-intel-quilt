@@ -1,0 +1,165 @@
+From 3a465a9c33fdf8c210dc9047c9ad02fa44706a58 Mon Sep 17 00:00:00 2001
+From: Li Fei1 <fei1.li@intel.com>
+Date: Thu, 16 Jul 2020 11:58:51 +0800
+Subject: [PATCH 3/8] kernel: vhm: add hypercall to support MMIO device pass
+ through
+
+Add two hypercalls to support MMIO device pass through.
+
+Tracked-On: projectacrn/acrn-hypervisor#5053
+Signed-off-by: Li Fei1 <fei1.li@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c         | 39 ++++++++++++++++++++++++++++++
+ drivers/vhm/vhm_hypercall.c        | 10 ++++++++
+ include/linux/vhm/acrn_common.h    | 22 +++++++++++++++++
+ include/linux/vhm/acrn_hv_defs.h   |  2 ++
+ include/linux/vhm/vhm_hypercall.h  |  2 ++
+ include/linux/vhm/vhm_ioctl_defs.h |  2 ++
+ 6 files changed, 77 insertions(+)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 6dfbe7b532a5..83fbb5415203 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -572,6 +572,45 @@ static long vhm_dev_ioctl(struct file *filep,
+ 		break;
+ 	}
+ 
++	case IC_ASSIGN_MMIODEV: {
++		struct acrn_mmiodev *mmiodev;
++
++		mmiodev = acrn_mempool_alloc(GFP_KERNEL);
++		if (mmiodev == NULL)
++			return -EFAULT;
++		if (copy_from_user(mmiodev,
++				(void *)ioctl_param, sizeof(*mmiodev))) {
++			ret = -EFAULT;
++		} else {
++			ret = hcall_assign_mmiodev(vm->vmid,
++					virt_to_phys(mmiodev));
++			if (ret < 0)
++				pr_err("vhm: failed to assign mmio device!\n");
++		}
++		acrn_mempool_free(mmiodev);
++		break;
++	}
++
++	case IC_DEASSIGN_MMIODEV: {
++		struct acrn_mmiodev *mmiodev;
++
++		mmiodev = acrn_mempool_alloc(GFP_KERNEL);
++		if (mmiodev == NULL)
++			return -EFAULT;
++
++		if (copy_from_user(mmiodev,
++				(void *)ioctl_param, sizeof(*mmiodev))) {
++			ret = -EFAULT;
++		} else {
++			ret = hcall_deassign_mmiodev(vm->vmid,
++					virt_to_phys(mmiodev));
++			if (ret < 0)
++				pr_err("vhm: failed to deassign mmio device!\n");
++		}
++		acrn_mempool_free(mmiodev);
++		break;
++	}
++
+ 	case IC_SET_PTDEV_INTR_INFO: {
+ 		struct hc_ptdev_irq *hc_pt_irq;
+ 
+diff --git a/drivers/vhm/vhm_hypercall.c b/drivers/vhm/vhm_hypercall.c
+index 1ef0af96893d..17a8736b3300 100644
+--- a/drivers/vhm/vhm_hypercall.c
++++ b/drivers/vhm/vhm_hypercall.c
+@@ -173,6 +173,16 @@ inline long hcall_deassign_pcidev(unsigned long vmid, unsigned long addr)
+ 	return acrn_hypercall2(HC_DEASSIGN_PCIDEV, vmid, addr);
+ }
+ 
++inline long hcall_assign_mmiodev(unsigned long vmid, unsigned long addr)
++{
++	return acrn_hypercall2(HC_ASSIGN_MMIODEV, vmid, addr);
++}
++
++inline long hcall_deassign_mmiodev(unsigned long vmid, unsigned long addr)
++{
++	return acrn_hypercall2(HC_DEASSIGN_MMIODEV, vmid, addr);
++}
++
+ inline long hcall_set_ptdev_intr_info(unsigned long vmid, unsigned long pt_irq)
+ {
+ 	return acrn_hypercall2(HC_SET_PTDEV_INTR_INFO, vmid, pt_irq);
+diff --git a/include/linux/vhm/acrn_common.h b/include/linux/vhm/acrn_common.h
+index 239d67536ef5..496888010a68 100644
+--- a/include/linux/vhm/acrn_common.h
++++ b/include/linux/vhm/acrn_common.h
+@@ -496,6 +496,28 @@ struct acrn_pcidev {
+ 
+ } __aligned(8);
+ 
++/**
++ * @brief Info to assign or deassign a MMIO device for a VM
++ *
++ * the parameter for HC_ASSIGN_MMIODEV or HC_DEASSIGN_MMIODEV hypercall
++ */
++struct acrn_mmiodev {
++	/** the gpa of the MMIO region for the MMIO device */
++	uint64_t base_gpa;
++
++	/** the hpa of the MMIO region for the MMIO device */
++	uint64_t base_hpa;
++
++	/** the size of the MMIO region for the MMIO device */
++	uint64_t size;
++
++	/** reserved for extension which could used for more
++	 *  MMIO regions/SID/HID/IRQ etc and align this structure to 2 ^ n
++	 */
++	uint64_t reserved[13];
++
++} __aligned(8);
++
+ /**
+  * @brief The guest config pointer offset.
+  *
+diff --git a/include/linux/vhm/acrn_hv_defs.h b/include/linux/vhm/acrn_hv_defs.h
+index 6e5f29447af4..8dcdfbc37939 100644
+--- a/include/linux/vhm/acrn_hv_defs.h
++++ b/include/linux/vhm/acrn_hv_defs.h
+@@ -115,6 +115,8 @@
+ #define HC_RESET_PTDEV_INTR_INFO    _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x04)
+ #define HC_ASSIGN_PCIDEV            _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x05)
+ #define HC_DEASSIGN_PCIDEV          _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x06)
++#define HC_ASSIGN_MMIODEV           _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x07)
++#define HC_DEASSIGN_MMIODEV         _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x08)
+ 
+ /* DEBUG */
+ #define HC_ID_DBG_BASE              0x60UL
+diff --git a/include/linux/vhm/vhm_hypercall.h b/include/linux/vhm/vhm_hypercall.h
+index 9ead2bcadcda..104ddf92eb6e 100644
+--- a/include/linux/vhm/vhm_hypercall.h
++++ b/include/linux/vhm/vhm_hypercall.h
+@@ -165,6 +165,8 @@ inline long hcall_assign_ptdev(unsigned long vmid, unsigned long bdf);
+ inline long hcall_deassign_ptdev(unsigned long vmid, unsigned long bdf);
+ inline long hcall_assign_pcidev(unsigned long vmid, unsigned long addr);
+ inline long hcall_deassign_pcidev(unsigned long vmid, unsigned long addr);
++inline long hcall_assign_mmiodev(unsigned long vmid, unsigned long addr);
++inline long hcall_deassign_mmiodev(unsigned long vmid, unsigned long addr);
+ inline long hcall_set_ptdev_intr_info(unsigned long vmid,
+ 		unsigned long pt_irq);
+ inline long hcall_reset_ptdev_intr_info(unsigned long vmid,
+diff --git a/include/linux/vhm/vhm_ioctl_defs.h b/include/linux/vhm/vhm_ioctl_defs.h
+index 8a3c6b4e1565..163007f6f2e8 100644
+--- a/include/linux/vhm/vhm_ioctl_defs.h
++++ b/include/linux/vhm/vhm_ioctl_defs.h
+@@ -110,6 +110,8 @@
+ #define IC_RESET_PTDEV_INTR_INFO       _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x04)
+ #define IC_ASSIGN_PCIDEV               _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x05)
+ #define IC_DEASSIGN_PCIDEV             _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x06)
++#define IC_ASSIGN_MMIODEV              _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x07)
++#define IC_DEASSIGN_MMIODEV            _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x08)
+ 
+ /* Power management */
+ #define IC_ID_PM_BASE                   0x60UL
+-- 
+2.17.1
+
