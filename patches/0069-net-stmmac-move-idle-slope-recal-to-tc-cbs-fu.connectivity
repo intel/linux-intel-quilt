@@ -1,0 +1,87 @@
+From 9ed0ac42c2e1fb7ecb3cfa4b1f1b2311a779cdb4 Mon Sep 17 00:00:00 2001
+From: Voon Weifeng <weifeng.voon@intel.com>
+Date: Mon, 9 Sep 2019 20:02:42 +0800
+Subject: [PATCH 069/103] net: stmmac: move idle slope recal to tc cbs function
+
+Change from ethtool implementation to tc will need to setup taprio qdisc
+as parent of cbs qdisc. Hence, the idleSlope recalculation needed to move
+to cbs function.
+
+Squash to 'net: stmmac: support recalculating of CBS idle slope under EST'
+
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_tc.c   | 36 +++----------------
+ .../net/ethernet/stmicro/stmmac/stmmac_tsn.c  |  2 +-
+ 2 files changed, 5 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
+index ff62bd6d8b4d..3780d9e8b798 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
+@@ -350,6 +350,10 @@ static int tc_setup_cbs(struct stmmac_priv *priv,
+ 	value = qopt->locredit * 1024ll * 8;
+ 	priv->plat->tx_queues_cfg[queue].low_credit = value & GENMASK(31, 0);
+ 
++	ret = stmmac_cbs_recal_idleslope(priv, priv->hw,
++					 priv->dev, queue,
++					 &priv->plat->tx_queues_cfg[queue].idle_slope);
++
+ 	ret = stmmac_config_cbs(priv, priv->hw,
+ 				priv->plat->tx_queues_cfg[queue].send_slope,
+ 				priv->plat->tx_queues_cfg[queue].idle_slope,
+@@ -737,38 +741,6 @@ static int tc_setup_taprio(struct stmmac_priv *priv,
+ 		return ret;
+ 	}
+ 
+-	if (priv->plat->tx_queues_to_use > 1) {
+-		u32 queue;
+-
+-		for (queue = 1; queue < priv->plat->tx_queues_to_use; queue++) {
+-			u32 new_idle_slope;
+-
+-			struct stmmac_txq_cfg *txqcfg =
+-				&priv->plat->tx_queues_cfg[queue];
+-
+-			if (txqcfg->mode_to_use == MTL_QUEUE_DCB)
+-				continue;
+-
+-			new_idle_slope = txqcfg->idle_slope;
+-			ret = stmmac_cbs_recal_idleslope(priv, priv->hw,
+-							 priv->dev, queue,
+-							 &new_idle_slope);
+-
+-			if (ret) {
+-				dev_err(priv->device,
+-					"Recal idleslope failed.\n");
+-				break;
+-			}
+-
+-			stmmac_config_cbs(priv, priv->hw,
+-					  txqcfg->send_slope,
+-					  new_idle_slope,
+-					  txqcfg->high_credit,
+-					  txqcfg->low_credit,
+-					  queue);
+-		}
+-	}
+-
+ 	return ret;
+ }
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
+index 5398b7afe025..ba881e10f777 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_tsn.c
+@@ -1141,7 +1141,7 @@ int tsn_cbs_recal_idleslope(struct mac_device_info *hw, struct net_device *dev,
+ 
+ 	cap = &info->cap;
+ 	est_gcc = &info->est_gcc;
+-	hw_bank = tsnif_est_get_bank(hw, ioaddr, 1);
++	hw_bank = tsnif_est_get_bank(hw, ioaddr, 0);
+ 
+ 	cycle_time_ns = (est_gcc->gcb[hw_bank].gcrr.cycle_sec *
+ 			 NSEC_PER_SEC) +
+-- 
+2.17.1
+

@@ -1,0 +1,121 @@
+From fe5c33ecae4f6673c9bb65c32eb575e3b5b77f0c Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Mon, 13 May 2019 17:33:54 +0800
+Subject: [PATCH 092/103] net: networkproxy: add API to trigger Proxy Enter
+ Flow
+
+Add command API to trigger Network Proxy Enter Flow without the need of
+HOST to enter low power mode.
+
+This feature is available when NETPROX_DEBUG_MODE is defined.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ drivers/net/networkproxy/network_proxy.c      |  8 +++++
+ .../net/networkproxy/network_proxy_configfs.c | 32 +++++++++++++++++++
+ include/linux/network_proxy.h                 |  5 +++
+ 3 files changed, 45 insertions(+)
+
+diff --git a/drivers/net/networkproxy/network_proxy.c b/drivers/net/networkproxy/network_proxy.c
+index e31a7e720df6..e555d021cd81 100644
+--- a/drivers/net/networkproxy/network_proxy.c
++++ b/drivers/net/networkproxy/network_proxy.c
+@@ -552,6 +552,14 @@ int netprox_write_rule(struct np_rules *rule, int size)
+ }
+ EXPORT_SYMBOL(netprox_write_rule);
+ 
++#ifdef NETPROX_DEBUG_MODE
++void netprox_trigger_proxy_enter(void)
++{
++	np_ctx->np_netdev->proxy_enter(np_ctx->np_netdev->netdev);
++}
++EXPORT_SYMBOL(netprox_trigger_proxy_enter);
++#endif
++
+ int netprox_agent_is_ready(void)
+ {
+ 	if (!np_ctx->np_ipcdev || !np_ctx->np_netdev)
+diff --git a/drivers/net/networkproxy/network_proxy_configfs.c b/drivers/net/networkproxy/network_proxy_configfs.c
+index 25044cf130cb..854bdadad03d 100644
+--- a/drivers/net/networkproxy/network_proxy_configfs.c
++++ b/drivers/net/networkproxy/network_proxy_configfs.c
+@@ -218,6 +218,32 @@ static ssize_t np_cfs_ipc_send_store(struct config_item *item,
+ 	return count;
+ }
+ 
++#ifdef NETPROX_DEBUG_MODE
++static ssize_t np_cfs_proxy_enter_show(struct config_item *item, char *page)
++{
++	return -EPERM;
++}
++
++static ssize_t np_cfs_proxy_enter_store(struct config_item *item,
++					const char *page, size_t count)
++{
++	int ret;
++	unsigned long tmp;
++
++	ret = kstrtoul(page, 0, &tmp);
++	if (ret)
++		return ret;
++
++	if (tmp != NP_PROXY_ENTER_VALUE) {
++		pr_err("Invalid value for Proxy Enter.\n");
++		return -EINVAL;
++	}
++
++	netprox_trigger_proxy_enter();
++	return count;
++}
++#endif
++
+ CONFIGFS_ATTR_RO(np_cfs_, agent_version);
+ CONFIGFS_ATTR_RO(np_cfs_, max_cls_rules);
+ CONFIGFS_ATTR_RO(np_cfs_, max_resp_rules);
+@@ -227,6 +253,9 @@ CONFIGFS_ATTR(np_cfs_, rules_offset);
+ CONFIGFS_ATTR(np_cfs_, rules_size);
+ CONFIGFS_ATTR(np_cfs_, rules_value);
+ CONFIGFS_ATTR(np_cfs_, ipc_send);
++#ifdef NETPROX_DEBUG_MODE
++CONFIGFS_ATTR(np_cfs_, proxy_enter);
++#endif
+ 
+ static struct configfs_attribute *np_cfs_attrs[] = {
+ 	&np_cfs_attr_agent_version,
+@@ -238,6 +267,9 @@ static struct configfs_attribute *np_cfs_attrs[] = {
+ 	&np_cfs_attr_rules_size,
+ 	&np_cfs_attr_rules_value,
+ 	&np_cfs_attr_ipc_send,
++#ifdef NETPROX_DEBUG_MODE
++	&np_cfs_attr_proxy_enter,
++#endif
+ 	NULL,
+ };
+ 
+diff --git a/include/linux/network_proxy.h b/include/linux/network_proxy.h
+index cc0b1add3ea9..c07289b8735f 100644
+--- a/include/linux/network_proxy.h
++++ b/include/linux/network_proxy.h
+@@ -21,6 +21,8 @@
+ #include <linux/network_proxy_common.h>
+ 
+ #define NP_RULE_ACCESS_MAX_BYTE			(500 * 1024)
++#define NETPROX_DEBUG_MODE
++#define NP_PROXY_ENTER_VALUE			1
+ 
+ /* Network Proxy Host States */
+ enum np_host_state {
+@@ -74,6 +76,9 @@ int netprox_host_proxy_exit(void);
+ int netprox_send_ipc_msg(int cmd, const char *msg, int size);
+ int netprox_read_rule(struct np_rules *rule, void *ptr, int *size);
+ int netprox_write_rule(struct np_rules *rule, int size);
++#ifdef NETPROX_DEBUG_MODE
++void netprox_trigger_proxy_enter(void);
++#endif
+ int netprox_ipc_recv(int cmd, unsigned char *payload, int size);
+ int netprox_register_shm(struct np_shm *np_shm);
+ int netprox_deregister_shm(struct np_shm *np_shm);
+-- 
+2.17.1
+

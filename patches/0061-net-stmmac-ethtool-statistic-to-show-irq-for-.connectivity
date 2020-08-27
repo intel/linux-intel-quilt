@@ -1,0 +1,155 @@
+From 576f179e988bc961866245803d650664bb36c667 Mon Sep 17 00:00:00 2001
+From: Weifeng Voon <weifeng.voon@intel.com>
+Date: Wed, 18 Jul 2018 07:27:02 +0800
+Subject: [PATCH 061/103] net: stmmac: ethtool statistic to show irq for each
+ tx/rx ch
+
+Adding new statistics for DMA tx and rx IRQ. Up to 8 channels are
+supported, incremented by dwmac4_dma_interrupt.
+
+Signed-off-by: Weifeng Voon <weifeng.voon@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/common.h  | 16 +++++
+ .../net/ethernet/stmicro/stmmac/dwmac4_lib.c  | 66 ++++++++++++++++++-
+ .../ethernet/stmicro/stmmac/stmmac_ethtool.c  | 16 +++++
+ 3 files changed, 96 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
+index 3b0eca540dd9..1452955333c7 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/common.h
++++ b/drivers/net/ethernet/stmicro/stmmac/common.h
+@@ -99,6 +99,22 @@ struct stmmac_extra_stats {
+ 	unsigned long tx_clean;
+ 	unsigned long tx_set_ic_bit;
+ 	unsigned long irq_receive_pmt_irq_n;
++	unsigned long q0_rx_irq_n;
++	unsigned long q1_rx_irq_n;
++	unsigned long q2_rx_irq_n;
++	unsigned long q3_rx_irq_n;
++	unsigned long q4_rx_irq_n;
++	unsigned long q5_rx_irq_n;
++	unsigned long q6_rx_irq_n;
++	unsigned long q7_rx_irq_n;
++	unsigned long q0_tx_irq_n;
++	unsigned long q1_tx_irq_n;
++	unsigned long q2_tx_irq_n;
++	unsigned long q3_tx_irq_n;
++	unsigned long q4_tx_irq_n;
++	unsigned long q5_tx_irq_n;
++	unsigned long q6_tx_irq_n;
++	unsigned long q7_tx_irq_n;
+ 	/* MMC info */
+ 	unsigned long mmc_tx_irq_n;
+ 	unsigned long mmc_rx_irq_n;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
+index 211931bc814f..8f1830d795cd 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
+@@ -149,12 +149,74 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
+ 	if (likely(intr_status & DMA_CHAN_STATUS_NIS)) {
+ 		x->normal_irq_n++;
+ 		if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
+-			x->rx_normal_irq_n++;
+-			ret |= handle_rx;
++			u32 value;
++
++			value = readl(ioaddr + DMA_CHAN_INTR_ENA(chan));
++			/* to schedule NAPI on real RIE event. */
++			if (likely(value & DMA_CHAN_INTR_ENA_RIE)) {
++				x->rx_normal_irq_n++;
++				switch (chan) {
++				case 0x0:
++					x->q0_rx_irq_n++;
++					break;
++				case 0x1:
++					x->q1_rx_irq_n++;
++					break;
++				case 0x2:
++					x->q2_rx_irq_n++;
++					break;
++				case 0x3:
++					x->q3_rx_irq_n++;
++					break;
++				case 0x4:
++					x->q4_rx_irq_n++;
++					break;
++				case 0x5:
++					x->q5_rx_irq_n++;
++					break;
++				case 0x6:
++					x->q6_rx_irq_n++;
++					break;
++				case 0x7:
++					x->q7_rx_irq_n++;
++					break;
++				default:
++					break;
++				}
++				ret |= handle_rx;
++			}
+ 		}
+ 		if (likely(intr_status & (DMA_CHAN_STATUS_TI |
+ 					  DMA_CHAN_STATUS_TBU))) {
+ 			x->tx_normal_irq_n++;
++			switch (chan) {
++			case 0x0:
++				x->q0_tx_irq_n++;
++				break;
++			case 0x1:
++				x->q1_tx_irq_n++;
++				break;
++			case 0x2:
++				x->q2_tx_irq_n++;
++				break;
++			case 0x3:
++				x->q3_tx_irq_n++;
++				break;
++			case 0x4:
++				x->q4_tx_irq_n++;
++				break;
++			case 0x5:
++				x->q5_tx_irq_n++;
++				break;
++			case 0x6:
++				x->q6_tx_irq_n++;
++				break;
++			case 0x7:
++				x->q7_tx_irq_n++;
++				break;
++			default:
++				break;
++			}
+ 			ret |= handle_tx;
+ 		}
+ 		if (unlikely(intr_status & DMA_CHAN_STATUS_ERI))
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index cb46e3c2d33f..00bf8c527cb3 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -90,6 +90,22 @@ static const struct stmmac_stats stmmac_gstrings_stats[] = {
+ 	STMMAC_STAT(tx_clean),
+ 	STMMAC_STAT(tx_set_ic_bit),
+ 	STMMAC_STAT(irq_receive_pmt_irq_n),
++	STMMAC_STAT(q0_rx_irq_n),
++	STMMAC_STAT(q1_rx_irq_n),
++	STMMAC_STAT(q2_rx_irq_n),
++	STMMAC_STAT(q3_rx_irq_n),
++	STMMAC_STAT(q4_rx_irq_n),
++	STMMAC_STAT(q5_rx_irq_n),
++	STMMAC_STAT(q6_rx_irq_n),
++	STMMAC_STAT(q7_rx_irq_n),
++	STMMAC_STAT(q0_tx_irq_n),
++	STMMAC_STAT(q1_tx_irq_n),
++	STMMAC_STAT(q2_tx_irq_n),
++	STMMAC_STAT(q3_tx_irq_n),
++	STMMAC_STAT(q4_tx_irq_n),
++	STMMAC_STAT(q5_tx_irq_n),
++	STMMAC_STAT(q6_tx_irq_n),
++	STMMAC_STAT(q7_tx_irq_n),
+ 	/* MMC info */
+ 	STMMAC_STAT(mmc_tx_irq_n),
+ 	STMMAC_STAT(mmc_rx_irq_n),
+-- 
+2.17.1
+

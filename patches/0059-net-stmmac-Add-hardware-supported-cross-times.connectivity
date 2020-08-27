@@ -1,7 +1,7 @@
-From aa6920f4587f6965c2d136273d1acfcbf37d8aa7 Mon Sep 17 00:00:00 2001
+From 8da582f3d9fbea72943d4488a593d706a766cdfc Mon Sep 17 00:00:00 2001
 From: "Tan, Tee Min" <tee.min.tan@intel.com>
 Date: Thu, 11 Oct 2018 14:27:00 +0800
-Subject: [PATCH 059/113] net: stmmac: Add hardware supported cross-timestamp
+Subject: [PATCH 059/103] net: stmmac: Add hardware supported cross-timestamp
 
 This lets get_device_system_crosststamp() to use
 stmmac_get_syncdevicetime() which uses hardware crosstimestamping
@@ -49,10 +49,10 @@ index 3425d37b6ae9..3ed5b2785e53 100644
 +	 devices. The cross-timestamp is accessible through the ioctl
 +	 call PTP_SYS_OFFSET_PRECISE.
 diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
-index 357ea781b6ce..7796a0f5b861 100644
+index 2fac562d72a7..3b0eca540dd9 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/common.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/common.h
-@@ -384,6 +384,8 @@ struct dma_features {
+@@ -385,6 +385,8 @@ struct dma_features {
  	unsigned int dvlan;
  	unsigned int l3l4fnum;
  	unsigned int arpoffsel;
@@ -60,20 +60,20 @@ index 357ea781b6ce..7796a0f5b861 100644
 +	unsigned int aux_snapshot_n;
  };
  
- /* GMAC TX FIFO is 8K, Rx FIFO is 16K */
+ /* RX Buffer size must be multiple of 4/8/16 bytes */
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
-index e5f409e8d97e..e05bb5ef18dc 100644
+index 98ba6d2dbb47..d065366a44b1 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
-@@ -44,6 +44,7 @@
- #define GMAC_ARP_ADDR			0x00000210
- #define GMAC_ADDR_HIGH(reg)		(0x300 + reg * 8)
- #define GMAC_ADDR_LOW(reg)		(0x304 + reg * 8)
+@@ -49,6 +49,7 @@
+ #define GMAC_L4_ADDR(reg)		(0x904 + (reg) * 0x30)
+ #define GMAC_L3_ADDR0(reg)		(0x910 + (reg) * 0x30)
+ #define GMAC_L3_ADDR1(reg)		(0x914 + (reg) * 0x30)
 +#define GMAC_TIMESTAMP_STATUS		0x00000b20
  
  /* RX Queues Routing */
  #define GMAC_RXQCTRL_AVCPQ_MASK		GENMASK(2, 0)
-@@ -137,11 +138,17 @@
+@@ -143,11 +144,17 @@
  #define GMAC_INT_PCS_PHYIS		BIT(3)
  #define GMAC_INT_PMT_EN			BIT(4)
  #define GMAC_INT_LPI_EN			BIT(5)
@@ -91,7 +91,7 @@ index e5f409e8d97e..e05bb5ef18dc 100644
  
  enum dwmac4_irq_status {
  	time_stamp_irq = 0x00001000,
-@@ -214,6 +221,7 @@ enum power_event {
+@@ -225,6 +232,7 @@ enum power_event {
  
  /* MAC HW features0 bitmap */
  #define GMAC_HW_FEAT_SAVLANINS		BIT(27)
@@ -99,7 +99,7 @@ index e5f409e8d97e..e05bb5ef18dc 100644
  #define GMAC_HW_FEAT_ADDMAC		BIT(18)
  #define GMAC_HW_FEAT_RXCOESEL		BIT(16)
  #define GMAC_HW_FEAT_TXCOSEL		BIT(14)
-@@ -238,6 +246,7 @@ enum power_event {
+@@ -252,6 +260,7 @@ enum power_event {
  #define GMAC_HW_RXFIFOSIZE		GENMASK(4, 0)
  
  /* MAC HW features2 bitmap */
@@ -107,9 +107,9 @@ index e5f409e8d97e..e05bb5ef18dc 100644
  #define GMAC_HW_FEAT_PPSOUTNUM		GENMASK(26, 24)
  #define GMAC_HW_FEAT_TXCHCNT		GENMASK(21, 18)
  #define GMAC_HW_FEAT_RXCHCNT		GENMASK(15, 12)
-@@ -257,6 +266,11 @@ enum power_event {
- #define GMAC_HI_DCS_SHIFT		16
- #define GMAC_HI_REG_AE			BIT(31)
+@@ -286,6 +295,11 @@ enum power_event {
+ #define GMAC_L4DP0_SHIFT		16
+ #define GMAC_L4SP0			GENMASK(15, 0)
  
 +/* MAC Timestamp Status */
 +#define GMAC_TIMESTAMP_AUXTSTRIG	BIT(2)
@@ -120,10 +120,10 @@ index e5f409e8d97e..e05bb5ef18dc 100644
  #define MTL_OPERATION_MODE		0x00000c00
  #define MTL_FRPE			BIT(15)
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
-index 87c283b88408..b55d31349d61 100644
+index 2ef53721c35e..5b183ac04853 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
-@@ -380,6 +380,10 @@ static void dwmac4_get_hw_feature(void __iomem *ioaddr,
+@@ -400,6 +400,10 @@ static void dwmac4_get_hw_feature(void __iomem *ioaddr,
  	/* IEEE 1588-2002 */
  	dma_cap->time_stamp = 0;
  
@@ -135,7 +135,7 @@ index 87c283b88408..b55d31349d61 100644
  	hw_cap = readl(ioaddr + GMAC_HW_FEATURE3);
  
 diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
-index 28aa7a88bf26..fc18856223d1 100644
+index e44b971ba5eb..6ff9e04fe72d 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
 @@ -623,6 +623,8 @@ struct stmmac_serdes_ops {
@@ -226,7 +226,7 @@ index 020159622559..6a4dcaa3f501 100644
 +	.get_ptptime = get_ptptime,
  };
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
-index fca6c3392eb2..99a3dafe4d68 100644
+index 4ef389736de2..1c9a38c37892 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
 @@ -16,6 +16,7 @@
@@ -456,10 +456,10 @@ index 7abb1d47e7da..c3dbb6364778 100644
 +
  #endif	/* __STMMAC_PTP_H__ */
 diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
-index 525ea9686efa..092f8720c79e 100644
+index 0b3e7bbb3c34..0444646f9f15 100644
 --- a/include/linux/stmmac.h
 +++ b/include/linux/stmmac.h
-@@ -218,5 +218,7 @@ struct plat_stmmacenet_data {
+@@ -220,5 +220,7 @@ struct plat_stmmacenet_data {
  	u32 legos;
  	u32 ftos;
  	u32 fgos;

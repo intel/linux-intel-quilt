@@ -1,7 +1,7 @@
-From c0dcbc043b004641f7e1f15c64d749d8539c564f Mon Sep 17 00:00:00 2001
+From 7192909c4bb5d660583719196407c2b6b350ff3f Mon Sep 17 00:00:00 2001
 From: "Chuah, Kim Tatt" <kim.tatt.chuah@intel.com>
 Date: Tue, 26 Jun 2018 07:35:03 +0800
-Subject: [PATCH 027/113] net: stmmac: Add support for VLAN Rx filtering
+Subject: [PATCH 027/103] net: stmmac: Add support for VLAN Rx filtering
 
 Add support for VLAN ID-based filtering by the MAC controller for MAC
 drivers that support it. Only the 12-bit VID field is used.
@@ -17,7 +17,7 @@ Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
  5 files changed, 237 insertions(+)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
-index a2ad992be4e2..88fa60f1ab91 100644
+index cb5830418e52..499b82b9603f 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/common.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/common.h
 @@ -474,6 +474,8 @@ struct mac_device_info {
@@ -30,10 +30,10 @@ index a2ad992be4e2..88fa60f1ab91 100644
  
  struct stmmac_rx_routing {
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
-index 29dd67a48a15..f842807edce8 100644
+index 22f73df8e535..a2e319b358a3 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
-@@ -17,6 +17,7 @@
+@@ -18,6 +18,7 @@
  #define GMAC_PACKET_FILTER		0x00000008
  #define GMAC_HASH_TAB(x)		(0x10 + (x) * 4)
  #define GMAC_VLAN_TAG			0x00000050
@@ -41,7 +41,7 @@ index 29dd67a48a15..f842807edce8 100644
  #define GMAC_VLAN_HASH_TABLE		0x00000058
  #define GMAC_RX_FLOW_CTRL		0x00000090
  #define GMAC_VLAN_INCL			0x00000060
-@@ -82,7 +83,15 @@
+@@ -88,7 +89,15 @@
  #define GMAC_VLAN_VLC			GENMASK(17, 16)
  #define GMAC_VLAN_VLC_SHIFT		16
  
@@ -57,7 +57,7 @@ index 29dd67a48a15..f842807edce8 100644
  #define GMAC_VLAN_TAG_CTRL_EVLS_MASK	GENMASK(22, 21)
  #define GMAC_VLAN_TAG_CTRL_EVLS_SHIFT	21
  #define GMAC_VLAN_TAG_CTRL_EVLRXS	BIT(24)
-@@ -92,6 +101,11 @@
+@@ -98,6 +107,11 @@
  #define GMAC_VLAN_TAG_STRIP_FAIL	(0x2 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
  #define GMAC_VLAN_TAG_STRIP_ALL		(0x3 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
  
@@ -69,7 +69,7 @@ index 29dd67a48a15..f842807edce8 100644
  /* MAC RX Queue Enable */
  #define GMAC_RX_QUEUE_CLEAR(queue)	~(GENMASK(1, 0) << ((queue) * 2))
  #define GMAC_RX_AV_QUEUE_ENABLE(queue)	BIT((queue) * 2)
-@@ -234,6 +248,7 @@ enum power_event {
+@@ -248,6 +262,7 @@ enum power_event {
  #define GMAC_HW_FEAT_FRPBS		GENMASK(12, 11)
  #define GMAC_HW_FEAT_FRPSEL		BIT(10)
  #define GMAC_HW_FEAT_DVLAN		BIT(5)
@@ -78,7 +78,7 @@ index 29dd67a48a15..f842807edce8 100644
  /* MAC HW ADDR regs */
  #define GMAC_HI_DCS			GENMASK(18, 16)
 diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
-index 22a7ff0eaff5..881c00be7dbf 100644
+index a981d86ad978..7242d558833b 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
 @@ -399,6 +399,156 @@ static void dwmac4_set_eee_timer(struct mac_device_info *hw, int ls, int tw)
@@ -249,8 +249,8 @@ index 22a7ff0eaff5..881c00be7dbf 100644
  	writel(value, ioaddr + GMAC_PACKET_FILTER);
  }
  
-@@ -877,6 +1031,9 @@ const struct stmmac_ops dwmac4_ops = {
- 	.set_arp_offload = dwmac4_set_arp_offload,
+@@ -989,6 +1143,9 @@ const struct stmmac_ops dwmac4_ops = {
+ 	.config_l4_filter = dwmac4_config_l4_filter,
  	.rx_hw_vlan = dwmac4_rx_hw_vlan,
  	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
 +	.add_hw_vlan_rx_fltr = dwmac4_add_hw_vlan_rx_fltr,
@@ -259,8 +259,8 @@ index 22a7ff0eaff5..881c00be7dbf 100644
  };
  
  const struct stmmac_ops dwmac410_ops = {
-@@ -915,6 +1072,9 @@ const struct stmmac_ops dwmac410_ops = {
- 	.set_arp_offload = dwmac4_set_arp_offload,
+@@ -1029,6 +1186,9 @@ const struct stmmac_ops dwmac410_ops = {
+ 	.config_l4_filter = dwmac4_config_l4_filter,
  	.rx_hw_vlan = dwmac4_rx_hw_vlan,
  	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
 +	.add_hw_vlan_rx_fltr = dwmac4_add_hw_vlan_rx_fltr,
@@ -269,8 +269,8 @@ index 22a7ff0eaff5..881c00be7dbf 100644
  };
  
  const struct stmmac_ops dwmac510_ops = {
-@@ -958,8 +1118,42 @@ const struct stmmac_ops dwmac510_ops = {
- 	.set_arp_offload = dwmac4_set_arp_offload,
+@@ -1074,8 +1234,42 @@ const struct stmmac_ops dwmac510_ops = {
+ 	.config_l4_filter = dwmac4_config_l4_filter,
  	.rx_hw_vlan = dwmac4_rx_hw_vlan,
  	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
 +	.add_hw_vlan_rx_fltr = dwmac4_add_hw_vlan_rx_fltr,
@@ -312,7 +312,7 @@ index 22a7ff0eaff5..881c00be7dbf 100644
  int dwmac4_setup(struct stmmac_priv *priv)
  {
  	struct mac_device_info *mac = priv->hw;
-@@ -989,5 +1183,7 @@ int dwmac4_setup(struct stmmac_priv *priv)
+@@ -1105,5 +1299,7 @@ int dwmac4_setup(struct stmmac_priv *priv)
  	mac->mii.clk_csr_shift = 8;
  	mac->mii.clk_csr_mask = GENMASK(11, 8);
  
@@ -321,7 +321,7 @@ index 22a7ff0eaff5..881c00be7dbf 100644
  	return 0;
  }
 diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
-index f3360f2b2c8d..0af44a8f8e85 100644
+index 149259b8ff15..c62a42167de6 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
 @@ -371,6 +371,14 @@ struct stmmac_ops {
@@ -353,10 +353,10 @@ index f3360f2b2c8d..0af44a8f8e85 100644
  	stmmac_do_callback(__priv, mac, get_mac_tx_timestamp, __args)
  #define stmmac_sarc_configure(__priv, __args...) \
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 18a3939e1f19..b2f7602967e8 100644
+index a6150c5970d0..dd1953fb37d7 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-@@ -4631,6 +4631,8 @@ static int stmmac_vlan_rx_add_vid(struct net_device *ndev, __be16 proto, u16 vid
+@@ -4733,6 +4733,8 @@ static int stmmac_vlan_rx_add_vid(struct net_device *ndev, __be16 proto, u16 vid
  		return ret;
  	}
  
@@ -365,15 +365,13 @@ index 18a3939e1f19..b2f7602967e8 100644
  	return ret;
  }
  
-@@ -4638,6 +4640,7 @@ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vi
+@@ -4740,11 +4742,17 @@ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vi
  {
  	struct stmmac_priv *priv = netdev_priv(ndev);
  	bool is_double = false;
 +	int ret;
  
- 	if (!priv->dma_cap.vlhash)
- 		return -EOPNOTSUPP;
-@@ -4645,6 +4648,11 @@ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vi
+ 	if (be16_to_cpu(proto) == ETH_P_8021AD)
  		is_double = true;
  
  	clear_bit(vid, priv->active_vlans);
@@ -385,7 +383,7 @@ index 18a3939e1f19..b2f7602967e8 100644
  	return stmmac_vlan_update(priv, is_double);
  }
  
-@@ -5230,6 +5238,8 @@ int stmmac_resume(struct device *dev)
+@@ -5339,6 +5347,8 @@ int stmmac_resume(struct device *dev)
  	stmmac_init_coalesce(priv);
  	stmmac_set_rx_mode(ndev);
  

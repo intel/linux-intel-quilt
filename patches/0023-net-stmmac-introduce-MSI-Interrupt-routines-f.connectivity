@@ -1,7 +1,7 @@
-From 9eb600be731180fd380fdc3d1ab11711a7a9521d Mon Sep 17 00:00:00 2001
+From 303efbf0a3dc7d0df040a62faf77d67298b4d368 Mon Sep 17 00:00:00 2001
 From: Ong Boon Leong <boon.leong.ong@intel.com>
 Date: Fri, 26 Jul 2019 10:30:21 +0800
-Subject: [PATCH 023/113] net: stmmac: introduce MSI Interrupt routines for
+Subject: [PATCH 023/103] net: stmmac: introduce MSI Interrupt routines for
  mac, safety, RX & TX
 
 Now we introduce MSI interrupt service routines and hook these routines
@@ -25,10 +25,10 @@ Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
  4 files changed, 402 insertions(+), 45 deletions(-)
 
 diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
-index b0cb5e9f0592..a65a5bf38359 100644
+index e2dbacf70976..60f8ea563717 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/common.h
 +++ b/drivers/net/ethernet/stmicro/stmmac/common.h
-@@ -295,6 +295,18 @@ enum dma_irq_dir {
+@@ -296,6 +296,18 @@ enum dma_irq_dir {
  	DMA_DIR_RXTX = 0x3,
  };
  
@@ -82,10 +82,10 @@ index 47fc750585a8..7b089089d204 100644
  #ifdef CONFIG_DEBUG_FS
  	struct dentry *dbgfs_dir;
 diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-index 34d69cb62f68..83fe91a5a636 100644
+index 703b2449e3a7..c81ef6f08fb7 100644
 --- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
-@@ -104,6 +104,11 @@ module_param(chain_mode, int, 0444);
+@@ -105,6 +105,11 @@ module_param(chain_mode, int, 0444);
  MODULE_PARM_DESC(chain_mode, "To use chain instead of ring mode");
  
  static irqreturn_t stmmac_interrupt(int irq, void *dev_id);
@@ -97,7 +97,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  
  #ifdef CONFIG_DEBUG_FS
  static void stmmac_init_fs(struct net_device *dev);
-@@ -2654,6 +2659,238 @@ static void stmmac_hw_teardown(struct net_device *dev)
+@@ -2646,6 +2651,238 @@ static void stmmac_hw_teardown(struct net_device *dev)
  	clk_disable_unprepare(priv->plat->clk_ptp_ref);
  }
  
@@ -336,7 +336,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  /**
   *  stmmac_open - open entry point of the driver
   *  @dev : pointer to the device structure.
-@@ -2712,39 +2949,9 @@ static int stmmac_open(struct net_device *dev)
+@@ -2714,39 +2951,9 @@ static int stmmac_open(struct net_device *dev)
  
  	phylink_start(priv->phylink);
  
@@ -378,7 +378,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  
  	/* Start phy converter after MDIO bus IRQ handling is up */
  	if (priv->plat->setup_phy_conv) {
-@@ -2765,11 +2972,9 @@ static int stmmac_open(struct net_device *dev)
+@@ -2767,11 +2974,9 @@ static int stmmac_open(struct net_device *dev)
  	return 0;
  
  phy_conv_error:
@@ -393,7 +393,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  irq_error:
  	phylink_stop(priv->phylink);
  
-@@ -2811,11 +3016,7 @@ static int stmmac_release(struct net_device *dev)
+@@ -2813,11 +3018,7 @@ static int stmmac_release(struct net_device *dev)
  		del_timer_sync(&priv->tx_queue[chan].txtimer);
  
  	/* Free the IRQ lines */
@@ -406,7 +406,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  
  	/* Start phy converter after MDIO bus IRQ handling is up */
  	if (priv->plat->remove_phy_conv) {
-@@ -3947,15 +4148,136 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
+@@ -4038,15 +4239,136 @@ static irqreturn_t stmmac_interrupt(int irq, void *dev_id)
  	return IRQ_HANDLED;
  }
  
@@ -546,7 +546,7 @@ index 34d69cb62f68..83fe91a5a636 100644
  }
  #endif
  
-@@ -4500,6 +4822,12 @@ int stmmac_dvr_probe(struct device *device,
+@@ -4600,6 +4922,12 @@ int stmmac_dvr_probe(struct device *device,
  	priv->wol_irq = res->wol_irq;
  	priv->lpi_irq = res->lpi_irq;
  	priv->phy_conv_irq = res->phy_conv_irq;
@@ -560,10 +560,10 @@ index 34d69cb62f68..83fe91a5a636 100644
  	if (!IS_ERR_OR_NULL(res->mac))
  		memcpy(priv->dev->dev_addr, res->mac, ETH_ALEN);
 diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
-index 5f9d027dfe5a..eedbf48e763e 100644
+index 27c37e6d4a24..52df8a2ee86c 100644
 --- a/include/linux/stmmac.h
 +++ b/include/linux/stmmac.h
-@@ -186,5 +186,6 @@ struct plat_stmmacenet_data {
+@@ -188,5 +188,6 @@ struct plat_stmmacenet_data {
  	int mac_port_sel_speed;
  	bool en_tx_lpi_clockgating;
  	int has_xgmac;

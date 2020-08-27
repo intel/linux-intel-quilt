@@ -1,0 +1,94 @@
+From a400b0508e2c5ce95520cbb2a6d8c4d88827cb46 Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Mon, 18 Nov 2019 14:49:54 +0200
+Subject: [PATCH 83/85] mei: dal: simplify bh_session_remove()
+
+When calling bh_session_remove we already hold the session record
+we don't need to call for bh_session_find().
+Pass the session as an argument to the function.
+
+Change-Id: I278714e1711e14214c15f39e7f7abfd03d4a9588
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+---
+ drivers/misc/mei/dal/bh_external.c |  4 ++--
+ drivers/misc/mei/dal/bh_internal.c | 19 +++++++------------
+ drivers/misc/mei/dal/bh_internal.h |  2 +-
+ 3 files changed, 10 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/misc/mei/dal/bh_external.c b/drivers/misc/mei/dal/bh_external.c
+index 0c48693af91d..bf61542303f5 100644
+--- a/drivers/misc/mei/dal/bh_external.c
++++ b/drivers/misc/mei/dal/bh_external.c
+@@ -375,7 +375,7 @@ int bh_ta_session_command(u64 host_id, int command_id,
+ 
+ out:
+ 	if (bh_session_is_killed(resp_hdr->code))
+-		bh_session_remove(conn_idx, session->host_id);
++		bh_session_remove(session);
+ 
+ 	kfree(resp_hdr);
+ 
+@@ -422,7 +422,7 @@ int bh_ta_session_close(u64 host_id)
+ 	 * It means that host app should call this API at appropriate time.
+ 	 */
+ 	if (ret != BHE_IAC_EXIST_INTERNAL_SESSION)
+-		bh_session_remove(conn_idx, host_id);
++		bh_session_remove(session);
+ 
+ 	return ret;
+ }
+diff --git a/drivers/misc/mei/dal/bh_internal.c b/drivers/misc/mei/dal/bh_internal.c
+index 2842b3c84147..1283f861d9e0 100644
+--- a/drivers/misc/mei/dal/bh_internal.c
++++ b/drivers/misc/mei/dal/bh_internal.c
+@@ -108,19 +108,14 @@ void bh_session_add(unsigned int conn_idx, struct bh_session_record *session)
+ /**
+  * bh_session_remove - remove session record from list, ad release its memory
+  *
+- * @conn_idx: fw client connection idx
+- * @host_id: session host id
++ * @session: active session record
+  */
+-void bh_session_remove(unsigned int conn_idx, u64 host_id)
++void bh_session_remove(struct bh_session_record *session)
+ {
+-	struct bh_session_record *session;
+-
+-	session = bh_session_find(conn_idx, host_id);
+-
+-	if (session) {
+-		list_del(&session->link);
+-		kfree(session);
+-	}
++	if (!session)
++		return;
++	list_del(&session->link);
++	kfree(session);
+ }
+ 
+ static void bh_request_free(struct bh_request_cmd *request)
+@@ -806,7 +801,7 @@ int bh_proxy_open_jta_session(unsigned int conn_idx,
+ 
+ out:
+ 	if (ret)
+-		bh_session_remove(conn_idx, session->host_id);
++		bh_session_remove(session);
+ 
+ 	kfree(resp_hdr);
+ 
+diff --git a/drivers/misc/mei/dal/bh_internal.h b/drivers/misc/mei/dal/bh_internal.h
+index 68c4e1a435cf..69649175ca76 100644
+--- a/drivers/misc/mei/dal/bh_internal.h
++++ b/drivers/misc/mei/dal/bh_internal.h
+@@ -54,7 +54,7 @@ u64 bh_get_msg_host_id(void);
+ 
+ struct bh_session_record *bh_session_find(unsigned int conn_idx, u64 host_id);
+ void bh_session_add(unsigned int conn_idx, struct bh_session_record *session);
+-void bh_session_remove(unsigned int conn_idx, u64 host_id);
++void bh_session_remove(struct bh_session_record *session);
+ 
+ int bh_request(unsigned int conn_idx,
+ 	       void *hdr, unsigned int hdr_len,
+-- 
+2.17.1
+

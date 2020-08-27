@@ -1,0 +1,76 @@
+From 3f21225f569aeea580e6af9a889eb4f966b604be Mon Sep 17 00:00:00 2001
+From: Alexander Usyskin <alexander.usyskin@intel.com>
+Date: Sun, 21 Oct 2018 17:09:17 +0300
+Subject: [PATCH 45/85] mei: handle tx queue flushing for vtag connections
+
+Since multiple file pointers (fp) can be associated
+with a single host client, upon close() only objects
+associated with the fp has to flushed from the tx queues.
+The control queues should be flushed only when all
+the connections are closed and the client is disconnected.
+
+Change-Id: I2cc1882e5e9b07c687cf9685141a3f8297161d87
+Signed-off-by: Alexander Usyskin <alexander.usyskin@intel.com>
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+---
+ drivers/misc/mei/client.c | 23 +++++++++++++----------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/misc/mei/client.c b/drivers/misc/mei/client.c
+index 38ec54fc7635..3391fe0c0c4c 100644
+--- a/drivers/misc/mei/client.c
++++ b/drivers/misc/mei/client.c
+@@ -427,14 +427,16 @@ static void mei_io_list_flush_cl(struct list_head *head,
+  *
+  * @head: An instance of our list structure
+  * @cl: host client
++ * @fp: file pointer (matching cb file object), may be NULL
+  */
+ static void mei_io_tx_list_free_cl(struct list_head *head,
+-				   const struct mei_cl *cl)
++				   const struct mei_cl *cl,
++				   const struct file *fp)
+ {
+ 	struct mei_cl_cb *cb, *next;
+ 
+ 	list_for_each_entry_safe(cb, next, head, list) {
+-		if (cl == cb->cl)
++		if (cl == cb->cl && (!fp || fp == cb->fp))
+ 			mei_tx_cb_dequeue(cb);
+ 	}
+ }
+@@ -573,13 +575,14 @@ int mei_cl_flush_queues(struct mei_cl *cl, const struct file *fp)
+ 	dev = cl->dev;
+ 
+ 	cl_dbg(dev, cl, "remove list entry belonging to cl\n");
+-	mei_io_tx_list_free_cl(&cl->dev->write_list, cl);
+-	mei_io_tx_list_free_cl(&cl->dev->write_waiting_list, cl);
+-	mei_io_list_flush_cl(&cl->dev->ctrl_wr_list, cl);
+-	mei_io_list_flush_cl(&cl->dev->ctrl_rd_list, cl);
+-	/* free pending cb only in final flush */
+-	if (!fp)
++	mei_io_tx_list_free_cl(&cl->dev->write_list, cl, fp);
++	mei_io_tx_list_free_cl(&cl->dev->write_waiting_list, cl, fp);
++	/* free pending and control cb only in final flush */
++	if (!fp) {
++		mei_io_list_flush_cl(&cl->dev->ctrl_wr_list, cl);
++		mei_io_list_flush_cl(&cl->dev->ctrl_rd_list, cl);
+ 		mei_cl_free_pending(cl);
++	}
+ 	spin_lock(&cl->rd_completed_lock);
+ 	mei_io_list_free_fp(&cl->rd_completed, fp);
+ 	spin_unlock(&cl->rd_completed_lock);
+@@ -797,8 +800,8 @@ static void mei_cl_set_disconnected(struct mei_cl *cl)
+ 		return;
+ 
+ 	cl->state = MEI_FILE_DISCONNECTED;
+-	mei_io_tx_list_free_cl(&dev->write_list, cl);
+-	mei_io_tx_list_free_cl(&dev->write_waiting_list, cl);
++	mei_io_tx_list_free_cl(&dev->write_list, cl, NULL);
++	mei_io_tx_list_free_cl(&dev->write_waiting_list, cl, NULL);
+ 	mei_io_list_flush_cl(&dev->ctrl_rd_list, cl);
+ 	mei_io_list_flush_cl(&dev->ctrl_wr_list, cl);
+ 	mei_cl_wake_all(cl);
+-- 
+2.17.1
+

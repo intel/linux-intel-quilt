@@ -1,4 +1,4 @@
-From ef658b60c366d1e4a925133777abef58db108cee Mon Sep 17 00:00:00 2001
+From b19f28b076a4d3e6d53421deea04f8958786b1fe Mon Sep 17 00:00:00 2001
 From: Qiuxu Zhuo <qiuxu.zhuo@intel.com>
 Date: Sat, 27 Oct 2018 23:47:36 +0800
 Subject: [PATCH 2/5] EDAC, igen6: Add EDAC driver for Intel client SoC
@@ -8,19 +8,19 @@ This driver is meant to support Intel client SoCs with integrated
 memory controller using In-Band ECC (IBECC) IP. The memory correctable
 and uncorrectable errors are reported via NMIs. The driver handles
 the NMIs and decodes the error address to platform specific address.
-The first supported platform is Ice Lake Neural Network Processor
+The first supported platform is Ice-Lake Neural Network Processor
 for Inference (ICL-NNPI).
 
 Signed-off-by: Qiuxu Zhuo <qiuxu.zhuo@intel.com>
 ---
  drivers/edac/Kconfig      |   9 +
  drivers/edac/Makefile     |   1 +
- drivers/edac/igen6_edac.c | 815 ++++++++++++++++++++++++++++++++++++++
- 3 files changed, 825 insertions(+)
+ drivers/edac/igen6_edac.c | 796 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 806 insertions(+)
  create mode 100644 drivers/edac/igen6_edac.c
 
 diff --git a/drivers/edac/Kconfig b/drivers/edac/Kconfig
-index 417dad635526..f75c8595e12d 100644
+index 5c8272329a65..9dee66e43bba 100644
 --- a/drivers/edac/Kconfig
 +++ b/drivers/edac/Kconfig
 @@ -262,6 +262,15 @@ config EDAC_PND2
@@ -53,10 +53,10 @@ index d77200c9680b..b71644e1c7d4 100644
  obj-$(CONFIG_EDAC_I82443BXGX)		+= i82443bxgx_edac.o
 diff --git a/drivers/edac/igen6_edac.c b/drivers/edac/igen6_edac.c
 new file mode 100644
-index 000000000000..fb020b8fa989
+index 000000000000..cb30c4dc4a6b
 --- /dev/null
 +++ b/drivers/edac/igen6_edac.c
-@@ -0,0 +1,815 @@
+@@ -0,0 +1,796 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Driver for Intel client SoC with integrated memory controller using IBECC
@@ -76,21 +76,21 @@ index 000000000000..fb020b8fa989
 +#include <linux/pci_ids.h>
 +#include <linux/slab.h>
 +#include <linux/bitops.h>
-+#include <linux/nmi.h>
 +#include <linux/irq_work.h>
 +#include <linux/llist.h>
 +#include <linux/genalloc.h>
 +#include <linux/edac.h>
 +#include <linux/processor.h>
-+#include <linux/spinlock.h>
 +#include <linux/sched/clock.h>
 +#include <asm/cpu_device_id.h>
 +#include <asm/intel-family.h>
++#include <asm/mach_traps.h>
++#include <asm/nmi.h>
 +
 +#include "edac_mc.h"
 +#include "edac_module.h"
 +
-+#define IGEN6_REVISION	"v1.1.5"
++#define IGEN6_REVISION	"v1.1.7"
 +
 +#define EDAC_MOD_STR	"igen6_edac"
 +#define IGEN6_NMI_NAME	"igen6_ibecc"
@@ -203,14 +203,6 @@ index 000000000000..fb020b8fa989
 +	u32 ibecc_offset;
 +	bool (*ibecc_available)(u32 capid);
 +} *ibecc_cfg;
-+
-+/*
-+ * An NMI is broadcast to all CPU cores on a CE/UE error on the ICL-NNPI
-+ * platform. Make sure only one concurrent NMI handler for it.
-+ */
-+static DEFINE_RAW_SPINLOCK(ecclog_lock);
-+static u64 last_handle_jiffies;
-+#define MAX_NMI_GAP_JIFFIES msecs_to_jiffies(8)
 +
 +/*
 + * printk() is not safe in NMI context. So in NMI handler, the driver uses
@@ -504,31 +496,22 @@ index 000000000000..fb020b8fa989
 +
 +static int ecclog_nmi_handler(unsigned int cmd, struct pt_regs *regs)
 +{
-+	u64 delta, ecclog;
-+
-+	raw_spin_lock(&ecclog_lock);
++	unsigned char reason;
++	u64 ecclog;
 +
 +	ecclog = ecclog_check();
-+	if (!ecclog) {
-+		delta = jiffies - last_handle_jiffies;
-+		raw_spin_unlock(&ecclog_lock);
-+		/*
-+		 * When a CE/UE error occurs, an NMI is delivered to all CPU
-+		 * cores. Only one core handles the error, and the rest cores
-+		 * see no error so that they complain they receive NMIs for
-+		 * unknown reason. A workaround for the complaint is to get a
-+		 * core to see if another core had "recently" handled the error.
-+		 * If it did, then return value from the handler could be faked
-+		 * to say this core handled one too.
-+		 */
-+		return delta < MAX_NMI_GAP_JIFFIES ? NMI_HANDLED : NMI_DONE;
-+	}
++	if (!ecclog)
++		return NMI_DONE;
 +
 +	if (!ecclog_gen_pool_add(ecclog))
 +		irq_work_queue(&ecclog_irq_work);
-+	last_handle_jiffies = jiffies;
 +
-+	raw_spin_unlock(&ecclog_lock);
++	/* Re-enable the PCI SERR error line */
++	reason = x86_platform.get_nmi_reason() & NMI_REASON_CLEAR_MASK;
++	reason |= NMI_REASON_CLEAR_SERR;
++	outb(reason, NMI_REASON_PORT);
++	reason &= ~NMI_REASON_CLEAR_SERR;
++	outb(reason, NMI_REASON_PORT);
 +
 +	return NMI_HANDLED;
 +}
@@ -567,8 +550,7 @@ index 000000000000..fb020b8fa989
 +		ndimms = 0;
 +
 +		for (j = 0; j < NUM_DIMMS; j++) {
-+			dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms,
-+					     mci->n_layers, i, j, 0);
++			dimm = edac_get_dimm(mci, i, j, 0);
 +
 +			if (j ^ pvt->dimm_l_map[i]) {
 +				dtype = get_width(0, mad_dimm);
@@ -785,10 +767,9 @@ index 000000000000..fb020b8fa989
 +	if (ecclog) {
 +		if (!ecclog_gen_pool_add(ecclog))
 +			irq_work_queue(&ecclog_irq_work);
-+		last_handle_jiffies = jiffies;
 +	}
 +
-+	rc = register_nmi_handler(NMI_LOCAL, ecclog_nmi_handler,
++	rc = register_nmi_handler(NMI_SERR, ecclog_nmi_handler,
 +				  0, IGEN6_NMI_NAME);
 +	if (rc) {
 +		igen6_printk(KERN_ERR, "Failed to register nmi handler\n");
@@ -815,7 +796,7 @@ index 000000000000..fb020b8fa989
 +
 +	edac_dbg(2, "\n");
 +
-+	unregister_nmi_handler(NMI_LOCAL, IGEN6_NMI_NAME);
++	unregister_nmi_handler(NMI_SERR, IGEN6_NMI_NAME);
 +	irq_work_sync(&ecclog_irq_work);
 +	flush_work(&ecclog_work);
 +	gen_pool_destroy(ecclog_pool);

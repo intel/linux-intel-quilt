@@ -1,0 +1,130 @@
+From 800705dfbefd555300584341120374040317266c Mon Sep 17 00:00:00 2001
+From: Tomas Winkler <tomas.winkler@intel.com>
+Date: Mon, 19 Sep 2016 09:24:44 -0400
+Subject: [PATCH 54/85] mei: debugfs: [DONOTMERGE] add stall timers debug hooks
+
+Change-Id: Ib22bf5a158e7db3470ddd60e543d01a89dfc3e80
+Signed-off-by: Tomas Winkler <tomas.winkler@intel.com>
+---
+ drivers/misc/mei/debugfs.c | 27 +++++++++++++++++++++++++++
+ drivers/misc/mei/hbm.c     | 16 ++++++++++++++++
+ drivers/misc/mei/mei_dev.h |  3 +++
+ 3 files changed, 46 insertions(+)
+
+diff --git a/drivers/misc/mei/debugfs.c b/drivers/misc/mei/debugfs.c
+index 0cb717bc02b6..b73605336f6d 100644
+--- a/drivers/misc/mei/debugfs.c
++++ b/drivers/misc/mei/debugfs.c
+@@ -139,6 +139,18 @@ static const struct file_operations mei_dbgfs_allow_fa_fops = {
+ 	.llseek = generic_file_llseek,
+ };
+ 
++static ssize_t mei_dbgfs_read_reset(struct file *fp, char __user *ubuf,
++				    size_t cnt, loff_t *ppos)
++{
++	char buf[250];
++	int pos = 0;
++
++	pos += scnprintf(buf, 100, "%s\n%s\n%s\n",
++			"reset", "stall-init", "stall-cl");
++
++	return simple_read_from_buffer(ubuf, cnt, ppos, buf, pos);
++}
++
+ static ssize_t mei_dbgfs_write_reset(struct file *file,
+ 				     const char __user *ubuf,
+ 				     size_t count, loff_t *ppos)
+@@ -153,13 +165,28 @@ static ssize_t mei_dbgfs_write_reset(struct file *file,
+ 	if (sysfs_streq("reset", buf)) {
+ 		dev_info(dev->dev, "debug reset\n");
+ 		schedule_work(&dev->reset_work);
++		goto out;
+ 	}
+ 
++	if (sysfs_streq("stall-init", buf)) {
++		dev_info(dev->dev, "init: stall\n");
++		dev->stall_timer_init = 1;
++		goto out;
++	}
++
++	if (sysfs_streq("stall-cl", buf)) {
++		dev_info(dev->dev, "cl: stall\n");
++		dev->stall_timer_cl = 1;
++		goto out;
++	}
++
++out:
+ 	return count;
+ }
+ 
+ static const struct file_operations mei_dbgfs_fops_reset = {
+ 	.open = simple_open,
++	.read = mei_dbgfs_read_reset,
+ 	.write = mei_dbgfs_write_reset,
+ 	.llseek = generic_file_llseek,
+ };
+diff --git a/drivers/misc/mei/hbm.c b/drivers/misc/mei/hbm.c
+index 812be084829a..79a423239464 100644
+--- a/drivers/misc/mei/hbm.c
++++ b/drivers/misc/mei/hbm.c
+@@ -925,6 +925,10 @@ static void mei_hbm_cl_res(struct mei_device *dev,
+ 		return;
+ 	}
+ 
++	if (dev->stall_timer_cl) {
++		dev->stall_timer_cl = 0;
++		return;
++	}
+ 	cl->timer_count = 0;
+ 	wake_up(&cl->wait);
+ }
+@@ -1161,6 +1165,10 @@ int mei_hbm_dispatch(struct mei_device *dev, struct mei_msg_hdr *hdr)
+ 	case HOST_START_RES_CMD:
+ 		dev_dbg(dev->dev, "hbm: start: response message received.\n");
+ 
++		if (dev->stall_timer_init) {
++			dev->stall_timer_init = 0;
++			return 0;
++		}
+ 		dev->init_clients_timer = 0;
+ 
+ 		version_res = (struct hbm_host_version_response *)mei_msg;
+@@ -1328,6 +1336,10 @@ int mei_hbm_dispatch(struct mei_device *dev, struct mei_msg_hdr *hdr)
+ 	case HOST_CLIENT_PROPERTIES_RES_CMD:
+ 		dev_dbg(dev->dev, "hbm: properties response: message received.\n");
+ 
++		if (dev->stall_timer_init) {
++			dev->stall_timer_init = 0;
++			return 0;
++		}
+ 		dev->init_clients_timer = 0;
+ 
+ 		if (dev->dev_state != MEI_DEV_INIT_CLIENTS ||
+@@ -1360,6 +1372,10 @@ int mei_hbm_dispatch(struct mei_device *dev, struct mei_msg_hdr *hdr)
+ 	case HOST_ENUM_RES_CMD:
+ 		dev_dbg(dev->dev, "hbm: enumeration response: message received\n");
+ 
++		if (dev->stall_timer_init) {
++			dev->stall_timer_init = 0;
++			return 0;
++		}
+ 		dev->init_clients_timer = 0;
+ 
+ 		enum_res = (struct hbm_host_enum_response *) mei_msg;
+diff --git a/drivers/misc/mei/mei_dev.h b/drivers/misc/mei/mei_dev.h
+index d958dc7b1b66..474b2ff67462 100644
+--- a/drivers/misc/mei/mei_dev.h
++++ b/drivers/misc/mei/mei_dev.h
+@@ -561,6 +561,9 @@ struct mei_device {
+ 	struct dentry *dbgfs_dir;
+ #endif /* CONFIG_DEBUG_FS */
+ 
++	unsigned int stall_timer_cl:1;
++	unsigned int stall_timer_init:1;
++
+ 	const struct mei_hw_ops *ops;
+ 	char hw[0] __aligned(sizeof(void *));
+ };
+-- 
+2.17.1
+
