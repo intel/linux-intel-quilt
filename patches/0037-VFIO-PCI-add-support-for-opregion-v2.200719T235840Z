@@ -1,0 +1,48 @@
+From c408b3539b8c2fb10128e76e6f9ff0ccb38c4791 Mon Sep 17 00:00:00 2001
+From: Swee Yee Fonn <swee.yee.fonn@intel.com>
+Date: Thu, 9 Jul 2020 23:41:51 +0800
+Subject: [PATCH 37/45] VFIO-PCI: add support for opregion v2
+
+Add support for Intel IGD opregion version v2
+---
+ drivers/vfio/pci/vfio_pci_igd.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/vfio/pci/vfio_pci_igd.c b/drivers/vfio/pci/vfio_pci_igd.c
+index 53d97f459252..694294be6287 100644
+--- a/drivers/vfio/pci/vfio_pci_igd.c
++++ b/drivers/vfio/pci/vfio_pci_igd.c
+@@ -58,6 +58,9 @@ static int vfio_pci_igd_opregion_init(struct vfio_pci_device *vdev)
+ 	u32 addr, size;
+ 	void *base;
+ 	int ret;
++	u32 ver;
++	u64 rvda;
++	u32 rvds;
+ 
+ 	ret = pci_read_config_dword(vdev->pdev, OPREGION_PCI_ADDR, &addr);
+ 	if (ret)
+@@ -83,6 +86,20 @@ static int vfio_pci_igd_opregion_init(struct vfio_pci_device *vdev)
+ 
+ 	size *= 1024; /* In KB */
+ 
++	/* Support opregion v2+ */
++	ver = le32_to_cpu(*(__le32 *)(base + 20));
++	if (ver >= 0x02000000) {
++		rvda = le64_to_cpu(*(__le64 *)(base + 0x3BA));
++		if (rvda != 0) {
++			rvds = le32_to_cpu(*(__le32 *)(base + 0x3C2));
++			if (ver == 0x02000000) {
++				size += ((rvda - (u64)addr) + rvds);
++			} else {
++				size += ((rvda - (u64)size) + rvds);
++			}
++		}
++	}
++
+ 	if (size != OPREGION_SIZE) {
+ 		memunmap(base);
+ 		base = memremap(addr, size, MEMREMAP_WB);
+-- 
+2.17.1
+

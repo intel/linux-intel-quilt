@@ -1,0 +1,88 @@
+From 7da4d00678c61beabc8b06b2995e6f9dd318a64b Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Wed, 15 Jan 2020 17:59:07 +0800
+Subject: [PATCH 12/24] drm/i915/gvt: Disable FBC and DMC firmware loading for
+ IDV
+
+In IDV direct display, GVT handles DDB static allocation and host/vGPU
+display switch. When vGPU owns the display, host i915 isn't aware of
+actual display status, these display related dynamic power management
+may break vGPU operating display HW, and leads to issue like corruption
+and watermark underrun. So we disable these features in IDV.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Acked-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit e6bbc207ebb74a51be213b12d2ef722fee6db2e8)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit b46df3983cd298ac5fbe9d0de317c81911ef4c58)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_fbc.c | 16 ++++++++++++++++
+ drivers/gpu/drm/i915/intel_csr.c         | 13 +++++++++++--
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_fbc.c b/drivers/gpu/drm/i915/display/intel_fbc.c
+index c4589bfd0ea0..602c15036639 100644
+--- a/drivers/gpu/drm/i915/display/intel_fbc.c
++++ b/drivers/gpu/drm/i915/display/intel_fbc.c
+@@ -811,6 +811,14 @@ static bool intel_fbc_can_enable(struct drm_i915_private *dev_priv)
+ 		return false;
+ 	}
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt) {
++		i915_modparams.enable_fbc = 0;
++		fbc->no_fbc_reason = "Disable FBC for direct display in IDV";
++		return false;
++	}
++#endif
++
+ 	if (!i915_modparams.enable_fbc) {
+ 		fbc->no_fbc_reason = "disabled per module param or by default";
+ 		return false;
+@@ -1276,6 +1284,14 @@ void intel_fbc_init_pipe_state(struct drm_i915_private *dev_priv)
+  */
+ static int intel_sanitize_fbc_option(struct drm_i915_private *dev_priv)
+ {
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt) {
++		i915_modparams.enable_fbc = 0;
++		DRM_WARN("Disable FBC for direct display in IDV\n");
++		return 0;
++	}
++#endif
++
+ 	if (i915_modparams.enable_fbc >= 0)
+ 		return !!i915_modparams.enable_fbc;
+ 
+diff --git a/drivers/gpu/drm/i915/intel_csr.c b/drivers/gpu/drm/i915/intel_csr.c
+index 3b478f8bc3ff..7c1ed3a9878d 100644
+--- a/drivers/gpu/drm/i915/intel_csr.c
++++ b/drivers/gpu/drm/i915/intel_csr.c
+@@ -625,12 +625,21 @@ static void csr_load_work_fn(struct work_struct *work)
+ 	struct drm_i915_private *dev_priv;
+ 	struct intel_csr *csr;
+ 	const struct firmware *fw = NULL;
++	bool skip_dmc = false;
+ 
+ 	dev_priv = container_of(work, typeof(*dev_priv), csr.work);
+ 	csr = &dev_priv->csr;
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt) {
++		skip_dmc = true;
++		DRM_WARN("Skip DMC firmware loading in IDV\n");
++	}
++#endif
+ 
+-	request_firmware(&fw, dev_priv->csr.fw_path, &dev_priv->drm.pdev->dev);
+-	parse_csr_fw(dev_priv, fw);
++	if (!skip_dmc) {
++		request_firmware(&fw, dev_priv->csr.fw_path, &dev_priv->drm.pdev->dev);
++		parse_csr_fw(dev_priv, fw);
++	}
+ 
+ 	if (dev_priv->csr.dmc_payload) {
+ 		intel_csr_load_program(dev_priv);
+-- 
+2.17.1
+

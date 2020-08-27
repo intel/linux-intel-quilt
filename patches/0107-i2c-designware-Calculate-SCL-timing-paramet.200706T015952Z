@@ -1,0 +1,55 @@
+From 1295c9aa4e8a5bb7c3ab268e03035e5b6cd838a3 Mon Sep 17 00:00:00 2001
+From: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Date: Tue, 7 Apr 2020 21:34:39 +0800
+Subject: [PATCH 107/131] i2c: designware: Calculate SCL timing parameter for
+ High Speed Mode
+
+Custom parameters for HCNT/LCNT are not available for OF based system.
+Thus, we will use existing SCL timing parameter calculation functions
+for High Speed Mode too.
+
+The value for the parameters tSYMBOL and tLOW is taken from DesignWare
+DW_apb_i2c Databook v2.01a, section 3.15.4.6. The calculation should
+assume higher bus load since it gives slower timing parameter.
+
+Signed-off-by: Wan Ahmad Zainie <wan.ahmad.zainie.wan.mohamad@intel.com>
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Acked-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Signed-off-by: Wolfram Sang <wsa@the-dreams.de>
+---
+ drivers/i2c/busses/i2c-designware-master.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/i2c/busses/i2c-designware-master.c b/drivers/i2c/busses/i2c-designware-master.c
+index b46580b482c0..26f4582c83d1 100644
+--- a/drivers/i2c/busses/i2c-designware-master.c
++++ b/drivers/i2c/busses/i2c-designware-master.c
+@@ -129,10 +129,22 @@ static int i2c_dw_set_timings_master(struct dw_i2c_dev *dev)
+ 			dev->master_cfg |= DW_IC_CON_SPEED_FAST;
+ 			dev->hs_hcnt = 0;
+ 			dev->hs_lcnt = 0;
+-		} else if (dev->hs_hcnt && dev->hs_lcnt) {
+-			dev_dbg(dev->dev, "High Speed Mode HCNT:LCNT = %d:%d\n",
+-				dev->hs_hcnt, dev->hs_lcnt);
++		} else if (!dev->hs_hcnt || !dev->hs_lcnt) {
++			ic_clk = i2c_dw_clk_rate(dev);
++			dev->hs_hcnt =
++				i2c_dw_scl_hcnt(ic_clk,
++						160,	/* tHIGH = 160 ns */
++						sda_falling_time,
++						0,	/* DW default */
++						0);	/* No offset */
++			dev->hs_lcnt =
++				i2c_dw_scl_lcnt(ic_clk,
++						320,	/* tLOW = 320 ns */
++						scl_falling_time,
++						0);	/* No offset */
+ 		}
++		dev_dbg(dev->dev, "High Speed Mode HCNT:LCNT = %d:%d\n",
++			dev->hs_hcnt, dev->hs_lcnt);
+ 	}
+ 
+ 	ret = i2c_dw_set_sda_hold(dev);
+-- 
+2.17.1
+

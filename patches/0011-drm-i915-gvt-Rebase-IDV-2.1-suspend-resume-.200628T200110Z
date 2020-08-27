@@ -1,0 +1,713 @@
+From 949771b621efce4f8a4d0804f62adfdb35b89882 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Tue, 14 Apr 2020 16:10:55 -0600
+Subject: [PATCH 11/24] drm/i915/gvt: Rebase IDV 2.1 suspend/resume feature to
+ 5.4.x.
+
+This patch squash IDV 2.1 host/guest suspend/resume support from 4.19.x
+to 5.4.x kernel. Squashed patches are listed as below:
+======================================================
+
+drm/i915/gvt: Do not destroy PPGTT on Device Model Level Reset
+
+During guest S3, guest will issue DMLR but context is not destroyed
+and PPGTT is still valid. If gvt destroys its PPGTT on reset, every
+workloads of the context will re-create PPGTT on preparation and destroy
+it on completion. It brings significant impact on performance.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+(cherry picked from commit ddb5da1e1014c46015a4ac45bf6fd46bf4f9b783)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Don't reset pv_notified in DMLR
+
+pv_notifed is set to true when guest driver reads PVINFO. But in
+Windows guest S3 resume, guest driver doesn't touch PVINFO after
+reset. So don't reset pv_notified to false in DMLR to ensure not
+to enter failsafe mode after guest S3 resume.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+(cherry picked from commit 7fa4c286c468a0079c1672205258a4a756187487)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Add GVT suspend/resume support routine.
+
+In GVT direct display, ddb is statically allocated so need restoration.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+Reviewed-by: Gao, Fred <fred.gao@intel.com>
+(cherry picked from commit 3e41d2fd2edfb4139d88411366f9c46377c20978)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: save and restore guest ggtt entries in host S3
+
+All GGTT entries are cleared in i915 driver during S3. Need to
+save and restore guest entries which doesn't have vma visible to
+host.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+(cherry picked from commit c08c6f41705bcc48d5df59942d03f506d0f71267)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: restore gvt controlled registers in host resume
+
+Some registers are written by gvt. Restore them in host resume from
+S3.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+(cherry picked from commit 1bd13d0999b8ba4a9c41b89b081839a14899db54)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Move ddb init into early resume
+
+i915_drm_resume() will call intel_modeset_init_hw() and
+intel_display_resume(), then display initilized. intel_gvt_pm_resume()
+is called last in i915_drm_resume().
+In direct display, ddb is statically programmed by gvt and restore
+in intel_gvt_pm_resume(). Current sequence will cause display programmed
+before ddb restore, and leads to blackscreen caused by wrong ddb.
+
+Since i915_drm_resume_early() is before i915_drm_resume(), this patch
+moves ddb init into early resume, which can guarantee display HW
+programming in i915_drm_resume() executed on correct ddb.
+
+Also, move intel_gvt_pm_resume() to end of i915_drm_resume(), and
+move intel_gvt_pm_suspend() to beginning of i915_drm_suspend().
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit 0b08e82eeb75997e3fcca51517811ead2fc3f8d9)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Restore vGPU direct display settings on resume
+
+Currently the entire direct display settings will only be updated
+on host->vGPU or vGPU->vGPU switch. vGPU direct display is burst
+programmed on plane_ctl update and SCL/WM recalculation, and only
+partially programmed those changed values.
+On resume, if missing vGPU direct display flush, vGPU display will
+update display based on incorrect SCL/WM settings. So we need restore
+direct display if the pipe is assigned to some vGPU, and the owner
+is also this vGPU before suspend.
+The solution is to add the full flush on intel_gvt_pm_resume().
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit 0d670fdab0dd8831ce6334d9139764dc9471e8cb)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Set ggtt_entries to NULL after kfree
+
+ggtt_entries is only valid during suspend/resume. If not set to NULL,
+there is chance that ggtt_entries is double freed in both
+intel_gvt_restore_ggtt() and intel_vgpu_destroy_ggtt_mm(), then kernel
+trace prompts.
+Always set ggtt_entries to NULL on initialization and after free, so
+that the pointer check won't fail.
+
+[  366.025323] ------------[ cut here ]------------
+[  366.025920] kernel BUG at mm/slub.c:3904!
+...
+[  366.029251] RIP: 0010:kfree+0x26c/0x2a0
+...
+[  366.039447] Call Trace:
+[  366.039756]  intel_vgpu_clean_gtt+0xc8/0x110
+[  366.040237]  intel_gvt_destroy_vgpu+0x69/0x120
+[  366.040772]  intel_vgpu_remove+0x2a/0x40 [kvmgt]
+[  366.041289]  mdev_device_remove_ops+0x23/0x50 [mdev]
+[  366.041894]  mdev_device_remove+0x8e/0x120 [mdev]
+[  366.042473]  remove_store+0x77/0xa0 [mdev]
+[  366.042934]  kernfs_fop_write+0x115/0x1a0
+[  366.043434]  __vfs_write+0x37/0x180
+[  366.043828]  ? __sb_start_write+0x136/0x1b0
+[  366.044295]  ? preempt_count_sub+0x43/0x50
+[  366.044791]  ? __sb_start_write+0x136/0x1b0
+[  366.045260]  vfs_write+0xaf/0x1b0
+[  366.045690]  ksys_write+0x5a/0xe0
+[  366.046068]  do_syscall_64+0x56/0x1b0
+[  366.046535]  entry_SYSCALL_64_after_hwframe+0x49/0xbe
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit f27c35cd1ab545eed70dc0c051b391db62e611d7)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Fix incorrect RPM wakelock ref during gvt suspend/resume
+
+gvt suspend saves ggtt, gvt early resume restore ddb, gvt resume restore
+ggtt and regs. Like other operations in i915_drm_suspend(),
+i915_drm_resume_early, i915_drm_resume, all HW access should be protected
+under correct rpm_wakeref and pm state, otherwise, call trace will show.
+
+The solution is to put gvt suspend/resume routine between
+disable_rpm_wakeref_asserts() and enable_rpm_wakeref_asserts().
+
+------------[ cut here ]------------
+RPM wakelock ref not held during HW access
+WARNING: CPU: 8 PID: 8689 at drivers/gpu/drm/i915/intel_drv.h:1995
+	fwtable_write32+0x1b5/0x1e0 [i915]
+...
+Call Trace:
+intel_gvt_ddb_entry_write+0x48/0x50 [i915]
+intel_gvt_init_ddb+0xde/0x130 [i915]
+? pci_restore_standard_config+0x50/0x50
+intel_gvt_pm_early_resume+0xe/0x20 [i915]
+intel_runtime_resume+0xf0/0x220 [i915]
+pci_pm_runtime_resume+0x78/0xd0
+__rpm_callback+0xc6/0x1d0
+? __switch_to_asm+0x35/0x70
+? __switch_to_asm+0x41/0x70
+? pci_restore_standard_config+0x50/0x50
+rpm_callback+0x24/0x80
+? pci_restore_standard_config+0x50/0x50
+rpm_resume+0x507/0x720
+? finish_wait+0x56/0x70
+__pm_runtime_resume+0x4e/0x80
+intel_runtime_pm_get+0x25/0xb0 [i915]
+intel_display_power_get+0x20/0x50 [i915]
+intel_atomic_commit_tail+0xcf1/0xe00 [i915]
+? flush_workqueue+0x1bb/0x3e0
+? intel_atomic_commit_ready+0x48/0x5c [i915]
+intel_atomic_commit+0x2bf/0x2f0 [i915]
+drm_atomic_commit+0x4a/0x50 [drm]
+drm_atomic_connector_commit_dpms+0xec/0x100 [drm]
+drm_mode_obj_set_property_ioctl+0x267/0x2b0 [drm]
+? drm_connector_set_obj_prop+0x80/0x80 [drm]
+drm_connector_property_set_ioctl+0x3f/0x60 [drm]
+drm_ioctl_kernel+0xae/0xf0 [drm]
+drm_ioctl+0x412/0x470 [drm]
+? drm_connector_set_obj_prop+0x80/0x80 [drm]
+do_vfs_ioctl+0xa6/0x600
+? vfs_read+0x123/0x140
+? vfs_read+0x123/0x140
+ksys_ioctl+0x6d/0x80
+__x64_sys_ioctl+0x1a/0x20
+do_syscall_64+0x5a/0x110
+entry_SYSCALL_64_after_hwframe+0x44/0xa9
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit d5b14e0b42e1635c7486de890face66e4673d807)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: Clean ppgtt on dmlr expect resuming from D3
+
+In DMLR, ppgtt will be invalidted and destroyed. However when resuming
+from S3, since memory is not lost ppgtt can still be reused. So we can
+skip them in DMLR during resume but keep it in other DMLR case.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+Reviewed-by: Hang Yuan <hang.yuan@intel.com>
+(cherry picked from commit eceedafbb3220abfd97621a56531cc030f1941de)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+
+drm/i915/gvt: free all spt in vgpu release
+
+Shadow page table may be populated before guest worklod is submitted
+when guest updates ppgtt table. So it's not enough to only release
+worload's mm which may leave some spts not freed if their workload is
+not submitted yet. For example, in killing a Qemu process, ppgtt table
+destroy g2v notification is not sent from guest and so some spts may
+not freed and their gfns are not removed from page tracker but these
+gfns' memory may be reused in host. Then unknown problem will happen.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+(cherry picked from commit ec558e1f2d2c19abfc5847b764a7d728bbdaf784)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit cdda004c050189d5a2460a2409809b62a94eec0f)
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/cfg_space.c | 24 +++++++++
+ drivers/gpu/drm/i915/gvt/display.c   |  8 +--
+ drivers/gpu/drm/i915/gvt/display.h   |  3 ++
+ drivers/gpu/drm/i915/gvt/gtt.c       | 76 +++++++++++++++++++++++++++-
+ drivers/gpu/drm/i915/gvt/gtt.h       |  3 ++
+ drivers/gpu/drm/i915/gvt/gvt.c       | 39 ++++++++++++++
+ drivers/gpu/drm/i915/gvt/gvt.h       |  9 ++++
+ drivers/gpu/drm/i915/gvt/handlers.c  | 24 ++++++++-
+ drivers/gpu/drm/i915/gvt/mmio.h      |  2 +
+ drivers/gpu/drm/i915/gvt/vgpu.c      | 22 ++++++--
+ drivers/gpu/drm/i915/i915_drv.c      | 36 +++++++++++++
+ 11 files changed, 236 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/cfg_space.c b/drivers/gpu/drm/i915/gvt/cfg_space.c
+index 19cf1bbe059d..1fe65f2eafa6 100644
+--- a/drivers/gpu/drm/i915/gvt/cfg_space.c
++++ b/drivers/gpu/drm/i915/gvt/cfg_space.c
+@@ -70,6 +70,7 @@ static void vgpu_pci_cfg_mem_write(struct intel_vgpu *vgpu, unsigned int off,
+ {
+ 	u8 *cfg_base = vgpu_cfg_space(vgpu);
+ 	u8 mask, new, old;
++	pci_power_t pwr;
+ 	int i = 0;
+ 
+ 	for (; i < bytes && (off + i < sizeof(pci_cfg_space_rw_bmp)); i++) {
+@@ -91,6 +92,15 @@ static void vgpu_pci_cfg_mem_write(struct intel_vgpu *vgpu, unsigned int off,
+ 	/* For other configuration space directly copy as it is. */
+ 	if (i < bytes)
+ 		memcpy(cfg_base + off + i, src + i, bytes - i);
++
++	if (off == vgpu->cfg_space.pmcsr_off && vgpu->cfg_space.pmcsr_off) {
++		pwr = (pci_power_t __force)(*(u16 *)(&vgpu_cfg_space(vgpu)[off])
++			& PCI_PM_CTRL_STATE_MASK);
++		if (pwr == PCI_D3hot)
++			vgpu->d3_entered = true;
++		gvt_dbg_core("vgpu-%d power status changed to %d\n",
++			     vgpu->id, pwr);
++	}
+ }
+ 
+ /**
+@@ -361,6 +371,7 @@ void intel_vgpu_init_cfg_space(struct intel_vgpu *vgpu,
+ 	struct intel_gvt *gvt = vgpu->gvt;
+ 	const struct intel_gvt_device_info *info = &gvt->device_info;
+ 	u16 *gmch_ctl;
++	u8 next;
+ 
+ 	memcpy(vgpu_cfg_space(vgpu), gvt->firmware.cfg_space,
+ 	       info->cfg_space_size);
+@@ -396,6 +407,19 @@ void intel_vgpu_init_cfg_space(struct intel_vgpu *vgpu,
+ 				pci_resource_len(gvt->dev_priv->drm.pdev, 2);
+ 
+ 	memset(vgpu_cfg_space(vgpu) + PCI_ROM_ADDRESS, 0, 4);
++
++	/* PM Support */
++	vgpu->cfg_space.pmcsr_off = 0;
++	if (vgpu_cfg_space(vgpu)[PCI_STATUS] & PCI_STATUS_CAP_LIST) {
++		next = vgpu_cfg_space(vgpu)[PCI_CAPABILITY_LIST];
++		do {
++			if (vgpu_cfg_space(vgpu)[next + PCI_CAP_LIST_ID] == PCI_CAP_ID_PM) {
++				vgpu->cfg_space.pmcsr_off = next + PCI_PM_CTRL;
++				break;
++			}
++			next = vgpu_cfg_space(vgpu)[next + PCI_CAP_LIST_NEXT];
++		} while (next);
++	}
+ }
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 9128a8e98418..92b3a7f9b7e2 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -744,7 +744,7 @@ static void intel_gvt_ddb_entry_write(struct drm_i915_private *dev_priv,
+  * plane information of DomU's planes, so here we statically allocate the
+  * ddb entries for all the possible enabled planes.
+  */
+-static void intel_gvt_init_ddb(struct intel_gvt *gvt)
++void intel_gvt_init_ddb(struct intel_gvt *gvt)
+ {
+ 	struct drm_i915_private *dev_priv = gvt->dev_priv;
+ 	struct intel_device_info *info = mkwrite_device_info(dev_priv);
+@@ -1861,9 +1861,9 @@ static int prepare_for_switch_display(struct intel_gvt *gvt, enum pipe pipe)
+ 	return 0;
+ }
+ 
+-static void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
+-					  struct intel_vgpu *old_v,
+-					  struct intel_vgpu *new_v)
++void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
++				   struct intel_vgpu *old_v,
++				   struct intel_vgpu *new_v)
+ {
+ 	struct drm_i915_private *dev_priv = gvt->dev_priv;
+ 	struct intel_runtime_info *runtime = RUNTIME_INFO(dev_priv);
+diff --git a/drivers/gpu/drm/i915/gvt/display.h b/drivers/gpu/drm/i915/gvt/display.h
+index 7b6f10a7a10a..6258da1f1e6a 100644
+--- a/drivers/gpu/drm/i915/gvt/display.h
++++ b/drivers/gpu/drm/i915/gvt/display.h
+@@ -245,6 +245,9 @@ void intel_gvt_check_vblank_emulation(struct intel_vgpu *vgpu, enum pipe pipe);
+ int intel_vgpu_init_display(struct intel_vgpu *vgpu, u64 resolution);
+ void intel_vgpu_reset_display(struct intel_vgpu *vgpu);
+ void intel_vgpu_clean_display(struct intel_vgpu *vgpu);
++void intel_gvt_switch_display_pipe(struct intel_gvt *gvt, enum pipe pipe,
++				   struct intel_vgpu *old_v,
++				   struct intel_vgpu *new_v);
+ 
+ int pipe_is_enabled(struct intel_vgpu *vgpu, enum pipe pipe);
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index 71d4d88d8115..bca44aa99983 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -2477,7 +2477,7 @@ int intel_vgpu_init_gtt(struct intel_vgpu *vgpu)
+ 	return create_scratch_page_tree(vgpu);
+ }
+ 
+-static void intel_vgpu_destroy_all_ppgtt_mm(struct intel_vgpu *vgpu)
++void intel_vgpu_destroy_all_ppgtt_mm(struct intel_vgpu *vgpu)
+ {
+ 	struct list_head *pos, *n;
+ 	struct intel_vgpu_mm *mm;
+@@ -2509,6 +2509,11 @@ static void intel_vgpu_destroy_ggtt_mm(struct intel_vgpu *vgpu)
+ 	}
+ 	intel_vgpu_destroy_mm(vgpu->gtt.ggtt_mm);
+ 	vgpu->gtt.ggtt_mm = NULL;
++
++	if (vgpu->ggtt_entries) {
++		kfree(vgpu->ggtt_entries);
++		vgpu->ggtt_entries = NULL;
++	}
+ }
+ 
+ /**
+@@ -2829,3 +2834,72 @@ void intel_vgpu_reset_gtt(struct intel_vgpu *vgpu)
+ 	intel_vgpu_destroy_all_ppgtt_mm(vgpu);
+ 	intel_vgpu_reset_ggtt(vgpu, true);
+ }
++
++/**
++ * intel_gvt_save_ggtt - save all vGPU's ggtt entries
++ * @gvt: intel gvt device
++ *
++ * This function is called at driver suspend stage to save
++ * GGTT entries of every active vGPU.
++ *
++ */
++void intel_gvt_save_ggtt(struct intel_gvt *gvt)
++{
++	struct intel_vgpu *vgpu;
++	int id;
++	u32 index, num_low, num_hi;
++	void __iomem *addr;
++
++	for_each_active_vgpu(gvt, vgpu, id) {
++		num_low = vgpu_aperture_sz(vgpu) >> PAGE_SHIFT;
++		num_hi = vgpu_hidden_sz(vgpu) >> PAGE_SHIFT;
++		vgpu->ggtt_entries = kzalloc((num_low + num_hi) *
++				sizeof(u64), GFP_KERNEL);
++		if (!vgpu->ggtt_entries)
++			continue;
++
++		index = vgpu_aperture_gmadr_base(vgpu) >> PAGE_SHIFT;
++		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
++		memcpy(vgpu->ggtt_entries, addr, num_low);
++
++		index = vgpu_hidden_gmadr_base(vgpu) >> PAGE_SHIFT;
++		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
++		memcpy((u64 *)vgpu->ggtt_entries + num_low, addr, num_hi);
++	}
++}
++
++/**
++ * intel_gvt_restore_ggtt - restore all vGPU's ggtt entries
++ * @gvt: intel gvt device
++ *
++ * This function is called at driver resume stage to restore
++ * GGTT entries of every active vGPU.
++ *
++ */
++void intel_gvt_restore_ggtt(struct intel_gvt *gvt)
++{
++	struct intel_vgpu *vgpu;
++	int id;
++	u32 index, num_low, num_hi;
++	void __iomem *addr;
++
++	for_each_active_vgpu(gvt, vgpu, id) {
++		if (!vgpu->ggtt_entries) {
++			gvt_vgpu_err("fail to get saved ggtt\n");
++			continue;
++		}
++
++		num_low = vgpu_aperture_sz(vgpu) >> PAGE_SHIFT;
++		num_hi = vgpu_hidden_sz(vgpu) >> PAGE_SHIFT;
++
++		index = vgpu_aperture_gmadr_base(vgpu) >> PAGE_SHIFT;
++		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
++		memcpy(addr, vgpu->ggtt_entries, num_low);
++		index = vgpu_hidden_gmadr_base(vgpu) >> PAGE_SHIFT;
++		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
++		memcpy(addr, (u64 *)vgpu->ggtt_entries + num_low, num_hi);
++
++		kfree(vgpu->ggtt_entries);
++		vgpu->ggtt_entries = NULL;
++	}
++}
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.h b/drivers/gpu/drm/i915/gvt/gtt.h
+index 88789316807d..6939d74a4ac1 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.h
++++ b/drivers/gpu/drm/i915/gvt/gtt.h
+@@ -278,4 +278,7 @@ int intel_vgpu_emulate_ggtt_mmio_read(struct intel_vgpu *vgpu,
+ int intel_vgpu_emulate_ggtt_mmio_write(struct intel_vgpu *vgpu,
+ 	unsigned int off, void *p_data, unsigned int bytes);
+ 
++void intel_gvt_save_ggtt(struct intel_gvt *gvt);
++void intel_gvt_restore_ggtt(struct intel_gvt *gvt);
++void intel_vgpu_destroy_all_ppgtt_mm(struct intel_vgpu *vgpu);
+ #endif /* _GVT_GTT_H_ */
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.c b/drivers/gpu/drm/i915/gvt/gvt.c
+index d86ed78c35cf..645a886fd920 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.c
++++ b/drivers/gpu/drm/i915/gvt/gvt.c
+@@ -409,6 +409,45 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
+ 	return ret;
+ }
+ 
++int intel_gvt_pm_suspend(struct intel_gvt *gvt)
++{
++	intel_gvt_save_ggtt(gvt);
++	return 0;
++}
++
++int intel_gvt_pm_early_resume(struct intel_gvt *gvt)
++{
++	intel_gvt_init_ddb(gvt);
++	return 0;
++}
++
++int intel_gvt_pm_resume(struct intel_gvt *gvt)
++{
++	struct intel_vgpu *vgpu = NULL;
++	struct intel_vgpu_display *disp_cfg = NULL;
++	struct intel_vgpu_display_path *disp_path = NULL, *n;
++	int id;
++
++	intel_gvt_restore_regs(gvt);
++	intel_gvt_restore_ggtt(gvt);
++
++	mutex_lock(&gvt->lock);
++	for_each_active_vgpu(gvt, vgpu, id) {
++		mutex_lock(&vgpu->vgpu_lock);
++		mutex_lock(&gvt->sw_in_progress);
++		disp_cfg = &vgpu->disp_cfg;
++		list_for_each_entry_safe(disp_path, n, &disp_cfg->path_list, list) {
++			if (disp_path->p_pipe != INVALID_PIPE && disp_path->foreground_state)
++				intel_gvt_switch_display_pipe(vgpu->gvt, disp_path->p_pipe, NULL, vgpu);
++		}
++		mutex_unlock(&gvt->sw_in_progress);
++		mutex_unlock(&vgpu->vgpu_lock);
++	}
++	mutex_unlock(&gvt->lock);
++
++	return 0;
++}
++
+ int
+ intel_gvt_register_hypervisor(struct intel_gvt_mpt *m)
+ {
+diff --git a/drivers/gpu/drm/i915/gvt/gvt.h b/drivers/gpu/drm/i915/gvt/gvt.h
+index 9ed23da11e95..e6df1e94f602 100644
+--- a/drivers/gpu/drm/i915/gvt/gvt.h
++++ b/drivers/gpu/drm/i915/gvt/gvt.h
+@@ -106,6 +106,7 @@ struct intel_vgpu_pci_bar {
+ struct intel_vgpu_cfg_space {
+ 	unsigned char virtual_cfg_space[PCI_CFG_SPACE_EXP_SIZE];
+ 	struct intel_vgpu_pci_bar bar[INTEL_GVT_MAX_BAR_NUM];
++	u32 pmcsr_off;
+ };
+ 
+ #define vgpu_cfg_space(vgpu) ((vgpu)->cfg_space.virtual_cfg_space)
+@@ -187,6 +188,9 @@ struct intel_vgpu {
+ 	struct intel_vgpu_submission submission;
+ 	struct radix_tree_root page_track_tree;
+ 	u32 hws_pga[I915_NUM_ENGINES];
++	u64 *ggtt_entries; /* place to save ggtt entries in suspend */
++	/* Set on PCI_D3, reset on DMLR, not reflecting the actual PM state */
++	bool d3_entered;
+ 
+ 	struct dentry *debugfs;
+ 
+@@ -818,6 +822,11 @@ void intel_vgpu_update_plane_wm(struct intel_vgpu *vgpu,
+ 	struct intel_crtc *intel_crtc, enum plane_id plane);
+ u32 vgpu_calc_wm_level(const struct skl_wm_level *level);
+ 
++void intel_gvt_init_ddb(struct intel_gvt *gvt);
++int intel_gvt_pm_suspend(struct intel_gvt *gvt);
++int intel_gvt_pm_early_resume(struct intel_gvt *gvt);
++int intel_gvt_pm_resume(struct intel_gvt *gvt);
++
+ #include "trace.h"
+ #include "mpt.h"
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 38cebb340336..559207ceb327 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -2101,13 +2101,13 @@ static int ring_mode_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 		(*(u32 *)p_data) &= ~_MASKED_BIT_ENABLE(2);
+ 	write_vreg(vgpu, offset, p_data, bytes);
+ 
+-	if (data & _MASKED_BIT_ENABLE(1)) {
++	if ((data & _MASKED_BIT_ENABLE(1)) == _MASKED_BIT_ENABLE(1)) {
+ 		enter_failsafe_mode(vgpu, GVT_FAILSAFE_UNSUPPORTED_GUEST);
+ 		return 0;
+ 	}
+ 
+ 	if (IS_COFFEELAKE(vgpu->gvt->dev_priv) &&
+-	    data & _MASKED_BIT_ENABLE(2)) {
++	    (data & _MASKED_BIT_ENABLE(2)) == _MASKED_BIT_ENABLE(2)) {
+ 		enter_failsafe_mode(vgpu, GVT_FAILSAFE_UNSUPPORTED_GUEST);
+ 		return 0;
+ 	}
+@@ -4000,3 +4000,23 @@ int intel_vgpu_mmio_reg_rw(struct intel_vgpu *vgpu, unsigned int offset,
+ 		intel_vgpu_default_mmio_read(vgpu, offset, pdata, bytes) :
+ 		intel_vgpu_default_mmio_write(vgpu, offset, pdata, bytes);
+ }
++
++void intel_gvt_restore_regs(struct intel_gvt *gvt)
++{
++	struct drm_i915_private *dev_priv = gvt->dev_priv;
++	struct intel_vgpu *vgpu;
++	int i, id;
++
++	for_each_active_vgpu(gvt, vgpu, id) {
++		mmio_hw_access_pre(dev_priv);
++		for (i = 0; i < vgpu_fence_sz(vgpu); i++) {
++			intel_vgpu_write_fence(vgpu, i, vgpu_vreg64(vgpu,
++				fence_num_to_offset(i)));
++		}
++#define VGPU_RESTORE_REG(offset) I915_WRITE(_MMIO(offset), \
++		vgpu_vreg(vgpu, offset))
++		VGPU_RESTORE_REG(0x4df4);
++		VGPU_RESTORE_REG(0x4dfc);
++		mmio_hw_access_post(dev_priv);
++	}
++}
+diff --git a/drivers/gpu/drm/i915/gvt/mmio.h b/drivers/gpu/drm/i915/gvt/mmio.h
+index 5874f1cb4306..da7ff0928665 100644
+--- a/drivers/gpu/drm/i915/gvt/mmio.h
++++ b/drivers/gpu/drm/i915/gvt/mmio.h
+@@ -102,4 +102,6 @@ int intel_vgpu_mmio_reg_rw(struct intel_vgpu *vgpu, unsigned int offset,
+ 
+ int intel_vgpu_mask_mmio_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 				  void *p_data, unsigned int bytes);
++
++void intel_gvt_restore_regs(struct intel_gvt *gvt);
+ #endif
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 92b4fb22385b..05e24d9695f6 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -281,7 +281,9 @@ void intel_gvt_release_vgpu(struct intel_vgpu *vgpu)
+ 	intel_gvt_deactivate_vgpu(vgpu);
+ 
+ 	mutex_lock(&vgpu->vgpu_lock);
++	vgpu->d3_entered = false;
+ 	intel_vgpu_clean_workloads(vgpu, ALL_ENGINES);
++	intel_vgpu_destroy_all_ppgtt_mm(vgpu);
+ 	intel_vgpu_dmabuf_cleanup(vgpu);
+ 	mutex_unlock(&vgpu->vgpu_lock);
+ }
+@@ -416,6 +418,8 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
+ 	INIT_RADIX_TREE(&vgpu->page_track_tree, GFP_KERNEL);
+ 	idr_init(&vgpu->object_idr);
+ 	intel_vgpu_init_cfg_space(vgpu, param->primary);
++	vgpu->ggtt_entries = NULL;
++	vgpu->d3_entered = false;
+ 
+ 	ret = intel_vgpu_init_mmio(vgpu);
+ 	if (ret)
+@@ -582,10 +586,15 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 	/* full GPU reset or device model level reset */
+ 	if (engine_mask == ALL_ENGINES || dmlr) {
+ 		intel_vgpu_select_submission_ops(vgpu, ALL_ENGINES, 0);
+-		intel_vgpu_invalidate_ppgtt(vgpu);
++		if (engine_mask == ALL_ENGINES)
++			intel_vgpu_invalidate_ppgtt(vgpu);
+ 		/*fence will not be reset during virtual reset */
+ 		if (dmlr) {
+-			intel_vgpu_reset_gtt(vgpu);
++			if (!vgpu->d3_entered) {
++				intel_vgpu_invalidate_ppgtt(vgpu);
++				intel_vgpu_destroy_all_ppgtt_mm(vgpu);
++			}
++			intel_vgpu_reset_ggtt(vgpu, true);
+ 			intel_vgpu_reset_resource(vgpu);
+ 		}
+ 
+@@ -597,7 +606,14 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 			intel_vgpu_reset_cfg_space(vgpu);
+ 			/* only reset the failsafe mode when dmlr reset */
+ 			vgpu->failsafe = false;
+-			vgpu->pv_notified = false;
++			/*
++			 * PCI_D0 is set before dmlr, so reset d3_entered here
++			 * after done using.
++			 */
++			if (vgpu->d3_entered)
++				vgpu->d3_entered = false;
++			else
++				vgpu->pv_notified = false;
+ 		}
+ 	}
+ 
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 82e4e6bf08c3..18049199087a 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -79,6 +79,10 @@
+ #include "intel_memory_region.h"
+ #include "intel_pm.h"
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++#include "gvt.h"
++#endif
++
+ static struct drm_driver driver;
+ 
+ struct vlv_s0ix_state {
+@@ -1696,6 +1700,11 @@ static int i915_drm_suspend(struct drm_device *dev)
+ 
+ 	drm_kms_helper_poll_disable(dev);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt)
++		intel_gvt_pm_suspend(dev_priv->gvt);
++#endif
++
+ 	pci_save_state(pdev);
+ 
+ 	intel_display_suspend(dev);
+@@ -1876,6 +1885,12 @@ static int i915_drm_resume(struct drm_device *dev)
+ 
+ 	intel_power_domains_enable(dev_priv);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (dev_priv->gvt) {
++		return intel_gvt_pm_resume(dev_priv->gvt);
++	}
++#endif
++
+ 	enable_rpm_wakeref_asserts(&dev_priv->runtime_pm);
+ 
+ 	return 0;
+@@ -1947,6 +1962,17 @@ static int i915_drm_resume_early(struct drm_device *dev)
+ 
+ 	intel_power_domains_resume(dev_priv);
+ 
++
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (!ret) {
++		if (dev_priv->gvt) {
++			ret = intel_gvt_pm_early_resume(dev_priv->gvt);
++			if (ret)
++				return ret;
++		}
++	}
++#endif
++
+ 	enable_rpm_wakeref_asserts(&dev_priv->runtime_pm);
+ 
+ 	return ret;
+@@ -2609,6 +2635,16 @@ static int intel_runtime_resume(struct device *kdev)
+ 
+ 	intel_enable_ipc(dev_priv);
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_GVT)
++	if (!ret) {
++		if (dev_priv->gvt) {
++			ret = intel_gvt_pm_early_resume(dev_priv->gvt);
++			if (ret)
++				return ret;
++		}
++	}
++#endif
++
+ 	enable_rpm_wakeref_asserts(rpm);
+ 
+ 	if (ret)
+-- 
+2.17.1
+

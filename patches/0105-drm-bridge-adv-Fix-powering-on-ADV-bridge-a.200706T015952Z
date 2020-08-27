@@ -1,0 +1,73 @@
+From 5d53cc9d983172a718fab4fd42b71b0a5cbc81f9 Mon Sep 17 00:00:00 2001
+From: Edmund Dea <edmund.j.dea@intel.com>
+Date: Wed, 17 Jun 2020 09:19:58 -0700
+Subject: [PATCH 105/131] drm/bridge/adv: Fix powering on ADV bridge and prune
+ modes to only 1080p
+
+On KMB, ADV bridge must be programmed and powered on prior to
+MIPI DSI HW initialization.
+
+Signed-off-by: Edmund Dea <edmund.j.dea@intel.com>
+---
+ drivers/gpu/drm/bridge/adv7511/adv7511.h     | 10 ++++++++++
+ drivers/gpu/drm/bridge/adv7511/adv7511_drv.c | 15 +++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/drivers/gpu/drm/bridge/adv7511/adv7511.h b/drivers/gpu/drm/bridge/adv7511/adv7511.h
+index 52b2adfdc877..f94ada51d2a9 100644
+--- a/drivers/gpu/drm/bridge/adv7511/adv7511.h
++++ b/drivers/gpu/drm/bridge/adv7511/adv7511.h
+@@ -220,6 +220,16 @@
+ 
+ #define ADV7533_REG_CEC_OFFSET		0x70
+ 
++#define KMB
++
++#ifdef KMB
++#define KMB_MAX_WIDTH			1920
++#define KMB_MAX_HEIGHT			1080
++#define KMB_MIN_WIDTH			1920
++#define KMB_MIN_HEIGHT			1080
++#define KMB_VREFRESH			60
++#endif
++
+ enum adv7511_input_clock {
+ 	ADV7511_INPUT_CLOCK_1X,
+ 	ADV7511_INPUT_CLOCK_2X,
+diff --git a/drivers/gpu/drm/bridge/adv7511/adv7511_drv.c b/drivers/gpu/drm/bridge/adv7511/adv7511_drv.c
+index 9e13e466e72c..c4a61f4e7854 100644
+--- a/drivers/gpu/drm/bridge/adv7511/adv7511_drv.c
++++ b/drivers/gpu/drm/bridge/adv7511/adv7511_drv.c
+@@ -671,7 +671,18 @@ static enum drm_mode_status adv7511_mode_valid(struct adv7511 *adv7511,
+ {
+ 	if (mode->clock > 165000)
+ 		return MODE_CLOCK_HIGH;
++#ifdef KMB
++	if (mode->hdisplay < KMB_MIN_WIDTH ||
++		mode->hdisplay > KMB_MAX_WIDTH)
++		return MODE_BAD_HVALUE;
+ 
++	if (mode->vdisplay < KMB_MIN_HEIGHT ||
++		mode->vdisplay > KMB_MAX_HEIGHT)
++		return MODE_BAD_VVALUE;
++
++	if (mode->vrefresh != KMB_VREFRESH)
++		return MODE_BAD;
++#endif
+ 	return MODE_OK;
+ }
+ 
+@@ -845,6 +856,10 @@ static void adv7511_bridge_mode_set(struct drm_bridge *bridge,
+ 	struct adv7511 *adv = bridge_to_adv7511(bridge);
+ 
+ 	adv7511_mode_set(adv, mode, adj_mode);
++
++#ifdef KMB
++	adv7511_power_on(adv);
++#endif
+ }
+ 
+ static int adv7511_bridge_attach(struct drm_bridge *bridge)
+-- 
+2.17.1
+

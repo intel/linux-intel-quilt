@@ -1,0 +1,78 @@
+From 176b6c5e1c8b20afc5cfe805eb82609d5606fc8b Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Tue, 2 Jun 2020 06:57:01 +0800
+Subject: [PATCH 12/27] net: phy: Enable wake on PHY activity for Marvell
+ 88e2110 PHY
+
+This commit add support to "wake on PHY activity" WoL feature by
+enabling link state change interrupt.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+---
+ drivers/net/phy/marvell10g.c | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/phy/marvell10g.c b/drivers/net/phy/marvell10g.c
+index abb9856b2f33..385c8060a197 100644
+--- a/drivers/net/phy/marvell10g.c
++++ b/drivers/net/phy/marvell10g.c
+@@ -45,6 +45,11 @@ enum {
+ 	MV_PCS_PAIRSWAP_AB	= 0x0002,
+ 	MV_PCS_PAIRSWAP_NONE	= 0x0003,
+ 
++	/* Copper Specific Interrupt registers */
++	MV_PCS_INTR_ENABLE	= 0x8010,
++	MV_PCS_INTR_STS		= 0x8011,
++	PM_PCS_INTR_LSC		= BIT(10),
++
+ 	/* These registers appear at 0x800X and 0xa00X - the 0xa00X control
+ 	 * registers appear to set themselves to the 0x800X when AN is
+ 	 * restarted, but status registers appear readable from either.
+@@ -575,13 +580,18 @@ static void m88e2110_get_wol(struct phy_device *phydev,
+ {
+ 	int ret = 0;
+ 
+-	wol->supported = WAKE_MAGIC;
++	wol->supported = WAKE_MAGIC | WAKE_PHY;
+ 	wol->wolopts = 0;
+ 
+ 	ret = phy_read_mmd(phydev, MDIO_MMD_VEND2, MV_V2_WOL_CTRL);
+ 
+ 	if (ret & MV_V2_WOL_MAGIC_PKT_EN)
+ 		wol->wolopts |= WAKE_MAGIC;
++
++	ret = phy_read_mmd(phydev, MDIO_MMD_PCS, MV_PCS_INTR_ENABLE);
++
++	if (ret & PM_PCS_INTR_LSC)
++		wol->wolopts |= WAKE_PHY;
+ }
+ 
+ static int m88e2110_set_wol(struct phy_device *phydev,
+@@ -657,6 +667,24 @@ static int m88e2110_set_wol(struct phy_device *phydev,
+ 			return ret;
+ 	}
+ 
++	if (wol->wolopts & WAKE_PHY) {
++		/* Enable the link status changed interrupt */
++		ret = phy_set_bits_mmd(phydev, MDIO_MMD_PCS,
++				       MV_PCS_INTR_ENABLE,
++				       PM_PCS_INTR_LSC);
++
++		if (ret < 0)
++			return ret;
++	} else {
++		/* Disable the link status changed interrupt */
++		ret = phy_clear_bits_mmd(phydev, MDIO_MMD_PCS,
++					 MV_PCS_INTR_ENABLE,
++					 PM_PCS_INTR_LSC);
++
++		if (ret < 0)
++			return ret;
++	}
++
+ 	return ret;
+ }
+ 
+-- 
+2.17.1
+

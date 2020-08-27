@@ -1,0 +1,100 @@
+From 3c038f1968310a1d08245b5f1a550e4e0e06d25d Mon Sep 17 00:00:00 2001
+From: Peter Fang <peter.fang@intel.com>
+Date: Wed, 29 Apr 2020 19:07:00 -0700
+Subject: [PATCH 11/11] vhm: use 2MB compound pages for ACRN mempool
+
+The hypercall HC_GET_PLATFORM_INFO may require a large memory buffer for
+its VM config if a large number of VMs should be reported (roughly 2400
+bytes are needed per VM).
+
+Statically use the size of 2MB for each buffer, as this is enough for
+any reasonable amount of VMs the hypervisor may have and also aligns
+with the design of 2MB huge pages.
+
+Use the __GFP_COMP flag to indicate the use of compound pages. Although
+this may seem to be a bit of an overkill at the moment, it provides
+better semantics for higher-order pages should we ever consider mapping
+them to user space.
+
+Tracked-On: projectacrn/acrn-hypervisor#4753
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c      | 10 +++++++---
+ drivers/vhm/vhm_mempool.c       | 11 +++++++++--
+ include/linux/vhm/acrn_vhm_mm.h |  2 +-
+ 3 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 2e5e62598108..6dfbe7b532a5 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -891,9 +891,13 @@ static int __init vhm_init(void)
+ 
+ 	acrn_ioreq_driver_init();
+ 
+-	/* The biggest consumer is the get_platform_info hypercall, and the size
+-	 * it requires is a function of the number of the physical CPUs */
+-	acrn_mempool_init(16, nr_cpu_ids * 2560 + 512);
++	/*
++	 * The biggest consumer is the get_platform_info hypercall. Statically
++	 * use 2MB as this is enough for any reasonable amount of VMs the
++	 * hypervisor may have in its VM config and also aligns with the design
++	 * of 2MB huge pages.
++	 */
++	acrn_mempool_init(16, SZ_2M);
+ 	pr_info("vhm: Virtio & Hypervisor service module initialized\n");
+ 	return 0;
+ }
+diff --git a/drivers/vhm/vhm_mempool.c b/drivers/vhm/vhm_mempool.c
+index 8d64aa94a6e9..a23373d4e694 100644
+--- a/drivers/vhm/vhm_mempool.c
++++ b/drivers/vhm/vhm_mempool.c
+@@ -13,8 +13,9 @@
+ #include <linux/vhm/acrn_vhm_mm.h>
+ 
+ static mempool_t *acrn_mempool;
++static gfp_t gfp_mempool_flag;
+ 
+-int acrn_mempool_init(int min_nr, int buf_size)
++int acrn_mempool_init(int min_nr, size_t buf_size)
+ {
+ 	if (acrn_mempool)
+ 		return 0;
+@@ -25,6 +26,12 @@ int acrn_mempool_init(int min_nr, int buf_size)
+ 		pr_err("Failed to initialize the memory poll\n");
+ 		return -ENOMEM;
+ 	}
++
++	gfp_mempool_flag = 0;
++
++	if (buf_size > PAGE_SIZE)
++		gfp_mempool_flag |= __GFP_COMP;
++
+ 	return 0;
+ }
+ 
+@@ -39,7 +46,7 @@ void *acrn_mempool_alloc(gfp_t gfp_flag)
+ 	if (acrn_mempool == NULL)
+ 		return NULL;
+ 
+-	return mempool_alloc(acrn_mempool, gfp_flag);
++	return mempool_alloc(acrn_mempool, gfp_flag | gfp_mempool_flag);
+ }
+ EXPORT_SYMBOL_GPL(acrn_mempool_alloc);
+ 
+diff --git a/include/linux/vhm/acrn_vhm_mm.h b/include/linux/vhm/acrn_vhm_mm.h
+index c5635ed88b3e..cc505eeec134 100644
+--- a/include/linux/vhm/acrn_vhm_mm.h
++++ b/include/linux/vhm/acrn_vhm_mm.h
+@@ -194,7 +194,7 @@ int hugepage_unmap_guest_phys(struct vhm_vm *vm, u64 guest_phys);
+  */
+ int set_memory_regions(struct set_regions *regions);
+ 
+-int acrn_mempool_init(int pool_size, int buf_size);
++int acrn_mempool_init(int min_nr, size_t buf_size);
+ void acrn_mempool_deinit(void);
+ void *acrn_mempool_alloc(gfp_t gfp_flag);
+ void acrn_mempool_free(void *buf);
+-- 
+2.17.1
+

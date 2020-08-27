@@ -1,0 +1,127 @@
+From 55087361fee7294263997a8e59b9957124485179 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 7 Jul 2020 16:27:17 +0800
+Subject: [PATCH 28/45] drm/i915/gt: Track use of RPS interrupts in flags
+
+Use the new intel_rps.flags field to store whether or not interrupts are
+being used with RPS.
+
+Rebase for Kernel 5.4. Drop changes related to selftest
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Andi Shyti <andi@etezian.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200429205446.3259-3-chris@chris-wilson.co.uk
+
+Signed-off-by: Romli, Khairul Anuar <khairul.anuar.romli@intel.com>
+---
+ drivers/gpu/drm/i915/gt/intel_rps.c       | 18 +++++++++++++-----
+ drivers/gpu/drm/i915/gt/intel_rps.h       | 14 ++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_rps_types.h |  1 +
+ 3 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.c b/drivers/gpu/drm/i915/gt/intel_rps.c
+index e6e50fa8e244..6c9964348008 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.c
++++ b/drivers/gpu/drm/i915/gt/intel_rps.c
+@@ -724,7 +724,7 @@ void intel_rps_unpark(struct intel_rps *rps)
+ 	rps->last_adj = 0;
+ 	mutex_unlock(&rps->lock);
+ 
+-	if (INTEL_GEN(rps_to_i915(rps)) >= 6)
++	if (intel_rps_has_interrupts(rps))
+ 		rps_enable_interrupts(rps);
+ 
+ 	if (IS_GEN(rps_to_i915(rps), 5))
+@@ -733,12 +733,10 @@ void intel_rps_unpark(struct intel_rps *rps)
+ 
+ void intel_rps_park(struct intel_rps *rps)
+ {
+-	struct drm_i915_private *i915 = rps_to_i915(rps);
+-
+ 	if (!intel_rps_clear_active(rps))
+ 		return;
+ 
+-	if (INTEL_GEN(i915) >= 6)
++	if (intel_rps_has_interrupts(rps))
+ 		rps_disable_interrupts(rps);
+ 
+ 	if (rps->last_freq <= rps->idle_freq)
+@@ -813,7 +811,7 @@ int intel_rps_set(struct intel_rps *rps, u8 val)
+ 		 * Make sure we continue to get interrupts
+ 		 * until we hit the minimum or maximum frequencies.
+ 		 */
+-		if (INTEL_GEN(rps_to_i915(rps)) >= 6) {
++		if (intel_rps_has_interrupts(rps)) {
+ 			struct intel_uncore *uncore = rps_to_uncore(rps);
+ 
+ 			intel_uncore_write(uncore, GEN6_RP_INTERRUPT_LIMITS,
+@@ -1213,6 +1211,11 @@ void intel_rps_enable(struct intel_rps *rps)
+ 	WARN_ON(rps->efficient_freq < rps->min_freq);
+ 	WARN_ON(rps->efficient_freq > rps->max_freq);
+ 
++	if (INTEL_GEN(i915) >= 6)
++		intel_rps_set_interrupts(rps);
++	else
++		/* Ironlake currently uses intel_ips.ko */ {}
++
+ 	intel_rps_set_enabled(rps);
+ }
+ 
+@@ -1226,6 +1229,7 @@ void intel_rps_disable(struct intel_rps *rps)
+ 	struct drm_i915_private *i915 = rps_to_i915(rps);
+ 
+ 	intel_rps_clear_enabled(rps);
++	intel_rps_clear_interrupts(rps);
+ 
+ 	if (INTEL_GEN(i915) >= 6)
+ 		gen6_rps_disable(rps);
+@@ -1689,6 +1693,10 @@ void intel_rps_init(struct intel_rps *rps)
+ 
+ 	if (INTEL_GEN(i915) >= 8)
+ 		rps->pm_intrmsk_mbz |= GEN8_PMINTR_DISABLE_REDIRECT_TO_GUC;
++
++	if (INTEL_GEN(i915) >= 6)
++		rps_disable_interrupts(rps);
++
+ }
+ 
+ u32 intel_get_cagf(struct intel_rps *rps, u32 rpstat)
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps.h b/drivers/gpu/drm/i915/gt/intel_rps.h
+index 11beea38a9de..d2f51309fbbe 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps.h
++++ b/drivers/gpu/drm/i915/gt/intel_rps.h
+@@ -63,5 +63,19 @@ static inline bool intel_rps_clear_active(struct intel_rps *rps)
+ {
+ 	return test_and_clear_bit(INTEL_RPS_ACTIVE, &rps->flags);
+ }
++static inline bool intel_rps_has_interrupts(const struct intel_rps *rps)
++{
++	return test_bit(INTEL_RPS_INTERRUPTS, &rps->flags);
++}
++
++static inline void intel_rps_set_interrupts(struct intel_rps *rps)
++{
++	set_bit(INTEL_RPS_INTERRUPTS, &rps->flags);
++}
++
++static inline void intel_rps_clear_interrupts(struct intel_rps *rps)
++{
++	clear_bit(INTEL_RPS_INTERRUPTS, &rps->flags);
++}
+ 
+ #endif /* INTEL_RPS_H */
+diff --git a/drivers/gpu/drm/i915/gt/intel_rps_types.h b/drivers/gpu/drm/i915/gt/intel_rps_types.h
+index 28b2467cf860..5d2858be7eb2 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rps_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_rps_types.h
+@@ -35,6 +35,7 @@ struct intel_rps_ei {
+ enum {
+ 	INTEL_RPS_ENABLED = 0,
+ 	INTEL_RPS_ACTIVE,
++	INTEL_RPS_INTERRUPTS,
+ };
+ 
+ struct intel_rps {
+-- 
+2.17.1
+

@@ -1,0 +1,93 @@
+From 3cb118e34948da9887dcfe96fd5563ee976a0d64 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Tue, 26 May 2020 14:28:31 -0700
+Subject: [PATCH 103/131] drm/kmb: Get System Clock from SCMI
+
+System clock is different for A0 and B0 silicons, so get it directly
+from clk_PLL0 through SCMI calls.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_drv.c | 11 +++++++++++
+ drivers/gpu/drm/kmb/kmb_drv.h |  1 +
+ drivers/gpu/drm/kmb/kmb_dsi.c | 12 +-----------
+ 3 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index bed6347c00d6..d1f14e1cb202 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -59,6 +59,7 @@ static struct clk *clk_lcd;
+ static struct clk *clk_mipi;
+ static struct clk *clk_mipi_ecfg;
+ static struct clk *clk_mipi_cfg;
++static struct clk *clk_pll0;
+ 
+ struct drm_bridge *adv_bridge;
+ 
+@@ -144,6 +145,7 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ #ifdef ICAM_LCD_QOS
+ 	int val = 0;
+ #endif
++	struct device_node *vpu_dev;
+ 
+ 	/* Map MIPI MMIO registers */
+ 	dev_p->mipi_mmio = kmb_map_mmio(pdev, "mipi_regs");
+@@ -210,6 +212,15 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		DRM_ERROR("clk_get() failed clk_mipi_cfg\n");
+ 		goto setup_fail;
+ 	}
++	vpu_dev = of_find_node_by_path("/soc/vpu-ipc");
++	DRM_INFO("vpu node = %pOF", vpu_dev);
++	clk_pll0 = of_clk_get_by_name(vpu_dev, "pll_0_out_0");
++	if (IS_ERR(clk_pll0)) {
++		DRM_ERROR("clk_get() failed clk_pll0 ");
++		goto setup_fail;
++	}
++	dev_p->sys_clk_mhz = clk_get_rate(clk_pll0)/1000000;
++	DRM_INFO("system clk = %d Mhz", dev_p->sys_clk_mhz);
+ #ifdef LCD_TEST
+ 	/* Set LCD clock to 200 Mhz */
+ 	DRM_DEBUG("Get clk_lcd before set = %ld\n", clk_get_rate(clk_lcd));
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.h b/drivers/gpu/drm/kmb/kmb_drv.h
+index a066abaff0e5..35872a59de6c 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.h
++++ b/drivers/gpu/drm/kmb/kmb_drv.h
+@@ -58,6 +58,7 @@ struct kmb_drm_private {
+ 	spinlock_t			irq_lock;
+ 	int				irq_lcd;
+ 	int				irq_mipi;
++	int				sys_clk_mhz;
+ 	dma_addr_t			fb_addr;
+ };
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+index 0b920c982ec2..fd88b38925f7 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.c
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -609,20 +609,10 @@ static void mipi_tx_fg_cfg_regs(struct kmb_drm_private *dev_p, u8 frame_gen,
+ 	u32 ppl_llp_ratio;
+ 	u32 ctrl_no = MIPI_CTRL6, reg_adr, val, offset;
+ 
+-#ifdef GET_SYS_CLK
+-	/* Get system clock for blanking period cnfigurations */
+-	sc = get_clock_frequency(CPR_CLK_SYSTEM, &sysclk);
+-	if (sc)
+-		return sc;
+-
+-	/* Convert to MHZ */
+-	sysclk /= 1000;
+-#else
+ 	/* 500 Mhz system clock minus 50 to account for the difference in
+ 	 * MIPI clock speed in RTL tests
+ 	 */
+-	sysclk = KMB_SYS_CLK_MHZ - 50;
+-#endif
++	sysclk = dev_p->sys_clk_mhz - 50;
+ 
+ 	/* PPL-Pixel Packing Layer, LLP-Low Level Protocol
+ 	 * Frame genartor timing parameters are clocked on the system clock,
+-- 
+2.17.1
+

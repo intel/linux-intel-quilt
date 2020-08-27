@@ -1,0 +1,275 @@
+From 24bcc7c19dfc01c0fd05ce64ed2ae00cef6d922a Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Wed, 30 Jan 2019 07:18:14 -0800
+Subject: [PATCH 047/131] drm/kmb: Added id to kmb_plane
+
+This is to keep track of the id of the plane as there are 4 planes in
+Kmb and when update() is called, we need to know which plane need to be
+updated so that the corresponding plane's registers can be programmed.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_crtc.c  | 13 +++---
+ drivers/gpu/drm/kmb/kmb_crtc.h  |  2 +-
+ drivers/gpu/drm/kmb/kmb_drv.h   |  2 +-
+ drivers/gpu/drm/kmb/kmb_plane.c | 80 ++++++++++++++++++++++-----------
+ drivers/gpu/drm/kmb/kmb_plane.h | 28 +++++++-----
+ 5 files changed, 79 insertions(+), 46 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_crtc.c b/drivers/gpu/drm/kmb/kmb_crtc.c
+index c9d59a7a228a..2b8f7de1c97a 100644
+--- a/drivers/gpu/drm/kmb/kmb_crtc.c
++++ b/drivers/gpu/drm/kmb/kmb_crtc.c
+@@ -127,9 +127,8 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 		kmb_write(lcd, LCD_VSYNC_START_EVEN, vsync_start_offset);
+ 		kmb_write(lcd, LCD_VSYNC_END_EVEN, vsync_end_offset);
+ 	}
+-	/* enable all 4 layers */
+-	ctrl = LCD_CTRL_ENABLE | LCD_CTRL_VL1_ENABLE
+-	    | LCD_CTRL_VL2_ENABLE | LCD_CTRL_GL1_ENABLE | LCD_CTRL_GL2_ENABLE;
++	/* enable VL1 layer as default */
++	ctrl = LCD_CTRL_ENABLE | LCD_CTRL_VL1_ENABLE;
+ 	ctrl |= LCD_CTRL_PROGRESSIVE | LCD_CTRL_TIM_GEN_ENABLE
+ 	    | LCD_CTRL_OUTPUT_ENABLED;
+ 	kmb_write(lcd, LCD_CONTROL, ctrl);
+@@ -197,17 +196,17 @@ static const struct drm_crtc_helper_funcs kmb_crtc_helper_funcs = {
+ int kmb_setup_crtc(struct drm_device *drm)
+ {
+ 	struct kmb_drm_private *lcd = drm->dev_private;
+-	struct drm_plane *primary;
++	struct kmb_plane *primary;
+ 	int ret;
+ 
+ 	primary = kmb_plane_init(drm);
+ 	if (IS_ERR(primary))
+ 		return PTR_ERR(primary);
+ 
+-	ret = drm_crtc_init_with_planes(drm, &lcd->crtc, primary, NULL,
+-					&kmb_crtc_funcs, NULL);
++	ret = drm_crtc_init_with_planes(drm, &lcd->crtc, &primary->base_plane,
++					NULL, &kmb_crtc_funcs, NULL);
+ 	if (ret) {
+-		kmb_plane_destroy(primary);
++		kmb_plane_destroy(&primary->base_plane);
+ 		return ret;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_crtc.h b/drivers/gpu/drm/kmb/kmb_crtc.h
+index 52830527630d..796de02970ee 100644
+--- a/drivers/gpu/drm/kmb/kmb_crtc.h
++++ b/drivers/gpu/drm/kmb/kmb_crtc.h
+@@ -42,5 +42,5 @@ struct kmb_crtc_state {
+ #define to_kmb_crtc_state(x) container_of(x, struct kmb_crtc_state, crtc_base)
+ #define to_kmb_crtc(x) container_of(x, struct kmb_crtc, crtc_base)
+ extern void kmb_plane_destroy(struct drm_plane *plane);
+-extern struct drm_plane *kmb_plane_init(struct drm_device *drm);
++extern struct kmb_plane *kmb_plane_init(struct drm_device *drm);
+ #endif /* __KMB_CRTC_H__ */
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.h b/drivers/gpu/drm/kmb/kmb_drv.h
+index 05e9791a9b0c..637e9a225ebb 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.h
++++ b/drivers/gpu/drm/kmb/kmb_drv.h
+@@ -36,7 +36,7 @@ struct kmb_drm_private {
+ 	struct clk *clk;
+ 	struct drm_fbdev_cma *fbdev;
+ 	struct drm_crtc crtc;
+-	struct drm_plane *plane;
++	struct kmb_plane *plane;
+ 	struct drm_atomic_state *state;
+ };
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.c b/drivers/gpu/drm/kmb/kmb_plane.c
+index aa6a47d2ef04..53f4b96eeeed 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.c
++++ b/drivers/gpu/drm/kmb/kmb_plane.c
+@@ -62,46 +62,69 @@ static void kmb_plane_atomic_update(struct drm_plane *plane,
+ 	dma_addr_t addr;
+ 	unsigned int width;
+ 	unsigned int height;
+-	unsigned int i;
+ 	unsigned int dma_len;
+-	struct kmb_plane_state *kmb_state = to_kmb_plane_state(plane->state);
++	struct kmb_plane *kmb_plane = to_kmb_plane(plane);
+ 	unsigned int dma_cfg;
++	unsigned int ctrl = 0;
++	unsigned char plane_id = kmb_plane->id;
+ 
+ 	if (!fb)
+ 		return;
+ 
+ 	lcd = plane->dev->dev_private;
+ 
++	switch (plane_id) {
++	case LAYER_0:
++		ctrl = LCD_CTRL_VL1_ENABLE;
++		break;
++	case LAYER_1:
++		ctrl = LCD_CTRL_VL2_ENABLE;
++		break;
++	case LAYER_2:
++		ctrl = LCD_CTRL_GL1_ENABLE;
++		break;
++	case LAYER_3:
++		ctrl = LCD_CTRL_GL2_ENABLE;
++		break;
++	}
++
++	ctrl |= LCD_CTRL_ENABLE;
++	ctrl |= LCD_CTRL_PROGRESSIVE | LCD_CTRL_TIM_GEN_ENABLE
++	    | LCD_CTRL_OUTPUT_ENABLED;
++	kmb_write(lcd, LCD_CONTROL, ctrl);
++
+ 	/* TBD */
+ 	/*set LCD_LAYERn_WIDTH, LCD_LAYERn_HEIGHT, LCD_LAYERn_COL_START,
+ 	 * LCD_LAYERn_ROW_START, LCD_LAYERn_CFG
+ 	 * CFG should set the pixel format, FIFO level and BPP
+ 	 */
+ 
++	/*TBD check visible? */
++
+ 	/* we may have to set LCD_DMA_VSTRIDE_ENABLE in the future */
+ 	dma_cfg = LCD_DMA_LAYER_ENABLE | LCD_DMA_LAYER_AUTO_UPDATE
+ 	    | LCD_DMA_LAYER_CONT_UPDATE | LCD_DMA_LAYER_AXI_BURST_1;
+ 
+-	for (i = 0; i < kmb_state->no_planes; i++) {
+-		/* disable DMA first */
+-		kmb_write(lcd, LCD_LAYERn_DMA_CFG(i), ~LCD_DMA_LAYER_ENABLE);
++	/* disable DMA first */
++	kmb_write(lcd, LCD_LAYERn_DMA_CFG(plane_id), ~LCD_DMA_LAYER_ENABLE);
+ 
+-		addr = drm_fb_cma_get_gem_addr(fb, plane->state, i);
+-		kmb_write(lcd, LCD_LAYERn_DMA_START_ADDR(i), addr);
+-		kmb_write(lcd, LCD_LAYERn_DMA_START_SHADOW(i), addr);
++	addr = drm_fb_cma_get_gem_addr(fb, plane->state, plane_id);
++	kmb_write(lcd, LCD_LAYERn_DMA_START_ADDR(plane_id), addr);
++	kmb_write(lcd, LCD_LAYERn_DMA_START_SHADOW(plane_id), addr);
+ 
+-		width = fb->width;
+-		height = fb->height;
+-		dma_len = width * height * fb->format->cpp[i];
+-		kmb_write(lcd, LCD_LAYERn_DMA_LEN(i), dma_len);
++	width = fb->width;
++	height = fb->height;
++	dma_len = width * height * fb->format->cpp[plane_id];
++	kmb_write(lcd, LCD_LAYERn_DMA_LEN(plane_id), dma_len);
+ 
+-		kmb_write(lcd, LCD_LAYERn_DMA_LINE_VSTRIDE(i), fb->pitches[0]);
+-		kmb_write(lcd, LCD_LAYERn_DMA_LINE_WIDTH(i),
+-			  (width * fb->format->cpp[i]));
++	kmb_write(lcd, LCD_LAYERn_DMA_LINE_VSTRIDE(plane_id),
++		  fb->pitches[plane_id]);
++	kmb_write(lcd, LCD_LAYERn_DMA_LINE_WIDTH(plane_id),
++		  (width * fb->format->cpp[plane_id]));
++
++	/* enable DMA */
++	kmb_write(lcd, LCD_LAYERn_DMA_CFG(plane_id), dma_cfg);
+ 
+-		/* enable DMA */
+-		kmb_write(lcd, LCD_LAYERn_DMA_CFG(i), dma_cfg);
+-	}
+ }
+ 
+ static const struct drm_plane_helper_funcs kmb_plane_helper_funcs = {
+@@ -111,7 +134,9 @@ static const struct drm_plane_helper_funcs kmb_plane_helper_funcs = {
+ 
+ void kmb_plane_destroy(struct drm_plane *plane)
+ {
++	struct kmb_plane *kmb_plane = to_kmb_plane(plane);
+ 	drm_plane_cleanup(plane);
++	kfree(kmb_plane);
+ }
+ 
+ static void kmb_destroy_plane_state(struct drm_plane *plane,
+@@ -206,11 +231,11 @@ static const u32 kmb_formats_v[] = {
+ 	DRM_FORMAT_NV12, DRM_FORMAT_NV21,
+ };
+ 
+-struct drm_plane *kmb_plane_init(struct drm_device *drm)
++struct kmb_plane *kmb_plane_init(struct drm_device *drm)
+ {
+ 	struct kmb_drm_private *lcd = drm->dev_private;
+-	struct drm_plane *plane = NULL;
+-	struct drm_plane *primary = NULL;
++	struct kmb_plane *plane = NULL;
++	struct kmb_plane *primary = NULL;
+ 	int i = 0;
+ 	int ret;
+ 	enum drm_plane_type plane_type;
+@@ -234,18 +259,21 @@ struct drm_plane *kmb_plane_init(struct drm_device *drm)
+ 			num_plane_formats = ARRAY_SIZE(kmb_formats_g);
+ 		}
+ 
+-		ret = drm_universal_plane_init(drm, plane, 0xFF,
+-				       &kmb_plane_funcs, plane_formats,
+-				       num_plane_formats,
+-				       NULL, plane_type, "plane %d", i);
++		ret =
++		    drm_universal_plane_init(drm, &plane->base_plane,
++					     POSSIBLE_CRTCS, &kmb_plane_funcs,
++					     plane_formats, num_plane_formats,
++					     NULL, plane_type, "plane %d", i);
+ 		if (ret < 0)
+ 			goto cleanup;
+ 
+-		drm_plane_helper_add(plane, &kmb_plane_helper_funcs);
++		drm_plane_helper_add(&plane->base_plane,
++				     &kmb_plane_helper_funcs);
+ 		if (plane_type == DRM_PLANE_TYPE_PRIMARY) {
+ 			primary = plane;
+ 			lcd->plane = plane;
+ 		}
++		plane->id = i;
+ 	}
+ 
+ cleanup:
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.h b/drivers/gpu/drm/kmb/kmb_plane.h
+index 84c711322985..45bcec11dd1d 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.h
++++ b/drivers/gpu/drm/kmb/kmb_plane.h
+@@ -28,25 +28,31 @@
+ 
+ #include "kmb_drv.h"
+ 
+-#define KMB_MAX_PLANES	4
++enum layer_id {
++	LAYER_0,
++	LAYER_1,
++	LAYER_2,
++	LAYER_3,
++	KMB_MAX_PLANES,
++};
++
++struct kmb_plane {
++	struct drm_plane base_plane;
++	struct kmb_drm_private kmb_dev;
++	unsigned char id;
++};
+ 
+-/* this struct may be needed in the future
+- *struct kmb_plane {
+- *	struct drm_plane base_plane;
+- *	struct kmb_drm_private kmb_dev;
+- *};
+- */
+ struct kmb_plane_state {
+ 	struct drm_plane_state base_plane_state;
+ 	unsigned char no_planes;
+ };
+ 
+-/* may be needed in the future
+- *#define to_kmb_plane(x) container_of(x, struct kmb_plane, base_plane)
+- */
++#define POSSIBLE_CRTCS 1
++#define to_kmb_plane(x) container_of(x, struct kmb_plane, base_plane)
++
+ #define to_kmb_plane_state(x) \
+ 		container_of(x, struct kmb_plane_state, base_plane_state)
+ 
+-struct drm_plane *kmb_plane_init(struct drm_device *drm);
++struct kmb_plane *kmb_plane_init(struct drm_device *drm);
+ void kmb_plane_destroy(struct drm_plane *plane);
+ #endif /* __KMB_PLANE_H__ */
+-- 
+2.17.1
+

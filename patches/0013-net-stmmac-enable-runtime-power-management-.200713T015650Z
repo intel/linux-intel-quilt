@@ -1,0 +1,355 @@
+From c2dececf73bb98860d5f4fb8b2f4d3462460831f Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Sat, 16 May 2020 07:12:07 +0800
+Subject: [PATCH 13/27] net: stmmac: enable runtime power management support
+
+Add basic runtime power management support such that
+  1. suspend the device when the link is not present
+  2. set it up after the link has been detected again
+
+According to Documentation/power/pci.rst, the driver itself should not
+call pm_runtime_allow(), though. Instead, it should let user space or
+some platform-specific code do that. Therefore, this feature is
+disabled until the user space enables it with the help of
+/sys/devices/.../power/control device attribute.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  2 +
+ .../ethernet/stmicro/stmmac/stmmac_ethtool.c  | 19 ++++
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 54 ++++++++++-
+ .../net/ethernet/stmicro/stmmac/stmmac_pci.c  | 94 ++++++++++++++++++-
+ 4 files changed, 165 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 5ad55f4099f9..7272cef1e351 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -220,6 +220,7 @@ struct stmmac_priv {
+ 
+ 	struct phylink_config phylink_config;
+ 	struct phylink *phylink;
++	bool phylink_up;
+ 
+ 	struct stmmac_extra_stats xstats ____cacheline_aligned_in_smp;
+ 	struct stmmac_safety_stats sstats;
+@@ -230,6 +231,7 @@ struct stmmac_priv {
+ 	int synopsys_id;
+ 	u32 msg_enable;
+ 	int wolopts;
++	int saved_wolopts;
+ 	int wol_irq;
+ 	int clk_csr;
+ 	struct timer_list eee_ctrl_timer;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index 7e1f77deb8fe..172df51a82a4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -14,6 +14,7 @@
+ #include <linux/mii.h>
+ #include <linux/phylink.h>
+ #include <linux/net_tstamp.h>
++#include <linux/pm_runtime.h>
+ #include <asm/io.h>
+ 
+ #include "stmmac.h"
+@@ -439,11 +440,28 @@ static void stmmac_ethtool_setmsglevel(struct net_device *dev, u32 level)
+ 
+ static int stmmac_check_if_running(struct net_device *dev)
+ {
++	struct stmmac_priv *priv = netdev_priv(dev);
++
+ 	if (!netif_running(dev))
+ 		return -EBUSY;
++
++	/* Increase the device's usage_count and cancel any scheduled runtime
++	 * suspend, so that race condition between runtime suspend and ethtool
++	 * operation can be avoided.
++	 */
++	pm_runtime_get_sync(priv->device);
++
+ 	return 0;
+ }
+ 
++static void stmmac_ethtool_complete(struct net_device *dev)
++{
++	struct stmmac_priv *priv = netdev_priv(dev);
++
++	/* Decrease the device's usage_count after ethtool operation. */
++	pm_runtime_put(priv->device);
++}
++
+ static int stmmac_ethtool_get_regs_len(struct net_device *dev)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+@@ -1065,6 +1083,7 @@ static int stmmac_set_tunable(struct net_device *dev,
+ 
+ static const struct ethtool_ops stmmac_ethtool_ops = {
+ 	.begin = stmmac_check_if_running,
++	.complete = stmmac_ethtool_complete,
+ 	.get_drvinfo = stmmac_ethtool_getdrvinfo,
+ 	.get_msglevel = stmmac_ethtool_getmsglevel,
+ 	.set_msglevel = stmmac_ethtool_setmsglevel,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 30e9f19950b2..33cec2a32da1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -45,6 +45,7 @@
+ #include <linux/of_mdio.h>
+ #include <linux/bpf.h>
+ #include <linux/bpf_trace.h>
++#include <linux/pm_runtime.h>
+ #include <net/xdp.h>
+ #include "dwmac1000.h"
+ #include "dwxgmac2.h"
+@@ -1037,12 +1038,18 @@ static void stmmac_mac_link_down(struct phylink_config *config,
+ {
+ 	struct stmmac_priv *priv = netdev_priv(to_net_dev(config->dev));
+ 
++	priv->phylink_up = false;
++
+ 	stmmac_mac_set(priv, priv->ioaddr, false);
+ 	priv->eee_active = false;
+ 	stmmac_eee_init(priv);
+ 	stmmac_set_eee_pls(priv, priv->hw, false);
+ 	stmmac_fpe_link_state_handle(priv, priv->hw, priv->dev, false);
+ 
++	/* Schedule runtime suspend if the device's runtime PM status allows it
++	 * to be suspended.
++	 */
++	pm_runtime_idle(priv->device);
+ }
+ 
+ static void stmmac_mac_link_up(struct phylink_config *config,
+@@ -1051,6 +1058,11 @@ static void stmmac_mac_link_up(struct phylink_config *config,
+ {
+ 	struct stmmac_priv *priv = netdev_priv(to_net_dev(config->dev));
+ 
++	priv->phylink_up = true;
++
++	/* Cancel any scheduled runtime suspend request */
++	pm_runtime_resume(priv->device);
++
+ 	stmmac_mac_set(priv, priv->ioaddr, true);
+ 	if (phy && priv->dma_cap.eee) {
+ 		priv->eee_active = phy_init_eee(phy, 1) >= 0;
+@@ -3454,6 +3466,12 @@ static int stmmac_open(struct net_device *dev)
+ 	u32 chan;
+ 	int ret;
+ 
++	/* Use pm_runtime_get_sync() call paired with pm_runtime_put() call to
++	 * ensure that the device is not put into runtime suspend during the
++	 * operation.
++	 */
++	pm_runtime_get_sync(priv->device);
++
+ 	if (priv->hw->pcs != STMMAC_PCS_RGMII &&
+ 	    priv->hw->pcs != STMMAC_PCS_TBI &&
+ 	    priv->hw->pcs != STMMAC_PCS_RTBI) {
+@@ -3462,7 +3480,7 @@ static int stmmac_open(struct net_device *dev)
+ 			netdev_err(priv->dev,
+ 				   "%s: Cannot attach to PHY (error: %d)\n",
+ 				   __func__, ret);
+-			return ret;
++			goto out;
+ 		}
+ 	}
+ 
+@@ -3562,6 +3580,7 @@ static int stmmac_open(struct net_device *dev)
+ 		stmmac_netproxy_register(dev);
+ #endif
+ 
++	pm_runtime_put(priv->device);
+ 	return 0;
+ 
+ phy_conv_error:
+@@ -3582,6 +3601,8 @@ static int stmmac_open(struct net_device *dev)
+ 	free_dma_desc_resources(priv);
+ dma_desc_error:
+ 	phylink_disconnect_phy(priv->phylink);
++out:
++	pm_runtime_put(priv->device);
+ 	return ret;
+ }
+ 
+@@ -3597,6 +3618,12 @@ static int stmmac_release(struct net_device *dev)
+ 	u32 chan;
+ 	int ret;
+ 
++	/* Use pm_runtime_get_sync() call paired with pm_runtime_put() call to
++	 * ensure that the device is not put into runtime suspend during the
++	 * operation.
++	 */
++	pm_runtime_get_sync(priv->device);
++
+ 	if (priv->eee_enabled)
+ 		del_timer_sync(&priv->eee_ctrl_timer);
+ 
+@@ -3622,7 +3649,7 @@ static int stmmac_release(struct net_device *dev)
+ 			netdev_err(priv->dev,
+ 				   "%s: ERROR: remove phy conv (error: %d)\n",
+ 				   __func__, ret);
+-			return 0;
++			goto out;
+ 		}
+ 	}
+ 
+@@ -3648,7 +3675,8 @@ static int stmmac_release(struct net_device *dev)
+ 	if (priv->plat->has_netproxy)
+ 		stmmac_netproxy_deregister(dev);
+ #endif
+-
++out:
++	pm_runtime_put(priv->device);
+ 	return 0;
+ }
+ 
+@@ -6626,6 +6654,23 @@ int stmmac_dvr_probe(struct device *device,
+ 	stmmac_init_fs(ndev);
+ #endif
+ 
++	/* Runtime PM is mutually exclusive with network proxy service */
++#ifdef CONFIG_STMMAC_NETWORK_PROXY
++	if (priv->plat->has_netproxy)
++		return ret;
++#endif
++
++	/* To support runtime PM, we need to make sure usage_count is equal to 0
++	 * when runtime_auto flag is set. Otherwise, it should be equal to 1.
++	 */
++	if (priv->device->power.runtime_auto) {
++		while (atomic_read(&priv->device->power.usage_count) > 0)
++			pm_runtime_put_noidle(device);
++	} else {
++		while (atomic_read(&priv->device->power.usage_count) > 1)
++			pm_runtime_put_noidle(device);
++	}
++
+ 	return ret;
+ 
+ error_netdev_register:
+@@ -6656,6 +6701,9 @@ int stmmac_dvr_remove(struct device *dev)
+ 	struct net_device *ndev = dev_get_drvdata(dev);
+ 	struct stmmac_priv *priv = netdev_priv(ndev);
+ 
++	/* Increase device’s usage_count so that runtime PM is disabled */
++	pm_runtime_get_noresume(dev);
++
+ 	netdev_info(priv->dev, "%s: removing driver", __func__);
+ 
+ 	stmmac_stop_all_dma(priv);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index ec5d867d435e..222d139d9724 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -14,6 +14,7 @@
+ #include <linux/pci.h>
+ #include <linux/dmi.h>
+ #include <linux/dwxpcs.h>
++#include <linux/pm_runtime.h>
+ #include "stmmac.h"
+ #include "dwmac4.h"
+ #include "stmmac_ptp.h"
+@@ -1063,7 +1064,98 @@ static int __maybe_unused stmmac_pci_resume(struct device *dev)
+ 	return stmmac_resume(dev);
+ }
+ 
+-static SIMPLE_DEV_PM_OPS(stmmac_pm_ops, stmmac_pci_suspend, stmmac_pci_resume);
++static int __maybe_unused stmmac_pci_runtime_suspend(struct device *dev)
++{
++	struct ethtool_wolinfo wol;
++	struct stmmac_priv *priv;
++	struct net_device *ndev;
++	struct pci_dev *pdev;
++	int ret;
++
++	pdev = to_pci_dev(dev);
++	ndev = dev_get_drvdata(&pdev->dev);
++	priv = netdev_priv(ndev);
++
++	rtnl_lock();
++	/* Save current WoL operation */
++	phylink_ethtool_get_wol(priv->phylink, &wol);
++	priv->saved_wolopts = wol.wolopts;
++	/* Enable WoL to wake on PHY activity */
++	wol.wolopts = WAKE_PHY;
++	phylink_ethtool_set_wol(priv->phylink, &wol);
++	rtnl_unlock();
++
++	device_set_wakeup_enable(priv->device, 1);
++
++	ret = stmmac_pci_suspend(dev);
++	if (!ret)
++		dev_info(dev, "%s: Device is runtime suspended.\n", __func__);
++
++	return ret;
++}
++
++static int __maybe_unused stmmac_pci_runtime_resume(struct device *dev)
++{
++	struct ethtool_wolinfo wol;
++	struct stmmac_priv *priv;
++	struct net_device *ndev;
++	struct pci_dev *pdev;
++	int ret;
++
++	pdev = to_pci_dev(dev);
++	ndev = dev_get_drvdata(&pdev->dev);
++	priv = netdev_priv(ndev);
++
++	rtnl_lock();
++	/* Restore saved WoL operation */
++	wol.wolopts = priv->saved_wolopts;
++	phylink_ethtool_set_wol(priv->phylink, &wol);
++	priv->saved_wolopts = 0;
++	rtnl_unlock();
++
++	ret = stmmac_pci_resume(dev);
++	if (!ret)
++		dev_info(dev, "%s: Device is runtime resumed.\n", __func__);
++
++	return ret;
++}
++
++#define STMMAC_RUNTIME_SUSPEND_DELAY	2500
++
++static int __maybe_unused stmmac_pci_runtime_idle(struct device *dev)
++{
++	struct ethtool_wolinfo wol;
++	struct stmmac_priv *priv;
++	struct net_device *ndev;
++	struct pci_dev *pdev;
++
++	pdev = to_pci_dev(dev);
++	ndev = dev_get_drvdata(&pdev->dev);
++	priv = netdev_priv(ndev);
++
++	/* Allow runtime suspend only if link is down */
++	if (priv->phylink_up)
++		return -EBUSY;
++
++	/* Allow runtime suspend only if PHY support wake on PHY activity */
++	rtnl_lock();
++	phylink_ethtool_get_wol(priv->phylink, &wol);
++	rtnl_unlock();
++	if (!(wol.supported & WAKE_PHY))
++		return -EBUSY;
++
++	/* Schedule the execution of delayed runtime suspend */
++	pm_schedule_suspend(dev, STMMAC_RUNTIME_SUSPEND_DELAY);
++
++	/* Return non-zero value to prevent PM core from calling autosuspend */
++	return -EBUSY;
++}
++
++static const struct dev_pm_ops stmmac_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(stmmac_pci_suspend, stmmac_pci_resume)
++	SET_RUNTIME_PM_OPS(stmmac_pci_runtime_suspend,
++			   stmmac_pci_runtime_resume, stmmac_pci_runtime_idle)
++};
+ 
+ /* synthetic ID, no official vendor */
+ #define PCI_VENDOR_ID_STMMAC 0x700
+-- 
+2.17.1
+

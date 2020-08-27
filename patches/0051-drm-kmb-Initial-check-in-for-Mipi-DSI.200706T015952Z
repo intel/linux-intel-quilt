@@ -1,0 +1,236 @@
+From 9334db1205cdefa9e5fee5f5f4711b97a65bdac3 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Thu, 28 Feb 2019 07:31:09 -0800
+Subject: [PATCH 051/131] drm/kmb: Initial check-in for Mipi DSI
+
+Basic frame work for mipi encoder and connector.
+More hardware specific details will be added in the future commits.
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/Makefile  |   2 +-
+ drivers/gpu/drm/kmb/kmb_drv.c |   2 +
+ drivers/gpu/drm/kmb/kmb_dsi.c | 115 ++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/kmb/kmb_dsi.h |  59 +++++++++++++++++
+ 4 files changed, 177 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/gpu/drm/kmb/kmb_dsi.c
+ create mode 100644 drivers/gpu/drm/kmb/kmb_dsi.h
+
+diff --git a/drivers/gpu/drm/kmb/Makefile b/drivers/gpu/drm/kmb/Makefile
+index be9f19c18243..8102bc99cb08 100644
+--- a/drivers/gpu/drm/kmb/Makefile
++++ b/drivers/gpu/drm/kmb/Makefile
+@@ -1,2 +1,2 @@
+-kmb-display-y := kmb_crtc.o kmb_drv.o kmb_plane.o
++kmb-display-y := kmb_crtc.o kmb_drv.o kmb_plane.o kmb_dsi.o
+ obj-$(CONFIG_DRM_KMB_DISPLAY)	+= kmb-display.o
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index b0cb2053c29d..ae6883e6b27a 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -47,6 +47,7 @@
+ #include "kmb_regs.h"
+ #include "kmb_crtc.h"
+ #include "kmb_plane.h"
++#include "kmb_dsi.h"
+ 
+ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ {
+@@ -83,6 +84,7 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		goto setup_fail;
+ 	}
+ 
++	kmb_dsi_init(drm);
+ 	ret = drm_irq_install(drm, platform_get_irq(pdev, 0));
+ 	if (ret < 0) {
+ 		DRM_ERROR("failed to install IRQ handler\n");
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+new file mode 100644
+index 000000000000..4f54d1d8b87e
+--- /dev/null
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -0,0 +1,115 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Copyright © 2019 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ *
++ */
++#include <drm/drmP.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_crtc.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_crtc_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_edid.h>
++#include <drm/drm_mipi_dsi.h>
++#include <linux/slab.h>
++#include <linux/gpio/consumer.h>
++#include "kmb_drv.h"
++#include "kmb_dsi.h"
++
++static enum drm_mode_status
++kmb_dsi_mode_valid(struct drm_connector *connector,
++		   struct drm_display_mode *mode)
++{
++	return MODE_OK;
++}
++
++static int kmb_dsi_get_modes(struct drm_connector *connector)
++{
++	struct drm_display_mode *mode;
++	struct kmb_connector *kmb_connector = to_kmb_connector(connector);
++
++	mode = drm_mode_duplicate(connector->dev, kmb_connector->fixed_mode);
++	drm_mode_probed_add(connector, mode);
++	return 1;
++}
++
++static void kmb_dsi_connector_destroy(struct drm_connector *connector)
++{
++	struct kmb_connector *kmb_connector = to_kmb_connector(connector);
++
++	drm_connector_cleanup(connector);
++	kfree(kmb_connector);
++}
++
++static void kmb_dsi_encoder_destroy(struct drm_encoder *encoder)
++{
++	struct kmb_dsi *kmb_dsi = to_kmb_dsi(encoder);
++
++	drm_encoder_cleanup(encoder);
++	kfree(kmb_dsi);
++}
++
++static const struct drm_encoder_funcs kmb_dsi_funcs = {
++	.destroy = kmb_dsi_encoder_destroy,
++};
++
++static const struct
++drm_connector_helper_funcs kmb_dsi_connector_helper_funcs = {
++	.get_modes = kmb_dsi_get_modes,
++	.mode_valid = kmb_dsi_mode_valid,
++};
++
++static const struct drm_connector_funcs kmb_dsi_connector_funcs = {
++	.destroy = kmb_dsi_connector_destroy,
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++};
++
++void kmb_dsi_init(struct drm_device *dev)
++{
++	struct kmb_dsi *kmb_dsi;
++	struct drm_encoder *encoder;
++	struct kmb_connector *kmb_connector;
++	struct drm_connector *connector;
++
++	kmb_dsi = kzalloc(sizeof(*kmb_dsi), GFP_KERNEL);
++	if (!kmb_dsi)
++		return;
++
++	kmb_connector = kzalloc(sizeof(*kmb_connector), GFP_KERNEL);
++	if (!kmb_connector) {
++		kfree(kmb_dsi);
++		return;
++	}
++
++	kmb_dsi->attached_connector = kmb_connector;
++
++	connector = &kmb_connector->base;
++	encoder = &kmb_dsi->base;
++	drm_encoder_init(dev, encoder, &kmb_dsi_funcs, DRM_MODE_ENCODER_DSI,
++			 "MIPI-DSI");
++	drm_connector_init(dev, connector, &kmb_dsi_connector_funcs,
++			   DRM_MODE_CONNECTOR_DSI);
++	drm_connector_helper_add(connector, &kmb_dsi_connector_helper_funcs);
++}
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.h b/drivers/gpu/drm/kmb/kmb_dsi.h
+new file mode 100644
+index 000000000000..591257f5370d
+--- /dev/null
++++ b/drivers/gpu/drm/kmb/kmb_dsi.h
+@@ -0,0 +1,59 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Copyright © 2019 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ *
++ */
++#ifndef __KMB_DSI_H__
++#define __KMB_DSI_H__
++
++#include <drm/drmP.h>
++#include <drm/drm_crtc.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include "kmb_drv.h"
++
++struct kmb_connector;
++
++struct kmb_dsi {
++	struct drm_encoder base;
++	struct kmb_connector *attached_connector;
++};
++
++struct kmb_dsi_host {
++	struct mipi_dsi_host base;
++	struct kmb_dsi *kmb_dsi;
++};
++
++struct kmb_connector {
++	struct drm_connector base;
++	struct drm_display_mode *fixed_mode;
++};
++
++void kmb_dsi_init(struct drm_device *dev);
++void kmb_plane_destroy(struct drm_plane *plane);
++
++#define to_kmb_connector(x) container_of(x, struct kmb_connector, base)
++#define to_kmb_host(x) container_of(x, struct kmb_dsi_host, base)
++#define to_kmb_dsi(x) container_of(x, struct kmb_dsi, base)
++
++#endif /* __KMB_DSI_H__ */
+-- 
+2.17.1
+

@@ -1,0 +1,275 @@
+From fd0ced5aaf66b47737c7f53422b9ac78d97ecebe Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Thu, 2 Jan 2020 03:29:44 -0800
+Subject: [PATCH 090/131] drm/kmb: Enable LCD interrupts
+
+Enabled vblank interrupts for LCD.
+
+Signed-off-by: Anitha Chrisanithus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_crtc.c  | 35 ++++++++++++----------------
+ drivers/gpu/drm/kmb/kmb_drv.c   | 41 +++++++++++++++++----------------
+ drivers/gpu/drm/kmb/kmb_plane.c |  6 ++---
+ drivers/gpu/drm/kmb/kmb_regs.h  |  2 +-
+ 4 files changed, 40 insertions(+), 44 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_crtc.c b/drivers/gpu/drm/kmb/kmb_crtc.c
+index fb108ef3404d..7c4dffe1f033 100644
+--- a/drivers/gpu/drm/kmb/kmb_crtc.c
++++ b/drivers/gpu/drm/kmb/kmb_crtc.c
+@@ -62,7 +62,8 @@ static int kmb_crtc_enable_vblank(struct drm_crtc *crtc)
+ 	kmb_write_lcd(dev->dev_private, LCD_VSTATUS_COMPARE,
+ 			LCD_VSTATUS_COMPARE_VSYNC);
+ 	/* enable vertical interrupt */
+-	kmb_write_lcd(dev->dev_private, LCD_INT_ENABLE, LCD_INT_VERT_COMP);
++	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE,
++			LCD_INT_VERT_COMP);
+ 	return 0;
+ }
+ 
+@@ -73,13 +74,9 @@ static void kmb_crtc_disable_vblank(struct drm_crtc *crtc)
+ 	/*clear interrupt */
+ 	kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR, LCD_INT_VERT_COMP);
+ 	/* disable vertical interrupt */
+-	kmb_write_lcd(dev->dev_private, LCD_INT_ENABLE, 0);
++	kmb_clr_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE,
++			LCD_INT_VERT_COMP);
+ 
+-/* TBD
+- *  set the BIT2 (VERTICAL_COMPARE_INTERRUPT) of the LCD_INT_ENABLE register
+- *  set the required bit LCD_VSTATUS_COMPARE register
+- *  Not sure if anything needs to be done in the ICB
+- */
+ }
+ 
+ static const struct drm_crtc_funcs kmb_crtc_funcs = {
+@@ -101,7 +98,7 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 	struct videomode vm;
+ 	int vsync_start_offset;
+ 	int vsync_end_offset;
+-#endif
++
+ 	/* initialize mipi */
+ 	kmb_dsi_hw_init(dev, m);
+ 	DRM_INFO("vfp= %d vbp= %d vsyc_len=%d hfp=%d hbp=%d hsync_len=%d\n",
+@@ -111,7 +108,6 @@ static void kmb_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ 			m->crtc_hsync_start - m->crtc_hdisplay,
+ 			m->crtc_htotal - m->crtc_hsync_end,
+ 			m->crtc_hsync_end - m->crtc_hsync_start);
+-#ifdef LCD_TEST
+ //	vm.vfront_porch = m->crtc_vsync_start - m->crtc_vdisplay;
+ 	vm.vfront_porch = 2;
+ //	vm.vback_porch = m->crtc_vtotal - m->crtc_vsync_end;
+@@ -175,7 +171,7 @@ static void kmb_crtc_atomic_enable(struct drm_crtc *crtc,
+ 
+ 	clk_prepare_enable(lcd->clk);
+ 	kmb_crtc_mode_set_nofb(crtc);
+-//	drm_crtc_vblank_on(crtc);
++	drm_crtc_vblank_on(crtc);
+ }
+ 
+ static void kmb_crtc_atomic_disable(struct drm_crtc *crtc,
+@@ -186,33 +182,32 @@ static void kmb_crtc_atomic_disable(struct drm_crtc *crtc,
+ 	/* always disable planes on the CRTC that is being turned off */
+ 	drm_atomic_helper_disable_planes_on_crtc(old_state, false);
+ 
+-//	drm_crtc_vblank_off(crtc);
++	drm_crtc_vblank_off(crtc);
+ 	clk_disable_unprepare(lcd->clk);
+ }
+ 
+ static void kmb_crtc_atomic_begin(struct drm_crtc *crtc,
+ 				  struct drm_crtc_state *state)
+ {
+-	/* TBD */
+-	/*disable  vblank interrupts here
+-	 * clear BIT 2 (VERTICAL_COMPARE_INTERRUPT) LCD_INT_ENABLE
+-	 */
++	struct drm_device *dev = crtc->dev;
++
++	kmb_clr_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE,
++			LCD_INT_VERT_COMP);
+ }
+ 
+ static void kmb_crtc_atomic_flush(struct drm_crtc *crtc,
+ 				  struct drm_crtc_state *state)
+ {
+-	/* TBD */
+-	/*enable  vblank interrupts after
+-	 * set BIT 2 (VERTICAL_COMPARE_INTERRUPT) LCD_INT_ENABLE
+-	 */
++	struct drm_device *dev = crtc->dev;
++
++	kmb_set_bitmask_lcd(dev->dev_private, LCD_INT_ENABLE,
++			LCD_INT_VERT_COMP);
+ 
+ 	spin_lock_irq(&crtc->dev->event_lock);
+ 	if (crtc->state->event)
+ 		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+ 	crtc->state->event = NULL;
+ 	spin_unlock_irq(&crtc->dev->event_lock);
+-
+ }
+ 
+ static const struct drm_crtc_helper_funcs kmb_crtc_helper_funcs = {
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index 0714dfc8a749..49fd87ea5c06 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -147,10 +147,8 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ {
+ 	struct kmb_drm_private *dev_p = drm->dev_private;
+ 	struct platform_device *pdev = to_platform_device(drm->dev);
+-#ifdef WIP
+ 	/*u32 version;*/
+-	int irq_lcd, irq_mipi;
+-#endif
++	int irq_lcd;// irq_mipi;
+ 	int ret = 0;
+ 	unsigned long clk;
+ 
+@@ -286,10 +284,9 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 	kmb_set_bitmask_msscam(dev_p, MSS_CAM_CLK_CTRL, 0x1fff);
+ 	kmb_set_bitmask_msscam(dev_p, MSS_CAM_RSTN_CTRL, 0xffffffff);
+ #endif //KMB_CLOCKS
+-#ifdef WIP
+ 	/* Register irqs here - section 17.3 in databook
+ 	 * lists LCD at 79 and 82 for MIPI under MSS CPU -
+-	 * firmware has to redirect it to A53
++	 * firmware has redirected  79 to A53 IRQ 33
+ 	 */
+ 	DRM_INFO("platform_get_irq_byname %pOF\n", drm->dev->of_node);
+ 
+@@ -299,14 +296,12 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 	irq_lcd = platform_get_irq_byname(pdev, "irq_lcd");
+ 	if (irq_lcd < 0) {
+ 		DRM_ERROR("irq_lcd not found");
+-		return irq_lcd;
++		goto setup_fail;
+ 	}
+ 
+ 	pr_info("irq_lcd platform_get_irq = %d\n", irq_lcd);
+ 
+-	ret = request_irq(irq_lcd, kmb_isr, IRQF_SHARED, "irq_lcd", dev_p);
+-	dev_p->irq_lcd = irq_lcd;
+-
++#ifdef WIP
+ 	/* Allocate MIPI interrupt resources, enable interrupt line,
+ 	 * and setup IRQ handling
+ 	 */
+@@ -342,19 +337,16 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		DRM_ERROR("failed to initialize DSI\n");
+ 		goto setup_fail;
+ 	}
+-#ifdef WIP
+-	ret = drm_irq_install(drm, platform_get_irq(pdev, 0));
++	ret = drm_irq_install(drm, irq_lcd);
+ 	if (ret < 0) {
+ 		DRM_ERROR("failed to install IRQ handler\n");
+ 		goto irq_fail;
+ 	}
+-#endif
++	dev_p->irq_lcd = irq_lcd;
+ 	return 0;
+ 
+-#ifdef WIP
+ irq_fail:
+ 	drm_crtc_cleanup(&dev_p->crtc);
+-#endif
+ setup_fail:
+ 	of_reserved_mem_device_release(drm->dev);
+ 
+@@ -400,6 +392,11 @@ static irqreturn_t handle_lcd_irq(struct drm_device *dev)
+ 		kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR,
+ 				LCD_INT_LINE_CMP);
+ 	}
++	if (status & LCD_INT_LAYER) {
++		/* clear layer interrupts */
++		kmb_write_lcd(dev->dev_private, LCD_INT_CLEAR, LCD_INT_LAYER);
++	}
++
+ 	if (status & LCD_INT_VERT_COMP) {
+ 		/* read VSTATUS */
+ 		val = kmb_read_lcd(dev->dev_private, LCD_VSTATUS);
+@@ -419,23 +416,20 @@ static irqreturn_t handle_lcd_irq(struct drm_device *dev)
+ 	return IRQ_HANDLED;
+ }
+ 
++#ifdef MIPI_IRQ
+ static irqreturn_t  handle_mipi_irq(struct drm_device *dev)
+ {
+ 	mipi_tx_handle_irqs(dev->dev_private);
+ 	return IRQ_HANDLED;
+ }
++#endif
+ 
+ static irqreturn_t kmb_isr(int irq, void *arg)
+ {
+ 	struct drm_device *dev = (struct drm_device *)arg;
+-	struct kmb_drm_private *dev_p = dev->dev_private;
+ 	irqreturn_t ret = IRQ_NONE;
+ 
+-	if (irq == dev_p->irq_lcd)
+-		ret = handle_lcd_irq(dev);
+-	else if (irq == dev_p->irq_mipi)
+-		ret = handle_mipi_irq(dev);
+-
++	ret = handle_lcd_irq(dev);
+ 	return ret;
+ }
+ 
+@@ -567,6 +561,12 @@ static int kmb_probe(struct platform_device *pdev)
+ 
+ 	/* Set the CRTC's port so that the encoder component can find it */
+ 	lcd->crtc.port = of_graph_get_port_by_id(dev->of_node, 0);
++	ret = drm_vblank_init(drm, drm->mode_config.num_crtc);
++	DRM_INFO("mode_config.num_crtc=%d\n", drm->mode_config.num_crtc);
++	if (ret < 0) {
++		DRM_ERROR("failed to initialize vblank\n");
++		goto err_vblank;
++	}
+ 	drm_mode_config_reset(drm);
+ 	drm_kms_helper_poll_init(drm);
+ 
+@@ -583,6 +583,7 @@ static int kmb_probe(struct platform_device *pdev)
+ 
+ err_register:
+ 	drm_kms_helper_poll_fini(drm);
++err_vblank:
+ 	pm_runtime_disable(drm->dev);
+ err_free:
+ 	drm_mode_config_cleanup(drm);
+diff --git a/drivers/gpu/drm/kmb/kmb_plane.c b/drivers/gpu/drm/kmb/kmb_plane.c
+index af81f12db0f1..459bd1514d1f 100644
+--- a/drivers/gpu/drm/kmb/kmb_plane.c
++++ b/drivers/gpu/drm/kmb/kmb_plane.c
+@@ -176,9 +176,9 @@ static void kmb_plane_atomic_disable(struct drm_plane *plane,
+ 		break;
+ 	}
+ 
+-	kmb_write_lcd(dev_p, LCD_LAYERn_DMA_CFG(plane_id),
+-			~LCD_DMA_LAYER_ENABLE);
+-	kmb_write_lcd(dev_p, LCD_CONTROL, ~ctrl);
++	kmb_clr_bitmask_lcd(dev_p, LCD_LAYERn_DMA_CFG(plane_id),
++			LCD_DMA_LAYER_ENABLE);
++	kmb_clr_bitmask_lcd(dev_p, LCD_CONTROL, ctrl);
+ }
+ 
+ 
+diff --git a/drivers/gpu/drm/kmb/kmb_regs.h b/drivers/gpu/drm/kmb/kmb_regs.h
+index c80646aa8eef..0249ea56d767 100644
+--- a/drivers/gpu/drm/kmb/kmb_regs.h
++++ b/drivers/gpu/drm/kmb/kmb_regs.h
+@@ -107,7 +107,7 @@
+ #define LAYER3_DMA_IDLE				  (1<<24)
+ #define LAYER3_DMA_FIFO_OVERFLOW		  (1<<25)
+ #define LAYER3_DMA_FIFO_UNDERFLOW		  (1<<26)
+-
++#define LCD_INT_LAYER				  (0x07fffff8)
+ #define LCD_INT_ENABLE				(0x4 * 0x002)
+ #define LCD_INT_CLEAR				(0x4 * 0x003)
+ #define LCD_LINE_COUNT				(0x4 * 0x004)
+-- 
+2.17.1
+

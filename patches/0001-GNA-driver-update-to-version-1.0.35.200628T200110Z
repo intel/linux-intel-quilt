@@ -1,0 +1,254 @@
+From d280314551d8116215f07635cda299905e5519e0 Mon Sep 17 00:00:00 2001
+From: Lingpl <pei.lee.ling@intel.com>
+Date: Mon, 22 Jun 2020 14:02:27 +0800
+Subject: [PATCH 01/24] GNA driver update to version 1.0.35
+
+This Gaussian & Neural Accelerator(GNA) driver update include below changes:
+1. Fix stability issues.
+2. Support multiple opened files.
+3. Driver version update from 1.0. to 1.0.35.
+
+Signed-off-by: Lingpl <pei.lee.ling@intel.com>
+---
+ drivers/misc/gna/Kconfig       |  9 +++++++--
+ drivers/misc/gna/Makefile      | 13 +++++++++++--
+ drivers/misc/gna/gna.h         |  4 ++++
+ drivers/misc/gna/gna_drv.c     | 23 ++++++++---------------
+ drivers/misc/gna/gna_drv.h     |  2 +-
+ drivers/misc/gna/gna_mem.c     |  8 ++++----
+ drivers/misc/gna/gna_pci.c     |  4 ----
+ drivers/misc/gna/gna_request.c |  8 ++++++--
+ drivers/misc/gna/gna_score.c   |  6 +-----
+ 9 files changed, 42 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/misc/gna/Kconfig b/drivers/misc/gna/Kconfig
+index faf3346cb9ac..ece41e53fa37 100644
+--- a/drivers/misc/gna/Kconfig
++++ b/drivers/misc/gna/Kconfig
+@@ -4,8 +4,13 @@
+ 
+ config INTEL_GNA
+         tristate "Intel GMM & Neural Networks Accelerator"
+-	depends on X86 && PCI
++	depends on X86_64 && PCI
+         help
+-	  This adds an option to enable the Intel GMM & Neural Networks Accelerator (Intel GNA) driver
++	  This adds an option to enable the Intel GMM & Neural Networks Accelerator (Intel GNA) driver.
+ 	  See Documentation/misc-devices/gna/gna.txt for more information on the functionality.
+ 
++config INTEL_GNA_DEBUG
++	bool "Debug messages for INTEL GNA driver"
++	depends on INTEL_GNA
++	---help---
++	  This enables the debug messages from the INTEL GNA driver.
+diff --git a/drivers/misc/gna/Makefile b/drivers/misc/gna/Makefile
+index 47827dd0e9c2..0be8e0d411d3 100644
+--- a/drivers/misc/gna/Makefile
++++ b/drivers/misc/gna/Makefile
+@@ -6,8 +6,6 @@
+ 
+ ccflags-y += -Werror
+ 
+-obj-$(CONFIG_INTEL_GNA) += gna.o
+-
+ gna-y := gna_drv.o \
+          gna_hw.o \
+          gna_ioctl.o \
+@@ -17,4 +15,15 @@ gna-y := gna_drv.o \
+          gna_request.o \
+          gna_score.o \
+ 
++obj-m += gna.o
++
++ifeq ($(KERNELRELEASE),)
++ccflags-y += -I $(PWD)
++KDIR ?= /lib/modules/$(shell uname -r)/build
++PWD := $(shell pwd)
+ 
++default:
++	$(MAKE) -C $(KDIR) M=$(PWD)
++clean:
++	$(MAKE) -C $(KDIR) M=$(PWD) clean
++endif
+diff --git a/drivers/misc/gna/gna.h b/drivers/misc/gna/gna.h
+index 6a0f3d8916ba..18e634a4da50 100644
+--- a/drivers/misc/gna/gna.h
++++ b/drivers/misc/gna/gna.h
+@@ -70,6 +70,10 @@ struct gna_buffer {
+ 	__u64 patches_ptr;
+ };
+ 
++/*
++ * Driver performance timestamps in nanoseconds.
++ * Values regard system boot time, but do not count during suspend.
++ */
+ struct gna_drv_perf {
+ 	__u64 pre_processing;	// driver starts pre-processing
+ 	__u64 processing;	// hw starts processing
+diff --git a/drivers/misc/gna/gna_drv.c b/drivers/misc/gna/gna_drv.c
+index f45964b983e9..a136d55ec00a 100644
+--- a/drivers/misc/gna/gna_drv.c
++++ b/drivers/misc/gna/gna_drv.c
+@@ -304,9 +304,9 @@ static int gna_dev_create(struct gna_private *gna_priv)
+ 
+ 	dev_num = find_first_zero_bit(gna_drv_priv.dev_map, MAX_GNA_DEVICES);
+ 	if (dev_num == MAX_GNA_DEVICES) {
++		mutex_unlock(&gna_drv_priv.lock);
+ 		dev_err(&pcidev->dev, "number of gna devices reached maximum\n");
+-		ret = -ENODEV;
+-		goto err_unlock_drv;
++		return -ENODEV;
+ 	}
+ 
+ 	set_bit(dev_num, gna_drv_priv.dev_map);
+@@ -334,23 +334,16 @@ static int gna_dev_create(struct gna_private *gna_priv)
+ 
+ 	ret = cdev_device_add(&gna_priv->cdev, &gna_priv->dev);
+ 	if (ret) {
++		mutex_lock(&gna_drv_priv.lock);
++		__clear_bit(minor, gna_drv_priv.dev_map);
++		mutex_unlock(&gna_drv_priv.lock);
+ 		dev_err(&gna_priv->dev, "could not add gna%d char device\n",
+ 			dev_num);
+-		goto err_release_devnum;
++	} else {
++		dev_info(&gna_priv->dev, "registered gna%d device: major %d, "
++			"minor %d\n", dev_num, major, minor);
+ 	}
+ 
+-	dev_info(&gna_priv->dev, "registered gna%d device: major %d, minor %d\n",
+-						dev_num, major, minor);
+-
+-	return 0;
+-
+-err_release_devnum:
+-	mutex_lock(&gna_drv_priv.lock);
+-	__clear_bit(minor, gna_drv_priv.dev_map);
+-
+-err_unlock_drv:
+-	mutex_unlock(&gna_drv_priv.lock);
+-
+ 	return ret;
+ }
+ 
+diff --git a/drivers/misc/gna/gna_drv.h b/drivers/misc/gna/gna_drv.h
+index 43798eafea47..3c0bd7e37a1d 100644
+--- a/drivers/misc/gna/gna_drv.h
++++ b/drivers/misc/gna/gna_drv.h
+@@ -15,7 +15,7 @@
+ #include "gna_mem.h"
+ 
+ #define GNA_DRV_NAME	"gna"
+-#define GNA_DRV_VER	"1.0"
++#define GNA_DRV_VER	"1.0.35"
+ 
+ #define MAX_GNA_DEVICES		16
+ 
+diff --git a/drivers/misc/gna/gna_mem.c b/drivers/misc/gna/gna_mem.c
+index f46f3fd4599f..41d63ec25cda 100644
+--- a/drivers/misc/gna/gna_mem.c
++++ b/drivers/misc/gna/gna_mem.c
+@@ -54,8 +54,8 @@ int gna_mmu_alloc(struct gna_private *gna_priv)
+ 
+ 	desc_size = ROUND_UP(gna_priv->info.desc_info.desc_size, PAGE_SIZE);
+ 
+-	mmu->hwdesc = pci_alloc_consistent(gna_priv->pdev,
+-				     desc_size, &mmu->hwdesc_dma);
++	mmu->hwdesc = dma_alloc_coherent(&gna_priv->pdev->dev,
++				     desc_size, &mmu->hwdesc_dma, GFP_KERNEL);
+ 	if (!mmu->hwdesc) {
+ 		dev_err(&gna_priv->dev, "gna base descriptor alloc fail\n");
+ 		goto end;
+@@ -77,8 +77,8 @@ int gna_mmu_alloc(struct gna_private *gna_priv)
+ 		goto err_free_pagetables_dma;
+ 
+ 	for (i = 0; i < mmu->num_pagetables; i++) {
+-		mmu->pagetables[i] = pci_alloc_consistent(gna_priv->pdev,
+-			PAGE_SIZE, &mmu->pagetables_dma[i]);
++		mmu->pagetables[i] = dma_alloc_coherent(&gna_priv->pdev->dev,
++			PAGE_SIZE, &mmu->pagetables_dma[i], GFP_KERNEL);
+ 		if (!mmu->pagetables[i]) {
+ 			dev_err(&gna_priv->dev,
+ 				"gna page table %d alloc fail\n", i);
+diff --git a/drivers/misc/gna/gna_pci.c b/drivers/misc/gna/gna_pci.c
+index a2f9bc37904d..0bda388bc6ec 100644
+--- a/drivers/misc/gna/gna_pci.c
++++ b/drivers/misc/gna/gna_pci.c
+@@ -113,8 +113,6 @@ static int __init gna_init(void)
+ 	}
+ 	gna_class->devnode = gna_devnode;
+ 
+-	mutex_lock(&gna_drv_priv.lock);
+-
+ 	ret = alloc_chrdev_region(&gna_drv_priv.devt, 0, MAX_GNA_DEVICES, "gna");
+ 	if (ret) {
+ 		pr_err("could not get major number\n");
+@@ -126,8 +124,6 @@ static int __init gna_init(void)
+ 
+ 	gna_drv_priv.minor = MINOR(gna_drv_priv.devt);
+ 
+-	mutex_unlock(&gna_drv_priv.lock);
+-
+ 	ret = pci_register_driver(&gna_driver);
+ 	if (ret) {
+ 		pr_err("pci register driver failed\n");
+diff --git a/drivers/misc/gna/gna_request.c b/drivers/misc/gna/gna_request.c
+index 9585d1937750..00cc08b17795 100644
+--- a/drivers/misc/gna/gna_request.c
++++ b/drivers/misc/gna/gna_request.c
+@@ -40,7 +40,7 @@ static void gna_request_process(struct work_struct *work)
+ 	spin_unlock_bh(&score_request->state_lock);
+ 
+ 	spin_lock_bh(&score_request->perf_lock);
+-	score_request->drv_perf.pre_processing = rdtsc();
++	score_request->drv_perf.pre_processing = ktime_get_ns();
+ 	spin_unlock_bh(&score_request->perf_lock);
+ 
+ 	ret = pm_runtime_get_sync(&gna_priv->pdev->dev);
+@@ -59,6 +59,10 @@ static void gna_request_process(struct work_struct *work)
+ 		goto end;
+ 	}
+ 
++	spin_lock_bh(&score_request->perf_lock);
++	score_request->drv_perf.processing = ktime_get_ns();
++	spin_unlock_bh(&score_request->perf_lock);
++
+ 	wait_event(gna_priv->busy_waitq, !gna_priv->busy);
+ 
+ 	/* request post-processing */
+@@ -95,7 +99,7 @@ static void gna_request_process(struct work_struct *work)
+ 
+ end:
+ 	spin_lock_bh(&score_request->perf_lock);
+-	score_request->drv_perf.processing = rdtsc();
++	score_request->drv_perf.completion = ktime_get_ns();
+ 	spin_unlock_bh(&score_request->perf_lock);
+ }
+ 
+diff --git a/drivers/misc/gna/gna_score.c b/drivers/misc/gna/gna_score.c
+index c13f4c0b7e12..8dc442b8412f 100644
+--- a/drivers/misc/gna/gna_score.c
++++ b/drivers/misc/gna/gna_score.c
+@@ -298,7 +298,7 @@ void gna_request_tasklet(unsigned long data)
+ 	del_timer(&gna_priv->isr_timer);
+ 
+ 	spin_lock_bh(&score_request->perf_lock);
+-	score_request->drv_perf.hw_completed = rdtsc();
++	score_request->drv_perf.hw_completed = ktime_get_ns();
+ 	spin_unlock_bh(&score_request->perf_lock);
+ 
+ 	/* get hw status written to device context by interrupt handler */
+@@ -342,10 +342,6 @@ void gna_request_tasklet(unsigned long data)
+ 		dev_warn_once(&gna_priv->dev,
+ 			"pm_runtime_put() failed: %d\n", ret);
+ 
+-	spin_lock_bh(&score_request->perf_lock);
+-	score_request->drv_perf.completion = rdtsc();
+-	spin_unlock_bh(&score_request->perf_lock);
+-
+ 	spin_lock_bh(&gna_priv->busy_lock);
+ 	gna_priv->busy = false;
+ 	spin_unlock_bh(&gna_priv->busy_lock);
+-- 
+2.17.1
+

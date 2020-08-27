@@ -1,0 +1,119 @@
+From b710415c75ebebae5b1142352ec4da65fb6d43c9 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Tue, 23 Jun 2020 10:13:32 +0800
+Subject: [PATCH 25/27] drm/i915/gvt: Do not warn when checking enabled status
+ on invalid pipe
+
+IDV now supports display off (i.e. guest OS monitor off on timeout).
+When dmabuf decoding plane information, it will check pipe enabled
+status before the decoding. In display off, pipe is diabled and dmabuf
+won't decoding and simply returns. However the status checking progress
+always warn that an invalid pipe is checked. Such information isn't
+necessary.
+
+This patch made below changes:
+- Only pass enabled vGPU pipe to pipe_is_enabled(). Currently dmabuf
+  only support 1 pipe, so this pipe is always expected to be valid.
+- Move warn on invalid pipe in pipe_is_enabled() to gvt_dbg_dpy() since
+  all caller of pipe_is_enabled() can guarantee pipe is always enabled.
+- Use enum pipe instead of int for get_active_pipe()
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+---
+ drivers/gpu/drm/i915/gvt/display.c    |  6 ++++--
+ drivers/gpu/drm/i915/gvt/fb_decoder.c | 31 ++++++++++++++++-----------
+ 2 files changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index f374c1b1a2aa..2f7a6e223487 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -72,9 +72,11 @@ int pipe_is_enabled(struct intel_vgpu *vgpu, enum pipe pipe)
+ {
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+ 
+-	if (WARN_ON(pipe == INVALID_PIPE ||
+-		    pipe >= INTEL_NUM_PIPES(dev_priv)))
++	if (pipe == INVALID_PIPE || pipe >= INTEL_NUM_PIPES(dev_priv)) {
++		gvt_dbg_dpy("vgpu:%d invalid pipe-%d to check enablement\n",
++					vgpu->id, pipe);
+ 		return -EINVAL;
++	}
+ 
+ 	if (vgpu_vreg_t(vgpu, PIPECONF(pipe)) & PIPECONF_ENABLE)
+ 		return 1;
+diff --git a/drivers/gpu/drm/i915/gvt/fb_decoder.c b/drivers/gpu/drm/i915/gvt/fb_decoder.c
+index 8bb292b01271..435c44e17e78 100644
+--- a/drivers/gpu/drm/i915/gvt/fb_decoder.c
++++ b/drivers/gpu/drm/i915/gvt/fb_decoder.c
+@@ -179,15 +179,22 @@ static u32 intel_vgpu_get_stride(struct intel_vgpu *vgpu, int pipe,
+ 	return stride;
+ }
+ 
+-static int get_active_pipe(struct intel_vgpu *vgpu)
++static enum pipe get_active_pipe(struct intel_vgpu *vgpu)
+ {
+-	int i;
+-
+-	for (i = 0; i < I915_MAX_PIPES; i++)
+-		if (pipe_is_enabled(vgpu, i))
++	enum pipe pipe = INVALID_PIPE;
++	struct intel_vgpu_display *disp_cfg = &vgpu->disp_cfg;
++	struct intel_vgpu_display_path *disp_path = NULL, *n;
++
++	list_for_each_entry_safe(disp_path, n, &disp_cfg->path_list, list) {
++		/* Current dmabuf only support 1st pipe */
++		if (disp_path->pipe != INVALID_PIPE &&
++		    pipe_is_enabled(vgpu, disp_path->pipe)) {
++			pipe = disp_path->pipe;
+ 			break;
++		}
++	}
+ 
+-	return i;
++	return pipe;
+ }
+ 
+ /**
+@@ -204,10 +211,10 @@ int intel_vgpu_decode_primary_plane(struct intel_vgpu *vgpu,
+ {
+ 	u32 val, fmt;
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+-	int pipe;
++	enum pipe pipe = INVALID_PIPE;
+ 
+ 	pipe = get_active_pipe(vgpu);
+-	if (pipe >= I915_MAX_PIPES)
++	if (pipe == INVALID_PIPE || pipe >= INTEL_NUM_PIPES(dev_priv))
+ 		return -ENODEV;
+ 
+ 	val = vgpu_vreg_t(vgpu, DSPCNTR(pipe));
+@@ -335,10 +342,10 @@ int intel_vgpu_decode_cursor_plane(struct intel_vgpu *vgpu,
+ 	u32 val, mode, index;
+ 	u32 alpha_plane, alpha_force;
+ 	struct drm_i915_private *dev_priv = vgpu->gvt->dev_priv;
+-	int pipe;
++	enum pipe pipe = INVALID_PIPE;
+ 
+ 	pipe = get_active_pipe(vgpu);
+-	if (pipe >= I915_MAX_PIPES)
++	if (pipe == INVALID_PIPE || pipe >= INTEL_NUM_PIPES(dev_priv))
+ 		return -ENODEV;
+ 
+ 	val = vgpu_vreg_t(vgpu, CURCNTR(pipe));
+@@ -414,10 +421,10 @@ int intel_vgpu_decode_sprite_plane(struct intel_vgpu *vgpu,
+ 	u32 val, fmt;
+ 	u32 color_order, yuv_order;
+ 	int drm_format;
+-	int pipe;
++	enum pipe pipe = INVALID_PIPE;
+ 
+ 	pipe = get_active_pipe(vgpu);
+-	if (pipe >= I915_MAX_PIPES)
++	if (pipe == INVALID_PIPE || pipe >= INTEL_NUM_PIPES(vgpu->gvt->dev_priv))
+ 		return -ENODEV;
+ 
+ 	val = vgpu_vreg_t(vgpu, SPRCTL(pipe));
+-- 
+2.17.1
+

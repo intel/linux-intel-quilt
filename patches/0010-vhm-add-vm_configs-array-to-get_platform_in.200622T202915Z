@@ -1,0 +1,165 @@
+From fb656fc434900b116bcc7769a469462c300bcfd5 Mon Sep 17 00:00:00 2001
+From: Zide Chen <zide.chen@intel.com>
+Date: Tue, 10 Mar 2020 19:43:31 -0700
+Subject: [PATCH 10/11] vhm: add vm_configs array to get_platform_info
+ hypercall
+
+Both the size of the vm_configs entry and the number of elements are various
+on different platforms and different VM configurations. In order to
+collect this array, the caller needs to assign vm_configs_addr with the
+address of a buffer that is big enough to hold the vm_configs array.
+
+The new member max_vms and vm_config_entry_size could be used by the
+hypercall caller to calculate the buffer it needs for this array, and to
+parse this array.
+
+If the vm_configs_addr field is set to zero, both VHM and hypervisor
+won't return the vm_configs array.
+
+This patch also increases ACRN mempool size as needed to handle this
+data structure.
+
+Tracked-On: projectacrn/acrn-hypervisor#4616
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c       | 59 +++++++++++++++++++++++++-------
+ include/linux/vhm/acrn_hv_defs.h | 32 +++++++++++++++--
+ 2 files changed, 77 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 2d3ccae4d3c9..2e5e62598108 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -163,23 +163,56 @@ static long vhm_dev_ioctl(struct file *filep,
+ 
+ 		return 0;
+ 	} else if (ioctl_num == IC_GET_PLATFORM_INFO) {
+-		struct hc_platform_info *platform_info;
++		struct hc_platform_info *plat_info;
++		struct hc_platform_info plat_info_user;
++		void *vm_configs = NULL;
+ 
+-		platform_info = acrn_mempool_alloc(GFP_KERNEL);
+-		ret = hcall_get_platform_info(virt_to_phys(platform_info));
+-		if (ret < 0) {
+-			acrn_mempool_free(platform_info);
++		/* Need to get the user provided vm_configs_addr */
++		if (copy_from_user(&plat_info_user, (void *)ioctl_param,
++			sizeof(*plat_info))) {
+ 			return -EFAULT;
+ 		}
+ 
++		plat_info = acrn_mempool_alloc(GFP_KERNEL);
++
++		/* User wants to get vm_configs[] array */
++		if (plat_info_user.vm_configs_addr) {
++			vm_configs = acrn_mempool_alloc(GFP_KERNEL);
++			plat_info->vm_configs_addr = (uint64_t)virt_to_phys(vm_configs);
++		} else {
++			plat_info->vm_configs_addr = 0;
++		}
++
++		ret = hcall_get_platform_info(virt_to_phys(plat_info));
++		if (ret < 0) {
++			ret = -EFAULT;
++			goto get_platform_info_done;
++		}
++
++		if (plat_info_user.vm_configs_addr) {
++			if (copy_to_user((void *)plat_info_user.vm_configs_addr,
++				vm_configs,
++				plat_info->vm_config_entry_size *
++				plat_info->max_vms)) {
++				ret = -EFAULT;
++				goto get_platform_info_done;
++			}
++		}
++
++		/* Restore the user address */
++		plat_info->vm_configs_addr = plat_info_user.vm_configs_addr;
++
+ 		if (copy_to_user((void *)ioctl_param,
+-			platform_info, sizeof(*platform_info))) {
+-			acrn_mempool_free(platform_info);
+-			return -EFAULT;
++			plat_info, sizeof(*plat_info))) {
++			ret = -EFAULT;
++			goto get_platform_info_done;
+ 		}
+ 
+-		acrn_mempool_free(platform_info);
+-		return 0;
++get_platform_info_done:
++		if (vm_configs)
++			acrn_mempool_free(vm_configs);
++		acrn_mempool_free(plat_info);
++		return ret;
+ 	}
+ 
+ 	memset(&ic_pt_irq, 0, sizeof(ic_pt_irq));
+@@ -857,8 +890,10 @@ static int __init vhm_init(void)
+ 	}
+ 
+ 	acrn_ioreq_driver_init();
+-	/* initialize memory pool with 16 elements and 512 bytes element size */
+-	acrn_mempool_init(16, 512);
++
++	/* The biggest consumer is the get_platform_info hypercall, and the size
++	 * it requires is a function of the number of the physical CPUs */
++	acrn_mempool_init(16, nr_cpu_ids * 2560 + 512);
+ 	pr_info("vhm: Virtio & Hypervisor service module initialized\n");
+ 	return 0;
+ }
+diff --git a/include/linux/vhm/acrn_hv_defs.h b/include/linux/vhm/acrn_hv_defs.h
+index 33613dd25f49..6e5f29447af4 100644
+--- a/include/linux/vhm/acrn_hv_defs.h
++++ b/include/linux/vhm/acrn_hv_defs.h
+@@ -259,15 +259,43 @@ struct hc_platform_info {
+ 	/** Physical CPU number */
+ 	uint16_t cpu_num;
+ 
++	/** version of this structure */
++	uint16_t version;
++
+ 	/** Align the size of version & hardware info to 128Bytes. */
+-	uint8_t reserved0[126];
++	uint8_t reserved0[124];
+ 
+ 	/** Configuration Information */
+ 	/** Maximum vCPU number for one VM. */
+ 	uint16_t max_vcpus_per_vm;
+ 
++	/** Maximum Kata container number in SOS VM */
++	uint8_t max_kata_containers;
++
++	uint8_t reserved1[7];
++
++	/** Number of configured VMs */
++	uint16_t max_vms;
++
++	/**
++	 * The size of acrn_vm_config is various on different platforms.
++	 * This is the size of this struct which is used for the caller
++	 * to parse the vm_configs array.
++	 */
++	uint32_t vm_config_entry_size;
++
++	/**
++	 * Address to an array of struct acrn_vm_config, containing all
++	 * the configurations of all VMs. VHM treats it as an opague data
++	 * structure.
++	 *
++	 * The size of one array element is vm_config_entry_size while
++	 * the number of elements is max_vms.
++	 */
++	uint64_t vm_configs_addr;
++
+ 	/** Align the size of Configuration info to 128Bytes. */
+-	uint8_t reserved1[126];
++	uint8_t reserved3[104];
+ } __aligned(8);
+ 
+ enum profiling_cmd_type {
+-- 
+2.17.1
+

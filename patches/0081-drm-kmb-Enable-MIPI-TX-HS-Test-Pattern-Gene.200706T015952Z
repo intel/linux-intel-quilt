@@ -1,0 +1,108 @@
+From 6747f66e50587c3e54365634fa900b96092f2058 Mon Sep 17 00:00:00 2001
+From: Edmund Dea <edmund.j.dea@intel.com>
+Date: Mon, 30 Sep 2019 12:11:49 -0700
+Subject: [PATCH 081/131] drm/kmb: Enable MIPI TX HS Test Pattern Generation
+
+Added test pattern generator function. Enable this at compile time to
+test if mipi is working. mipi->hdmi section
+
+Signed-off-by: Edmund Dea <edmund.j.dea@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_dsi.c  | 31 +++++++++++++++++++++++++++++++
+ drivers/gpu/drm/kmb/kmb_dsi.h  |  7 +++++++
+ drivers/gpu/drm/kmb/kmb_regs.h | 11 +++++++++++
+ 3 files changed, 49 insertions(+)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+index 3977406ea598..24c57cef536b 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.c
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -764,6 +764,32 @@ static void mipi_tx_ctrl_cfg(struct kmb_drm_private *dev_p, u8 fg_id,
+ 	kmb_write_mipi(dev_p, MIPI_TXm_HS_CTRL(ctrl_no), ctrl);
+ }
+ 
++#ifdef MIPI_TX_TEST_PATTERN_GENERATION
++static void mipi_tx_hs_tp_gen(struct kmb_drm_private *dev_p, int vc,
++		int tp_sel, u32 stripe_width, u32 color0, u32 color1)
++{
++	u32 ctrl_no = MIPI_CTRL6;
++
++	/* Select test pattern mode on the virtual channel */
++	kmb_write_mipi(dev_p, MIPI_TXm_HS_TEST_PAT_CTRL(ctrl_no),
++			TP_SEL_VCm(vc, tp_sel));
++
++	if (tp_sel == MIPI_TX_HS_TP_V_STRIPES ||
++			tp_sel == MIPI_TX_HS_TP_H_STRIPES) {
++		kmb_write_mipi(dev_p, MIPI_TXm_HS_TEST_PAT_CTRL(ctrl_no),
++				TP_STRIPE_WIDTH(stripe_width));
++	}
++
++	/* Configure test pattern colors */
++	kmb_write_mipi(dev_p, MIPI_TX_HS_TEST_PAT_COLOR0, color0);
++	kmb_write_mipi(dev_p, MIPI_TX_HS_TEST_PAT_COLOR1, color1);
++
++	/* Enable test pattern generation on the virtual channel */
++	kmb_write_mipi(dev_p, MIPI_TXm_HS_TEST_PAT_CTRL(ctrl_no),
++			TP_EN_VCm(vc));
++}
++#endif
++
+ static u32 mipi_tx_init_cntrl(struct kmb_drm_private *dev_p,
+ 		struct mipi_ctrl_cfg *ctrl_cfg)
+ {
+@@ -827,6 +853,11 @@ static u32 mipi_tx_init_cntrl(struct kmb_drm_private *dev_p,
+ 	/*Multi-Channel FIFO Configuration*/
+ 	mipi_tx_multichannel_fifo_cfg(dev_p, ctrl_cfg->active_lanes, frame_id);
+ 
++#ifdef MIPI_TX_TEST_PATTERN_GENERATION
++	mipi_tx_hs_tp_gen(dev_p, 0, MIPI_TX_HS_TP_WHOLE_FRAME_COLOR0, 0,
++			0xffffffff, 0);
++#endif
++
+ 	/*Frame Generator Enable */
+ 	mipi_tx_ctrl_cfg(dev_p, frame_id, ctrl_cfg);
+ 	return ret;
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.h b/drivers/gpu/drm/kmb/kmb_dsi.h
+index 0ec0bdfe65d1..e14855c0a64b 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.h
++++ b/drivers/gpu/drm/kmb/kmb_dsi.h
+@@ -201,6 +201,13 @@ enum mipi_dsi_data_type {
+ 	DSI_LP_DT_RESERVED_3F = 0x3f
+ };
+ 
++enum mipi_tx_hs_tp_sel {
++	MIPI_TX_HS_TP_WHOLE_FRAME_COLOR0 = 0,
++	MIPI_TX_HS_TP_WHOLE_FRAME_COLOR1,
++	MIPI_TX_HS_TP_V_STRIPES,
++	MIPI_TX_HS_TP_H_STRIPES,
++};
++
+ enum dphy_mode {
+ 	MIPI_DPHY_SLAVE = 0,
+ 	MIPI_DPHY_MASTER
+diff --git a/drivers/gpu/drm/kmb/kmb_regs.h b/drivers/gpu/drm/kmb/kmb_regs.h
+index 20b331d4d23c..2377439636ff 100644
+--- a/drivers/gpu/drm/kmb/kmb_regs.h
++++ b/drivers/gpu/drm/kmb/kmb_regs.h
+@@ -645,6 +645,17 @@
+ 			MIPI_TX_HS_IRQ_CLEAR \
+ 			+ HS_OFFSET(M), val)
+ 
++/* MIPI Test Pattern Generation */
++#define MIPI_TX_HS_TEST_PAT_CTRL			(0x230)
++#define   MIPI_TXm_HS_TEST_PAT_CTRL(M)			\
++				(MIPI_TX_HS_TEST_PAT_CTRL + HS_OFFSET(M))
++#define   TP_EN_VCm(M)					((M) * 0x04)
++#define   TP_SEL_VCm(M, N)				\
++				(N << (((M) * 0x04) + 1))
++#define   TP_STRIPE_WIDTH(M)				((M) << 16)
++#define MIPI_TX_HS_TEST_PAT_COLOR0			(0x234)
++#define MIPI_TX_HS_TEST_PAT_COLOR1			(0x238)
++
+ /* D-PHY regs */
+ #define DPHY_ENABLE				(0x100)
+ #define DPHY_INIT_CTRL0				(0x104)
+-- 
+2.17.1
+

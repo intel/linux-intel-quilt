@@ -1,0 +1,86 @@
+From 1ee6de5c3628242746e234d619507baf8b6c77a3 Mon Sep 17 00:00:00 2001
+From: Kan Liang <kan.liang@linux.intel.com>
+Date: Thu, 28 May 2020 08:19:29 -0700
+Subject: [PATCH 03/11] perf/x86/intel/uncore: Validate MMIO address before
+ accessing
+
+An oops will be triggered, if perf tries to access an invalid address
+which exceeds the mapped area.
+
+Check the address before the actual access to MMIO sapce of an uncore
+unit.
+
+Suggested-by: David Laight <David.Laight@ACULAB.COM>
+Signed-off-by: Kan Liang <kan.liang@linux.intel.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Link: https://lkml.kernel.org/r/1590679169-61823-3-git-send-email-kan.liang@linux.intel.com
+---
+ arch/x86/events/intel/uncore.c       |  3 +++
+ arch/x86/events/intel/uncore.h       | 12 ++++++++++++
+ arch/x86/events/intel/uncore_snbep.c |  6 ++++++
+ 3 files changed, 21 insertions(+)
+
+diff --git a/arch/x86/events/intel/uncore.c b/arch/x86/events/intel/uncore.c
+index 63922e3a34f5..89fc66fca506 100644
+--- a/arch/x86/events/intel/uncore.c
++++ b/arch/x86/events/intel/uncore.c
+@@ -132,6 +132,9 @@ u64 uncore_mmio_read_counter(struct intel_uncore_box *box,
+ 	if (!box->io_addr)
+ 		return 0;
+ 
++	if (!uncore_mmio_is_valid_offset(box, event->hw.event_base))
++		return 0;
++
+ 	return readq(box->io_addr + event->hw.event_base);
+ }
+ 
+diff --git a/arch/x86/events/intel/uncore.h b/arch/x86/events/intel/uncore.h
+index e374befc54e3..c9e51273dbe6 100644
+--- a/arch/x86/events/intel/uncore.h
++++ b/arch/x86/events/intel/uncore.h
+@@ -196,6 +196,18 @@ static inline bool uncore_pmc_freerunning(int idx)
+ 	return idx == UNCORE_PMC_IDX_FREERUNNING;
+ }
+ 
++static inline bool uncore_mmio_is_valid_offset(struct intel_uncore_box *box,
++					       unsigned long offset)
++{
++	if (offset < box->pmu->type->mmio_map_size)
++		return true;
++
++	pr_warn_once("perf uncore: Invalid offset 0x%lx exceeds mapped area of %s.\n",
++		     offset, box->pmu->type->name);
++
++	return false;
++}
++
+ static inline
+ unsigned int uncore_mmio_box_ctl(struct intel_uncore_box *box)
+ {
+diff --git a/arch/x86/events/intel/uncore_snbep.c b/arch/x86/events/intel/uncore_snbep.c
+index 40406571740a..b09fd2004b5e 100644
+--- a/arch/x86/events/intel/uncore_snbep.c
++++ b/arch/x86/events/intel/uncore_snbep.c
+@@ -4440,6 +4440,9 @@ static void snr_uncore_mmio_enable_event(struct intel_uncore_box *box,
+ 	if (!box->io_addr)
+ 		return;
+ 
++	if (!uncore_mmio_is_valid_offset(box, hwc->config_base))
++		return;
++
+ 	writel(hwc->config | SNBEP_PMON_CTL_EN,
+ 	       box->io_addr + hwc->config_base);
+ }
+@@ -4452,6 +4455,9 @@ static void snr_uncore_mmio_disable_event(struct intel_uncore_box *box,
+ 	if (!box->io_addr)
+ 		return;
+ 
++	if (!uncore_mmio_is_valid_offset(box, hwc->config_base))
++		return;
++
+ 	writel(hwc->config, box->io_addr + hwc->config_base);
+ }
+ 
+-- 
+2.17.1
+

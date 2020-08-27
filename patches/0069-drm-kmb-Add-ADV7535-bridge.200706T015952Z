@@ -1,0 +1,164 @@
+From 723250a6459e20489e23dd357e9a6630bf2115d5 Mon Sep 17 00:00:00 2001
+From: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Date: Wed, 21 Aug 2019 06:22:52 -0700
+Subject: [PATCH 069/131] drm/kmb: Add ADV7535 bridge
+
+Find ADV 7535 from the device tree and get the bridge driver and attach
+it to the DRM and the MIPI encoder.
+
+v2: check for valid encoder node
+
+Signed-off-by: Anitha Chrisanthus <anitha.chrisanthus@intel.com>
+Reviewed-by: Bob Paauwe <bob.j.paauwe@intel.com>
+---
+ drivers/gpu/drm/kmb/kmb_drv.c | 27 ++++++++++++++++++++++++++-
+ drivers/gpu/drm/kmb/kmb_dsi.c | 24 ++++++++++++++++++++----
+ drivers/gpu/drm/kmb/kmb_dsi.h |  3 ++-
+ 3 files changed, 48 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/kmb/kmb_drv.c b/drivers/gpu/drm/kmb/kmb_drv.c
+index e657c6c2edb3..28cc9a2d26ba 100644
+--- a/drivers/gpu/drm/kmb/kmb_drv.c
++++ b/drivers/gpu/drm/kmb/kmb_drv.c
+@@ -55,10 +55,12 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ {
+ 	struct kmb_drm_private *dev_p = drm->dev_private;
+ 	struct platform_device *pdev = to_platform_device(drm->dev);
++	struct drm_bridge *bridge;
+ 	/*struct resource *res;*/
+ 	/*u32 version;*/
+ 	int irq_lcd, irq_mipi;
+ 	int ret;
++	struct device_node *encoder_node;
+ 
+ 	/* TBD - not sure if clock_get needs to be called here */
+ 	/*
+@@ -146,7 +148,30 @@ static int kmb_load(struct drm_device *drm, unsigned long flags)
+ 		goto setup_fail;
+ 	}
+ 
+-	kmb_dsi_init(drm);
++	/* find ADV7535 node and initialize it */
++	encoder_node = of_parse_phandle(drm->dev->of_node, "encoder-slave", 0);
++	if (!encoder_node) {
++		DRM_ERROR("failed to get bridge info from DT\n");
++		ret = -EPROBE_DEFER;
++		goto setup_fail;
++	}
++
++	/* Locate drm bridge from the hdmi encoder DT node */
++	bridge = of_drm_find_bridge(encoder_node);
++	if (!bridge) {
++		DRM_ERROR("failed to get bridge driver from DT\n");
++		ret = -EPROBE_DEFER;
++		goto setup_fail;
++	}
++
++	of_node_put(encoder_node);
++
++	ret = kmb_dsi_init(drm, bridge);
++	if (ret) {
++		DRM_ERROR("failed to initialize DSI\n");
++		goto setup_fail;
++	}
++
+ 	ret = drm_irq_install(drm, platform_get_irq(pdev, 0));
+ 	if (ret < 0) {
+ 		DRM_ERROR("failed to install IRQ handler\n");
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.c b/drivers/gpu/drm/kmb/kmb_dsi.c
+index 0cfe11365c17..c726bf318bde 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.c
++++ b/drivers/gpu/drm/kmb/kmb_dsi.c
+@@ -31,6 +31,7 @@
+ #include <drm/drm_connector.h>
+ #include <drm/drm_edid.h>
+ #include <drm/drm_mipi_dsi.h>
++#include <drm/drm_bridge.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+ #include <linux/gpio/consumer.h>
+@@ -1260,7 +1261,6 @@ static void mipi_tx_init_irqs(struct kmb_drm_private *dev_p,
+ 	spin_unlock_irqrestore(&dev_p->irq_lock, irqflags);
+ }
+ 
+-
+ void mipi_tx_handle_irqs(struct kmb_drm_private *dev_p)
+ {
+ 	uint32_t irq_ctrl_stat_0, hs_stat, hs_enable;
+@@ -1301,21 +1301,27 @@ int kmb_dsi_init(struct drm_device *dev, struct drm_bridge *bridge)
+ 	struct drm_connector *connector;
+ 	struct kmb_dsi_host *host;
+ 	struct kmb_drm_private *dev_p = dev->dev_private;
++	int ret = 0;
+ 
+ 	kmb_dsi = kzalloc(sizeof(*kmb_dsi), GFP_KERNEL);
+-	if (!kmb_dsi)
+-		return;
++	if (!kmb_dsi) {
++		DRM_ERROR("failed to allocate kmb_dsi\n");
++		return -ENOMEM;
++	}
+ 
+ 	kmb_connector = kzalloc(sizeof(*kmb_connector), GFP_KERNEL);
+ 	if (!kmb_connector) {
+ 		kfree(kmb_dsi);
+-		return;
++		DRM_ERROR("failed to allocate kmb_connector\n");
++		return -ENOMEM;
+ 	}
+ 
+ 	kmb_dsi->attached_connector = kmb_connector;
+ 
+ 	connector = &kmb_connector->base;
+ 	encoder = &kmb_dsi->base;
++	encoder->possible_crtcs = 1;
++	encoder->possible_clones = 0;
+ 	drm_encoder_init(dev, encoder, &kmb_dsi_funcs, DRM_MODE_ENCODER_DSI,
+ 			 "MIPI-DSI");
+ 
+@@ -1333,6 +1339,14 @@ int kmb_dsi_init(struct drm_device *dev, struct drm_bridge *bridge)
+ 	connector->encoder = encoder;
+ 	drm_connector_attach_encoder(connector, encoder);
+ 
++	/* Link drm_bridge to encoder */
++	ret = drm_bridge_attach(encoder, bridge, NULL);
++	if (ret) {
++		DRM_ERROR("failed to attach bridge to MIPI\n");
++		drm_encoder_cleanup(encoder);
++		return ret;
++	}
++
+ 	/* initialize mipi controller */
+ 	mipi_tx_init_cntrl(dev_p, &mipi_tx_init_cfg);
+ 
+@@ -1341,4 +1355,6 @@ int kmb_dsi_init(struct drm_device *dev, struct drm_bridge *bridge)
+ 
+ 	/* irq initialization */
+ 	mipi_tx_init_irqs(dev_p, &int_cfg, &mipi_tx_init_cfg.tx_ctrl_cfg);
++
++	return 0;
+ }
+diff --git a/drivers/gpu/drm/kmb/kmb_dsi.h b/drivers/gpu/drm/kmb/kmb_dsi.h
+index ee51cda163a9..7159ae9ecc2e 100644
+--- a/drivers/gpu/drm/kmb/kmb_dsi.h
++++ b/drivers/gpu/drm/kmb/kmb_dsi.h
+@@ -39,6 +39,7 @@ struct kmb_dsi {
+ 	struct drm_encoder base;
+ 	struct kmb_connector *attached_connector;
+ 	struct kmb_dsi_host *dsi_host;
++	struct drm_bridge *bridge;
+ };
+ 
+ struct kmb_dsi_host {
+@@ -329,7 +330,7 @@ union mipi_irq_cfg {
+ 	} irq_cfg;
+ };
+ 
+-void kmb_dsi_init(struct drm_device *dev);
++int kmb_dsi_init(struct drm_device *dev, struct drm_bridge *bridge);
+ void kmb_plane_destroy(struct drm_plane *plane);
+ void mipi_tx_handle_irqs(struct kmb_drm_private *dev_p);
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,45 @@
+From 32a339226c9e05922482e1809f6ae57caedb0c44 Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Thu, 28 May 2020 06:53:29 +0800
+Subject: [PATCH 08/27] net: stmmac: Stop phy state machine before go into low
+ power state
+
+When WOL is enabled, phy state machine will still running even
+Ethernet driver is suspended. This will hit phy_error kernel
+dump because mdio bus is not available when IP is put into D3.
+
+Therefore, this commit stop phy state machine in suspend flow
+and start phy state machine in resume flow if wakeup machanism
+is enabled.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 31e28b538074..546b1c17cfe5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -6815,6 +6815,9 @@ int stmmac_suspend(struct device *dev)
+ 
+ 	phylink_mac_change(priv->phylink, false);
+ 
++	if (ndev->phydev && device_may_wakeup(priv->device))
++		phy_stop_machine(ndev->phydev);
++
+ 	mutex_lock(&priv->lock);
+ 
+ 	netif_device_detach(ndev);
+@@ -7111,6 +7114,8 @@ int stmmac_resume(struct device *dev)
+ 		rtnl_lock();
+ 		phylink_start(priv->phylink);
+ 		rtnl_unlock();
++	} else if (ndev->phydev) {
++		phy_start_machine(ndev->phydev);
+ 	}
+ 
+ 	phylink_mac_change(priv->phylink, true);
+-- 
+2.17.1
+
