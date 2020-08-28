@@ -1,0 +1,99 @@
+From 09e4f65e317a39a45305c0f63cbe4e6e1ed5a6f4 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Mon, 18 May 2020 12:26:43 +0800
+Subject: [PATCH 02/78] net: stmmac: provide fallback to corrupted per packet
+ RX HW T/S corruption
+
+Context descriptor contains a bit that indicates if the descriptor is
+error. Add a check as part of the get_rx_timestamp_status().
+
+Now, if stmmac_get_rx_hwtstamp() on detecting RX HW T/S is invalid, we
+should not just print debug. Instead, we should return the next best
+PTP time estimation so that application does not see valid RX HW T/S
+from previous descriptor read. Returning 0 here is also devastating too.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c | 8 +++++++-
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h | 4 ++++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c  | 8 +++++++-
+ 3 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
+index 68d6ca41d276..f289b06b47e6 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.c
+@@ -252,12 +252,14 @@ static int dwmac4_rx_check_timestamp(void *desc)
+ 	unsigned int rdes0 = le32_to_cpu(p->des0);
+ 	unsigned int rdes1 = le32_to_cpu(p->des1);
+ 	unsigned int rdes3 = le32_to_cpu(p->des3);
+-	u32 own, ctxt;
++	u32 own, ctxt, de;
+ 	int ret = 1;
+ 
+ 	own = rdes3 & RDES3_OWN;
+ 	ctxt = ((rdes3 & RDES3_CONTEXT_DESCRIPTOR)
+ 		>> RDES3_CONTEXT_DESCRIPTOR_SHIFT);
++	de = ((rdes3 & RDES3_CONTEXT_DESCRIPTOR_ERR)
++		>> RDES3_CONTEXT_DESCRIPTOR_ERR_SHIFT);
+ 
+ 	if (likely(!own && ctxt)) {
+ 		if ((rdes0 == 0xffffffff) && (rdes1 == 0xffffffff))
+@@ -268,6 +270,10 @@ static int dwmac4_rx_check_timestamp(void *desc)
+ 			ret = 0;
+ 	}
+ 
++	/* Descriptor Error */
++	if (unlikely(de))
++		ret = -EINVAL;
++
+ 	/* Timestamp not ready */
+ 	return ret;
+ }
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
+index 0d7b3bbcd5a7..f504b522a891 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_descs.h
+@@ -128,6 +128,10 @@
+ #define RDES3_CONTEXT_DESCRIPTOR	BIT(30)
+ #define RDES3_CONTEXT_DESCRIPTOR_SHIFT	30
+ 
++/* RDES3 (context format) */
++#define RDES3_CONTEXT_DESCRIPTOR_ERR		BIT(29)
++#define RDES3_CONTEXT_DESCRIPTOR_ERR_SHIFT	29
++
+ /* RDES3 (read format) */
+ #define RDES3_BUFFER1_VALID_ADDR	BIT(24)
+ #define RDES3_BUFFER2_VALID_ADDR	BIT(25)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 58da2a061cf7..6c9eadc32b80 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -514,6 +514,7 @@ void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv,
+ void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+ 			    struct dma_desc *np, ktime_t *hwtstamp)
+ {
++	void __iomem *ptpaddr = priv->ptpaddr;
+ 	struct dma_desc *desc = p;
+ 	u64 adjust = 0;
+ 	u64 ns = 0;
+@@ -552,10 +553,15 @@ void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+ 
+ 		ns -= adjust;
+ 		netdev_dbg(priv->dev, "get valid RX hw timestamp %llu\n", ns);
+-		*hwtstamp = ns_to_ktime(ns);
+ 	} else  {
+ 		netdev_dbg(priv->dev, "cannot get RX hw timestamp\n");
++		/* RX HW T/S invalid, fallback to current PTP time instead
++		 * of not updating hwtstamp (which can be valid stale data
++		 * from past)
++		 */
++		stmmac_get_systime(priv, ptpaddr, &ns);
+ 	}
++	*hwtstamp = ns_to_ktime(ns);
+ }
+ 
+ /**
+-- 
+2.17.1
+

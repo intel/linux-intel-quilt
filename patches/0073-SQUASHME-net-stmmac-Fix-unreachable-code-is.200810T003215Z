@@ -1,0 +1,100 @@
+From 89567d7fd97e09e56c4e0317f2baa7d11d9276a4 Mon Sep 17 00:00:00 2001
+From: "Wong, Vee Khee" <vee.khee.wong@intel.com>
+Date: Mon, 6 Jul 2020 16:05:57 +0800
+Subject: [PATCH 73/78] SQUASHME: net: stmmac: Fix unreachable code issue found
+ by Klocwork
+
+This patch fixed unreachable code issue found by Klocwork.
+
+Signed-off-by: Wong, Vee Khee <vee.khee.wong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  4 ++--
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 19 ++++---------------
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.c  |  5 +----
+ 3 files changed, 7 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 829936a42cea..95b29cfae1c4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -413,8 +413,8 @@ void stmmac_get_rx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+ 			    struct dma_desc *np, ktime_t *hwtstamp);
+ void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+ 			    ktime_t *hwtstamp);
+-int stmmac_set_tbs_launchtime(struct stmmac_priv *priv, struct dma_desc *desc,
+-			      u64 tx_time);
++void stmmac_set_tbs_launchtime(struct stmmac_priv *priv, struct dma_desc *desc,
++			       u64 tx_time);
+ void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue);
+ #if IS_ENABLED(CONFIG_STMMAC_SELFTESTS)
+ void stmmac_selftest_run(struct net_device *dev,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 76e28ba2952f..5e39d26972d1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2884,9 +2884,8 @@ static void stmmac_configure_cbs(struct stmmac_priv *priv)
+ 	}
+ }
+ 
+-int stmmac_set_tbs_launchtime(struct stmmac_priv *priv,
+-				     struct dma_desc *desc,
+-				     u64 tx_time)
++void stmmac_set_tbs_launchtime(struct stmmac_priv *priv, struct dma_desc *desc,
++			       u64 tx_time)
+ {
+ 	struct dma_enhanced_tx_desc *enhtxdesc;
+ 	u32 launchtime_ns;
+@@ -2899,8 +2898,6 @@ int stmmac_set_tbs_launchtime(struct stmmac_priv *priv,
+ 	enhtxdesc->etdes4 = launchtime_s & ETDESC4_LT_SEC;
+ 	enhtxdesc->etdes5 = launchtime_ns & ETDESC5_LT_NANOSEC;
+ 	enhtxdesc->etdes4 |= ETDESC4_LTV;
+-
+-	return 0;
+ }
+ 
+ /**
+@@ -4235,11 +4232,8 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	 * is invalid.
+ 	 */
+ 	if (skb->tstamp && (tx_q->tbs & STMMAC_TBS_EN)) {
+-		if (stmmac_set_tbs_launchtime(priv, first,
+-					      ktime_to_ns(skb->tstamp))) {
+-			netdev_warn(priv->dev, "Launch time setting failed\n");
+-			goto tbs_err;
+-		}
++		stmmac_set_tbs_launchtime(priv, first,
++					  ktime_to_ns(skb->tstamp));
+ 	}
+ 
+ 	enh_desc = priv->plat->enh_desc;
+@@ -4431,11 +4425,6 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	dev_kfree_skb(skb);
+ 	priv->dev->stats.tx_dropped++;
+ 	return NETDEV_TX_OK;
+-
+-tbs_err:
+-	dev_kfree_skb(skb);
+-	priv->dev->stats.tx_dropped++;
+-	return NETDEV_TX_OK;
+ }
+ 
+ void stmmac_rx_vlan(struct net_device *dev, struct sk_buff *skb)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index b3ce8ad3bb13..f0e87bd6da7a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -803,10 +803,7 @@ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ 		if (stmmac_enabled_xdp(priv) &&
+ 		    (xdp_q->tbs & STMMAC_TBS_EN) &&
+ 		    desc.txtime > 0) {
+-			if (stmmac_set_tbs_launchtime(priv, tx_desc,
+-						      desc.txtime))
+-				netdev_warn(priv->dev, "Launch time setting"
+-						       "failed\n");
++			stmmac_set_tbs_launchtime(priv, tx_desc, desc.txtime);
+ 		}
+ 
+ 		tx_packets =  (entry + 1) - first_entry;
+-- 
+2.17.1
+

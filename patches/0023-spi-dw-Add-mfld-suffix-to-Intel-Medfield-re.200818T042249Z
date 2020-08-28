@@ -1,0 +1,124 @@
+From a3037ff2e9082c93b052b5950f57d95f58852644 Mon Sep 17 00:00:00 2001
+From: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Date: Wed, 6 May 2020 18:30:23 +0300
+Subject: [PATCH 23/25] spi: dw: Add 'mfld' suffix to Intel Medfield related
+ routines
+
+In order to prepare driver for the extension to support newer hardware,
+add 'mfld' suffix to some related functions.
+
+While here, move DMA parameters assignment under existing #ifdef
+CONFIG_SPI_DW_MID_DMA.
+
+There is no functional change intended.
+
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Link: https://lore.kernel.org/r/20200506153025.21441-6-andriy.shevchenko@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+(cherry picked from commit 37aa8aa68492deb56f9e4c8b2d00aa5d9dae7da2)
+Signed-off-by: Raymond Tan <raymond.tan@intel.com>
+---
+ drivers/spi/spi-dw-mid.c | 24 ++++++++++++++----------
+ drivers/spi/spi-dw-pci.c |  4 ++--
+ drivers/spi/spi-dw.h     |  3 ++-
+ 3 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/spi/spi-dw-mid.c b/drivers/spi/spi-dw-mid.c
+index 85bad3a7bd6a..7aba15402044 100644
+--- a/drivers/spi/spi-dw-mid.c
++++ b/drivers/spi/spi-dw-mid.c
+@@ -34,7 +34,7 @@ static bool mid_spi_dma_chan_filter(struct dma_chan *chan, void *param)
+ 	return true;
+ }
+ 
+-static int mid_spi_dma_init(struct dw_spi *dws)
++static int mid_spi_dma_init_mfld(struct dw_spi *dws)
+ {
+ 	struct pci_dev *dma_dev;
+ 	struct dw_dma_slave *tx = dws->dma_tx;
+@@ -280,14 +280,23 @@ static void mid_spi_dma_stop(struct dw_spi *dws)
+ 	}
+ }
+ 
+-static const struct dw_spi_dma_ops mid_dma_ops = {
+-	.dma_init	= mid_spi_dma_init,
++static const struct dw_spi_dma_ops mfld_dma_ops = {
++	.dma_init	= mid_spi_dma_init_mfld,
+ 	.dma_exit	= mid_spi_dma_exit,
+ 	.dma_setup	= mid_spi_dma_setup,
+ 	.can_dma	= mid_spi_can_dma,
+ 	.dma_transfer	= mid_spi_dma_transfer,
+ 	.dma_stop	= mid_spi_dma_stop,
+ };
++
++static void dw_spi_mid_setup_dma_mfld(struct dw_spi *dws)
++{
++	dws->dma_tx = &mid_dma_tx;
++	dws->dma_rx = &mid_dma_rx;
++	dws->dma_ops = &mfld_dma_ops;
++}
++#else	/* CONFIG_SPI_DW_MID_DMA */
++static inline void dw_spi_mid_setup_dma_mfld(struct dw_spi *dws) {}
+ #endif
+ 
+ /* Some specific info for SPI0 controller on Intel MID */
+@@ -301,7 +310,7 @@ static const struct dw_spi_dma_ops mid_dma_ops = {
+ #define CLK_SPI_CDIV_MASK	0x00000e00
+ #define CLK_SPI_DISABLE_OFFSET	8
+ 
+-int dw_spi_mid_init(struct dw_spi *dws)
++int dw_spi_mid_init_mfld(struct dw_spi *dws)
+ {
+ 	void __iomem *clk_reg;
+ 	u32 clk_cdiv;
+@@ -318,14 +327,9 @@ int dw_spi_mid_init(struct dw_spi *dws)
+ 
+ 	iounmap(clk_reg);
+ 
+-#ifdef CONFIG_SPI_DW_MID_DMA
+-	dws->dma_tx = &mid_dma_tx;
+-	dws->dma_rx = &mid_dma_rx;
+-	dws->dma_ops = &mid_dma_ops;
+-#endif
+-
+ 	/* Register hook to configure CTRLR0 */
+ 	dws->update_cr0 = dw_spi_update_cr0;
+ 
++	dw_spi_mid_setup_dma_mfld(dws);
+ 	return 0;
+ }
+diff --git a/drivers/spi/spi-dw-pci.c b/drivers/spi/spi-dw-pci.c
+index 172a9f299631..dd59df5122ee 100644
+--- a/drivers/spi/spi-dw-pci.c
++++ b/drivers/spi/spi-dw-pci.c
+@@ -23,13 +23,13 @@ struct spi_pci_desc {
+ };
+ 
+ static struct spi_pci_desc spi_pci_mid_desc_1 = {
+-	.setup = dw_spi_mid_init,
++	.setup = dw_spi_mid_init_mfld,
+ 	.num_cs = 5,
+ 	.bus_num = 0,
+ };
+ 
+ static struct spi_pci_desc spi_pci_mid_desc_2 = {
+-	.setup = dw_spi_mid_init,
++	.setup = dw_spi_mid_init_mfld,
+ 	.num_cs = 2,
+ 	.bus_num = 1,
+ };
+diff --git a/drivers/spi/spi-dw.h b/drivers/spi/spi-dw.h
+index edbef0fede4c..c94b404afb0e 100644
+--- a/drivers/spi/spi-dw.h
++++ b/drivers/spi/spi-dw.h
+@@ -286,5 +286,6 @@ extern u32 dw_spi_update_cr0_v1_01a(struct spi_controller *master,
+ 				    struct spi_transfer *transfer);
+ 
+ /* platform related setup */
+-extern int dw_spi_mid_init(struct dw_spi *dws); /* Intel MID platforms */
++extern int dw_spi_mid_init_mfld(struct dw_spi *dws);
++
+ #endif /* DW_SPI_HEADER_H */
+-- 
+2.17.1
+

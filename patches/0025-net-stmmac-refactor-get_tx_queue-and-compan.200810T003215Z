@@ -1,0 +1,138 @@
+From 64c67d53637d9b20d9501908ed9c8b7edfdbef7b Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Wed, 27 May 2020 00:15:15 +0800
+Subject: [PATCH 25/78] net: stmmac: refactor get_tx_queue and company
+
+The following functions are used to define XDP TXQ so that get_tx_queue()
+returns address to tx_queue[] or xdp_queue[] accordingly:-
+
+ - queue_is_xdp()
+ - set_queue_xdp()
+ - clear_queue_xdp()
+
+The purpose of cur_mode_is_normal can be statisfied by stmmac_enabled_xdp()
+and set_queue_xdo() in combination.
+
+Specifically, stmmac_enabled_xdp() returns whether driver has been setup
+with BPF/XDP program as configured through stmmac_xdp_setup(). In order for
+get_tx_queue() to return correctly, the set_queue_xdp() and
+clear_queue_xdp() should be called as follow:
+
+ A) SKB mode --> XDP mode :-
+  (1)  stmmac_queue_pair_disable():
+       - perform tear-down for NAPI, IRQ, DMA and TX & RX descriptors.
+  (2) old_prog = xchg(&priv->xdp_prog, prog):
+       - add driver's XDP program
+       - After this, stmmac_enabled_xdp() returns TRUE.
+  (3) stmmac_queue_pair_enable():
+       - Since stmmac_enabled_xdp() returns TRUE, we set_queue_xdp(qid).
+         After this point, any call to get_tx_queue(qid) will return
+         address to xdp_queue[qid - num_queue_pairs]
+       - perform spin-up for TX & RX descriptors, DMA, IRQ and NAPI.
+
+ B) XDP mode --> SKB mode:-
+  (1)  stmmac_queue_pair_disable():
+       - HERE, get_tx_queue(qid) will still return to xdp_queue[qid]
+         because we don't call clear_queue_xdp() here.
+       - perform tear-down for NAPI, IRQ, DMA and TX & RX descriptors.
+  (2) old_prog = xchg(&priv->xdp_prog, prog):
+       - remove driver's XDP program
+       - After this, stmmac_enabled_xdp() returns FALSE.
+  (3) stmmac_queue_pair_enable():
+       - Since stmmac_enabled_xdp() returns FALSE, and we do
+         clear_queue_xdp(qid). After this point, any call to
+         get_tx_queue(qid) will return address to tx_queue[qid]
+       - perform spin-up for TX & RX descriptors, DMA, IRQ and NAPI.
+
+Special note: the queue id used for xdp_queue[] is always offset by
+num_queue_pairs because XSK uses zero-based queue index. So, internally,
+in the driver converts the XSK's queue index as above.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h      | 12 +-----------
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 10 ++--------
+ 2 files changed, 3 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 6dc20a7605d1..6a7da8bb8b3b 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -306,9 +306,6 @@ struct stmmac_priv {
+ 	/* WA for EST */
+ 	int est_hw_del;
+ 
+-	/* Flag to track driver state from normal->xdp or vice versa */
+-	bool cur_mode_is_normal;
+-
+ 	/* XDP BPF Program */
+ 	struct bpf_prog *xdp_prog;
+ 
+@@ -368,11 +365,7 @@ static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
+ 
+ static inline bool queue_is_xdp(struct stmmac_priv *priv, u32 queue_index)
+ {
+-	if (priv->tx_queue_is_xdp[queue_index] &&
+-	    !priv->cur_mode_is_normal)
+-		return true;
+-
+-	return false;
++	return priv->tx_queue_is_xdp[queue_index];
+ }
+ 
+ static inline void set_queue_xdp(struct stmmac_priv *priv, u32 queue_index)
+@@ -388,9 +381,6 @@ static inline void clear_queue_xdp(struct stmmac_priv *priv, u32 queue_index)
+ static inline struct stmmac_tx_queue *get_tx_queue(struct stmmac_priv *priv,
+ 						   u32 queue_index)
+ {
+-	if (queue_is_xdp(priv, queue_index) && !priv->cur_mode_is_normal)
+-		return &priv->tx_queue[queue_index];
+-
+ 	return queue_is_xdp(priv, queue_index) ?
+ 	       &priv->xdp_queue[queue_index - priv->plat->num_queue_pairs] :
+ 	       &priv->tx_queue[queue_index];
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 430120e3d1be..58128ff4a061 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1738,8 +1738,7 @@ static void dma_free_tx_skbufs(struct stmmac_priv *priv, u32 queue)
+ 	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 	int i;
+ 
+-	if (queue_is_xdp(priv, queue) && tx_q->xsk_umem &&
+-	    !priv->cur_mode_is_normal) {
++	if (queue_is_xdp(priv, queue) && tx_q->xsk_umem) {
+ 		stmmac_xsk_clean_tx_queue(tx_q);
+ 	} else {
+ 		for (i = 0; i < priv->dma_tx_size; i++)
+@@ -3546,8 +3545,6 @@ static int stmmac_open(struct net_device *dev)
+ 	if (!priv->dma_tx_size)
+ 		priv->dma_tx_size = DMA_DEFAULT_TX_SIZE;
+ 
+-	priv->cur_mode_is_normal = true;
+-
+ 	ret = alloc_dma_desc_resources(priv);
+ 	if (ret < 0) {
+ 		netdev_err(priv->dev, "%s: DMA descriptors allocation failed\n",
+@@ -5861,9 +5858,6 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 
+ 	old_prog = xchg(&priv->xdp_prog, prog);
+ 
+-	/* Begin transition between normal->xdp or xdp->normal */
+-	priv->cur_mode_is_normal = !priv->cur_mode_is_normal;
+-
+ 	for (i = 0; i < priv->plat->num_queue_pairs; i++) {
+ 		err = stmmac_queue_pair_enable(priv, i);
+ 		if (err)
+@@ -5876,7 +5870,7 @@ static int stmmac_xdp_setup(struct stmmac_priv *priv,
+ 	/* Kick start the NAPI context if there is an AF_XDP socket open
+ 	 * on that queue id. This so that receiving will start.
+ 	 */
+-	if (need_reset && !priv->cur_mode_is_normal)
++	if (need_reset)
+ 		for (i = 0; i < priv->plat->num_queue_pairs; i++)
+ 			if (priv->xdp_queue[i].xsk_umem)
+ 				(void)stmmac_xsk_wakeup(priv->dev, i,
+-- 
+2.17.1
+

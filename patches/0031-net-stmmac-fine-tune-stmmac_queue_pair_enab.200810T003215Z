@@ -1,0 +1,85 @@
+From a27f0d51ae8972763a9e2e87270e9e1284fbfaa3 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Tue, 2 Jun 2020 12:03:38 +0800
+Subject: [PATCH 31/78] net: stmmac: fine-tune
+ stmmac_queue_pair_enable|disable() to only XDP Queue
+
+Previously, stmmac_xdp_setup() loops through all XDP queue pairs from 0 to
+num_queue_pairs and aggresively tear-down and build new RX & TX descriptors
+rings even though there is XSK UMEM assigned to it.
+
+Now, we make stmmac_queue_pair_enable|disable() more fine tuned and
+explained below:-
+
+To use a pair of XSK queue, inside the kernel driver, it involves:-
+ 1) stmmac_xsk_umem_enable() :-
+      Here, priv->af_xdp_zc_qps is SET to mark which XDP queue-pair has
+      XSK UMEM mapped.
+
+ 2) stmmac_xdp_setup() :-
+      stmmac_all_queue_pairs_disable() --- (A)
+      xchg(&priv->xdp_prog, prog)
+      stmmac_all_queue_pairs_enable()  --- (B)
+
+To tear-down a pair of XSK queue, inside the kernel driver, we have:-
+ 3) stmmac_xdp_setup() :-
+      stmmac_all_queue_pairs_disable() --- (C)
+      xchg(&priv->xdp_prog, prog)
+      stmmac_all_queue_pairs_enable()  --- (D)
+
+ 4) stmmac_xsk_umem_disable() :-
+      Here, priv->af_xdp_zc_qps is CLEARED to mark which XDP queue-pair
+      has XSK UMEM unmapped.
+
+Now, we are the following flag inside both stmmac_all_queue_pairs_disable|
+enable():-
+
+    if (!test_bit(qid, priv->af_xdp_zc_qps))
+        return 0;
+
+With above condition checking, for XDP queue pair that does not have
+XSK UMEM assigned to them will skip the tearing-down and rebuilding
+process, say for XDP Queue Index=1 which maps to RXQ-1, TXQ-1 and
+TXQ-5(XDP), the above condition check will be:-
+
+ (A) Tear-down RXQ-1, TXQ-1, TXQ-5
+ (B) We will stmmac_enabled_xdp() is SET && set_queue_xdp(TXQ5), then
+     rebuild all RXQ-1 with XSK RX UMEM and TXQ-5 with XSK TX UMEM
+ (C) Tear-down TXQ-1, TXQ-1, TXQ-5
+ (D) Here, as priv->af_xdp_zc_qps is still SET, then we will have
+     stmmac_enabled_xdp() return CLEAR and we do clear_queue_xdp(TXQ5).
+     Now, stmmac_xsk_rx|tx_umem() returns NULL and the entire RXQ-1 and
+     TXQ-5 are rebuilt with SKB frame buffer.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 719bb012e9eb..59cb6d052b2c 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -5731,6 +5731,9 @@ int stmmac_queue_pair_enable(struct stmmac_priv *priv, u16 qid)
+ 		return -EINVAL;
+ 	}
+ 
++	if (!test_bit(qid, priv->af_xdp_zc_qps))
++		return 0;
++
+ 	/* XDP BPF must be loaded before TX & XDP TX queue pair are enabled and
+ 	 * the Tx XDP queue is assigned with higher TxQ starting from
+ 	 * num_queue_pairs. For example, for controller with 8 HW DMA channels
+@@ -5801,6 +5804,9 @@ int stmmac_queue_pair_disable(struct stmmac_priv *priv, u16 qid)
+ 		return -EINVAL;
+ 	}
+ 
++	if (!test_bit(qid, priv->af_xdp_zc_qps))
++		return 0;
++
+ 	stmmac_napi_control(priv, qid, false);
+ 	ret = stmmac_txrx_irq_control(priv, qid, false);
+ 	if (ret)
+-- 
+2.17.1
+

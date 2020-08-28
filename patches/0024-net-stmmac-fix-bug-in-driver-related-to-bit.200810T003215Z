@@ -1,0 +1,103 @@
+From 9d64cf0bbb738de4e60e928fe1ee8d27562fb5d0 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Mon, 25 May 2020 21:08:41 +0800
+Subject: [PATCH 24/78] net: stmmac: fix bug in driver related to bitmap API
+
+test_bit(), clear_bit(), set_bit() operates on unsigned long *addr
+allocated using bitmap_zalloc() instead of unsigned long.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h      |  2 +-
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 11 ++++++++---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c  |  4 ++--
+ 3 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 40fa585d7fca..6dc20a7605d1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -313,7 +313,7 @@ struct stmmac_priv {
+ 	struct bpf_prog *xdp_prog;
+ 
+ 	/* AF_XDP zero-copy */
+-	unsigned long af_xdp_zc_qps; /* tracks AF_XDP ZC enabled qps */
++	unsigned long *af_xdp_zc_qps; /* tracks AF_XDP ZC enabled qps */
+ 	struct xdp_umem **xsk_umems;
+ };
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 2b1455550b6d..430120e3d1be 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1432,7 +1432,7 @@ static struct xdp_umem *stmmac_xsk_rx_umem(struct stmmac_priv *priv, u32 queue)
+ {
+ 	bool xdp_on = stmmac_enabled_xdp(priv);
+ 
+-	if (!xdp_on || !test_bit(queue, &priv->af_xdp_zc_qps))
++	if (!xdp_on || !test_bit(queue, priv->af_xdp_zc_qps))
+ 		return NULL;
+ 
+ 	return xdp_get_umem_from_qid(priv->dev, queue);
+@@ -1451,7 +1451,7 @@ static struct xdp_umem *stmmac_xsk_tx_umem(struct stmmac_priv *priv, u32 queue)
+ 	if (queue_is_xdp(priv, queue))
+ 		queue -= priv->plat->num_queue_pairs;
+ 
+-	if (!xdp_on || !test_bit(queue, &priv->af_xdp_zc_qps))
++	if (!xdp_on || !test_bit(queue, priv->af_xdp_zc_qps))
+ 		return NULL;
+ 
+ 	return xdp_get_umem_from_qid(priv->dev, queue);
+@@ -6579,6 +6579,10 @@ int stmmac_dvr_probe(struct device *device,
+ 	/* Verify driver arguments */
+ 	stmmac_verify_args();
+ 
++	priv->af_xdp_zc_qps = bitmap_zalloc(MTL_MAX_TX_QUEUES / 2, GFP_KERNEL);
++	if (!priv->af_xdp_zc_qps)
++		return -ENOMEM;
++
+ 	/* Allocate workqueue */
+ 	priv->wq = create_singlethread_workqueue("stmmac_wq");
+ 	if (!priv->wq) {
+@@ -6811,7 +6815,7 @@ int stmmac_dvr_probe(struct device *device,
+ 
+ error_hw_init:
+ 	destroy_workqueue(priv->wq);
+-
++	bitmap_free(priv->af_xdp_zc_qps);
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(stmmac_dvr_probe);
+@@ -6856,6 +6860,7 @@ int stmmac_dvr_remove(struct device *dev)
+ 		stmmac_mdio_unregister(ndev);
+ 	destroy_workqueue(priv->wq);
+ 	mutex_destroy(&priv->lock);
++	bitmap_free(priv->af_xdp_zc_qps);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index 32eda8182447..9cf9f7c8afc5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -99,7 +99,7 @@ static int stmmac_xsk_umem_enable(struct stmmac_priv *priv,
+ 	if (err)
+ 		return err;
+ 
+-	set_bit(qid, &priv->af_xdp_zc_qps);
++	set_bit(qid, priv->af_xdp_zc_qps);
+ 
+ 	if_running = netif_running(priv->dev) && stmmac_enabled_xdp(priv);
+ 
+@@ -147,7 +147,7 @@ static int stmmac_xsk_umem_disable(struct stmmac_priv *priv, u16 qid)
+ 			return err;
+ 	}
+ 
+-	clear_bit(qid, &priv->af_xdp_zc_qps);
++	clear_bit(qid, priv->af_xdp_zc_qps);
+ 	stmmac_xsk_umem_dma_unmap(priv, umem);
+ 
+ 	if (if_running) {
+-- 
+2.17.1
+

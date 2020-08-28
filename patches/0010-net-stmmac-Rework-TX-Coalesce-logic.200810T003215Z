@@ -1,0 +1,136 @@
+From c9b907a1d05a933de69ff6d35494a2f516f3ae46 Mon Sep 17 00:00:00 2001
+From: Jose Abreu <Jose.Abreu@synopsys.com>
+Date: Thu, 28 May 2020 22:37:01 +0800
+Subject: [PATCH 10/78] net: stmmac: Rework TX Coalesce logic
+
+Coalesce logic currently increments the number of packets and sets the
+IC bit when the coalesced packets have passed a given limit. This does
+not reflect very well what coalesce was meant for as we can have a large
+number of packets that are coalesced and then a single one, sent later
+on that has the IC bit.
+
+Rework the logic so that it coalesces only upon a limit of packets and
+sets the IC bit for large number of packets.
+
+Signed-off-by: Jose Abreu <Jose.Abreu@synopsys.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit c2837423cb54551302f037106830ee607b4563e0)
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 58 +++++++++++++------
+ 1 file changed, 39 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index a35c79a2866a..c5259c2f425d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -3812,16 +3812,17 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+ 	int nfrags = skb_shinfo(skb)->nr_frags;
+ 	u32 queue = skb_get_queue_mapping(skb);
++	unsigned int first_entry, tx_packets;
++	int tmp_pay_len = 0, first_tx;
+ 	struct stmmac_tx_queue *tx_q;
+-	unsigned int first_entry;
+ 	u8 proto_hdr_len, hdr;
+-	int tmp_pay_len = 0;
++	bool has_vlan, set_ic;
+ 	u32 pay_len, mss;
+ 	dma_addr_t des;
+-	bool has_vlan;
+ 	int i;
+ 
+ 	tx_q = &priv->tx_queue[queue];
++	first_tx = tx_q->cur_tx;
+ 
+ 	/* Compute header lengths */
+ 	if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4) {
+@@ -3939,16 +3940,26 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	tx_q->tx_skbuff[tx_q->cur_tx] = skb;
+ 
+ 	/* Manage tx mitigation */
+-	tx_q->tx_count_frames += nfrags + 1;
+-	if (likely(priv->tx_coal_frames > tx_q->tx_count_frames) &&
+-	    !((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
+-	      priv->hwts_tx_en)) {
+-		stmmac_tx_timer_arm(priv, queue);
+-	} else {
++	tx_packets = (tx_q->cur_tx + 1) - first_tx;
++	tx_q->tx_count_frames += tx_packets;
++
++	if ((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) && priv->hwts_tx_en)
++		set_ic = true;
++	else if (!priv->tx_coal_frames)
++		set_ic = false;
++	else if (tx_packets > priv->tx_coal_frames)
++		set_ic = true;
++	else if ((tx_q->tx_count_frames % priv->tx_coal_frames) < tx_packets)
++		set_ic = true;
++	else
++		set_ic = false;
++
++	if (set_ic) {
+ 		if (tx_q->tbs & STMMAC_TBS_AVAIL)
+ 			desc = &(tx_q->dma_enhtx + tx_q->cur_tx)->basic;
+ 		else
+ 			desc = tx_q->dma_tx + tx_q->cur_tx;
++
+ 		tx_q->tx_count_frames = 0;
+ 		stmmac_set_tx_ic(priv, desc);
+ 		priv->xstats.tx_set_ic_bit++;
+@@ -4060,6 +4071,7 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+  */
+ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
++	unsigned int first_entry, tx_packets, enh_desc;
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+ 	unsigned int nopaged_len = skb_headlen(skb);
+ 	int i, csum_insertion = 0, is_jumbo = 0;
+@@ -4068,13 +4080,12 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	int gso = skb_shinfo(skb)->gso_type;
+ 	struct dma_desc *desc, *first;
+ 	struct stmmac_tx_queue *tx_q;
+-	unsigned int first_entry;
+-	unsigned int enh_desc;
++	bool has_vlan, set_ic;
++	int entry, first_tx;
+ 	dma_addr_t des;
+-	bool has_vlan;
+-	int entry;
+ 
+ 	tx_q = &priv->tx_queue[queue];
++	first_tx = tx_q->cur_tx;
+ 
+ 	if (priv->tx_path_in_lpi_mode && priv->plat->eee_timer)
+ 		stmmac_disable_eee_mode(priv);
+@@ -4189,12 +4200,21 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	 * This approach takes care about the fragments: desc is the first
+ 	 * element in case of no SG.
+ 	 */
+-	tx_q->tx_count_frames += nfrags + 1;
+-	if (likely(priv->tx_coal_frames > tx_q->tx_count_frames) &&
+-	    !((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
+-	      priv->hwts_tx_en)) {
+-		stmmac_tx_timer_arm(priv, queue);
+-	} else {
++	tx_packets = (entry + 1) - first_tx;
++	tx_q->tx_count_frames += tx_packets;
++
++	if ((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) && priv->hwts_tx_en)
++		set_ic = true;
++	else if (!priv->tx_coal_frames)
++		set_ic = false;
++	else if (tx_packets > priv->tx_coal_frames)
++		set_ic = true;
++	else if ((tx_q->tx_count_frames % priv->tx_coal_frames) < tx_packets)
++		set_ic = true;
++	else
++		set_ic = false;
++
++	if (set_ic) {
+ 		if (likely(priv->extend_desc))
+ 			desc = &tx_q->dma_etx[entry].basic;
+ 		else if (tx_q->tbs & STMMAC_TBS_AVAIL)
+-- 
+2.17.1
+

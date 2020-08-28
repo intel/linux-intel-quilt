@@ -1,0 +1,131 @@
+From b84e9e700db5f97c506e7c01f6dc28c180d285e9 Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Wed, 27 May 2020 00:16:16 +0800
+Subject: [PATCH 32/78] net: stmmac: fix incorrect XDP tbs flag checking and
+ initialization
+
+We have different struct stmmac_tx_queue for SKB TX and XDP TX, so,
+fix driver code that incorrect uses tx_queue for XDP TXQ path.
+
+Also, the xdp_q->tbs should be setup during stmmac_open() too as we
+have different stmmac_tx_queue xdp_q[] for XDP mode. Take note that
+that at platform configuration level, the setting of STMMAC_TBS_AVAIL
+is based on queue index relative to HW TX Queue but since the index of
+XDP TX queue is zero-based, we need to factor in the num_queue_pairs
+value here.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 19 ++++++++++++++++---
+ .../net/ethernet/stmicro/stmmac/stmmac_tc.c   |  6 ++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.c  |  8 +++-----
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 59cb6d052b2c..9f37cac86955 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -1620,6 +1620,7 @@ static void init_dma_tx_desc_ring(struct stmmac_priv *priv, u32 queue)
+ 	if (queue_is_xdp(priv, queue)) {
+ 		spin_lock_init(&tx_q->xdp_xmit_lock);
+ 		tx_q->xsk_umem = stmmac_xsk_tx_umem(priv, queue);
++		tx_q->tbs = priv->tx_queue[tx_q->queue_index].tbs;
+ 	}
+ 
+ 	/* Setup the chained descriptor addresses */
+@@ -3520,6 +3521,18 @@ static int stmmac_open(struct net_device *dev)
+ 	if (!priv->plat->num_queue_pairs)
+ 		priv->plat->num_queue_pairs = priv->plat->max_combined;
+ 
++	/* Mirror XDP Tx TBS setting on the 2H of Tx Queue's TBS */
++	for (chan = 0; chan < priv->plat->num_queue_pairs; chan++) {
++		int qp_num = priv->plat->num_queue_pairs;
++		struct stmmac_tx_queue *xdp_q, *tx_q;
++
++		/* XDP TxQ takes the 2H of the total HW TxQ */
++		xdp_q = &priv->xdp_queue[chan];
++		tx_q = &priv->tx_queue[chan + qp_num];
++
++		xdp_q->tbs = tx_q->tbs;
++	}
++
+ 	/* Configure normal_tx_queue_count here as the value of num_queue_pairs
+ 	 * can be changed through stmmac_reinit_queues triggered by ethool
+ 	 */
+@@ -4481,7 +4494,7 @@ static int stmmac_xmit_xdp_queue(struct xdp_frame *xdpf,
+ 
+ 	if (likely(priv->extend_desc))
+ 		desc = (struct dma_desc *)(xdp_q->dma_etx + entry);
+-	else if (priv->tx_queue[xdp_q->queue_index].tbs & STMMAC_TBS_AVAIL)
++	else if (xdp_q->tbs & STMMAC_TBS_AVAIL)
+ 		desc = &xdp_q->dma_enhtx[entry].basic;
+ 	else
+ 		desc = xdp_q->dma_tx + entry;
+@@ -4583,7 +4596,7 @@ void stmmac_xdp_queue_update_tail(struct stmmac_tx_queue *xdp_q)
+ 		xdp_q->tx_tail_addr = xdp_q->dma_tx_phy +
+ 					(xdp_q->cur_tx *
+ 					sizeof(struct dma_extended_desc));
+-	else if (priv->tx_queue[xdp_q->queue_index].tbs & STMMAC_TBS_AVAIL)
++	else if (xdp_q->tbs & STMMAC_TBS_AVAIL)
+ 		xdp_q->tx_tail_addr = xdp_q->dma_tx_phy +
+ 					(xdp_q->cur_tx *
+ 					sizeof(struct dma_enhanced_tx_desc));
+@@ -5687,7 +5700,7 @@ static void stmmac_txrx_ch_init(struct stmmac_priv *priv, u16 qid)
+ 	stmmac_init_tx_chan(priv, priv->ioaddr, priv->plat->dma_cfg,
+ 			    xdp_q->dma_tx_phy, xdp_q->queue_index);
+ 
+-	if (priv->tx_queue[xdp_q->queue_index].tbs & STMMAC_TBS_AVAIL)
++	if (xdp_q->tbs & STMMAC_TBS_AVAIL)
+ 		stmmac_enable_tbs(priv, priv->ioaddr, 1, xdp_q->queue_index);
+ 
+ 	xdp_q->tx_tail_addr = xdp_q->dma_tx_phy;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
+index 1845cfdc391e..05f412047c4a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_tc.c
+@@ -820,6 +820,12 @@ static int tc_setup_etf(struct stmmac_priv *priv,
+ 	else
+ 		priv->tx_queue[qopt->queue].tbs &= ~STMMAC_TBS_EN;
+ 
++	if (queue_is_xdp(priv, qopt->queue)) {
++		struct stmmac_tx_queue *xdp_q = get_tx_queue(priv, qopt->queue);
++
++		xdp_q->tbs = priv->tx_queue[qopt->queue].tbs;
++	}
++
+ 	netdev_info(priv->dev, "%s ETF for Queue %d\n",
+ 		    qopt->enable ? "enabled" : "disabled", qopt->queue);
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index 9cf9f7c8afc5..5ffb34e74707 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -767,8 +767,7 @@ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ 
+ 		if (likely(priv->extend_desc))
+ 			tx_desc = (struct dma_desc *)(xdp_q->dma_etx + entry);
+-		else if (priv->tx_queue[xdp_q->queue_index].tbs &
+-			 STMMAC_TBS_AVAIL)
++		else if (xdp_q->tbs & STMMAC_TBS_AVAIL)
+ 			tx_desc = &xdp_q->dma_enhtx[entry].basic;
+ 		else
+ 			tx_desc = xdp_q->dma_tx + entry;
+@@ -782,13 +781,12 @@ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ 		stmmac_set_desc_addr(priv, tx_desc, dma);
+ 
+ 		if (stmmac_enabled_xdp(priv) &&
+-		    (priv->tx_queue[xdp_q->queue_index].tbs & STMMAC_TBS_EN) &&
++		    (xdp_q->tbs & STMMAC_TBS_EN) &&
+ 		    desc.txtime > 0) {
+ 			if (stmmac_set_tbs_launchtime(priv, tx_desc,
+-						      desc.txtime)) {
++						      desc.txtime))
+ 				netdev_warn(priv->dev, "Launch time setting"
+ 						       "failed\n");
+-			}
+ 		}
+ 
+ 		if (unlikely(priv->hwts_all))
+-- 
+2.17.1
+

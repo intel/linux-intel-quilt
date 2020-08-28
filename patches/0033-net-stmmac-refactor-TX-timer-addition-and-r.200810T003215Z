@@ -1,0 +1,144 @@
+From 78d9cf3c1308d9cf26cdd738e97826fe40d0cb5a Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Thu, 28 May 2020 09:48:20 +0800
+Subject: [PATCH 33/78] net: stmmac: refactor TX timer addition and removal to
+ be used in XDP later
+
+We refactor the timer setup and delete functions into per-queue so that we
+can use the functions for XDP enable/disable later.
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  |  3 ++
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 43 +++++++++++--------
+ 2 files changed, 27 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 6a7da8bb8b3b..973fc2e9c4dd 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -358,6 +358,8 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev);
+ #define STMMAC_RX_DMA_ATTR \
+ 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
+ 
++#define STMMAC_COAL_TIMER(x) (jiffies + usecs_to_jiffies(x))
++
+ static inline bool stmmac_enabled_xdp(struct stmmac_priv *priv)
+ {
+ 	return !!priv->xdp_prog;
+@@ -412,6 +414,7 @@ void stmmac_get_tx_hwtstamp(struct stmmac_priv *priv, struct dma_desc *p,
+ 			    ktime_t *hwtstamp);
+ int stmmac_set_tbs_launchtime(struct stmmac_priv *priv, struct dma_desc *desc,
+ 			      u64 tx_time);
++void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue);
+ #if IS_ENABLED(CONFIG_STMMAC_SELFTESTS)
+ void stmmac_selftest_run(struct net_device *dev,
+ 			 struct ethtool_test *etest, u64 *buf);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 9f37cac86955..c5e28123c896 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -133,8 +133,6 @@ static void stmmac_init_fs(struct net_device *dev);
+ static void stmmac_exit_fs(struct net_device *dev);
+ #endif
+ 
+-#define STMMAC_COAL_TIMER(x) (jiffies + usecs_to_jiffies(x))
+-
+ /**
+  * stmmac_verify_args - verify the driver parameters.
+  * Description: it checks the driver parameters and set a default in case of
+@@ -2689,9 +2687,9 @@ static int stmmac_init_dma_engine(struct stmmac_priv *priv)
+ 	return ret;
+ }
+ 
+-static void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue)
++void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue)
+ {
+-	struct stmmac_tx_queue *tx_q = &priv->tx_queue[queue];
++	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 
+ 	mod_timer(&tx_q->txtimer, STMMAC_COAL_TIMER(priv->tx_coal_timer));
+ }
+@@ -2720,6 +2718,20 @@ static void stmmac_tx_timer(struct timer_list *t)
+ 	}
+ }
+ 
++static void stmmac_add_txtimer_q(struct stmmac_priv *priv, u32 queue)
++{
++	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
++
++	timer_setup(&tx_q->txtimer, stmmac_tx_timer, 0);
++}
++
++static void stmmac_remove_txtimer_q(struct stmmac_priv *priv, u32 queue)
++{
++	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
++
++	del_timer_sync(&tx_q->txtimer);
++}
++
+ /**
+  * stmmac_init_coalesce - init mitigation options.
+  * @priv: driver private structure
+@@ -2737,11 +2749,9 @@ static void stmmac_init_coalesce(struct stmmac_priv *priv)
+ 	priv->tx_coal_timer = STMMAC_COAL_TX_TIMER;
+ 	priv->rx_coal_frames = STMMAC_RX_FRAMES;
+ 
+-	for (chan = 0; chan < tx_channel_count; chan++) {
+-		struct stmmac_tx_queue *tx_q = get_tx_queue(priv, chan);
++	for (chan = 0; chan < tx_channel_count; chan++)
++		stmmac_add_txtimer_q(priv, chan);
+ 
+-		timer_setup(&tx_q->txtimer, stmmac_tx_timer, 0);
+-	}
+ }
+ 
+ static void stmmac_set_rings_length(struct stmmac_priv *priv)
+@@ -3616,11 +3626,8 @@ static int stmmac_open(struct net_device *dev)
+ irq_error:
+ 	phylink_stop(priv->phylink);
+ 
+-	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++) {
+-		struct stmmac_tx_queue *tx_q = get_tx_queue(priv, chan);
+-
+-		del_timer_sync(&tx_q->txtimer);
+-	}
++	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
++		stmmac_remove_txtimer_q(priv, chan);
+ 
+ 	stmmac_hw_teardown(dev);
+ init_error:
+@@ -3659,11 +3666,8 @@ static int stmmac_release(struct net_device *dev)
+ 
+ 	stmmac_disable_all_queues(priv);
+ 
+-	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++) {
+-		struct stmmac_tx_queue *tx_q = get_tx_queue(priv, chan);
+-
+-		del_timer_sync(&tx_q->txtimer);
+-	}
++	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
++		stmmac_remove_txtimer_q(priv, chan);
+ 
+ 	/* Free the IRQ lines */
+ 	stmmac_free_irq(dev, REQ_IRQ_ERR_ALL, 0);
+@@ -5824,6 +5828,7 @@ int stmmac_queue_pair_disable(struct stmmac_priv *priv, u16 qid)
+ 	ret = stmmac_txrx_irq_control(priv, qid, false);
+ 	if (ret)
+ 		return ret;
++
+ 	stmmac_txrx_dma_control(priv, qid, false);
+ 	stmmac_txrx_desc_control(priv, qid, false);
+ 
+@@ -6955,7 +6960,7 @@ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ 	stmmac_disable_all_queues(priv);
+ 
+ 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
+-		del_timer_sync(&priv->tx_queue[chan].txtimer);
++		stmmac_remove_txtimer_q(priv, chan);
+ 
+ 	/* Remove phy converter */
+ 	if (priv->plat->remove_phy_conv) {
+-- 
+2.17.1
+

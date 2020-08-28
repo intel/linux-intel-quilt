@@ -1,0 +1,57 @@
+From c625c4c10ff2d38c544c2eb0adece163bebd1aba Mon Sep 17 00:00:00 2001
+From: Jose Abreu <Jose.Abreu@synopsys.com>
+Date: Wed, 1 Apr 2020 19:29:03 +0200
+Subject: [PATCH 20/78] net: stmmac: Fix VLAN filtering when HW does not
+ support it
+
+If we don't have any filters available we can't rely upon the return
+code of stmmac_add_hw_vlan_rx_fltr() / stmmac_del_hw_vlan_rx_fltr(). Add
+a check for this.
+
+Fixes: ed64639bc1e0 ("net: stmmac: Add support for VLAN Rx filtering")
+Signed-off-by: Jose Abreu <Jose.Abreu@synopsys.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+(cherry picked from commit dd6a4998e64a7806b54c3eba1e5e7bf6c81ccf8c)
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c    | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 647cbe99d34a..2b1455550b6d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -6208,9 +6208,13 @@ static int stmmac_vlan_rx_add_vid(struct net_device *ndev, __be16 proto, u16 vid
+ 		return ret;
+ 	}
+ 
+-	ret = stmmac_add_hw_vlan_rx_fltr(priv, ndev, priv->hw, proto, vid);
++	if (priv->hw->num_vlan) {
++		ret = stmmac_add_hw_vlan_rx_fltr(priv, ndev, priv->hw, proto, vid);
++		if (ret)
++			return ret;
++	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vid)
+@@ -6226,9 +6230,11 @@ static int stmmac_vlan_rx_kill_vid(struct net_device *ndev, __be16 proto, u16 vi
+ 
+ 	clear_bit(vid, priv->active_vlans);
+ 
+-	ret = stmmac_del_hw_vlan_rx_fltr(priv, ndev, priv->hw, proto, vid);
+-	if(ret)
+-		return ret;
++	if (priv->hw->num_vlan) {
++		ret = stmmac_del_hw_vlan_rx_fltr(priv, ndev, priv->hw, proto, vid);
++		if (ret)
++			return ret;
++	}
+ 
+ 	return stmmac_vlan_update(priv, is_double);
+ }
+-- 
+2.17.1
+

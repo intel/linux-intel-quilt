@@ -1,0 +1,468 @@
+From ed913308fddf2cf62819b7165bb3fc5690293a5a Mon Sep 17 00:00:00 2001
+From: Ong Boon Leong <boon.leong.ong@intel.com>
+Date: Tue, 2 Jun 2020 16:28:41 +0800
+Subject: [PATCH 37/78] net: stmmac: add per-queue TX & RX coalesce ethtool
+ support
+
+To show per-queue coalesce setting:-
+ $ ethtool --per-queue <DEVNAME> queue_mask <MASK> --show-coalesce
+
+To set per-queue coalesce setting:-
+ $ ethtool --per-queue <DEVNAME> queue_mask <MASK> --coalesce \
+   [rx-usecs N] [rx-frames M] [tx-usecs P] [tx-frames Q]
+
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+---
+ .../ethernet/stmicro/stmmac/dwmac1000_dma.c   |   2 +-
+ .../net/ethernet/stmicro/stmmac/dwmac4_dma.c  |   7 +-
+ .../ethernet/stmicro/stmmac/dwxgmac2_dma.c    |   7 +-
+ drivers/net/ethernet/stmicro/stmmac/hwif.h    |   2 +-
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h  |   8 +-
+ .../ethernet/stmicro/stmmac/stmmac_ethtool.c  | 118 +++++++++++++++---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c |  50 +++++---
+ .../net/ethernet/stmicro/stmmac/stmmac_xsk.c  |  20 +--
+ 8 files changed, 154 insertions(+), 60 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac1000_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac1000_dma.c
+index 2bac49b49f73..90383abafa66 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac1000_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac1000_dma.c
+@@ -255,7 +255,7 @@ static void dwmac1000_get_hw_feature(void __iomem *ioaddr,
+ }
+ 
+ static void dwmac1000_rx_watchdog(void __iomem *ioaddr, u32 riwt,
+-				  u32 number_chan)
++				  u32 queue)
+ {
+ 	writel(riwt, ioaddr + DMA_RX_WATCHDOG);
+ }
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+index 350c267b3b7d..9ef903ddf175 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_dma.c
+@@ -223,12 +223,9 @@ static void dwmac4_dump_dma_regs(void __iomem *ioaddr, u32 *reg_space)
+ 		_dwmac4_dump_dma_regs(ioaddr, i, reg_space);
+ }
+ 
+-static void dwmac4_rx_watchdog(void __iomem *ioaddr, u32 riwt, u32 number_chan)
++static void dwmac4_rx_watchdog(void __iomem *ioaddr, u32 riwt, u32 queue)
+ {
+-	u32 chan;
+-
+-	for (chan = 0; chan < number_chan; chan++)
+-		writel(riwt, ioaddr + DMA_CHAN_RX_WATCHDOG(chan));
++	writel(riwt, ioaddr + DMA_CHAN_RX_WATCHDOG(queue));
+ }
+ 
+ static void dwmac4_dma_rx_chan_op_mode(void __iomem *ioaddr, int mode,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwxgmac2_dma.c b/drivers/net/ethernet/stmicro/stmmac/dwxgmac2_dma.c
+index fbb7c8efc7d3..73355344b072 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwxgmac2_dma.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwxgmac2_dma.c
+@@ -437,12 +437,9 @@ static void dwxgmac2_get_hw_feature(void __iomem *ioaddr,
+ 	dma_cap->frpsel = (hw_cap & XGMAC_HWFEAT_FRPSEL) >> 3;
+ }
+ 
+-static void dwxgmac2_rx_watchdog(void __iomem *ioaddr, u32 riwt, u32 nchan)
++static void dwxgmac2_rx_watchdog(void __iomem *ioaddr, u32 riwt, u32 queue)
+ {
+-	u32 i;
+-
+-	for (i = 0; i < nchan; i++)
+-		writel(riwt & XGMAC_RWT, ioaddr + XGMAC_DMA_CH_Rx_WATCHDOG(i));
++	writel(riwt & XGMAC_RWT, ioaddr + XGMAC_DMA_CH_Rx_WATCHDOG(queue));
+ }
+ 
+ static void dwxgmac2_set_rx_ring_len(void __iomem *ioaddr, u32 len, u32 chan)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/hwif.h b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+index 245d4393f230..1a006b01576a 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/hwif.h
++++ b/drivers/net/ethernet/stmicro/stmmac/hwif.h
+@@ -209,7 +209,7 @@ struct stmmac_dma_ops {
+ 	void (*get_hw_feature)(void __iomem *ioaddr,
+ 			       struct dma_features *dma_cap);
+ 	/* Program the HW RX Watchdog */
+-	void (*rx_watchdog)(void __iomem *ioaddr, u32 riwt, u32 number_chan);
++	void (*rx_watchdog)(void __iomem *ioaddr, u32 riwt, u32 queue);
+ 	void (*set_tx_ring_len)(void __iomem *ioaddr, u32 len, u32 chan);
+ 	void (*set_rx_ring_len)(void __iomem *ioaddr, u32 len, u32 chan);
+ 	void (*set_rx_tail_ptr)(void __iomem *ioaddr, u32 tail_ptr, u32 chan);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 973fc2e9c4dd..8c48e93a797d 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -173,9 +173,9 @@ struct stmmac_flow_entry {
+ 
+ struct stmmac_priv {
+ 	/* Frequently used values are kept adjacent for cache effect */
+-	u32 tx_coal_frames;
+-	u32 tx_coal_timer;
+-	u32 rx_coal_frames;
++	u32 tx_coal_frames[MTL_MAX_TX_QUEUES];
++	u32 tx_coal_timer[MTL_MAX_TX_QUEUES];
++	u32 rx_coal_frames[MTL_MAX_RX_QUEUES];
+ 
+ 	int tx_coalesce;
+ 	int hwts_tx_en;
+@@ -186,7 +186,7 @@ struct stmmac_priv {
+ 
+ 	unsigned int dma_buf_sz;
+ 	unsigned int rx_copybreak;
+-	u32 rx_riwt;
++	u32 rx_riwt[MTL_MAX_RX_QUEUES];
+ 	int hwts_rx_en;
+ 
+ 	void __iomem *ioaddr;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index 172df51a82a4..a684eb505a2e 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -846,28 +846,75 @@ static u32 stmmac_riwt2usec(u32 riwt, struct stmmac_priv *priv)
+ 	return (riwt * 256) / (clk / 1000000);
+ }
+ 
+-static int stmmac_get_coalesce(struct net_device *dev,
+-			       struct ethtool_coalesce *ec)
++static int __stmmac_get_coalesce(struct net_device *dev,
++				 struct ethtool_coalesce *ec,
++				 int queue)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
++	u32 max_cnt;
++	u32 rx_cnt;
++	u32 tx_cnt;
+ 
+-	ec->tx_coalesce_usecs = priv->tx_coal_timer;
+-	ec->tx_max_coalesced_frames = priv->tx_coal_frames;
++	rx_cnt = priv->plat->rx_queues_to_use;
++	tx_cnt = priv->plat->tx_queues_to_use;
++	max_cnt = max(rx_cnt, tx_cnt);
+ 
+-	if (priv->use_riwt) {
+-		ec->rx_max_coalesced_frames = priv->rx_coal_frames;
+-		ec->rx_coalesce_usecs = stmmac_riwt2usec(priv->rx_riwt, priv);
++	if (queue < 0)
++		queue = 0;
++	else if (queue >= max_cnt)
++		return -EINVAL;
++
++	if (queue < tx_cnt) {
++		ec->tx_coalesce_usecs = priv->tx_coal_timer[queue];
++		ec->tx_max_coalesced_frames = priv->tx_coal_frames[queue];
++	} else {
++		ec->tx_coalesce_usecs = -1;
++		ec->tx_max_coalesced_frames = -1;
++	}
++
++	if (priv->use_riwt && queue < rx_cnt) {
++		ec->rx_max_coalesced_frames = priv->rx_coal_frames[queue];
++		ec->rx_coalesce_usecs = stmmac_riwt2usec(priv->rx_riwt[queue],
++							 priv);
++	} else {
++		ec->rx_max_coalesced_frames = -1;
++		ec->rx_coalesce_usecs = -1;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+-static int stmmac_set_coalesce(struct net_device *dev,
++static int stmmac_get_coalesce(struct net_device *dev,
+ 			       struct ethtool_coalesce *ec)
++{
++	return __stmmac_get_coalesce(dev, ec, -1);
++}
++
++static int stmmac_get_per_queue_coalesce(struct net_device *dev, u32 queue,
++					 struct ethtool_coalesce *ec)
++{
++	return __stmmac_get_coalesce(dev, ec, queue);
++}
++
++static int __stmmac_set_coalesce(struct net_device *dev,
++				 struct ethtool_coalesce *ec,
++				 int queue)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
+-	u32 rx_cnt = priv->plat->rx_queues_to_use;
++	bool all_queues = false;
+ 	unsigned int rx_riwt;
++	u32 max_cnt;
++	u32 rx_cnt;
++	u32 tx_cnt;
++
++	rx_cnt = priv->plat->rx_queues_to_use;
++	tx_cnt = priv->plat->tx_queues_to_use;
++	max_cnt = max(rx_cnt, tx_cnt);
++
++	if (queue < 0)
++		all_queues = true;
++	else if (queue >= max_cnt)
++		return -EINVAL;
+ 
+ 	/* Check not supported parameters  */
+ 	if ((ec->rx_coalesce_usecs_irq) ||
+@@ -889,8 +936,23 @@ static int stmmac_set_coalesce(struct net_device *dev,
+ 		if ((rx_riwt > MAX_DMA_RIWT) || (rx_riwt < MIN_DMA_RIWT))
+ 			return -EINVAL;
+ 
+-		priv->rx_riwt = rx_riwt;
+-		stmmac_rx_watchdog(priv, priv->ioaddr, priv->rx_riwt, rx_cnt);
++		if (all_queues) {
++			int i;
++
++			for (i = 0; i < rx_cnt; i++) {
++				priv->rx_riwt[i] = rx_riwt;
++				stmmac_rx_watchdog(priv, priv->ioaddr,
++						   rx_riwt, i);
++				priv->rx_coal_frames[i] =
++					ec->rx_max_coalesced_frames;
++			}
++		} else if (queue < rx_cnt) {
++			priv->rx_riwt[queue] = rx_riwt;
++			stmmac_rx_watchdog(priv, priv->ioaddr,
++					   rx_riwt, queue);
++			priv->rx_coal_frames[queue] =
++				ec->rx_max_coalesced_frames;
++		}
+ 	}
+ 
+ 	if ((ec->tx_coalesce_usecs == 0) &&
+@@ -901,13 +963,37 @@ static int stmmac_set_coalesce(struct net_device *dev,
+ 	    (ec->tx_max_coalesced_frames > STMMAC_TX_MAX_FRAMES))
+ 		return -EINVAL;
+ 
+-	/* Only copy relevant parameters, ignore all others. */
+-	priv->tx_coal_frames = ec->tx_max_coalesced_frames;
+-	priv->tx_coal_timer = ec->tx_coalesce_usecs;
+-	priv->rx_coal_frames = ec->rx_max_coalesced_frames;
++	if (all_queues) {
++		int i;
++
++		for (i = 0; i < tx_cnt; i++) {
++			priv->tx_coal_frames[i] =
++				ec->tx_max_coalesced_frames;
++			priv->tx_coal_timer[i] =
++				ec->tx_coalesce_usecs;
++		}
++	} else if (queue < tx_cnt) {
++		priv->tx_coal_frames[queue] =
++			ec->tx_max_coalesced_frames;
++		priv->tx_coal_timer[queue] =
++			ec->tx_coalesce_usecs;
++	}
++
+ 	return 0;
+ }
+ 
++static int stmmac_set_coalesce(struct net_device *dev,
++			       struct ethtool_coalesce *ec)
++{
++	return __stmmac_set_coalesce(dev, ec, -1);
++}
++
++static int stmmac_set_per_queue_coalesce(struct net_device *dev, u32 queue,
++					 struct ethtool_coalesce *ec)
++{
++	return __stmmac_set_coalesce(dev, ec, queue);
++}
++
+ static int stmmac_get_rxnfc(struct net_device *dev,
+ 			    struct ethtool_rxnfc *rxnfc, u32 *rule_locs)
+ {
+@@ -1115,6 +1201,8 @@ static const struct ethtool_ops stmmac_ethtool_ops = {
+ 	.set_channels = stmmac_set_channels,
+ 	.get_tunable = stmmac_get_tunable,
+ 	.set_tunable = stmmac_set_tunable,
++	.get_per_queue_coalesce = stmmac_get_per_queue_coalesce,
++	.set_per_queue_coalesce = stmmac_set_per_queue_coalesce,
+ 	.get_link_ksettings = stmmac_ethtool_get_link_ksettings,
+ 	.set_link_ksettings = stmmac_ethtool_set_link_ksettings,
+ };
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index f073964f959d..eab53d5c7f75 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2387,7 +2387,8 @@ static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
+ 
+ 	/* We still have pending packets, let's call for a new scheduling */
+ 	if (tx_q->dirty_tx != tx_q->cur_tx)
+-		mod_timer(&tx_q->txtimer, STMMAC_COAL_TIMER(priv->tx_coal_timer));
++		mod_timer(&tx_q->txtimer,
++			  STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]));
+ 
+ 	if (!queue_is_xdp(priv, queue))
+ 		__netif_tx_unlock_bh(netdev_get_tx_queue(priv->dev, queue));
+@@ -2691,7 +2692,8 @@ void stmmac_tx_timer_arm(struct stmmac_priv *priv, u32 queue)
+ {
+ 	struct stmmac_tx_queue *tx_q = get_tx_queue(priv, queue);
+ 
+-	mod_timer(&tx_q->txtimer, STMMAC_COAL_TIMER(priv->tx_coal_timer));
++	mod_timer(&tx_q->txtimer,
++		  STMMAC_COAL_TIMER(priv->tx_coal_timer[queue]));
+ }
+ 
+ /**
+@@ -2743,15 +2745,17 @@ static void stmmac_remove_txtimer_q(struct stmmac_priv *priv, u32 queue)
+ static void stmmac_init_coalesce(struct stmmac_priv *priv)
+ {
+ 	u32 tx_channel_count = priv->plat->tx_queues_to_use;
++	u32 rx_channel_count = priv->plat->rx_queues_to_use;
+ 	u32 chan;
+ 
+-	priv->tx_coal_frames = STMMAC_TX_FRAMES;
+-	priv->tx_coal_timer = STMMAC_COAL_TX_TIMER;
+-	priv->rx_coal_frames = STMMAC_RX_FRAMES;
+-
+-	for (chan = 0; chan < tx_channel_count; chan++)
++	for (chan = 0; chan < tx_channel_count; chan++) {
++		priv->tx_coal_frames[chan] = STMMAC_TX_FRAMES;
++		priv->tx_coal_timer[chan] = STMMAC_COAL_TX_TIMER;
+ 		stmmac_add_txtimer_q(priv, chan);
++	}
+ 
++	for (chan = 0; chan < rx_channel_count; chan++)
++		priv->rx_coal_frames[chan] = STMMAC_RX_FRAMES;
+ }
+ 
+ static void stmmac_set_rings_length(struct stmmac_priv *priv)
+@@ -3078,11 +3082,15 @@ static int stmmac_hw_setup(struct net_device *dev, bool init_ptp,
+ 	priv->tx_lpi_timer = STMMAC_DEFAULT_LPI_TIMER;
+ 
+ 	if (priv->use_riwt) {
+-		if (!priv->rx_riwt)
+-			priv->rx_riwt = DEF_DMA_RIWT;
++		u32 queue;
++
++		for (queue = 0; queue < rx_cnt; queue++) {
++			if (!priv->rx_riwt[queue])
++				priv->rx_riwt[queue] = DEF_DMA_RIWT;
+ 
+-		ret = stmmac_rx_watchdog(priv, priv->ioaddr, priv->rx_riwt,
+-					 rx_cnt);
++			stmmac_rx_watchdog(priv, priv->ioaddr,
++					   priv->rx_riwt[queue], queue);
++		}
+ 	}
+ 
+ 	if (priv->hw->pcs)
+@@ -3958,11 +3966,12 @@ static netdev_tx_t stmmac_tso_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	if ((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) && priv->hwts_tx_en)
+ 		set_ic = true;
+-	else if (!priv->tx_coal_frames)
++	else if (!priv->tx_coal_frames[queue])
+ 		set_ic = false;
+-	else if (tx_packets > priv->tx_coal_frames)
++	else if (tx_packets > priv->tx_coal_frames[queue])
+ 		set_ic = true;
+-	else if ((tx_q->tx_count_frames % priv->tx_coal_frames) < tx_packets)
++	else if ((tx_q->tx_count_frames %
++		  priv->tx_coal_frames[queue]) < tx_packets)
+ 		set_ic = true;
+ 	else
+ 		set_ic = false;
+@@ -4218,11 +4227,12 @@ static netdev_tx_t stmmac_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	if ((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) && priv->hwts_tx_en)
+ 		set_ic = true;
+-	else if (!priv->tx_coal_frames)
++	else if (!priv->tx_coal_frames[queue])
+ 		set_ic = false;
+-	else if (tx_packets > priv->tx_coal_frames)
++	else if (tx_packets > priv->tx_coal_frames[queue])
+ 		set_ic = true;
+-	else if ((tx_q->tx_count_frames % priv->tx_coal_frames) < tx_packets)
++	else if ((tx_q->tx_count_frames %
++		  priv->tx_coal_frames[queue]) < tx_packets)
+ 		set_ic = true;
+ 	else
+ 		set_ic = false;
+@@ -4444,11 +4454,11 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv, u32 queue)
+ 		stmmac_refill_desc3(priv, rx_q, p);
+ 
+ 		rx_q->rx_count_frames++;
+-		rx_q->rx_count_frames += priv->rx_coal_frames;
+-		if (rx_q->rx_count_frames > priv->rx_coal_frames)
++		rx_q->rx_count_frames += priv->rx_coal_frames[queue];
++		if (rx_q->rx_count_frames > priv->rx_coal_frames[queue])
+ 			rx_q->rx_count_frames = 0;
+ 
+-		use_rx_wd = !priv->rx_coal_frames;
++		use_rx_wd = !priv->rx_coal_frames[queue];
+ 		use_rx_wd |= rx_q->rx_count_frames > 0;
+ 		if (!priv->use_riwt)
+ 			use_rx_wd = false;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+index bb2d7958fd22..6739bbf9e5bd 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_xsk.c
+@@ -306,6 +306,7 @@ __stmmac_alloc_rx_buffers_zc(struct stmmac_rx_queue *rx_q, u16 count,
+ 					struct stmmac_rx_buffer *buf))
+ {
+ 	struct stmmac_priv *priv = rx_q->priv_data;
++	int qid = rx_q->queue_index;
+ 	u16 entry = rx_q->dirty_rx;
+ 	bool ok = true;
+ 	struct stmmac_rx_buffer *buf;
+@@ -334,11 +335,11 @@ __stmmac_alloc_rx_buffers_zc(struct stmmac_rx_queue *rx_q, u16 count,
+ 		stmmac_refill_desc3(priv, rx_q, rx_desc);
+ 
+ 		rx_q->rx_count_frames++;
+-		rx_q->rx_count_frames += priv->rx_coal_frames;
+-		if (rx_q->rx_count_frames > priv->rx_coal_frames)
++		rx_q->rx_count_frames += priv->rx_coal_frames[qid];
++		if (rx_q->rx_count_frames > priv->rx_coal_frames[qid])
+ 			rx_q->rx_count_frames = 0;
+ 
+-		use_rx_wd = !priv->rx_coal_frames;
++		use_rx_wd = !priv->rx_coal_frames[qid];
+ 		use_rx_wd |= rx_q->rx_count_frames > 0;
+ 		if (!priv->use_riwt)
+ 			use_rx_wd = false;
+@@ -359,7 +360,7 @@ __stmmac_alloc_rx_buffers_zc(struct stmmac_rx_queue *rx_q, u16 count,
+ 		rx_q->rx_tail_addr = rx_q->dma_rx_phy + (last_refill *
+ 				     sizeof(struct dma_desc));
+ 		stmmac_set_rx_tail_ptr(priv, priv->ioaddr,
+-				       rx_q->rx_tail_addr, rx_q->queue_index);
++				       rx_q->rx_tail_addr, qid);
+ 	}
+ 
+ 	return ok;
+@@ -753,6 +754,7 @@ int stmmac_rx_zc(struct stmmac_priv *priv, int budget, u32 queue)
+ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ {
+ 	struct stmmac_priv *priv = xdp_q->priv_data;
++	int qid = xdp_q->queue_index;
+ 	struct dma_desc *tx_desc = NULL;
+ 	bool work_done = true;
+ 	unsigned int tx_packets;
+@@ -806,12 +808,12 @@ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ 		if (unlikely(priv->hwts_all)) {
+ 			stmmac_enable_tx_timestamp(priv, tx_desc);
+ 			set_ic = true;
+-		} else if (!priv->tx_coal_frames) {
++		} else if (!priv->tx_coal_frames[qid]) {
+ 			set_ic = false;
+-		} else if (tx_packets > priv->tx_coal_frames) {
++		} else if (tx_packets > priv->tx_coal_frames[qid]) {
+ 			set_ic = true;
+-		} else if ((xdp_q->tx_count_frames % priv->tx_coal_frames) <
+-			   tx_packets) {
++		} else if ((xdp_q->tx_count_frames %
++			    priv->tx_coal_frames[qid]) < tx_packets) {
+ 			set_ic = true;
+ 		} else {
+ 			set_ic = false;
+@@ -841,7 +843,7 @@ static bool stmmac_xmit_zc(struct stmmac_tx_queue *xdp_q, unsigned int budget)
+ 		xdp_q->cur_tx = entry;
+ 		stmmac_xdp_queue_update_tail(xdp_q);
+ 		xsk_umem_consume_tx_done(xdp_q->xsk_umem);
+-		stmmac_tx_timer_arm(priv, xdp_q->queue_index);
++		stmmac_tx_timer_arm(priv, qid);
+ 	}
+ 
+ 	return !!budget && work_done;
+-- 
+2.17.1
+
