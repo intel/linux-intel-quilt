@@ -1,0 +1,187 @@
+From 483f95fd8cc03e667f78c6ca0b6c4feb4a0da1f3 Mon Sep 17 00:00:00 2001
+From: Yuan Liu <yuan1.liu@intel.com>
+Date: Wed, 26 Aug 2020 14:04:11 +0800
+Subject: [PATCH 11/11] vhm: add new IC and HC APIs to create and destroy a
+ virtual device in hypervisor
+
+Add IC_CREATE_HV_VDEV/IC_DESTROY_HV_VDEV ioctls and HC_CREATE_VDEV/HC_DESTROY_VDEV
+hypercalls to create/destroy an emulated device in hypervisor
+
+Tracked-On: projectacrn/acrn-hypervisor#4853
+Signed-off-by: Yuan Liu <yuan1.liu@intel.com>
+Reviewed-by: Shuo A Liu <shuo.a.liu@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c         | 38 ++++++++++++++++++++++++++
+ drivers/vhm/vhm_hypercall.c        | 10 +++++++
+ include/linux/vhm/acrn_common.h    | 43 ++++++++++++++++++++++++++++++
+ include/linux/vhm/acrn_hv_defs.h   |  2 ++
+ include/linux/vhm/vhm_hypercall.h  |  2 ++
+ include/linux/vhm/vhm_ioctl_defs.h |  2 ++
+ 6 files changed, 97 insertions(+)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 83fbb5415203..8fe199a8d34e 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -611,6 +611,44 @@ static long vhm_dev_ioctl(struct file *filep,
+ 		break;
+ 	}
+ 
++	case IC_CREATE_HV_VDEV: {
++		struct acrn_emul_dev *dev;
++
++		dev = acrn_mempool_alloc(GFP_KERNEL);
++		if (dev == NULL)
++			return -EFAULT;
++		if (copy_from_user(dev, (void *)ioctl_param, sizeof(*dev))) {
++			ret = -EFAULT;
++		} else {
++			ret = hcall_create_vdev(vm->vmid,
++					virt_to_phys(dev));
++			if (ret < 0)
++				pr_err("vhm: failed to create emulated device!\n");
++		}
++		acrn_mempool_free(dev);
++		break;
++	}
++
++	case IC_DESTROY_HV_VDEV: {
++		struct acrn_emul_dev *dev;
++
++		dev = acrn_mempool_alloc(GFP_KERNEL);
++		if (dev == NULL)
++			return -EFAULT;
++
++		if (copy_from_user(dev, (void *)ioctl_param, sizeof(*dev))) {
++			ret = -EFAULT;
++		} else {
++			ret = hcall_destroy_vdev(vm->vmid,
++					virt_to_phys(dev));
++			if (ret < 0)
++				pr_err("vhm: failed to destroy emulated device!\n");
++					 break;
++		}
++		acrn_mempool_free(dev);
++		break;
++	}
++
+ 	case IC_SET_PTDEV_INTR_INFO: {
+ 		struct hc_ptdev_irq *hc_pt_irq;
+ 
+diff --git a/drivers/vhm/vhm_hypercall.c b/drivers/vhm/vhm_hypercall.c
+index 17a8736b3300..5de44ee98264 100644
+--- a/drivers/vhm/vhm_hypercall.c
++++ b/drivers/vhm/vhm_hypercall.c
+@@ -183,6 +183,16 @@ inline long hcall_deassign_mmiodev(unsigned long vmid, unsigned long addr)
+ 	return acrn_hypercall2(HC_DEASSIGN_MMIODEV, vmid, addr);
+ }
+ 
++inline long hcall_create_vdev(unsigned long vmid, unsigned long addr)
++{
++	return acrn_hypercall2(HC_CREATE_VDEV, vmid, addr);
++}
++
++inline long hcall_destroy_vdev(unsigned long vmid, unsigned long addr)
++{
++	return acrn_hypercall2(HC_DESTROY_VDEV, vmid, addr);
++}
++
+ inline long hcall_set_ptdev_intr_info(unsigned long vmid, unsigned long pt_irq)
+ {
+ 	return acrn_hypercall2(HC_SET_PTDEV_INTR_INFO, vmid, pt_irq);
+diff --git a/include/linux/vhm/acrn_common.h b/include/linux/vhm/acrn_common.h
+index 496888010a68..a2eedfae746d 100644
+--- a/include/linux/vhm/acrn_common.h
++++ b/include/linux/vhm/acrn_common.h
+@@ -518,6 +518,49 @@ struct acrn_mmiodev {
+ 
+ } __aligned(8);
+ 
++/**
++ * @brief Info to create or destroy a virtual PCI or legacy device for a VM
++ *
++ * the parameter for HC_CREATE_VDEV or HC_DESTROY_VDEV hypercall
++ */
++struct acrn_emul_dev {
++	/*
++	 * the identifier of the device, the low 32 bits represent the vendor
++	 * id and device id of PCI device and the high 32 bits represent the
++	 * device number of the legacy device
++	 */
++	union {
++		uint64_t value;
++		struct {
++			uint16_t vendor_id;
++			uint16_t device_id;
++			uint32_t legacy_device_number;
++		} fields;
++	} dev_id;
++
++	/*
++	 * the slot of the device, if the device is a PCI device, the slot
++	 * represents BDF, otherwise it represents legacy device slot number
++	 */
++	uint32_t slot;
++
++	/** reserved for extension */
++	uint32_t reserved0;
++
++	/** the IO resource address of the device, initialized by ACRN-DM. */
++	uint32_t io_addr[6];
++
++	/** the IO resource size of the device, initialized by ACRN-DM. */
++	uint32_t io_size[6];
++
++	/** the options for the virtual device, initialized by ACRN-DM. */
++	uint8_t args[128];
++
++	/** reserved for extension */
++	uint64_t reserved1[8];
++
++} __aligned(8);
++
+ /**
+  * @brief The guest config pointer offset.
+  *
+diff --git a/include/linux/vhm/acrn_hv_defs.h b/include/linux/vhm/acrn_hv_defs.h
+index 8dcdfbc37939..2311cc1ebb3a 100644
+--- a/include/linux/vhm/acrn_hv_defs.h
++++ b/include/linux/vhm/acrn_hv_defs.h
+@@ -117,6 +117,8 @@
+ #define HC_DEASSIGN_PCIDEV          _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x06)
+ #define HC_ASSIGN_MMIODEV           _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x07)
+ #define HC_DEASSIGN_MMIODEV         _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x08)
++#define HC_CREATE_VDEV              _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x09)
++#define HC_DESTROY_VDEV             _HC_ID(HC_ID, HC_ID_PCI_BASE + 0x0A)
+ 
+ /* DEBUG */
+ #define HC_ID_DBG_BASE              0x60UL
+diff --git a/include/linux/vhm/vhm_hypercall.h b/include/linux/vhm/vhm_hypercall.h
+index 104ddf92eb6e..db571cb3a233 100644
+--- a/include/linux/vhm/vhm_hypercall.h
++++ b/include/linux/vhm/vhm_hypercall.h
+@@ -167,6 +167,8 @@ inline long hcall_assign_pcidev(unsigned long vmid, unsigned long addr);
+ inline long hcall_deassign_pcidev(unsigned long vmid, unsigned long addr);
+ inline long hcall_assign_mmiodev(unsigned long vmid, unsigned long addr);
+ inline long hcall_deassign_mmiodev(unsigned long vmid, unsigned long addr);
++inline long hcall_create_vdev(unsigned long vmid, unsigned long addr);
++inline long hcall_destroy_vdev(unsigned long vmid, unsigned long addr);
+ inline long hcall_set_ptdev_intr_info(unsigned long vmid,
+ 		unsigned long pt_irq);
+ inline long hcall_reset_ptdev_intr_info(unsigned long vmid,
+diff --git a/include/linux/vhm/vhm_ioctl_defs.h b/include/linux/vhm/vhm_ioctl_defs.h
+index 163007f6f2e8..8c47535dd1a2 100644
+--- a/include/linux/vhm/vhm_ioctl_defs.h
++++ b/include/linux/vhm/vhm_ioctl_defs.h
+@@ -112,6 +112,8 @@
+ #define IC_DEASSIGN_PCIDEV             _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x06)
+ #define IC_ASSIGN_MMIODEV              _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x07)
+ #define IC_DEASSIGN_MMIODEV            _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x08)
++#define IC_CREATE_HV_VDEV              _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x09)
++#define IC_DESTROY_HV_VDEV             _IC_ID(IC_ID, IC_ID_PCI_BASE + 0x0A)
+ 
+ /* Power management */
+ #define IC_ID_PM_BASE                   0x60UL
+-- 
+2.17.1
+
