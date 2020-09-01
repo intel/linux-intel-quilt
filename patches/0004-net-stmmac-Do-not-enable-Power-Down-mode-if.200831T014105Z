@@ -1,0 +1,79 @@
+From 3f176b87c3f837eb2af46891a885ab9fdfc0727f Mon Sep 17 00:00:00 2001
+From: "Song, Yoong Siang" <yoong.siang.song@intel.com>
+Date: Mon, 10 Aug 2020 23:00:29 +0800
+Subject: [PATCH 04/11] net: stmmac: Do not enable Power Down mode if PHY WoL
+ thru PMC is used
+
+If PHY WoL interrupt will directly go through PMC without involving
+MAC, do not enable Power Down mode and do not set irq_wake flag.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c    | 16 ++++++++++------
+ drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c |  2 ++
+ include/linux/stmmac.h                           |  1 +
+ 3 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 90b8286cbc20..6379ab33ca62 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -7075,10 +7075,12 @@ int stmmac_suspend_main(struct stmmac_priv *priv, struct net_device *ndev)
+ 	if (priv->plat->has_serdes)
+ 		stmmac_serdes_powerdown(priv, ndev);
+ 
+-	/* Enable Power down mode by programming the PMT regs */
+ 	if (device_may_wakeup(priv->device)) {
+-		stmmac_pmt(priv, priv->hw, priv->wolopts);
+-		priv->irq_wake = 1;
++		/* Enable Power Down mode by programming the PMT regs. */
++		if (!priv->plat->phy_wol_thru_pmc) {
++			stmmac_pmt(priv, priv->hw, priv->wolopts);
++			priv->irq_wake = 1;
++		}
+ 	} else {
+ 		mutex_unlock(&priv->lock);
+ 		rtnl_lock();
+@@ -7166,10 +7168,12 @@ int stmmac_suspend(struct device *dev)
+ 	if (priv->plat->has_serdes)
+ 		stmmac_serdes_powerdown(priv, ndev);
+ 
+-	/* Enable Power down mode by programming the PMT regs */
+ 	if (device_may_wakeup(priv->device)) {
+-		stmmac_pmt(priv, priv->hw, priv->wolopts);
+-		priv->irq_wake = 1;
++		/* Enable Power Down mode by programming the PMT regs.*/
++		if (!priv->plat->phy_wol_thru_pmc) {
++			stmmac_pmt(priv, priv->hw, priv->wolopts);
++			priv->irq_wake = 1;
++		}
+ 	} else {
+ 		mutex_unlock(&priv->lock);
+ 		rtnl_lock();
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+index 2fd8f403e7c0..59af5cef23b4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_pci.c
+@@ -322,6 +322,8 @@ static int intel_mgbe_common_data(struct pci_dev *pdev,
+ 	plat->int_snapshot_en = 0;
+ 	plat->ext_snapshot_en = 0;
+ 
++	plat->phy_wol_thru_pmc = 1;
++
+ 	return 0;
+ }
+ 
+diff --git a/include/linux/stmmac.h b/include/linux/stmmac.h
+index f55ec48c3b9a..bdba12f4cbe8 100644
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -264,5 +264,6 @@ struct plat_stmmacenet_data {
+ 	bool eee_timer;
+ 	struct mdio_board_info *intel_bi;
+ 	struct dwxpcs_platform_data *xpcs_pdata;
++	bool phy_wol_thru_pmc;
+ };
+ #endif
+-- 
+2.17.1
+
