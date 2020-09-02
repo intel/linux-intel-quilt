@@ -1,0 +1,130 @@
+From 449a3927997e92d75d9ce184f74edf50858afcfd Mon Sep 17 00:00:00 2001
+From: Sean Christopherson <sean.j.christopherson@intel.com>
+Date: Fri, 15 Mar 2019 10:42:29 -0700
+Subject: [PATCH 20/75] x86/traps: Attempt to fixup exceptions in vDSO before
+ signaling
+
+vDSO functions can now leverage an exception fixup mechanism similar to
+kernel exception fixup.  For vDSO exception fixup, the initial user is
+Intel's Software Guard Extensions (SGX), which will wrap the low-level
+transitions to/from the enclave, i.e. EENTER and ERESUME instructions,
+in a vDSO function and leverage fixup to intercept exceptions that would
+otherwise generate a signal.  This allows the vDSO wrapper to return the
+fault information directly to its caller, obviating the need for SGX
+applications and libraries to juggle signal handlers.
+
+Attempt to fixup vDSO exceptions immediately prior to populating and
+sending signal information.  Except for the delivery mechanism, an
+exception in a vDSO function should be treated like any other exception
+in userspace, e.g. any fault that is successfully handled by the kernel
+should not be directly visible to userspace.
+
+Although it's debatable whether or not all exceptions are of interest to
+enclaves, defer to the vDSO fixup to decide whether to do fixup or
+generate a signal.  Future users of vDSO fixup, if there ever are any,
+will undoubtedly have different requirements than SGX enclaves, e.g. the
+fixup vs. signal logic can be made function specific if/when necessary.
+
+Suggested-by: Andy Lutomirski <luto@amacapital.net>
+Acked-by: Jethro Beekman <jethro@fortanix.com>
+Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+Signed-off-by: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>
+---
+ arch/x86/kernel/traps.c | 19 ++++++++++++++++---
+ arch/x86/mm/fault.c     |  8 ++++++++
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index 1f66d2d1e998..20a881485b6b 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -59,6 +59,7 @@
+ #include <asm/umip.h>
+ #include <asm/insn.h>
+ #include <asm/insn-eval.h>
++#include <asm/vdso.h>
+ 
+ #ifdef CONFIG_X86_64
+ #include <asm/x86_init.h>
+@@ -116,6 +117,9 @@ do_trap_no_signal(struct task_struct *tsk, int trapnr, const char *str,
+ 		tsk->thread.error_code = error_code;
+ 		tsk->thread.trap_nr = trapnr;
+ 		die(str, regs, error_code);
++	} else {
++		if (fixup_vdso_exception(regs, trapnr, error_code, 0))
++			return 0;
+ 	}
+ 
+ 	/*
+@@ -549,6 +553,9 @@ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
+ 		tsk->thread.error_code = error_code;
+ 		tsk->thread.trap_nr = X86_TRAP_GP;
+ 
++		if (fixup_vdso_exception(regs, X86_TRAP_GP, error_code, 0))
++			return;
++
+ 		show_signal(tsk, SIGSEGV, "", desc, regs, error_code);
+ 		force_sig(SIGSEGV);
+ 		goto exit;
+@@ -827,9 +834,12 @@ static void handle_debug(struct pt_regs *regs, unsigned long dr6, bool user)
+ #endif
+ 
+ 	if (notify_die(DIE_DEBUG, "debug", regs, (long)&dr6, 0,
+-		       SIGTRAP) == NOTIFY_STOP) {
+-		return;
+-	}
++		       SIGTRAP) == NOTIFY_STOP)
++		goto out;
++
++	if (user_mode(regs) &&
++	    fixup_vdso_exception(regs, X86_TRAP_DB, 0, 0))
++		goto out;
+ 
+ 	/* It's safe to allow irq's after DR6 has been saved */
+ 	cond_local_irq_enable(regs);
+@@ -981,6 +991,9 @@ static void math_error(struct pt_regs *regs, int trapnr)
+ 	if (!si_code)
+ 		goto exit;
+ 
++	if (fixup_vdso_exception(regs, trapnr, 0, 0))
++		return;
++
+ 	force_sig_fault(SIGFPE, si_code,
+ 			(void __user *)uprobe_get_trap_addr(regs));
+ exit:
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 9e5ec861aba0..ebe290a68c36 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -30,6 +30,7 @@
+ #include <asm/cpu_entry_area.h>		/* exception stack		*/
+ #include <asm/pgtable_areas.h>		/* VMALLOC_START, ...		*/
+ #include <asm/kvm_para.h>		/* kvm_handle_async_pf		*/
++#include <asm/vdso.h>			/* fixup_vdso_exception()	*/
+ 
+ #define CREATE_TRACE_POINTS
+ #include <asm/trace/exceptions.h>
+@@ -775,6 +776,10 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
+ 
+ 		sanitize_error_code(address, &error_code);
+ 
++		if (fixup_vdso_exception(regs, X86_TRAP_PF, error_code,
++		    address))
++			return;
++
+ 		if (likely(show_unhandled_signals))
+ 			show_signal_msg(regs, error_code, address, tsk);
+ 
+@@ -894,6 +899,9 @@ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
+ 
+ 	sanitize_error_code(address, &error_code);
+ 
++	if (fixup_vdso_exception(regs, X86_TRAP_PF, error_code, address))
++		return;
++
+ 	set_signal_archinfo(address, error_code);
+ 
+ #ifdef CONFIG_MEMORY_FAILURE
+-- 
+2.27.0
+

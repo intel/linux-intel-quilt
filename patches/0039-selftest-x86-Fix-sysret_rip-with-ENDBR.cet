@@ -1,0 +1,46 @@
+From 7643b4afd51327a3fc9c89824d2e5dd61fd92176 Mon Sep 17 00:00:00 2001
+From: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Date: Tue, 2 Oct 2018 10:38:38 -0700
+Subject: [PATCH 39/41] selftest/x86: Fix sysret_rip with ENDBR
+
+When indirect branch tracking is enabled, an indirect near CALL/JMP,
+without the 'notrack' prefix, must land at an ENDBR instruction, otherwise
+a control-protection fault is triggered.
+
+The compiler inserts ENDBR's for C code, but assembly code must be updated
+manually.  Fix that for x86/sysret_rip.
+
+When CET is not enabled, ENDBR is a nop and has no effect.
+
+Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+---
+ tools/testing/selftests/x86/sysret_rip.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/tools/testing/selftests/x86/sysret_rip.c b/tools/testing/selftests/x86/sysret_rip.c
+index 84d74be1d902..f198652c15d9 100644
+--- a/tools/testing/selftests/x86/sysret_rip.c
++++ b/tools/testing/selftests/x86/sysret_rip.c
+@@ -27,8 +27,9 @@ asm (
+ 	".pushsection \".text\", \"ax\"\n\t"
+ 	".balign 4096\n\t"
+ 	"test_page: .globl test_page\n\t"
+-	".fill 4094,1,0xcc\n\t"
++	".fill 4090,1,0xcc\n\t"
+ 	"test_syscall_insn:\n\t"
++	".byte 0xf3, 0x0f, 0x1e, 0xfa\n\t" /* endbr64 */
+ 	"syscall\n\t"
+ 	".ifne . - test_page - 4096\n\t"
+ 	".error \"test page is not one page long\"\n\t"
+@@ -151,7 +152,7 @@ static void test_syscall_fallthrough_to(unsigned long ip)
+ 
+ 	if (sigsetjmp(jmpbuf, 1) == 0) {
+ 		asm volatile ("call *%[syscall_insn]" :: "a" (SYS_getpid),
+-			      [syscall_insn] "rm" (ip - 2));
++			      [syscall_insn] "rm" (ip - 6));
+ 		errx(1, "[FAIL]\tSyscall trampoline returned");
+ 	}
+ 
+-- 
+2.27.0
+
