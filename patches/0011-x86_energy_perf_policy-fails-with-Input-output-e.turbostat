@@ -1,0 +1,134 @@
+From 6637ab1ee48a420fa1092cde287ac9b7707492cf Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ond=C5=99ej=20Lyson=C4=9Bk?= <olysonek@redhat.com>
+Date: Fri, 27 Mar 2020 08:27:12 +0100
+Subject: [PATCH 11/13] x86_energy_perf_policy fails with Input/output error in
+ a VM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+I've encountered an issue with x86_energy_perf_policy. If I run it on a
+machine that I'm told is a qemu-kvm virtual machine running inside a
+privileged container, I get the following error:
+
+x86_energy_perf_policy: /dev/cpu/0/msr offset 0x1ad read failed: Input/output error
+
+I get the same error in a Digital Ocean droplet, so that might be a
+similar environment.
+
+I created the following patch which is intended to give a more
+user-friendly message. It's based on a patch for turbostat from Prarit
+Bhargava that was posted some time ago. The patch is "[v2] turbostat:
+Running on virtual machine is not supported" [1].
+
+Given my limited knowledge of the topic, I can't say with confidence
+that this is the right solution, though (that's why this is not an
+official patch submission). Also, I'm not sure what the convention with
+exit codes is in this tool. Also, instead of the error message, perhaps
+the tool should just not print anything in this case, which is how it
+behaves in a "regular" VM?
+
+[1] https://patchwork.kernel.org/patch/9868587/
+
+Signed-off-by: Ondřej Lysoněk <olysonek@redhat.com>
+Signed-off-by: Len Brown <len.brown@intel.com>
+---
+ .../x86_energy_perf_policy.c                  | 67 +++++++++++++++----
+ 1 file changed, 54 insertions(+), 13 deletions(-)
+
+diff --git a/tools/power/x86/x86_energy_perf_policy/x86_energy_perf_policy.c b/tools/power/x86/x86_energy_perf_policy/x86_energy_perf_policy.c
+index 3fe1eed900d4..ff6c6661f075 100644
+--- a/tools/power/x86/x86_energy_perf_policy/x86_energy_perf_policy.c
++++ b/tools/power/x86/x86_energy_perf_policy/x86_energy_perf_policy.c
+@@ -622,6 +622,57 @@ void cmdline(int argc, char **argv)
+ 	}
+ }
+ 
++/*
++ * Open a file, and exit on failure
++ */
++FILE *fopen_or_die(const char *path, const char *mode)
++{
++	FILE *filep = fopen(path, "r");
++
++	if (!filep)
++		err(1, "%s: open failed", path);
++	return filep;
++}
++
++void err_on_hypervisor(void)
++{
++	FILE *cpuinfo;
++	char *flags, *hypervisor;
++	char *buffer;
++
++	/* On VMs /proc/cpuinfo contains a "flags" entry for hypervisor */
++	cpuinfo = fopen_or_die("/proc/cpuinfo", "ro");
++
++	buffer = malloc(4096);
++	if (!buffer) {
++		fclose(cpuinfo);
++		err(-ENOMEM, "buffer malloc fail");
++	}
++
++	if (!fread(buffer, 1024, 1, cpuinfo)) {
++		fclose(cpuinfo);
++		free(buffer);
++		err(1, "Reading /proc/cpuinfo failed");
++	}
++
++	flags = strstr(buffer, "flags");
++	rewind(cpuinfo);
++	fseek(cpuinfo, flags - buffer, SEEK_SET);
++	if (!fgets(buffer, 4096, cpuinfo)) {
++		fclose(cpuinfo);
++		free(buffer);
++		err(1, "Reading /proc/cpuinfo failed");
++	}
++	fclose(cpuinfo);
++
++	hypervisor = strstr(buffer, "hypervisor");
++
++	free(buffer);
++
++	if (hypervisor)
++		err(-1,
++		    "not supported on this virtual machine");
++}
+ 
+ int get_msr(int cpu, int offset, unsigned long long *msr)
+ {
+@@ -635,8 +686,10 @@ int get_msr(int cpu, int offset, unsigned long long *msr)
+ 		err(-1, "%s open failed, try chown or chmod +r /dev/cpu/*/msr, or run as root", pathname);
+ 
+ 	retval = pread(fd, msr, sizeof(*msr), offset);
+-	if (retval != sizeof(*msr))
++	if (retval != sizeof(*msr)) {
++		err_on_hypervisor();
+ 		err(-1, "%s offset 0x%llx read failed", pathname, (unsigned long long)offset);
++	}
+ 
+ 	if (debug > 1)
+ 		fprintf(stderr, "get_msr(cpu%d, 0x%X, 0x%llX)\n", cpu, offset, *msr);
+@@ -1086,18 +1139,6 @@ int update_cpu_msrs(int cpu)
+ 	return 0;
+ }
+ 
+-/*
+- * Open a file, and exit on failure
+- */
+-FILE *fopen_or_die(const char *path, const char *mode)
+-{
+-	FILE *filep = fopen(path, "r");
+-
+-	if (!filep)
+-		err(1, "%s: open failed", path);
+-	return filep;
+-}
+-
+ unsigned int get_pkg_num(int cpu)
+ {
+ 	FILE *fp;
+-- 
+2.27.0
+

@@ -1,7 +1,7 @@
-From 3c2be2b493ffb50f7eb57cbaf32311a441faa857 Mon Sep 17 00:00:00 2001
+From 1404413cb796d4cbd5910fddc3148cf01dac1fc4 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 3 May 2018 12:40:57 -0700
-Subject: [PATCH 24/41] x86/cet/shstk: Handle thread shadow stack
+Subject: [PATCH 24/42] x86/cet/shstk: Handle thread shadow stack
 
 The kernel allocates (and frees on thread exit) a new shadow stack for a
 pthread child.
@@ -22,27 +22,28 @@ Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 v10:
 - Limit shadow stack size to 4 GB.
 ---
- arch/x86/include/asm/cet.h         |  2 ++
- arch/x86/include/asm/mmu_context.h |  3 +++
- arch/x86/kernel/cet.c              | 41 ++++++++++++++++++++++++++++++
+ arch/x86/include/asm/cet.h         |  3 ++
+ arch/x86/include/asm/mmu_context.h |  3 ++
+ arch/x86/kernel/cet.c              | 44 ++++++++++++++++++++++++++++++
  arch/x86/kernel/process.c          |  7 +++++
- 4 files changed, 53 insertions(+)
+ 4 files changed, 57 insertions(+)
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index 56fe08eebae6..71dc92acd2f2 100644
+index 56fe08eebae6..ca671c9b747b 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
-@@ -18,11 +18,13 @@ struct cet_status {
+@@ -18,11 +18,14 @@ struct cet_status {
  
  #ifdef CONFIG_X86_INTEL_CET
  int cet_setup_shstk(void);
-+int cet_setup_thread_shstk(struct task_struct *p);
++int cet_setup_thread_shstk(struct task_struct *p, unsigned long clone_flags);
  void cet_disable_free_shstk(struct task_struct *p);
  int cet_verify_rstor_token(bool ia32, unsigned long ssp, unsigned long *new_ssp);
  void cet_restore_signal(struct sc_ext *sc);
  int cet_setup_signal(bool ia32, unsigned long rstor, struct sc_ext *sc);
  #else
-+static inline int cet_setup_thread_shstk(struct task_struct *p) { return 0; }
++static inline int cet_setup_thread_shstk(struct task_struct *p,
++					 unsigned long clone_flags) { return 0; }
  static inline void cet_disable_free_shstk(struct task_struct *p) {}
  static inline void cet_restore_signal(struct sc_ext *sc) { return; }
  static inline int cet_setup_signal(bool ia32, unsigned long rstor,
@@ -68,20 +69,23 @@ index d98016b83755..e3ca4397258b 100644
  	loadsegment(fs, 0);			\
  } while (0)
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index a08a956ac3aa..b30c61a66c8e 100644
+index a08a956ac3aa..a46ef73ea0bb 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
-@@ -172,6 +172,47 @@ int cet_setup_shstk(void)
+@@ -172,6 +172,50 @@ int cet_setup_shstk(void)
  	return 0;
  }
  
-+int cet_setup_thread_shstk(struct task_struct *tsk)
++int cet_setup_thread_shstk(struct task_struct *tsk, unsigned long clone_flags)
 +{
 +	unsigned long addr, size;
 +	struct cet_user_state *state;
 +	struct cet_status *cet = &tsk->thread.cet;
 +
 +	if (!cet->shstk_size)
++		return 0;
++
++	if ((clone_flags & (CLONE_VFORK | CLONE_VM)) != CLONE_VM)
 +		return 0;
 +
 +	state = get_xsave_addr(&tsk->thread.fpu.state.xsave,
@@ -120,7 +124,7 @@ index a08a956ac3aa..b30c61a66c8e 100644
  {
  	struct cet_status *cet = &tsk->thread.cet;
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index d54f0425aac0..00d32c24757c 100644
+index d54f0425aac0..2afcf5a898b5 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
 @@ -109,6 +109,7 @@ void exit_thread(struct task_struct *tsk)
@@ -137,8 +141,8 @@ index d54f0425aac0..00d32c24757c 100644
  
 +#ifdef CONFIG_X86_64
 +	/* Allocate a new shadow stack for pthread */
-+	if (!ret && (clone_flags & (CLONE_VFORK | CLONE_VM)) == CLONE_VM)
-+		ret = cet_setup_thread_shstk(p);
++	if (!ret)
++		ret = cet_setup_thread_shstk(p, clone_flags);
 +#endif
 +
  	if (!ret && unlikely(test_tsk_thread_flag(current, TIF_IO_BITMAP)))
