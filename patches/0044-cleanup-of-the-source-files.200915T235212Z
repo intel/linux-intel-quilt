@@ -1,0 +1,775 @@
+From 8ec8b3c37909d377f130ab6d64d7acfb5760c2ab Mon Sep 17 00:00:00 2001
+From: lrajasub <lakshmi.bai.raja.subramanian@intel.com>
+Date: Mon, 3 Aug 2020 08:23:49 +0530
+Subject: [PATCH 44/48] cleanup of the source files
+
+Signed-off-by: lrajasub <lakshmi.bai.raja.subramanian@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device.c        |   4 +-
+ drivers/misc/host_kmb_tj/host_kmb_tj.c        | 125 ++++++++----------
+ .../misc/host_kmb_tj/keembay_cooling_host.c   |  27 ++--
+ drivers/misc/slave_kmb_tj/slave_kmb_tj.c      | 101 ++++++--------
+ drivers/misc/thermal/keembay_cooling.c        |  13 +-
+ drivers/misc/thermal/keembay_thermal.c        |   4 +-
+ drivers/misc/xlink-smbus/xlink-smbus.c        | 106 ++++-----------
+ 7 files changed, 142 insertions(+), 238 deletions(-)
+
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+index 9b29a2eda822..e76164115cfa 100644
+--- a/drivers/misc/hddl_device/hddl_device.c
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -219,7 +219,7 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		break;
+ 	case HDDL_READ_SW_ID_DATA:
+ 		if (copy_from_user(&swid_data, (int32_t *)arg,
+-			sizeof(T_SW_ID_HDDL_DATA)))
++				sizeof(T_SW_ID_HDDL_DATA)))
+ 			return -EFAULT;
+ 		for (i = 0; i < HDDL_MAX_DEVICE; i++) {
+ 			for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+@@ -723,7 +723,7 @@ static int hddl_device_thread_create(void)
+ 	}
+ 	/*Creating device*/
+ 	if ((device_create(dev_class, NULL, dev, NULL, "hddl_dev"))
+-			== NULL) {
++		== NULL) {
+ 		dev_info(hddl_dbg, "Cannot create the Device 1\n");
+ 		goto r_device;
+ 	}
+diff --git a/drivers/misc/host_kmb_tj/host_kmb_tj.c b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+index 60cd641658ae..fc73699d78bd 100644
+--- a/drivers/misc/host_kmb_tj/host_kmb_tj.c
++++ b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+@@ -62,7 +62,9 @@ static int keembay_get_temp_host(struct thermal_zone_device *thermal,
+ 	default:
+ 		break;
+ 	}
+-	//dev_info(&ktherm->i2c_c->dev, "HOST_KMB_TJ[%d] %d\n", kmb_zone_info->sensor_type, *temp);
++	//dev_info(&thermal->device, "HOST_KMB_TJ[%d] %d\n",
++	//	kmb_zone_info->sensor_type,
++	//	*temp);
+ 	spin_unlock(&ktherm->lock);
+ 
+ 	/* TODO: How to do error handling here */
+@@ -98,13 +100,13 @@ static int keembay_thermal_notify_host(struct thermal_zone_device *zone,
+ 
+ 	switch (type) {
+ 	case THERMAL_TRIP_ACTIVE:
+-		printk(KERN_WARNING "Thermal reached to active temperature\n");
++		dev_info(&zone->device, "Thermal reached to active temperature\n");
+ 		break;
+ 	case THERMAL_TRIP_CRITICAL:
+-		printk(KERN_WARNING "Thermal reached to critical temperature\n");
++		dev_info(&zone->device, "Thermal reached to critical temperature\n");
+ 		break;
+ 	default:
+-		printk(KERN_WARNING "Thermal not reached to active temperature\n");
++		dev_info(&zone->device, "Thermal not reached to active temperature\n");
+ 		break;
+ 	}
+ 	thermal_generate_netlink_event(zone, type);
+@@ -140,9 +142,9 @@ static int keembay_unbind_host(struct thermal_zone_device *tz,
+ 		      struct thermal_cooling_device *cdev)
+ {
+ 	int ret;
+-	printk("inside unbind");
++
+ 	if (strncmp("keembay_thermal", cdev->type, THERMAL_NAME_LENGTH) == 0) {
+-	ret = thermal_zone_unbind_cooling_device(tz, 0, cdev);
++		ret = thermal_zone_unbind_cooling_device(tz, 0, cdev);
+ 	if (ret) {
+ 		dev_err(&tz->device,
+ 			"unbinding zone %s with cdev %s failed:%d\n",
+@@ -181,8 +183,8 @@ int keembay_thermal_zone_register_host(
+ 		);
+ 	if (IS_ERR(zone_trip_info->tz)) {
+ 		ret = PTR_ERR(zone_trip_info->tz);
+-		printk(KERN_WARNING "failed to"
+-				"register thermal zone device %d\n", ret);
++		dev_err(&zone_trip_info->tz->device,
++			"failed to register thermal zone device %d\n", ret);
+ 	}
+ 	return 0;
+ }
+@@ -195,7 +197,10 @@ int keembay_thermal_zone_unregister_host(
+ 
+ 	spin_lock(&ktherm->lock);
+ 	thermal_zone_device_unregister(zone_trip_info->tz);
+-	dev_info(ktherm->dev, "thermal_zone_device_unregister %s\n", zone_trip_info->sensor_name);
++	dev_info(ktherm->dev,
++		"thermal_zone_device_unregister %s\n",
++		zone_trip_info->sensor_name
++	);
+ 	spin_unlock(&ktherm->lock);
+ 	return 0;
+ }
+@@ -272,66 +277,51 @@ static int host_kmb_tj_probe(struct i2c_client *client,
+ 		i2c_str = "xlk";
+ 
+ 
+-	host_kmb_trip_info = (struct kmb_trip_point_info *)kzalloc(
+-		sizeof(struct kmb_trip_point_info) * KMB_TJ_SENSORS, GFP_KERNEL);
+-	for (i = 0; i < KMB_TJ_SENSORS; i++) {
+-		switch (i) {
+-		case 0:
+-			memcpy(&host_kmb_trip_info[0], &mss_zone_trip_info_host,
+-				sizeof(struct kmb_trip_point_info));
+-
+-			host_kmb_trip_info[0].sensor_name = kasprintf(GFP_KERNEL,
+-				"mss_%s-%x", i2c_str, *device_id);
+-
+-			host_kmb_trip_info[0].thermal_info =  kzalloc(
+-			sizeof(struct keembay_therm_info), GFP_KERNEL);
+-
+-			host_kmb_trip_info[0].thermal_info->i2c_c = client;
+-			break;
+-		case 1:
+-			memcpy(&host_kmb_trip_info[1], &css_zone_trip_info_host,
+-				sizeof(struct kmb_trip_point_info));
+-
+-			host_kmb_trip_info[1].sensor_name = kasprintf(GFP_KERNEL,
+-				"css_%s-%x", i2c_str, *device_id);
+-
+-			host_kmb_trip_info[1].thermal_info =  kzalloc(
+-			sizeof(struct keembay_therm_info), GFP_KERNEL);
+-
+-			host_kmb_trip_info[1].thermal_info->i2c_c = client;
+-			break;
+-		case 2:
+-			memcpy(&host_kmb_trip_info[2], &nce_max_zone_trip_info_host,
+-				sizeof(struct kmb_trip_point_info));
+-
+-			host_kmb_trip_info[2].sensor_name = kasprintf(GFP_KERNEL,
+-				"nce_%s-%x", i2c_str, *device_id);
+-
+-			host_kmb_trip_info[2].thermal_info =
++	host_kmb_trip_info = kzalloc(
++		sizeof(struct kmb_trip_point_info) * KMB_TJ_SENSORS,
++		GFP_KERNEL);
++
++	/* thermal zone registeration for all zones */
++	memcpy(&host_kmb_trip_info[0],
++		&mss_zone_trip_info_host,
++		sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info[0].sensor_name
++		= kasprintf(GFP_KERNEL, "mss_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info[0].thermal_info =  kzalloc(
++		sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info[0].thermal_info->i2c_c = client;
++	keembay_thermal_zone_register_host(&host_kmb_trip_info[0]);
++
++	memcpy(&host_kmb_trip_info[1], &css_zone_trip_info_host,
++		sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info[1].sensor_name = kasprintf(GFP_KERNEL,
++		"css_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info[1].thermal_info =  kzalloc(
++		sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info[1].thermal_info->i2c_c = client;
++	keembay_thermal_zone_register_host(&host_kmb_trip_info[1]);
++
++	memcpy(&host_kmb_trip_info[2], &nce_max_zone_trip_info_host,
++		sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info[2].sensor_name = kasprintf(GFP_KERNEL,
++		"nce_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info[2].thermal_info =
+ 		kzalloc(sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info[2].thermal_info->i2c_c = client;
++	keembay_thermal_zone_register_host(&host_kmb_trip_info[2]);
++
++	memcpy(&host_kmb_trip_info[3], &soc_max_zone_trip_info_host,
++		sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info[3].sensor_name = kasprintf(
++		GFP_KERNEL, "soc_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info[3].thermal_info =  kzalloc(
++		sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info[3].thermal_info->i2c_c = client;
++	keembay_thermal_zone_register_host(&host_kmb_trip_info[3]);
+ 
+-			host_kmb_trip_info[2].thermal_info->i2c_c = client;
+-			break;
+-		case 3:
+-			memcpy(&host_kmb_trip_info[3], &soc_max_zone_trip_info_host,
+-				sizeof(struct kmb_trip_point_info));
+-
+-			host_kmb_trip_info[3].sensor_name = kasprintf(
+-			GFP_KERNEL, "soc_%s-%x", i2c_str, *device_id);
+-
+-			host_kmb_trip_info[3].thermal_info =  kzalloc(
+-			sizeof(struct keembay_therm_info), GFP_KERNEL);
+-
+-			host_kmb_trip_info[3].thermal_info->i2c_c = client;
+-			break;
+-		default:
+-			break;
+-		}
+-		keembay_thermal_zone_register_host(&host_kmb_trip_info[i]);
+-	}
+ 	i2c_set_clientdata(client, host_kmb_trip_info);
+ 
+-	printk(KERN_INFO "host_kmb_tj: probe success\n");
++	dev_info(client->dev, "host_kmb_tj: probe success\n");
+ 
+ 	return 0;
+ }
+@@ -341,14 +331,15 @@ static int host_kmb_tj_exit(struct i2c_client *client)
+ 	struct kmb_trip_point_info *host_kmb_trip_info =
+ 					i2c_get_clientdata(client);
+ 	int i;
++
+ 	for (i = 0; i < KMB_TJ_SENSORS; i++) {
+ 
+ 		keembay_thermal_zone_unregister_host(&host_kmb_trip_info[i]);
+ 
+ 		if (host_kmb_trip_info[i].thermal_info != NULL)
+-			kfree (host_kmb_trip_info[i].thermal_info);
++			kfree(host_kmb_trip_info[i].thermal_info);
+ 	}
+-	kfree (host_kmb_trip_info);
++	kfree(host_kmb_trip_info);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/misc/host_kmb_tj/keembay_cooling_host.c b/drivers/misc/host_kmb_tj/keembay_cooling_host.c
+index b648d813b7fc..3db96f5a7c0d 100644
+--- a/drivers/misc/host_kmb_tj/keembay_cooling_host.c
++++ b/drivers/misc/host_kmb_tj/keembay_cooling_host.c
+@@ -1,7 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+-
+-
++ * keembay_cooling_host.c - Host KeemBay cooling driver(used for testing).
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
+  */
+ 
+ #include <linux/module.h>
+@@ -35,7 +36,7 @@ keembay_cooling_set_cur_state(struct thermal_cooling_device *cooling_dev,
+ 			      unsigned long state)
+ {
+ 	state = 0;
+-	printk(KERN_WARNING "keembay_cooling_set_cur_state\n");
++	dev_info(&cooling_dev->dev, "%s\n", __func__);
+ 	return 0;
+ }
+ 
+@@ -44,8 +45,8 @@ keembay_cooling_get_cur_state(struct thermal_cooling_device *cooling_dev,
+ 			      unsigned long *state)
+ {
+ 	//printk(KERN_WARNING "keembay_cooling_get_cur_state\n");
+- *state = 0;
+- return 0;
++	*state = 0;
++	return 0;
+ }
+ 
+ static const struct thermal_cooling_device_ops keembay_cooling_ops = {
+@@ -59,22 +60,18 @@ static int keembay_cooling_probe(struct platform_device *pdev)
+ {
+ 	struct keembay_cooling_data *d;
+ 	int ret;
+-		printk(KERN_WARNING "keembay_thermal_cooling_probe_start\n");
+-		d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
+-	if (!d) {
+-		printk(KERN_WARNING "keembay_thermal_cooling_dev_kzalloc_failed\n");
++
++	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
++	if (d == NULL)
+ 		return -ENOMEM;
+-	}
+-	printk(KERN_WARNING "keembay_thermal_cooling_kzalloc\n");
+ 	d->cooling_dev = thermal_cooling_device_register("keembay_thermal",
+-							 d, &keembay_cooling_ops);
++					 d, &keembay_cooling_ops);
+ 	if (IS_ERR(d->cooling_dev)) {
+ 		ret = PTR_ERR(d->cooling_dev);
+ 		dev_err(&pdev->dev,
+ 			"failed to register thermal zone device %d\n", ret);
+-			printk(KERN_WARNING "keembay_thermal_cooling_register_failed\n");
+-		}
+-		printk(KERN_WARNING "keembay_thermal_cooling_register\n");
++	}
++	dev_info(&pdev-dev, "keembay_thermal_cooling_register..Done\n");
+ 
+ 	return 0;
+ }
+diff --git a/drivers/misc/slave_kmb_tj/slave_kmb_tj.c b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+index e975301deade..ab6f7f5bdd0b 100644
+--- a/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
++++ b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+@@ -36,7 +36,6 @@ struct kmb_tj_data {
+ 	u8 buffer[];
+ };
+ 
+-extern int kmb_tj_temp_list[];
+ 
+ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 				     enum i2c_slave_event event, u8 *val)
+@@ -60,9 +59,8 @@ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 			spin_unlock(&kmb_tj->buffer_lock);
+ 		} else {
+ 			if (!kmb_tj->read_only) {
+-				printk(KERN_WARNING "Error"
+-						"I2C_SLAVE_WRITE_RECEIVED,"
+-						"KMB TJ reg are readonly\n");
++				dev_info(&client->dev,
++					"I2C_SLAVE_WRITE_RECEIVED KMB TJ reg are readonly\n");
+ 				return -1; /* write not allowed */
+ 			}
+ 		}
+@@ -78,7 +76,7 @@ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 	case I2C_SLAVE_READ_REQUESTED:
+ 	{
+ 		if (kmb_tj->buffer_idx >= (6 * sizeof(int))) {
+-			printk(KERN_WARNING "Error Wrong Offset \n");
++			dev_info(&client->dev, "Error Wrong Offset\n");
+ 			/* only first four bytes correspond to Tj Temperature */
+ 			return -1;
+ 		}
+@@ -130,56 +128,47 @@ static ssize_t i2c_slave_kmb_tj_bin_read(struct file *filp,
+ 	return count;
+ }
+ 
+-#if 0
+-/* Write to keembay TJ sensor registers not allowed, as they are readonly */
+-static ssize_t i2c_slave_kmb_tj_bin_write(
+-		struct file *filp, struct kobject *kobj,
+-		struct bin_attribute *attr, char *buf,
+-		loff_t off, size_t count)
++static int hddl_id_read(uint32_t *bid, uint32_t *kmbid, struct device *dev)
+ {
+-	struct kmb_tj_data *kmb_tj;
+-	unsigned long flags;
+-
+-	kmb_tj = dev_get_drvdata(container_of(kobj, struct device, kobj));
++	char *gpio_base_address;
+ 
+-	spin_lock_irqsave(&kmb_tj->buffer_lock, flags);
+-	memcpy(&kmb_tj->buffer[off], buf, count);
+-	spin_unlock_irqrestore(&kmb_tj->buffer_lock, flags);
++	gpio_base_address = ioremap(0x20320000, 2048);
+ 
+-	return count;
+-}
+-#endif
+ 
+-static int hddl_device_identify(uint32_t *board_id, uint32_t *kmb_id) /* TODO */
+-{
+-	char *gpio_base_address;
++	/* Configure the GPIOs */
+ 
+ 	gpio_base_address = ioremap(0x20320000, 2048);
+ 
+-
+ 	/* Configure the GPIOs */
+ 
+-	*((volatile int*)(gpio_base_address + 0x2CC)) =  0x1C0F;
+-	*((volatile int*)(gpio_base_address + 0x2D0)) =  0x1C0F;
+-	*((volatile int*)(gpio_base_address + 0x2D4)) =  0x1C0F;
+-
+-	*(volatile int*)(gpio_base_address + 0x328) =  0x1C0F;
+-	*(volatile int*)(gpio_base_address + 0x32C) =  0x1C0F;
+-	*(volatile int*)(gpio_base_address + 0x330) =  0x1C0F;
+-
+-	*board_id = *((volatile int*)(gpio_base_address + 0x24));
+-	*board_id = (*board_id >> 19)&0x7;
+-	*kmb_id = *((volatile int*)(gpio_base_address + 0x28));
+-	*kmb_id = (*kmb_id >> 10)&0x7;
+-	printk(KERN_INFO "HDDL:Board Id = %x\n", *board_id);
+-	if (*kmb_id > 2) {
+-		*kmb_id = 0;
+-		printk(KERN_INFO "HDDL: GPIO KEEMBAY ID > 2,"
+-		"hence setting KEEMBAY ID = 0\n");
++	writel(0x1C0F, gpio_base_address + 0x2CC);
++	writel(0x1C0F, gpio_base_address + 0x2D0);
++	writel(0x1C0F, gpio_base_address + 0x2D4);
++
++	dev_info(dev, "0x2CC = %x\n", readl(gpio_base_address + 0x2CC));
++	dev_info(dev, "0x2D0 = %x\n", readl(gpio_base_address + 0x2D0));
++	dev_info(dev, "0x2D4 = %x\n", readl(gpio_base_address + 0x2D4));
++
++	writel(0x1C0F, gpio_base_address + 0x328);
++	writel(0x1C0F, gpio_base_address + 0x32C);
++	writel(0x1C0F, gpio_base_address + 0x330);
++
++
++	dev_info(dev, "0x328 = %x\n", readl(gpio_base_address + 0x328));
++	dev_info(dev, "0x32C = %x\n", readl(gpio_base_address + 0x32C));
++	dev_info(dev, "0x330 = %x\n", readl(gpio_base_address + 0x330));
++
++	*bid = readl(gpio_base_address + 0x24);
++	*bid = (bid >> 19) & 0x7;
++	*kmbid = readl(gpio_base_address + 0x28);
++	*kmbid = (kmbid >> 10) & 0x7;
++	dev_info(dev, "HDDL: GPIO BOARD ID = %u\n", *bid);
++	dev_info(dev, "HDDL: GPIO KEEMBAY ID = %u\n", *kmbid);
++	if (*kmbid > 2) {
++		*kmbid = 0;
++		dev_info(dev, "HDDL: GPIO KEEMBAY ID > 2, ");
++		dev_info(dev, "Hence setting KEEMBAY ID = 0\n");
+ 	}
+-	printk(KERN_INFO "HDDL:Kmb Id = %x\n", *kmb_id);
+-
+-	pr_info("HDDL: hddl_device_identify done\n");
+ 	return 0;
+ }
+ 
+@@ -195,7 +184,7 @@ static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
+ 	unsigned int slave_addr;
+ 	uint32_t board_id, kmb_id;
+ 
+-	hddl_device_identify(&board_id, &kmb_id);
++	hddl_id_read(&board_id, &kmb_id, &client->dev);
+ 	if (board_id <= 4) {
+ 		/* Slave address range 0x10 -- 0x1F */
+ 		slave_addr = kmb_id + 0x10 + (board_id * 3);
+@@ -204,7 +193,7 @@ static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
+ 		slave_addr = kmb_id + 0x60 + ((board_id - 5) * 3);
+ 	}
+ 
+-	printk(KERN_INFO "HDDL: Slave Address = %x\n", slave_addr);
++	dev_info(&client->dev, "HDDL: Slave Address = %x\n", slave_addr);
+ 
+ 	kmb_tj = devm_kzalloc(&client->dev,
+ 			sizeof(struct kmb_tj_data) + size, GFP_KERNEL);
+@@ -219,25 +208,9 @@ static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
+ 	spin_lock_init(&kmb_tj->buffer_lock);
+ 	i2c_set_clientdata(client, kmb_tj);
+ 
+-	sysfs_bin_attr_init(&kmb_tj->bin);	/* TODO */
+-	kmb_tj->bin.attr.name = "slave-kmb-tj";
+-	kmb_tj->bin.attr.mode = S_IRUSR | S_IWUSR;
+-	kmb_tj->bin.read = i2c_slave_kmb_tj_bin_read;
+-	/* kmb_tj->bin.write = i2c_slave_kmb_tj_bin_write; */
+-	/* Write not allowed to registers */
+-	kmb_tj->bin.size = size;
+-
+-	ret = sysfs_create_bin_file(&client->dev.kobj, &kmb_tj->bin);
+-	if (ret)
+-		return ret;
+-
+ 	ret = i2c_slave_register(client, i2c_slave_kmb_tj_slave_cb);
+-	if (ret) {
+-		sysfs_remove_bin_file(&client->dev.kobj, &kmb_tj->bin);
+-		return ret;
+-	}
+ 
+-	return 0;
++	return ret;
+ };
+ 
+ static int i2c_slave_kmb_tj_remove(struct i2c_client *client)
+diff --git a/drivers/misc/thermal/keembay_cooling.c b/drivers/misc/thermal/keembay_cooling.c
+index 70fb47a7cf0a..8f46e1c9ffbb 100644
+--- a/drivers/misc/thermal/keembay_cooling.c
++++ b/drivers/misc/thermal/keembay_cooling.c
+@@ -34,7 +34,7 @@ keembay_cooling_set_cur_state(struct thermal_cooling_device *cooling_dev,
+ 			      unsigned long state)
+ {
+ 	state = 0;
+-	printk(KERN_WARNING "keembay_cooling_set_cur_state\n");
++	dev_info(&cooling_dev->dev, "%s\n", __func__);
+ 	return 0;
+ }
+ 
+@@ -58,22 +58,21 @@ static int keembay_cooling_probe(struct platform_device *pdev)
+ 	struct keembay_cooling_data *d;
+ 	int ret;
+ 
+-	printk(KERN_WARNING "keembay_thermal_cooling_probe_start\n");
++	dev_info(&pdev->dev, "keembay_thermal_cooling_probe_start\n");
+ 	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
+ 	if (!d) {
+-		printk(KERN_WARNING "keembay_thermal_cooling_dev_kzalloc_failed\n");
++		dev_info(&pdev->dev,
++			"keembay_thermal_cooling_dev_kzalloc_failed\n");
+ 		return -ENOMEM;
+ 	}
+-	printk(KERN_WARNING "keembay_thermal_cooling_kzalloc\n");
+ 	d->cooling_dev = thermal_cooling_device_register(
+ 			"keembay_thermal", d, &keembay_cooling_ops);
+ 	if (IS_ERR(d->cooling_dev)) {
+ 		ret = PTR_ERR(d->cooling_dev);
+ 		dev_err(&pdev->dev,
+-		"failed to register thermal zone device %d\n", ret);
+-		printk(KERN_WARNING "keembay_thermal_cooling_register_failed\n");
++			"failed to register thermal zone device %d\n", ret);
+ 	}
+-	printk(KERN_WARNING "keembay_thermal_cooling_register\n");
++	dev_info(&pdev->dev, "keembay_thermal_cooling_register..done\n");
+ 
+ 	return 0;
+ }
+diff --git a/drivers/misc/thermal/keembay_thermal.c b/drivers/misc/thermal/keembay_thermal.c
+index 40c90559279f..2556c5f3148d 100644
+--- a/drivers/misc/thermal/keembay_thermal.c
++++ b/drivers/misc/thermal/keembay_thermal.c
+@@ -62,6 +62,7 @@ static int kmb_sensor_read_temp(void __iomem *regs_val,
+ }
+ 
+ int kmb_tj_temp_list[6];
++EXPORT_SYMBOL_GPL(kmb_tj_temp_list);
+ static int keembay_get_temp(struct thermal_zone_device *thermal,
+ 							int *temp)
+ {
+@@ -265,7 +266,7 @@ static int keembay_thermal_probe(struct platform_device *pdev)
+ 	int ret;
+ 	int error;
+ 
+-	printk(KERN_INFO "Keembay thermal probe \n");
++	dev_info(&pdev->dev, "Keembay thermal probe\n");
+ 
+ 	g_thermal_data = devm_kzalloc(&pdev->dev,
+ 					sizeof(struct keembay_therm_info),
+@@ -428,7 +429,6 @@ struct kmb_trip_point_info soc_zone_trip_info = {
+ 
+ static int hddl_device_thermal_init(void)
+ {
+-	printk(KERN_INFO "Keembay thermal init \n");
+ 	keembay_thermal_zone_register(&mss_zone_trip_info);
+ 	keembay_thermal_zone_register(&css_zone_trip_info);
+ 	keembay_thermal_zone_register(&nce_zone_trip_info);
+diff --git a/drivers/misc/xlink-smbus/xlink-smbus.c b/drivers/misc/xlink-smbus/xlink-smbus.c
+index 7de9acb9cb92..9de37971c5d5 100644
+--- a/drivers/misc/xlink-smbus/xlink-smbus.c
++++ b/drivers/misc/xlink-smbus/xlink-smbus.c
+@@ -84,37 +84,21 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 	u8 temp;
+ 
+ 	/* refer https://lwn.net/Articles/640346/ for protocol */
+-	//dev_info(dbgxi2c,
+-		//"handle_slave_mode:
+-		//read_write[%d] protocol[%d] command[%x]\n",
+-		//msg->read_write,
+-		//msg->protocol,
+-		//msg->command);
+ 
+ 	/* send the command as first write */
+-	//dev_info(dbgxi2c, "handle_slave_mode: I2C_SLAVE_WRITE_REQUESTED:\n");
+ 	i2c_slave_event(slave, I2C_SLAVE_WRITE_REQUESTED, 0 /* unused */);
+ 	i2c_slave_event(slave, I2C_SLAVE_WRITE_RECEIVED, &(msg->command));
+ 
+ 	/* now handle specifics to read/write */
+ 	if (msg->read_write == I2C_SMBUS_WRITE) {
+ 		if (msg->protocol == I2C_SMBUS_BYTE_DATA) {
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
+-			//msg->data.byte);
+ 			i2c_slave_event(slave, I2C_SLAVE_WRITE_RECEIVED,
+ 					&(msg->data.byte));
+ 		} else if (msg->protocol == I2C_SMBUS_WORD_DATA) {
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
+-			//msg->data.word & 0XFF);
+ 			temp = msg->data.word & 0xFF;
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_WRITE_RECEIVED,
+ 					&temp);
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
+-			//(msg->data.word >> 8) & 0xFF);
+ 			temp = (msg->data.word >> 8) & 0xFF;
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_WRITE_RECEIVED,
+@@ -123,18 +107,15 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 			int i;
+ 
+ 			for (i = 1; (i < msg->data.block[0] ||
+-				i <= I2C_SMBUS_BLOCK_MAX); ++i) {
+-				//dev_info(dbgxi2c, "handle_slave_mode:
+-				//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
+-				//msg->data.block[i]);
++					i <= I2C_SMBUS_BLOCK_MAX); ++i) {
+ 				i2c_slave_event(slave,
+ 						I2C_SLAVE_WRITE_RECEIVED,
+ 						&(msg->data.block[i]));
+ 			}
+ 		} else {
+ 			dev_err(dbgxi2c,
+-				"unknown protocol (%d)"
+-				"received in handle_slave_mode\n",
++				"unknown protocol (%d) received in %s\n",
++				__func__,
+ 				msg->protocol);
+ 		}
+ 	} else {
+@@ -142,22 +123,14 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_READ_REQUESTED,
+ 					&(msg->data.byte));
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
+-			//msg->data.byte);
+ 		} else if (msg->protocol == I2C_SMBUS_WORD_DATA) {
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_READ_REQUESTED,
+ 					&temp);
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
+-			//temp);
+ 			msg->data.word = temp << 8;
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_READ_REQUESTED,
+ 					&temp);
+-			//dev_info(dbgxi2c, "handle_slave_mode:
+-			//I2C_SLAVE_READ_REQUESTED: D[%X]\n", temp);
+ 			msg->data.word |= temp;
+ 		} else if (msg->protocol == I2C_SMBUS_BLOCK_DATA) {
+ 			int i;
+@@ -167,21 +140,15 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 				i2c_slave_event(slave,
+ 						I2C_SLAVE_READ_REQUESTED,
+ 						&(msg->data.block[i]));
+-				//dev_info(dbgxi2c, "handle_slave_mode:
+-				//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
+-				//msg->data.block[i]);
+ 			}
+ 		} else {
+-			dev_err(dbgxi2c, "unknown protocol (%d)"
+-			"received in handle_slave_mode\n", msg->protocol);
++			dev_err(dbgxi2c,
++				"unknown protocol (%d) received in %s\n",
++				__func__,
++				msg->protocol);
+ 		}
+-		i2c_slave_event(slave,
+-				I2C_SLAVE_READ_PROCESSED,
+-				&temp);
+-		//dev_info(dbgxi2c, "handle_slave_mode:
+-		//I2C_SLAVE_READ_PROCESSED: D[%X]\n", temp);
++		i2c_slave_event(slave, I2C_SLAVE_READ_PROCESSED, &temp);
+ 	}
+-	//dev_info(dbgxi2c, "handle_slave_mode: I2C_SLAVE_STOP\n");
+ 	i2c_slave_event(slave, I2C_SLAVE_STOP, 0 /* unused */);
+ 	return 0;
+ }
+@@ -222,23 +189,23 @@ static s32 xlink_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+ 		msg->data = *data;
+ 	msg->status = 0;
+ 	devH = adapt_data->xhandle;
+-	//dev_info(dbgxi2c, "devH = %d\n", devH->sw_device_id);
+-	//dev_info(dbgxi2c, "xlink channel = %d\n", adapt_data->channel);
+ 	xerr = xlink_write_data(adapt_data->xhandle, adapt_data->channel,
+ 				(u8 *)msg,
+ 				sizeof(struct xlink_msg));
+ 	kfree(msg);
+ 	if (xerr != X_LINK_SUCCESS) {
+-		dev_info(dbgxi2c, "xlink_write_data failed (%d)"
+-			"dropping packet.\n",
++		dev_info(dbgxi2c, "xlink_write_data failed (%d) dropping packet.\n",
+ 			xerr);
+ 		return -ENODEV;
+ 	}
+-	//dev_info(dbgxi2c, "xlink_write_data - success[%d]\n", xerr);
+-/* TODO: handle timeout and return time out error code to the caller of xfer */
+ #endif	/* CONFIG_XLINKI2C_ADAPTER */
+-	if (wait_for_completion_interruptible_timeout(&adapt_data->work, 4*HZ) > 0) {
+-		msg = (list_first_entry(&adapt_data->head, struct xlink_msg, node));
++	if (wait_for_completion_interruptible_timeout(
++			&adapt_data->work,
++			4*HZ) > 0) {
++		msg = list_first_entry(
++			&adapt_data->head,
++			struct xlink_msg,
++			node);
+ 		list_del(&msg->node);
+ 		if (data)
+ 			*data = msg->data;
+@@ -277,33 +244,17 @@ static int xlinki2c_receive_thread(void *param)
+ 						(uint8_t *)msg, &size);
+ 		if (xerr != X_LINK_SUCCESS) {
+ 			if (xerr != X_LINK_TIMEOUT) {
+-				dev_warn(dev, "[%d]xlink_read_data failed (%d)"
+-					"dropping packet.\n",
++				dev_warn(dev,
++					"[%d] Error (%d) dropping packet.\n",
+ 					adapt_data->adap->nr, xerr);
+ 			}
+ 			kfree(msg);
+ 			continue;
+ 		}
+-		//dev_info(dbgxi2c, "xlink_read_data_to_buffer[%d][%d]\n",
+-		//xerr, size);
+ 		xlink_release_data(adapt_data->xhandle, adapt_data->channel,
+ 						NULL);
+-		//dev_info(dbgxi2c, "xlink_release_data\n");
+ 		adap = get_adapter_from_channel(adapt_data->channel);
+ 		if (adap) {
+-				//dev_info(dbgxi2c, "i2c-%d parameters:\n",
+-				//adap->nr);
+-				//dev_info(dbgxi2c, "addr = %.4x\n",
+-				//msg->addr);
+-				//dev_info(dbgxi2c, "flags = %.4x\n",
+-				//msg->flags);
+-				//dev_info(dbgxi2c, "read_write = %s\n",
+-				//msg.read_write == I2C_SMBUS_WRITE ?
+-				//"write" : "read");
+-				//dev_info(dbgxi2c, "command = %d\n",
+-				//msg->command);
+-				//dev_info(dbgxi2c, "protocol = %d\n",
+-				//msg->protocol);
+ #if IS_ENABLED(CONFIG_I2C_SLAVE)
+ 			if (adapt_data->slave != NULL) {
+ 				msg->status =
+@@ -323,23 +274,17 @@ static int xlinki2c_receive_thread(void *param)
+ 			}
+ #endif
+ 	/* send back the complete message that carries status back to sender */
+-			//dev_info(dbgxi2c, "xlink_write_data %d\n",
+-			//msg.addr);
+ 			xlink_write_data(adapt_data->xhandle,
+ 			adapt_data->channel, (u8 *)msg,
+ 			sizeof(struct xlink_msg));
+ 			kfree(msg);
+ 		} else {
+ 			/* this is an adapter on its own. */
+-	/* TODO: add this msg to the list in adapt_data. refer xlink-pcie for the usage of thread-safe list */
+ 			list_add_tail(&msg->node, &adapt_data->head);
+-			//dev_info(dbgxi2c, "list_add[%d]\n", msg.addr);
+ 			complete(&adapt_data->work);
+-			//dev_info(dbgxi2c, "signal completed\n");
+ 		}
+ 	}
+-	dev_info(dev, "[%d]xlinki2c_receive_thread stopped.\n",
+-			adapt_data->adap->nr);
++	dev_info(dev, "[%d] %s stopped\n", __func__, adapt_data->adap->nr);
+ 
+ 	return 0;
+ }
+@@ -349,7 +294,6 @@ static u32 xlink_smbus_func(struct i2c_adapter *adapter)
+ 	u32 func = I2C_FUNC_SMBUS_QUICK | I2C_FUNC_SMBUS_BYTE |
+ 		I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA |
+ 		I2C_FUNC_SMBUS_BLOCK_DATA;
+-	//dev_info(dbgxi2c, "Reporting func %X\n", func);
+ 
+ 	return func;
+ }
+@@ -434,11 +378,10 @@ static int xlink_i2c_probe(struct platform_device *pdev)
+ 	dev_info(&adap->dev, "xlink_smbus_adapter[%d] [%d]\n", rc, adap->nr);
+ 	/* create receiver thread */
+ 	adapt_data->task_recv = kthread_run(xlinki2c_receive_thread,
+-															adapt_data,
+-															"xlinki2c_receive_thread");
+-	if (adapt_data->task_recv == NULL) {
+-		printk("xlinki2c_receive_thread Thread creation failed");
+-	}
++					adapt_data,
++					"xlinki2c_receive_thread");
++	if (adapt_data->task_recv == NULL)
++		dev_info(dev, "%s Thread creation failed", __func__);
+ 	return rc;
+ }
+ 
+@@ -455,7 +398,8 @@ static int xlink_i2c_remove(struct platform_device *pdev)
+ 	/* close the channel and disconnect */
+ 	xlink_close_channel(adapt_data->xhandle, adapt_data->channel);
+ 	dev_info(dev, "close the channel...\n");
+-	//i2c_del_adapter(adapt_data->adap); /* This will block the dynamic registration */
++	/* This will block the dynamic registration */
++	//i2c_del_adapter(adapt_data->adap);
+ 	kfree(adapt_data);
+ 	dev_info(dev, "delete the adapter...\n");
+ 
+-- 
+2.17.1
+

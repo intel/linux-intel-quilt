@@ -1,0 +1,84 @@
+From f04581436c166cb3080b496ca9914cb9d165e0c0 Mon Sep 17 00:00:00 2001
+From: Muhammad Husaini Zulkifli <muhammad.husaini.zulkifli@intel.com>
+Date: Thu, 6 Aug 2020 00:27:01 +0800
+Subject: [PATCH 18/48] net: stmmac: Fix WOL issues on EHL after wakeup from S3
+
+DUT failed to wake up after send magic packet from Host for S3 for
+second time. Need to run ethtool command again to set wol on magic
+packet in order to wakeup again.
+
+Signed-off-by: Muhammad Husaini Zulkifli <muhammad.husaini.zulkifli@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac.h         |  1 +
+ drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c | 12 ++++++++++++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c    | 12 ++++++++++++
+ 3 files changed, 25 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac.h b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+index 95b29cfae1c4..5ceaffd228d5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac.h
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac.h
+@@ -326,6 +326,7 @@ int stmmac_mdio_unregister(struct net_device *ndev);
+ int stmmac_mdio_register(struct net_device *ndev);
+ int stmmac_mdio_reset(struct mii_bus *mii);
+ void stmmac_set_ethtool_ops(struct net_device *netdev);
++void stmmac_update_wol_status(struct net_device *ndev);
+ 
+ void stmmac_ptp_register(struct stmmac_priv *priv);
+ void stmmac_ptp_unregister(struct stmmac_priv *priv);
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index a684eb505a2e..a1ba1f4578b1 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -769,6 +769,18 @@ static int stmmac_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+ 	return 0;
+ }
+ 
++void stmmac_update_wol_status(struct net_device *ndev)
++{
++	struct stmmac_priv *priv = netdev_priv(ndev);
++	struct ethtool_wolinfo wol;
++
++	memset(&wol, 0, sizeof(struct ethtool_wolinfo));
++
++	wol.wolopts = (u32)priv->wolopts;
++
++	stmmac_set_wol(ndev, &wol);
++}
++
+ static int stmmac_ethtool_op_get_eee(struct net_device *dev,
+ 				     struct ethtool_eee *edata)
+ {
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 82da9d06429c..378d7156af18 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -7321,6 +7321,12 @@ int stmmac_resume_main(struct stmmac_priv *priv, struct net_device *ndev)
+ 
+ 	phylink_mac_change(priv->phylink, true);
+ 
++	if (priv->wolopts) {
++		rtnl_lock();
++		stmmac_update_wol_status(ndev);
++		rtnl_unlock();
++	}
++
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->setup_phy_conv) {
+ 		struct dwxpcs_platform_data *pdata;
+@@ -7460,6 +7466,12 @@ int stmmac_resume(struct device *dev)
+ 
+ 	phylink_mac_change(priv->phylink, true);
+ 
++	if (priv->wolopts) {
++		rtnl_lock();
++		stmmac_update_wol_status(ndev);
++		rtnl_unlock();
++	}
++
+ 	/* Start phy converter after MDIO bus IRQ handling is up */
+ 	if (priv->plat->setup_phy_conv) {
+ 		struct dwxpcs_platform_data *pdata;
+-- 
+2.17.1
+

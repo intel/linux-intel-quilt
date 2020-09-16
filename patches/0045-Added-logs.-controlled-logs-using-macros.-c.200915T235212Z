@@ -1,0 +1,1733 @@
+From d2bd7d7627ce8e925f8aa77dbc48fb9619493024 Mon Sep 17 00:00:00 2001
+From: lrajasub <lakshmi.bai.raja.subramanian@intel.com>
+Date: Sun, 9 Aug 2020 13:04:34 +0530
+Subject: [PATCH 45/48] Added logs. controlled logs using macros. cleaned up
+ the code for check patch errors
+
+Signed-off-by: lrajasub <lakshmi.bai.raja.subramanian@intel.com>
+---
+ .../bindings/misc/intel,keembay-thermal.txt   |  23 ++
+ drivers/misc/hddl_device/hddl_device.c        | 310 +++++++---------
+ drivers/misc/host_kmb_tj/host_kmb_tj.c        |   7 +-
+ drivers/misc/slave_kmb_tj/slave_kmb_tj.c      |  39 +-
+ drivers/misc/thermal/keembay_cooling.c        |   2 +-
+ drivers/misc/thermal/keembay_thermal.c        | 348 ++++++++++++++++-
+ drivers/misc/thermal/keembay_tsens.h          | 351 +-----------------
+ drivers/misc/xlink-smbus/xlink-smbus.c        |  62 ++--
+ include/linux/hddl_device.h                   |  13 +-
+ 9 files changed, 571 insertions(+), 584 deletions(-)
+ create mode 100644 Documentation/devicetree/bindings/misc/intel,keembay-thermal.txt
+
+diff --git a/Documentation/devicetree/bindings/misc/intel,keembay-thermal.txt b/Documentation/devicetree/bindings/misc/intel,keembay-thermal.txt
+new file mode 100644
+index 000000000000..181bead0a29c
+--- /dev/null
++++ b/Documentation/devicetree/bindings/misc/intel,keembay-thermal.txt
+@@ -0,0 +1,23 @@
++Intel Keem Bay Thermal
++---------------------
++
++The Keem Bay Thermal driver enables reading of onchip sensors present
++in the Intel Keem Bay SoC.
++
++Required properties:
++- compatible : "intel,keembay-tsens"
++- compatible : "intel,keembay-dummy"
++
++- reg: list of register areas, as specified in reg-names
++- interrupts: not used
++- clocks: clock needed for thermal to operate
++
++Example:
++		thermal@20260030 {
++			compatible = "intel,keembay-tsens";
++			reg = <0x0 0x20260030 0x0 0x20>;
++			interrupts = <0x0 0x5a 0x4>;
++			clocks = <0x6 0x21>;
++			status = "okay";
++		};
++
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+index e76164115cfa..b6459d64cdfc 100644
+--- a/drivers/misc/hddl_device/hddl_device.c
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -71,7 +71,9 @@ static struct i2c_board_info kmb_i2c_devices[] = {
+ };
+ #endif
+ 
+-T_HDDL_DEVICE_KMB_NODE kmb_hddls[HDDL_MAX_DEVICE] = {0};
++#define HDDL_DEVICE_DEBUG 0
++
++struct hddl_device_kmb kmb_hddls[HDDL_MAX_DEVICE] = {0};
+ #define HDDL_NODE_XLINK_CHANNEL 1080
+ #define HDDL_I2C_XLINK_CHANNEL 1081
+ 
+@@ -80,7 +82,7 @@ struct device_driver hddl_dbg_name = {
+ };
+ 
+ struct device hddl_dbg_subname = {
+-	.init_name = "hddldev",	/* set to "" */
++	.init_name = "",	/* set to "" */
+ 	.driver = &hddl_dbg_name
+ };
+ 
+@@ -128,25 +130,27 @@ static int __init hddl_device_init(void)
+ 	writel(0x1C0F, gpio_base_address + 0x2D0);
+ 	writel(0x1C0F, gpio_base_address + 0x2D4);
+ 
++#if HDDL_DEVICE_DEBUG
+ 	dev_info(hddl_dbg, "0x2CC = %x\n", readl(gpio_base_address + 0x2CC));
+ 	dev_info(hddl_dbg, "0x2D0 = %x\n", readl(gpio_base_address + 0x2D0));
+ 	dev_info(hddl_dbg, "0x2D4 = %x\n", readl(gpio_base_address + 0x2D4));
++#endif
+ 
+ 	writel(0x1C0F, gpio_base_address + 0x328);
+ 	writel(0x1C0F, gpio_base_address + 0x32C);
+ 	writel(0x1C0F, gpio_base_address + 0x330);
+ 
+ 
++#if HDDL_DEVICE_DEBUG
+ 	dev_info(hddl_dbg, "0x328 = %x\n", readl(gpio_base_address + 0x328));
+ 	dev_info(hddl_dbg, "0x32C = %x\n", readl(gpio_base_address + 0x32C));
+ 	dev_info(hddl_dbg, "0x330 = %x\n", readl(gpio_base_address + 0x330));
++#endif
+ 
+ 	board_id = readl(gpio_base_address + 0x24);
+ 	board_id = (board_id >> 19) & 0x7;
+ 	kmb_id = readl(gpio_base_address + 0x28);
+ 	kmb_id = (kmb_id >> 10) & 0x7;
+-	dev_info(hddl_dbg, "HDDL: GPIO BOARD ID = %u\n", board_id);
+-	dev_info(hddl_dbg, "HDDL: GPIO KEEMBAY ID = %u\n", kmb_id);
+ 	if (kmb_id > 2) {
+ 		kmb_id = 0;
+ 		dev_info(hddl_dbg, "HDDL: GPIO KEEMBAY ID > 2, ");
+@@ -158,10 +162,11 @@ static int __init hddl_device_init(void)
+ 	hddl_board_id = board_id;
+ 	hddl_kmb_id = kmb_id;
+ 
++#if HDDL_DEVICE_DEBUG
+ 	dev_info(hddl_dbg, "HDDL:Board Id = %x\n", hddl_board_id);
+ 	dev_info(hddl_dbg, "HDDL:Kmb Id = %x\n", hddl_kmb_id);
++#endif
+ 
+-	dev_info(hddl_dbg, "%s done\n", __func__);
+ 	hddl_device_thread_create();
+ 	return 0;
+ }
+@@ -183,66 +188,74 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ {
+ 
+ 	int i, j, rc = 0;
+-	T_SW_ID_HDDL_DATA swid_data = {0};
+-	T_SW_ID_SOFT_RESET soft_reset = {0};
++	struct sw_id_hddl_data data = {0};
++	struct sw_id_soft_reset reset = {0};
++	struct xlink_handle *devH;
+ 
+ 	switch (cmd) {
+ 	case HDDL_SOFT_RESET:
+-		if (copy_from_user(&soft_reset,
+-				(int32_t *)arg, sizeof(T_SW_ID_SOFT_RESET)))
++		if (copy_from_user(&reset,
++			(int32_t *)arg, sizeof(struct sw_id_soft_reset)))
+ 			return -EFAULT;
+ 		for (i = 0; i < HDDL_MAX_DEVICE; i++) {
+ 			for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 				if (kmb_hddls[i].soc[j].devH.sw_device_id
+-						!= soft_reset.sw_id) {
+-					continue;
++					== reset.sw_id) {
++					break;
+ 				}
+ 			}
++			if (j < HDDL_MAX_BAY_DEVICE)
++				break;
+ 		}
+-
+-		if (kmb_hddls[i].soc[j].devH.sw_device_id == soft_reset.sw_id) {
+-			/* xlink-reset */
+-			struct xlink_handle *devH =
+-				&kmb_hddls[i].soc[j].devH;
+-			rc =  xlink_reset_device(devH);
+-
+-			if (rc > 0)
+-				dev_info(hddl_dbg, "xlink_reset_device failed");
+-			else
+-				soft_reset.return_id = 1;
+-
+-			if (copy_to_user((T_SW_ID_SOFT_RESET *) arg,
+-				&soft_reset, sizeof(T_SW_ID_SOFT_RESET)))
+-				return -EFAULT;
+-			/* xlink-rest */
++		if (i == HDDL_MAX_DEVICE) {
++			dev_warn(hddl_dbg, "SoftReset: [%x]device not found:\n",
++				 reset.sw_id);
++			return -EFAULT;
+ 		}
++
++		/* xlink-reset */
++		devH = &kmb_hddls[i].soc[j].devH;
++		rc =  xlink_reset_device(devH);
++
++		if (rc > 0)
++			dev_info(hddl_dbg, "xlink_reset_device failed");
++		else
++			reset.return_id = 1;
++
++		if (copy_to_user((struct sw_id_soft_reset *) arg,
++			&reset, sizeof(struct sw_id_soft_reset)))
++			return -EFAULT;
++		/* xlink-rest */
+ 		break;
+ 	case HDDL_READ_SW_ID_DATA:
+-		if (copy_from_user(&swid_data, (int32_t *)arg,
+-				sizeof(T_SW_ID_HDDL_DATA)))
++		if (copy_from_user(&data, (int32_t *)arg,
++				sizeof(struct sw_id_hddl_data)))
+ 			return -EFAULT;
+ 		for (i = 0; i < HDDL_MAX_DEVICE; i++) {
+ 			for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 				if (kmb_hddls[i].soc[j].devH.sw_device_id
+-					!= swid_data.sw_id) {
+-					continue;
++					== data.sw_id) {
++					break;
+ 				}
+ 			}
++			if (j < HDDL_MAX_BAY_DEVICE)
++				break;
+ 		}
+-
+-		if (kmb_hddls[i].soc[j].devH.sw_device_id
+-			== swid_data.sw_id) {
+-			swid_data.board_id = kmb_hddls[i].board_id;
+-			swid_data.soc_id = kmb_hddls[i].soc[j].id;
+-			swid_data.soc_adaptor_no[0] =
+-				kmb_hddls[i].soc[j].adap[0].nr;
+-			swid_data.soc_adaptor_no[1] =
+-				kmb_hddls[i].soc[j].adap[1].nr;
+-			swid_data.return_id = 1;
+-			if (copy_to_user((T_SW_ID_HDDL_DATA *) arg,
+-					&swid_data, sizeof(T_SW_ID_HDDL_DATA)))
+-				return -EFAULT;
++		if (i == HDDL_MAX_DEVICE) {
++			dev_warn(hddl_dbg, "HDDL Data: [%x]device not found:\n",
++				 data.sw_id);
++			return -EFAULT;
+ 		}
++
++		data.board_id = kmb_hddls[i].board_id;
++		data.soc_id = kmb_hddls[i].soc[j].id;
++		data.soc_adaptor_no[0] = kmb_hddls[i].soc[j].adap[0].nr;
++		data.soc_adaptor_no[1] = kmb_hddls[i].soc[j].adap[1].nr;
++		data.return_id = 1;
++		if (copy_to_user((struct sw_id_hddl_data *) arg,
++				&data,
++				sizeof(struct sw_id_hddl_data)))
++			return -EFAULT;
+ 		break;
+ 	}
+ 	return 0;
+@@ -253,97 +266,76 @@ static const struct file_operations fops = {
+ 	.unlocked_ioctl = hddl_ioctl,
+ };
+ 
++int hddl_per_device_connect_thread(void *thread_param);
+ 		/*ioctl-end*/
+ void hddl_device_probe(uint32_t swdev)
+ {
+ 	int i, j;
+ 	struct task_struct *task_recv;
+ 
+-	dev_info(hddl_dbg, "%s = %x\n", __func__, swdev);
+-
+ 	for (i = 0; i < HDDL_MAX_DEVICE; i++) {
+ 		for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+-			if (kmb_hddls[i].soc[j].devH.sw_device_id != swdev)
+-				continue;
++			if (kmb_hddls[i].soc[j].devH.sw_device_id == swdev)
++				break;
+ 		}
++		if (j < HDDL_MAX_BAY_DEVICE)
++			break;
+ 	}
+-	if (kmb_hddls[i].soc[j].devH.sw_device_id == swdev) {
+-
+-		dev_info(hddl_dbg, "Booting kmb device after reset\n");
+-		task_recv = kthread_run(hddl_per_device_connect_thread,
+-				(void *)&kmb_hddls[i].soc[j].devH,
+-				"hddl_per_device_thread");
+-		if (task_recv == NULL)
+-			dev_info(hddl_dbg,
+-			    "hddl_device_init Thread creation failed");
++	if (i == HDDL_MAX_DEVICE) {
++		dev_warn(hddl_dbg, "Probe: [%x]device not found:\n", swdev);
++		return;
+ 	}
++
++	task_recv = kthread_run(hddl_per_device_connect_thread,
++			(void *)&kmb_hddls[i].soc[j].devH,
++			"hddl_per_device_thread");
++	if (task_recv == NULL)
++		dev_info(hddl_dbg,
++		    "hddl_device_init Thread creation failed");
+ }
+ 
+-void hddl_device_remove(uint32_t sw_device_id)
++void hddl_device_remove(uint32_t swdev)
+ {
+-	int i, j, k, rc;
++	int i, j, k, rc = 0;
+ 	uint32_t chan_num;
+ 	struct kmb *soc;
+ 
+-	dev_info(hddl_dbg, "%s = %x\n", __func__, sw_device_id);
+-
+ 	for (i = 0; i < HDDL_MAX_DEVICE; i++) {
+ 		for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+-			if (kmb_hddls[i].soc[j].devH.sw_device_id
+-				!= sw_device_id) {
+-				continue;
+-			}
++			if (kmb_hddls[i].soc[j].devH.sw_device_id == swdev)
++				break;
+ 		}
++		if (j < HDDL_MAX_BAY_DEVICE)
++			break;
++	}
++	if (i == HDDL_MAX_DEVICE) {
++		dev_warn(hddl_dbg, "Remove:[%x]device not found:\n", swdev);
++		return;
+ 	}
+ 
+-	if (kmb_hddls[i].soc[j].devH.sw_device_id == sw_device_id) {
++	soc = &kmb_hddls[i].soc[j];
++	for (k = 0; k < soc->i2c_slaves_cnt; k++)
++		i2c_unregister_device(soc->i2c_slaves_ext[k]);
+ 
+-		soc = &kmb_hddls[i].soc[j];
+-		for (k = 0; k < soc->i2c_slaves_cnt; k++) {
+-			dev_info(hddl_dbg,
+-			  "i2c_slaves_ext adapter %d",
+-			  soc->i2c_slaves_ext[k]->adapter->nr);
+-			i2c_unregister_device(soc->i2c_slaves_ext[k]);
+-		}
+-		for (k = 0; k < soc->soc_xlinki2c_cnt; k++) {
+-			if (soc->soc_smbus[k]) {
+-				dev_info(hddl_dbg, "soc_smbus adapter %d",
+-					soc->soc_smbus[k]->adapter->nr);
+-				i2c_unregister_device(
+-					soc->soc_smbus[k]);
+-			}
+-		}
+-		for (k = 0; k < soc->soc_xlinki2c_cnt; k++) {
+-			if (soc->soc_xlinki2c[k]) {
+-				dev_info(hddl_dbg,
+-				   "soc_xlinki2c adapter %d",
+-				    soc->soc_xlinki2c[k]->adapter->nr);
+-				i2c_unregister_device(
+-					soc->soc_xlinki2c[k]);
+-			}
+-		}
++	for (k = 0; k < soc->soc_xlinki2c_cnt; k++) {
++		if (soc->soc_smbus[k])
++			i2c_unregister_device(soc->soc_smbus[k]);
++	}
++	for (k = 0; k < soc->soc_xlinki2c_cnt; k++) {
++		if (soc->soc_xlinki2c[k])
++			i2c_unregister_device(soc->soc_xlinki2c[k]);
++	}
+ 
+-		chan_num = HDDL_NODE_XLINK_CHANNEL;
++	chan_num = HDDL_NODE_XLINK_CHANNEL;
+ 
+-		for (k = 0; k < 2; k++) {
+-			dev_info(hddl_dbg,
+-				"platform_device_unregister = %d\n",
+-				k);
+-			platform_device_unregister(soc->xlink_i2c_plt_dev[k]);
+-		}
++	for (k = 0; k < ARRAY_SIZE(soc->xlink_i2c_plt_dev); k++)
++		platform_device_unregister(soc->xlink_i2c_plt_dev[k]);
+ 
+-		rc = xlink_close_channel(&soc->devH, chan_num);
+-		dev_info(hddl_dbg, "Close Channel Number[%x]: [%u] EC[%d]\n",
+-			    sw_device_id,
+-			    chan_num,
+-			    rc);
++	rc = xlink_close_channel(&soc->devH, chan_num);
+ 
+-		rc = xlink_disconnect(&soc->devH);
+-		dev_info(hddl_dbg,
+-			"HDDL:Disconnect[%x]: EC[%d]\n",
+-			sw_device_id,
+-			rc);
+-	}
++	rc = xlink_disconnect(&soc->devH);
++
++	dev_info(hddl_dbg, "[%x]kmb device down\n", swdev);
+ }
+ 
+ uint32_t xlink_device_events[] = {
+@@ -392,12 +384,11 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 	struct timespec64 ts;
+ 	uint32_t chan_num;
+ 	uint32_t j = 0, i = 0;
+-	#ifndef CONFIG_HDDL_LOCAL_HOST
++#ifndef CONFIG_HDDL_LOCAL_HOST
+ 	struct i2c_adapter *temp;
+ 	struct i2c_board_info temp_host_i2c_device;
+-	#endif
++#endif
+ 	struct xlink_handle *devH = thread_param;
+-
+ 	struct platform_device_info xlink_i2c_info = {0};
+ 
+ 	rc = xlink_get_device_name(devH,
+@@ -408,8 +399,6 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 			rc, devH->sw_device_id);
+ 		return rc;
+ 	}
+-	dev_info(hddl_dbg, "HDDL:Device name: %x %s\n",
+-		devH->sw_device_id, device_name);
+ 	rc = X_LINK_ERROR;
+ 	while (rc != X_LINK_SUCCESS) {
+ 		rc = xlink_boot_device(devH, device_name);
+@@ -420,14 +409,11 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 	while (rc != X_LINK_SUCCESS)
+ 		rc = xlink_get_device_status(devH, &stat);
+ 
+-	dev_info(hddl_dbg, "HDDL:Device status[%d]: %u\n", rc, stat);
+-	while (rc  != 0) {
+-		xlink_connect(devH);
++	rc = X_LINK_ERROR;
++	while (rc  != X_LINK_SUCCESS)
++		rc = xlink_connect(devH);
+ 
+ 	chan_num = HDDL_NODE_XLINK_CHANNEL;
+-	dev_info(hddl_dbg, "HDDL:Channel Number[%x]: %u\n",
+-		devH->sw_device_id,
+-		chan_num);
+ 
+ 	xlink_pcie_register_device_event(devH->sw_device_id,
+ 				xlink_device_events,
+@@ -435,52 +421,39 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 				hddl_event_notify,
+ 				0);
+ 
+-
+ 	while ((rc = xlink_open_channel(devH,
+ 			chan_num,
+ 			RXB_TXB, /* mode */
+ 			64 * 1024,
+ 			0 /* timeout */)) != 0) {
+ 	}
+-	dev_info(hddl_dbg, "xlink_open_channel completed[%d]\n", rc);
+-	#ifdef CONFIG_HDDL_LOCAL_HOST
++	dev_info(hddl_dbg, "Booting Device..%x", devH->sw_device_id);
++
++#ifdef CONFIG_HDDL_LOCAL_HOST
+ 	size = sizeof(ts);
+ 	rc = xlink_read_data_to_buffer(devH, chan_num, (uint8_t *)&ts, &size);
+ 	xlink_release_data(devH, chan_num, NULL);
+ 
+-	dev_info(hddl_dbg, "S[%llx] NS[%lx]\n", ts.tv_sec, ts.tv_nsec);
+ 	do_settimeofday64(&ts);
+ 
+ 	board_id = hddl_get_board_id();
+ 	kmb_id = hddl_get_kmb_id();
+ 	board_info = (board_id << 4) | kmb_id;
+ 	rc = xlink_write_volatile(devH, chan_num,
+-	(uint8_t *)&board_info, sizeof(board_info));
++		(uint8_t *)&board_info, sizeof(board_info));
+ 
+ 	size = sizeof(board_id_rcvd);
+ 	rc = xlink_read_data_to_buffer(devH, chan_num,
+-	(uint8_t *) &board_id_rcvd, &size);
++		(uint8_t *) &board_id_rcvd, &size);
+ 	xlink_release_data(devH, chan_num, NULL);
+-	dev_info(hddl_dbg, "Board Info[%x %x]\n",
+-		board_info,
+-		board_id_rcvd
+-	);
+ 
+ 	if (board_info == ~(board_id_rcvd)) {
+ 		memcpy(&kmb_hddls[board_id].soc[kmb_id].devH, devH,
+ 		sizeof(struct xlink_handle));
+-		dev_info(hddl_dbg, "Handshake Complete = %x\n", board_info);
+-		dev_info(hddl_dbg,
+-			"Board[%x] Soc[%x] DevType[%x]\n",
+-			kmb_hddls[board_id].board_id,
+-			kmb_hddls[board_id].soc[kmb_id].id,
+-			kmb_hddls[board_id].soc[kmb_id].devH.dev_type
+-		);
+ 	}
+-	#else
++#else
+ 
+ 	ktime_get_real_ts64(&ts);
+-	dev_info(hddl_dbg, "S[%llx] NS[%lx]\n", ts.tv_sec, ts.tv_nsec);
+ 	rc = xlink_write_volatile(
+ 		devH,
+ 		chan_num,
+@@ -488,25 +461,19 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 		sizeof(struct timespec64));
+ 	size = sizeof(board_id_rcvd);
+ 	rc = xlink_read_data_to_buffer(devH, chan_num,
+-	(uint8_t *)&board_id_rcvd, &size);
++		(uint8_t *)&board_id_rcvd, &size);
+ 	xlink_release_data(devH, chan_num, NULL);
+ 
+ 	board_info = ~(board_id_rcvd);
+ 	rc = xlink_write_volatile(devH, chan_num, (uint8_t *)&board_info,
+-	sizeof(board_info));
+-	dev_info(hddl_dbg, "Board Info[%x %x]", board_id_rcvd, board_info);
++			sizeof(board_info));
+ 	board_id = (board_id_rcvd >> 4) & 0xF;
+ 	kmb_id = (board_id_rcvd & 0xF);
+ 	kmb_hddls[board_id].board_id = board_id;
+ 	kmb_hddls[board_id].soc[kmb_id].id = board_id_rcvd;
+ 	memcpy(&kmb_hddls[board_id].soc[kmb_id].devH, devH,
+-	sizeof(struct xlink_handle));
+-	dev_info(hddl_dbg, "Board[%x] Soc[%x] DevType[%x]\n",
+-		kmb_hddls[board_id].board_id,
+-		kmb_hddls[board_id].soc[kmb_id].id,
+-		kmb_hddls[board_id].soc[kmb_id].devH.dev_type
+-	);
+-	#endif
++			sizeof(struct xlink_handle));
++#endif
+ 	soc = &kmb_hddls[board_id].soc[kmb_id];
+ 	for (j = 0; j < 2; ++j) {
+ 		xlink_i2c_info.name = "i2c_xlink";
+@@ -521,9 +488,16 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 		soc->adap[j] =
+ 			*((struct i2c_adapter *)platform_get_drvdata(
+ 						soc->xlink_i2c_plt_dev[j]));
+-		dev_info(hddl_dbg, "Adapter number = %d\n", soc->adap[j].nr);
+ 	}
+-	#ifndef CONFIG_HDDL_LOCAL_HOST
++
++	dev_info(hddl_dbg, "Handshake Complete = %x\n", devH->sw_device_id);
++	dev_info(hddl_dbg,
++		"Board[%x] Soc[%x] Adapter[%d]\n",
++		kmb_hddls[board_id].board_id,
++		kmb_hddls[board_id].soc[kmb_id].id,
++		soc->adap[0].nr);
++
++#ifndef CONFIG_HDDL_LOCAL_HOST
+ 	soc->soc_xlinki2c_cnt
+ 		= sizeof(host_xlinki2c_devices)/sizeof(struct i2c_board_info);
+ 
+@@ -556,9 +530,6 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 			if (strstr(temp->name, "SMBus I801") != NULL) {
+ 				soc->soc_smbus[i]
+ 				  = i2c_new_device(temp, &temp_host_i2c_device);
+-				dev_info(hddl_dbg,
+-					"soc_smbus adapter %d",
+-					soc->soc_smbus[i]->adapter->nr);
+ 				break;
+ 			}
+ 			j++;
+@@ -566,14 +537,6 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 		soc->soc_xlinki2c[i] = i2c_new_device(i2c_get_adapter(
+ 				soc->adap[1].nr),
+ 				&temp_host_i2c_device);
+-		dev_info(hddl_dbg,
+-			"soc_xlinki2c adapter %d",
+-			soc->soc_xlinki2c[i]->adapter->nr);
+-
+-		dev_info(hddl_dbg,
+-			"Host_kmb_tj [%s] %d\n",
+-			temp_host_i2c_device.type,
+-			temp_host_i2c_device.addr);
+ 	}
+ 
+ 	soc->i2c_slaves_cnt
+@@ -590,27 +553,25 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 		soc->i2c_slaves_ext[i] = i2c_new_device(
+ 			i2c_get_adapter(soc->adap[0].nr),
+ 			&soc_i2c_ext_devices[i]);
+-		dev_info(hddl_dbg,
+-			"i2c_slaves_ext adapter %d",
+-			soc->i2c_slaves_ext[i]->adapter->nr);
+ 
+ 		ssleep(1);
+ 	}
+ 	mutex_unlock(&my_mutex);
+ 
+-	#else
++#else
+ 	soc->soc_xlinki2c_cnt
+-	= sizeof(kmb_i2c_devices)/sizeof(struct i2c_board_info);
++		= sizeof(kmb_i2c_devices)/sizeof(struct i2c_board_info);
+ 	soc->soc_xlinki2c
+-	= kzalloc(
+-		sizeof(struct i2c_client *) * (soc->soc_xlinki2c_cnt),
++		= kzalloc(
++			sizeof(struct i2c_client *) * (soc->soc_xlinki2c_cnt),
+ 		GFP_KERNEL);
+ 	for (i = 0; i < soc->soc_xlinki2c_cnt; i++) {
+ 		soc->soc_xlinki2c[i] = i2c_new_device(
+ 			i2c_get_adapter(soc->adap[1].nr),
+ 			&kmb_i2c_devices[i]);
+ 	}
+-	#endif
++#endif
++	dev_info(hddl_dbg, "[%x]kmb device up\n", devH->sw_device_id);
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(hddl_per_device_connect_thread);
+@@ -626,7 +587,7 @@ EXPORT_SYMBOL_GPL(hddl_per_device_connect_thread);
+ #define SW_DEVICE_ID_PCIE_INTERFACE 0x1
+ 
+ #define XLINK_CONNECT_THREAD_BASED
+-static struct xlink_handle xdevH[20];
++static struct xlink_handle xdevH[HDDL_MAX_DEVICE*HDDL_MAX_BAY_DEVICE];
+ static int hddl_device_thermal_init(void *thread_param)
+ {
+ 	uint32_t num_devices = 0;
+@@ -643,7 +604,7 @@ static int hddl_device_thermal_init(void *thread_param)
+ 	if (num_devices == 0) {
+ 		dev_info(hddl_dbg, "HDDL:No devices found\n");
+ 		return 0;
+-	} else if (num_devices > 20) {
++	} else if (num_devices > (HDDL_MAX_DEVICE*HDDL_MAX_BAY_DEVICE)) {
+ 		dev_info(hddl_dbg, "HDDL:Increase xdevH array size\n");
+ 		return -1;
+ 	}
+@@ -664,7 +625,6 @@ static int hddl_device_thermal_init(void *thread_param)
+ 
+ 		if (GET_INTERFACE_FROM_SW_DEVICE_ID(xdevH[i].sw_device_id)
+ 				== SW_DEVICE_ID_PCIE_INTERFACE) {
+-			dev_info(hddl_dbg, "HDDL:Booting device...\n");
+ 			task_recv = kthread_run(hddl_per_device_connect_thread,
+ 					(void *)&xdevH[i],
+ 					"hddl_per_device_thread");
+@@ -727,8 +687,7 @@ static int hddl_device_thread_create(void)
+ 		dev_info(hddl_dbg, "Cannot create the Device 1\n");
+ 		goto r_device;
+ 	}
+-	dev_info(hddl_dbg, "Device Driver Insert...Done!!!\n");
+-		return 0;
++	return 0;
+ r_device:
+ 	class_destroy(dev_class);
+ r_class:
+@@ -747,8 +706,7 @@ module_exit(hddl_device_thermal_exit);
+ #endif
+ 
+ MODULE_DESCRIPTION("KeemBay HDDL Device driver");
+-MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai
+-	<lakshmi.bai.raja.subramanian@intel.com>");
++MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>");
+ MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
+ MODULE_AUTHOR("Vaidya, Mahesh R <mahesh.r.vaidya@intel.com>");
+ MODULE_LICENSE("GPL v2");
+diff --git a/drivers/misc/host_kmb_tj/host_kmb_tj.c b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+index fc73699d78bd..75d2d34b4f3f 100644
+--- a/drivers/misc/host_kmb_tj/host_kmb_tj.c
++++ b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+@@ -197,10 +197,6 @@ int keembay_thermal_zone_unregister_host(
+ 
+ 	spin_lock(&ktherm->lock);
+ 	thermal_zone_device_unregister(zone_trip_info->tz);
+-	dev_info(ktherm->dev,
+-		"thermal_zone_device_unregister %s\n",
+-		zone_trip_info->sensor_name
+-	);
+ 	spin_unlock(&ktherm->lock);
+ 	return 0;
+ }
+@@ -269,7 +265,6 @@ static int host_kmb_tj_probe(struct i2c_client *client,
+ 	char *i2c_str;
+ 	struct kmb_trip_point_info *host_kmb_trip_info;
+ 	uint32_t *device_id = client->dev.platform_data;
+-	int i;
+ 
+ 	if (strstr(client->adapter->name, "SMBus I801") != NULL)
+ 		i2c_str = "smb";
+@@ -321,7 +316,7 @@ static int host_kmb_tj_probe(struct i2c_client *client,
+ 
+ 	i2c_set_clientdata(client, host_kmb_trip_info);
+ 
+-	dev_info(client->dev, "host_kmb_tj: probe success\n");
++	dev_info(&client->dev, "host_kmb_tj: probe success\n");
+ 
+ 	return 0;
+ }
+diff --git a/drivers/misc/slave_kmb_tj/slave_kmb_tj.c b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+index ab6f7f5bdd0b..55c0fcaab744 100644
+--- a/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
++++ b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+@@ -17,12 +17,15 @@
+ #include <linux/sysfs.h>
+ #include <linux/sched/mm.h>
+ #include <linux/of_address.h>
++#include "../drivers/misc/thermal/keembay_tsens.h"
+ 
+ #define I2C_SLAVE_BYTELEN GENMASK(15, 0)
+ #define I2C_SLAVE_FLAG_ADDR16 BIT(16)
+ #define I2C_SLAVE_FLAG_RO BIT(17)
+ #define I2C_SLAVE_DEVICE_MAGIC(_len, _flags) ((_flags) | (_len))
+ 
++#define DEBUG_SLAVE_KMB_TJ 0
++
+ #if IS_ENABLED(CONFIG_I2C_SLAVE)
+ 
+ struct kmb_tj_data {
+@@ -36,7 +39,6 @@ struct kmb_tj_data {
+ 	u8 buffer[];
+ };
+ 
+-
+ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 				     enum i2c_slave_event event, u8 *val)
+ {
+@@ -53,7 +55,7 @@ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 			kmb_tj->buffer_idx = *val | (kmb_tj->buffer_idx << 8);
+ 			kmb_tj->idx_write_cnt++;
+ 			spin_lock(&kmb_tj->buffer_lock);
+-			temp = (unsigned char *)(kmb_tj_temp_list);
++			temp = (unsigned char *)kmb_tj_get_temp_base();
+ 			kmb_tj->buffer[kmb_tj->buffer_idx]
+ 				= temp[kmb_tj->buffer_idx];
+ 			spin_unlock(&kmb_tj->buffer_lock);
+@@ -111,23 +113,6 @@ static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
+ 	return 0;
+ }
+ 
+-static ssize_t i2c_slave_kmb_tj_bin_read(struct file *filp,
+-					struct kobject *kobj,
+-					struct bin_attribute *attr,
+-					char *buf, loff_t off, size_t count)
+-{
+-	struct kmb_tj_data *kmb_tj;
+-	unsigned long flags;
+-
+-	kmb_tj = dev_get_drvdata(container_of(kobj, struct device, kobj));
+-
+-	spin_lock_irqsave(&kmb_tj->buffer_lock, flags);
+-	memcpy(buf, &kmb_tj->buffer[off], count);
+-	spin_unlock_irqrestore(&kmb_tj->buffer_lock, flags);
+-
+-	return count;
+-}
+-
+ static int hddl_id_read(uint32_t *bid, uint32_t *kmbid, struct device *dev)
+ {
+ 	char *gpio_base_address;
+@@ -145,25 +130,30 @@ static int hddl_id_read(uint32_t *bid, uint32_t *kmbid, struct device *dev)
+ 	writel(0x1C0F, gpio_base_address + 0x2D0);
+ 	writel(0x1C0F, gpio_base_address + 0x2D4);
+ 
++#if DEBUG_SLAVE_KMB_TJ
+ 	dev_info(dev, "0x2CC = %x\n", readl(gpio_base_address + 0x2CC));
+ 	dev_info(dev, "0x2D0 = %x\n", readl(gpio_base_address + 0x2D0));
+ 	dev_info(dev, "0x2D4 = %x\n", readl(gpio_base_address + 0x2D4));
++#endif
+ 
+ 	writel(0x1C0F, gpio_base_address + 0x328);
+ 	writel(0x1C0F, gpio_base_address + 0x32C);
+ 	writel(0x1C0F, gpio_base_address + 0x330);
+ 
+-
++#if DEBUG_SLAVE_KMB_TJ
+ 	dev_info(dev, "0x328 = %x\n", readl(gpio_base_address + 0x328));
+ 	dev_info(dev, "0x32C = %x\n", readl(gpio_base_address + 0x32C));
+ 	dev_info(dev, "0x330 = %x\n", readl(gpio_base_address + 0x330));
++#endif /*DEBUG_SLAVE_KMB_TJ*/
+ 
+ 	*bid = readl(gpio_base_address + 0x24);
+-	*bid = (bid >> 19) & 0x7;
++	*bid = (*bid >> 19) & 0x7;
+ 	*kmbid = readl(gpio_base_address + 0x28);
+-	*kmbid = (kmbid >> 10) & 0x7;
++	*kmbid = (*kmbid >> 10) & 0x7;
++#if DEBUG_SLAVE_KMB_TJ
+ 	dev_info(dev, "HDDL: GPIO BOARD ID = %u\n", *bid);
+ 	dev_info(dev, "HDDL: GPIO KEEMBAY ID = %u\n", *kmbid);
++#endif
+ 	if (*kmbid > 2) {
+ 		*kmbid = 0;
+ 		dev_info(dev, "HDDL: GPIO KEEMBAY ID > 2, ");
+@@ -193,8 +183,6 @@ static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
+ 		slave_addr = kmb_id + 0x60 + ((board_id - 5) * 3);
+ 	}
+ 
+-	dev_info(&client->dev, "HDDL: Slave Address = %x\n", slave_addr);
+-
+ 	kmb_tj = devm_kzalloc(&client->dev,
+ 			sizeof(struct kmb_tj_data) + size, GFP_KERNEL);
+ 	if (!kmb_tj)
+@@ -209,6 +197,9 @@ static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
+ 	i2c_set_clientdata(client, kmb_tj);
+ 
+ 	ret = i2c_slave_register(client, i2c_slave_kmb_tj_slave_cb);
++#if DEBUG_SLAVE_KMB_TJ
++	dev_info(&client->dev, "Slave Kmb Probe Success[%x]\n", slave_addr);
++#endif
+ 
+ 	return ret;
+ };
+diff --git a/drivers/misc/thermal/keembay_cooling.c b/drivers/misc/thermal/keembay_cooling.c
+index 8f46e1c9ffbb..10dfe37e2b05 100644
+--- a/drivers/misc/thermal/keembay_cooling.c
++++ b/drivers/misc/thermal/keembay_cooling.c
+@@ -34,7 +34,7 @@ keembay_cooling_set_cur_state(struct thermal_cooling_device *cooling_dev,
+ 			      unsigned long state)
+ {
+ 	state = 0;
+-	dev_info(&cooling_dev->dev, "%s\n", __func__);
++	dev_info(&cooling_dev->device, "%s\n", __func__);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/misc/thermal/keembay_thermal.c b/drivers/misc/thermal/keembay_thermal.c
+index 2556c5f3148d..c90703136e63 100644
+--- a/drivers/misc/thermal/keembay_thermal.c
++++ b/drivers/misc/thermal/keembay_thermal.c
+@@ -17,6 +17,346 @@
+ #include <linux/delay.h>
+ #include <linux/slab.h>
+ #include "keembay_tsens.h"
++/* Register values for keembay temperature (PVT Sensor) */
++#define AON_TSENS_TRIM0_CFG 0x0030
++#define AON_TSENS_TRIM1_CFG 0x0034
++#define AON_TSENS_CFG 0x0038
++#define AON_TSENS_INT0 0x203c
++#define AON_TSENS_INT1 0x2040
++#define AON_TSENS_IRQ_CLEAR 0x0044
++#define AON_TSENS_DATA0 0x0048
++#define MSS_T_SAMPLE_VALID 0x80000000
++#define MSS_T_SAMPLE 0x3ff
++#define CSS_T_SAMPLE_VALID 0x8000
++#define CSS_T_SAMPLE 0x3ff
++#define NCE1_T_SAMPLE_VALID 0x80000000
++#define NCE1_T_SAMPLE 0x3ff
++#define NCE0_T_SAMPLE_VALID 0x8000
++#define NCE0_T_SAMPLE 0x3ff
++#define AON_TSENS_DATA1 0x004c
++#define AON_INTERFACE 0x20260000
++/* Bit shift for registers*/
++#define MSS_BIT_SHIFT 16
++#define CSS_BIT_SHIFT 0
++#define NCE0_BIT_SHIFT 0
++#define NCE1_BIT_SHIFT 16
++/* mask values for config register */
++#define CFG_MASK_AUTO 0x80ff //(auto configuration)
++#define CFG_IRQ_MASK 0x8fff
++#define CFG_MASK_MANUAL  0x000f // TSENS_EN (manual configuration)
++/* temperature boundary cases */
++#define Lower_Temp_Nrange 27
++#define Upper_Temp_Nrange 771
++#define Lower_Temp -39956
++#define Upper_Temp 125025
++
++/* temperature calculation lookup */
++struct raw_kmb {
++	int N;
++	int temp;
++};
++static struct raw_kmb raw_kmb_data[] = {
++{27, -39956}, {28, -39637}, {29, -39319}, {30, -39001}, {31, -38684},
++
++{32, -38367}, {33, -38050}, {34, -37734}, {35, -37418}, {36, -37103},
++
++{37, -36787}, {38, -36472}, {39, -36158}, {40, -35844}, {41, -35530},
++
++{42, -35216}, {43, -34903}, {44, -34590}, {45, -34278}, {46, -33966},
++
++{47, -33654}, {48, -33343}, {49, -33032}, {50, -32721}, {51, -32411},
++
++{52, -32101}, {53, -31791}, {54, -31482}, {55, -31173}, {56, -30864},
++
++{57, -30556}, {58, -30248}, {59, -29940}, {60, -29633}, {61, -29326},
++
++{62, -29020}, {63, -28713}, {64, -28407}, {65, -28102}, {66, -27797},
++
++{67, -27492}, {68, -27187}, {69, -26883}, {70, -26579}, {71, -26276},
++
++{72, -25973}, {73, -25670}, {74, -25367}, {75, -25065}, {76, -24763},
++
++{77, -24462}, {78, -24160}, {79, -23860}, {80, -23559}, {81, -23259},
++
++{82, -22959}, {83, -22660}, {84, -22360}, {85, -22062}, {86, -21763},
++
++{87, -21465}, {88, -21167}, {89, -20869}, {90, -20572}, {91, -20275},
++
++{92, -19979}, {93, -19683}, {94, -19387}, {95, -19091}, {96, -18796},
++
++{97, -18501}, {98, -18206}, {99, -17912}, {100, -17618}, {101, -17325},
++
++{102, -17031}, {103, -16738}, {104, -16446}, {105, -16153}, {106, -15861},
++
++{107, -15570}, {108, -15278}, {109, -14987}, {110, -14697}, {111, -14406},
++
++{112, -14116}, {113, -13826}, {114, -13537}, {115, -13248}, {116, -12959},
++
++{117, -12670}, {118, -12382}, {119, -12094}, {120, -11807}, {121, -11520},
++
++{122, -11233}, {123, -10946}, {124, -10660}, {125, -10374}, {126, -10088},
++
++{127, -9803}, {128, -9518}, {129, -9233}, {130, -8949}, {131, -8665},
++
++{132, -8381}, {133, -8097}, {134, -7814}, {135, -7531}, {136, -7249},
++
++{137, -6967}, {138, -6685}, {139, -6403}, {140, -6122}, {141, -5841},
++
++{142, -5560}, {143, -5279}, {144, -4999}, {145, -4720}, {146, -4440},
++
++{147, -4161}, {148, -3882}, {149, -3603}, {150, -3325}, {151, -3047},
++
++{152, -2770}, {153, -2492}, {154, -2215}, {155, -1938}, {156, -1662},
++
++{157, -1386}, {158, -1110}, {159, -834}, {160, -559}, {161, -284},
++
++{162, -9}, {163, 265}, {164, 539}, {165, 813}, {166, 1086},
++
++{167, 1360}, {168, 1633}, {169, 1905}, {170, 2177}, {171, 2449},
++
++{172, 2721}, {173, 2993}, {174, 3264}, {175, 3535}, {176, 3805},
++
++{177, 4075}, {178, 4345}, {179, 4615}, {180, 4884}, {181, 5153},
++
++{182, 5422}, {183, 5691}, {184, 5959}, {185, 6227}, {186, 6495},
++
++{187, 6762}, {188, 7029}, {189, 7296}, {190, 7562}, {191, 7829},
++
++{192, 8095}, {193, 8360}, {194, 8626}, {195, 8891}, {196, 9155},
++
++{197, 9420}, {198, 9684}, {199, 9948}, {200, 10212}, {201, 10475},
++
++{202, 10738}, {203, 11001}, {204, 11264}, {205, 11526}, {206, 11788},
++
++{207, 12049}, {208, 12311}, {209, 12572}, {210, 12833}, {211, 13093},
++
++{212, 13354}, {213, 13614}, {214, 13874}, {215, 14133}, {216, 14392},
++
++{217, 14651}, {218, 14910}, {219, 15168}, {220, 15426}, {221, 15684},
++
++{222, 15942}, {223, 16199}, {224, 16456}, {225, 16713}, {226, 16969},
++
++{227, 17225}, {228, 17481}, {229, 17737}, {230, 17992}, {231, 18247},
++
++{232, 18502}, {233, 18757}, {234, 19011}, {235, 19265}, {236, 19519},
++
++{237, 19772}, {238, 20025}, {239, 20278}, {240, 20531}, {241, 20784},
++
++{242, 21036}, {243, 21288}, {244, 21539}, {245, 21791}, {246, 22042},
++
++{247, 22292}, {248, 22543}, {249, 22793}, {250, 23043}, {251, 23293},
++
++{252, 23543}, {253, 23792}, {254, 24041}, {255, 24290}, {256, 24538},
++
++{257, 24786}, {258, 25034}, {259, 25282}, {260, 25529}, {261, 25776},
++
++{262, 26023}, {263, 26270}, {264, 26516}, {265, 26763}, {266, 27008},
++
++{267, 27254}, {268, 27499}, {269, 27745}, {270, 27989}, {271, 28234},
++
++{272, 28478}, {273, 28722}, {274, 28966}, {275, 29210}, {276, 29453},
++
++{277, 29696}, {278, 29939}, {279, 30182}, {280, 30424}, {281, 30666},
++
++{282, 30908}, {283, 31149}, {284, 31391}, {285, 31632}, {286, 31873},
++
++{287, 32113}, {288, 32353}, {289, 32593}, {290, 32833}, {291, 33073},
++
++{292, 33312}, {293, 33551}, {294, 33790}, {295, 34029}, {296, 34267},
++
++{297, 34505}, {298, 34743}, {299, 34980}, {300, 35218}, {301, 35455},
++
++{302, 35692}, {303, 35928}, {304, 36165}, {305, 36401}, {306, 36637},
++
++{307, 36872}, {308, 37108}, {309, 37343}, {310, 37578}, {311, 37813},
++
++{312, 38047}, {313, 38281}, {314, 38515}, {315, 38749}, {316, 38982},
++
++{317, 39216}, {318, 39448}, {319, 39681}, {320, 39914}, {321, 40146},
++
++{322, 40378}, {323, 40610}, {324, 40841}, {325, 41073}, {326, 41304},
++
++{327, 41535}, {328, 41765}, {329, 41996}, {330, 42226}, {331, 42456},
++
++{332, 42686}, {333, 42915}, {334, 43144}, {335, 43373}, {336, 43602},
++
++{337, 43830}, {338, 44059}, {339, 44287}, {340, 44515}, {341, 44742},
++
++{342, 44970}, {343, 45197}, {344, 45424}, {345, 45650}, {346, 45877},
++
++{347, 46103}, {348, 46329}, {349, 46555}, {350, 46780}, {351, 47006},
++
++{352, 47231}, {353, 47456}, {354, 47680}, {355, 47905}, {356, 48129},
++
++{357, 48353}, {358, 48576}, {359, 48800}, {360, 49023}, {361, 49246},
++
++{362, 49469}, {363, 49692}, {364, 49914}, {365, 50136}, {366, 50358},
++
++{367, 50580}, {368, 50801}, {369, 51023}, {370, 51244}, {371, 51464},
++
++{372, 51685}, {373, 51905}, {374, 52126}, {375, 52346}, {376, 52565},
++
++{377, 52785}, {378, 53004}, {379, 53223}, {380, 53442}, {381, 53661},
++
++{382, 53879}, {383, 54097}, {384, 54315}, {385, 54533}, {386, 54750},
++
++{387, 54968}, {388, 55185}, {389, 55402}, {390, 55618}, {391, 55835},
++
++{392, 56051}, {393, 56267}, {394, 56483}, {395, 56699}, {396, 56914},
++
++{397, 57129}, {398, 57344}, {399, 57559}, {400, 57773}, {401, 57988},
++
++{402, 58202}, {403, 58416}, {404, 58630}, {405, 58843}, {406, 59056},
++
++{407, 59269}, {408, 59482}, {409, 59695}, {410, 59907}, {411, 60120},
++
++{412, 60332}, {413, 60543}, {414, 60755}, {415, 60966}, {416, 61178},
++
++{417, 61389}, {418, 61599}, {419, 61810}, {420, 62020}, {421, 62231},
++
++{422, 62440}, {423, 62650}, {424, 62860}, {425, 63069}, {426, 63278},
++
++{427, 63487}, {428, 63696}, {429, 63904}, {430, 64113}, {431, 64321},
++
++{432, 64529}, {433, 64737}, {434, 64944}, {435, 65151}, {436, 65358},
++
++{437, 65565}, {438, 65772}, {439, 65979}, {440, 66185}, {441, 66391},
++
++{442, 66597}, {443, 66803}, {444, 67008}, {445, 67213}, {446, 67419},
++
++{447, 67624}, {448, 67828}, {449, 68033}, {450, 68237}, {451, 68441},
++
++{452, 68645}, {453, 68849}, {454, 69052}, {455, 69256}, {456, 69459},
++
++{457, 69662}, {458, 69865}, {459, 70067}, {460, 70270}, {461, 70472},
++
++{462, 70674}, {463, 70876}, {464, 71077}, {465, 71279}, {466, 71480},
++
++{467, 71681}, {468, 71882}, {469, 72082}, {470, 72283}, {471, 72483},
++
++{472, 72683}, {473, 72883}, {474, 73083}, {475, 73282}, {476, 73481},
++
++{477, 73680}, {478, 73879}, {479, 74078}, {480, 74277}, {481, 74475},
++
++{482, 74673}, {483, 74871}, {484, 75069}, {485, 75266}, {486, 75464},
++
++{487, 75661}, {488, 75858}, {489, 76055}, {490, 76252}, {491, 76448},
++
++{492, 76644}, {493, 76841}, {494, 77037}, {495, 77232}, {496, 77428},
++
++{497, 77623}, {498, 77818}, {499, 78013}, {500, 78208}, {501, 78403},
++
++{502, 78597}, {503, 78792}, {504, 78986}, {505, 79180}, {506, 79373},
++
++{507, 79567}, {508, 79760}, {509, 79953}, {510, 80146}, {511, 80339},
++
++{512, 80532}, {513, 80724}, {514, 80917}, {515, 81109}, {516, 81301},
++
++{517, 81492}, {518, 81684}, {519, 81875}, {520, 82066}, {521, 82258},
++
++{522, 82448}, {523, 82639}, {524, 82830}, {525, 83020}, {526, 83210},
++
++{527, 83400}, {528, 83590}, {529, 83779}, {530, 83969}, {531, 84158},
++
++{532, 84347}, {533, 84536}, {534, 84725}, {535, 84913}, {536, 85102},
++
++{537, 85290}, {538, 85478}, {539, 85666}, {540, 85854}, {541, 86041},
++
++{542, 86228}, {543, 86416}, {544, 86603}, {545, 86789}, {546, 86976},
++
++{547, 87163}, {548, 87349}, {549, 87535}, {550, 87721}, {551, 87907},
++
++{552, 88092}, {553, 88278}, {554, 88463}, {555, 88648}, {556, 88833},
++
++{557, 89018}, {558, 89203}, {559, 89387}, {560, 89571}, {561, 89755},
++
++{562, 89939}, {563, 90123}, {564, 90307}, {565, 90490}, {566, 90674},
++
++{567, 90857}, {568, 91040}, {569, 91222}, {570, 91405}, {571, 91587},
++
++{572, 91770}, {573, 91952}, {574, 92134}, {575, 92315}, {576, 92497},
++
++{577, 92679}, {578, 92860}, {579, 93041}, {580, 93222}, {581, 93403},
++
++{582, 93583}, {583, 93764}, {584, 93944}, {585, 94124}, {586, 94304},
++
++{587, 94484}, {588, 94664}, {589, 94843}, {590, 95023}, {591, 95202},
++
++{592, 95381}, {593, 95560}, {594, 95738}, {595, 95917}, {596, 96095},
++
++{597, 96273}, {598, 96451}, {599, 96629}, {600, 96807}, {601, 96985},
++
++{602, 97162}, {603, 97339}, {604, 97516}, {605, 97693}, {606, 97870},
++
++{607, 98047}, {608, 98223}, {609, 98399}, {610, 98576}, {611, 98752},
++
++{612, 98927}, {613, 99103}, {614, 99279}, {615, 99454}, {616, 99629},
++
++{617, 99804}, {618, 99979}, {619, 100154}, {620, 100328}, {621, 100503},
++
++{622, 100677}, {623, 100851}, {624, 101025}, {625, 101199}, {626, 101373},
++
++{627, 101546}, {628, 101720}, {629, 101893}, {630, 102066}, {631, 102239},
++
++{632, 102411}, {633, 102584}, {634, 102756}, {635, 102929}, {636, 103101},
++
++{637, 103273}, {638, 103445}, {639, 103616}, {640, 103788}, {641, 103959},
++
++{642, 104130}, {643, 104302}, {644, 104472}, {645, 104643}, {646, 104814},
++
++{647, 104984}, {648, 105155}, {649, 105325}, {650, 105495}, {651, 105665},
++
++{652, 105835}, {653, 106004}, {654, 106174}, {655, 106343}, {656, 106512},
++
++{657, 106681}, {658, 106850}, {659, 107019}, {660, 107187}, {661, 107355},
++
++{662, 107524}, {663, 107692}, {664, 107860}, {665, 108028}, {666, 108195},
++
++{667, 108363}, {668, 108530}, {669, 108697}, {670, 108865}, {671, 109031},
++
++{672, 109198}, {673, 109365}, {674, 109531}, {675, 109698}, {676, 109864},
++
++{677, 110030}, {678, 110196}, {679, 110362}, {680, 110528}, {681, 110693},
++
++{682, 110858}, {683, 111024}, {684, 111189}, {685, 111354}, {686, 111518},
++
++{687, 111683}, {688, 111848}, {689, 112012}, {690, 112176}, {691, 112340},
++
++{692, 112504}, {693, 112668}, {694, 112832}, {695, 112995}, {696, 113159},
++
++{697, 113322}, {698, 113485}, {699, 113648}, {700, 113811}, {701, 113973},
++
++{702, 114136}, {703, 114298}, {704, 114461}, {705, 114623}, {706, 114785},
++
++{707, 114947}, {708, 115108}, {709, 115270}, {710, 115431}, {711, 115593},
++
++{712, 115754}, {713, 115915}, {714, 116076}, {715, 116236}, {716, 116397},
++
++{717, 116558}, {718, 116718}, {719, 116878}, {720, 117038}, {721, 117198},
++
++{722, 117358}, {723, 117518}, {724, 117677}, {725, 117836}, {726, 117996},
++
++{727, 118155}, {728, 118314}, {729, 118473}, {730, 118631}, {731, 118790},
++
++{732, 118948}, {733, 119107}, {734, 119265}, {735, 119423}, {736, 119581},
++
++{737, 119739}, {738, 119896}, {739, 120054}, {740, 120211}, {741, 120368},
++
++{742, 120525}, {743, 120682}, {744, 120839}, {745, 120996}, {746, 121153},
++
++{747, 121309}, {748, 121465}, {749, 121622}, {750, 121778}, {751, 121934},
++
++{752, 122089}, {753, 122245}, {754, 122400}, {755, 122556}, {756, 122711},
++
++{757, 122866}, {758, 123021}, {759, 123176}, {760, 123331}, {761, 123486},
++
++{762, 123640}, {763, 123794}, {764, 123949}, {765, 124103}, {766, 124257},
++
++{767, 124411}, {768, 124564}, {769, 124718}, {770, 124871}, {771, 125025},
++};
++
++enum { NUM_RAW_KMB = ARRAY_SIZE(raw_kmb_data) };
++
+ 
+ static int TempLookupSearch(int low, int high, int n)
+ {
+@@ -62,7 +402,13 @@ static int kmb_sensor_read_temp(void __iomem *regs_val,
+ }
+ 
+ int kmb_tj_temp_list[6];
+-EXPORT_SYMBOL_GPL(kmb_tj_temp_list);
++
++int *kmb_tj_get_temp_base(void)
++{
++	return kmb_tj_temp_list;
++}
++EXPORT_SYMBOL_GPL(kmb_tj_get_temp_base);
++
+ static int keembay_get_temp(struct thermal_zone_device *thermal,
+ 							int *temp)
+ {
+diff --git a/drivers/misc/thermal/keembay_tsens.h b/drivers/misc/thermal/keembay_tsens.h
+index 129982f5227e..a5cdb0a28d46 100644
+--- a/drivers/misc/thermal/keembay_tsens.h
++++ b/drivers/misc/thermal/keembay_tsens.h
+@@ -1,357 +1,16 @@
+-// SPDX-License-Identifier: GPL-2.0-only
++/* SPDX-License-Identifier: GPL-2.0-only */
+ /*
+  * Keembay Temperature sensor local-host module.
+  *
+  * Copyright (C) 2019-2020 Intel Corporation.
+  */
+ 
+-#ifndef _LINUX_KEEMBAY_TSENS_H
+-#define _LINUX_KEEMBAY_TSENS_H
++#ifndef _KEEMBAY_TSENS_H
++#define _KEEMBAY_TSENS_H
+ 
+ 
+ #include <linux/thermal.h>
+ 
+-/* Register values for keembay temperature (PVT Sensor) */
+-#define AON_TSENS_TRIM0_CFG 0x0030
+-#define AON_TSENS_TRIM1_CFG 0x0034
+-#define AON_TSENS_CFG 0x0038
+-#define AON_TSENS_INT0 0x203c
+-#define AON_TSENS_INT1 0x2040
+-#define AON_TSENS_IRQ_CLEAR 0x0044
+-#define AON_TSENS_DATA0 0x0048
+-#define MSS_T_SAMPLE_VALID 0x80000000
+-#define MSS_T_SAMPLE 0x3ff
+-#define CSS_T_SAMPLE_VALID 0x8000
+-#define CSS_T_SAMPLE 0x3ff
+-#define NCE1_T_SAMPLE_VALID 0x80000000
+-#define NCE1_T_SAMPLE 0x3ff
+-#define NCE0_T_SAMPLE_VALID 0x8000
+-#define NCE0_T_SAMPLE 0x3ff
+-#define AON_TSENS_DATA1 0x004c
+-#define AON_INTERFACE 0x20260000
+-/* Bit shift for registers*/
+-#define MSS_BIT_SHIFT 16
+-#define CSS_BIT_SHIFT 0
+-#define NCE0_BIT_SHIFT 0
+-#define NCE1_BIT_SHIFT 16
+-/* mask values for config register */
+-#define CFG_MASK_AUTO 0x80ff //(auto configuration)
+-#define CFG_IRQ_MASK 0x8fff
+-#define CFG_MASK_MANUAL  0x000f // TSENS_EN (manual configuration)
+-/* temperature boundary cases */
+-#define Lower_Temp_Nrange 27
+-#define Upper_Temp_Nrange 771
+-#define Lower_Temp -39956
+-#define Upper_Temp 125025
+-
+-/* temperature calculation lookup */
+-struct raw_kmb {
+-	int N;
+-	int temp;
+-};
+-static struct raw_kmb raw_kmb_data[] = {
+-{27, -39956}, {28, -39637}, {29, -39319}, {30, -39001}, {31, -38684},
+-
+-{32, -38367}, {33, -38050}, {34, -37734}, {35, -37418}, {36, -37103},
+-
+-{37, -36787}, {38, -36472}, {39, -36158}, {40, -35844}, {41, -35530},
+-
+-{42, -35216}, {43, -34903}, {44, -34590}, {45, -34278}, {46, -33966},
+-
+-{47, -33654}, {48, -33343}, {49, -33032}, {50, -32721}, {51, -32411},
+-
+-{52, -32101}, {53, -31791}, {54, -31482}, {55, -31173}, {56, -30864},
+-
+-{57, -30556}, {58, -30248}, {59, -29940}, {60, -29633}, {61, -29326},
+-
+-{62, -29020}, {63, -28713}, {64, -28407}, {65, -28102}, {66, -27797},
+-
+-{67, -27492}, {68, -27187}, {69, -26883}, {70, -26579}, {71, -26276},
+-
+-{72, -25973}, {73, -25670}, {74, -25367}, {75, -25065}, {76, -24763},
+-
+-{77, -24462}, {78, -24160}, {79, -23860}, {80, -23559}, {81, -23259},
+-
+-{82, -22959}, {83, -22660}, {84, -22360}, {85, -22062}, {86, -21763},
+-
+-{87, -21465}, {88, -21167}, {89, -20869}, {90, -20572}, {91, -20275},
+-
+-{92, -19979}, {93, -19683}, {94, -19387}, {95, -19091}, {96, -18796},
+-
+-{97, -18501}, {98, -18206}, {99, -17912}, {100, -17618}, {101, -17325},
+-
+-{102, -17031}, {103, -16738}, {104, -16446}, {105, -16153}, {106, -15861},
+-
+-{107, -15570}, {108, -15278}, {109, -14987}, {110, -14697}, {111, -14406},
+-
+-{112, -14116}, {113, -13826}, {114, -13537}, {115, -13248}, {116, -12959},
+-
+-{117, -12670}, {118, -12382}, {119, -12094}, {120, -11807}, {121, -11520},
+-
+-{122, -11233}, {123, -10946}, {124, -10660}, {125, -10374}, {126, -10088},
+-
+-{127, -9803}, {128, -9518}, {129, -9233}, {130, -8949}, {131, -8665},
+-
+-{132, -8381}, {133, -8097}, {134, -7814}, {135, -7531}, {136, -7249},
+-
+-{137, -6967}, {138, -6685}, {139, -6403}, {140, -6122}, {141, -5841},
+-
+-{142, -5560}, {143, -5279}, {144, -4999}, {145, -4720}, {146, -4440},
+-
+-{147, -4161}, {148, -3882}, {149, -3603}, {150, -3325}, {151, -3047},
+-
+-{152, -2770}, {153, -2492}, {154, -2215}, {155, -1938}, {156, -1662},
+-
+-{157, -1386}, {158, -1110}, {159, -834}, {160, -559}, {161, -284},
+-
+-{162, -9}, {163, 265}, {164, 539}, {165, 813}, {166, 1086},
+-
+-{167, 1360}, {168, 1633}, {169, 1905}, {170, 2177}, {171, 2449},
+-
+-{172, 2721}, {173, 2993}, {174, 3264}, {175, 3535}, {176, 3805},
+-
+-{177, 4075}, {178, 4345}, {179, 4615}, {180, 4884}, {181, 5153},
+-
+-{182, 5422}, {183, 5691}, {184, 5959}, {185, 6227}, {186, 6495},
+-
+-{187, 6762}, {188, 7029}, {189, 7296}, {190, 7562}, {191, 7829},
+-
+-{192, 8095}, {193, 8360}, {194, 8626}, {195, 8891}, {196, 9155},
+-
+-{197, 9420}, {198, 9684}, {199, 9948}, {200, 10212}, {201, 10475},
+-
+-{202, 10738}, {203, 11001}, {204, 11264}, {205, 11526}, {206, 11788},
+-
+-{207, 12049}, {208, 12311}, {209, 12572}, {210, 12833}, {211, 13093},
+-
+-{212, 13354}, {213, 13614}, {214, 13874}, {215, 14133}, {216, 14392},
+-
+-{217, 14651}, {218, 14910}, {219, 15168}, {220, 15426}, {221, 15684},
+-
+-{222, 15942}, {223, 16199}, {224, 16456}, {225, 16713}, {226, 16969},
+-
+-{227, 17225}, {228, 17481}, {229, 17737}, {230, 17992}, {231, 18247},
+-
+-{232, 18502}, {233, 18757}, {234, 19011}, {235, 19265}, {236, 19519},
+-
+-{237, 19772}, {238, 20025}, {239, 20278}, {240, 20531}, {241, 20784},
+-
+-{242, 21036}, {243, 21288}, {244, 21539}, {245, 21791}, {246, 22042},
+-
+-{247, 22292}, {248, 22543}, {249, 22793}, {250, 23043}, {251, 23293},
+-
+-{252, 23543}, {253, 23792}, {254, 24041}, {255, 24290}, {256, 24538},
+-
+-{257, 24786}, {258, 25034}, {259, 25282}, {260, 25529}, {261, 25776},
+-
+-{262, 26023}, {263, 26270}, {264, 26516}, {265, 26763}, {266, 27008},
+-
+-{267, 27254}, {268, 27499}, {269, 27745}, {270, 27989}, {271, 28234},
+-
+-{272, 28478}, {273, 28722}, {274, 28966}, {275, 29210}, {276, 29453},
+-
+-{277, 29696}, {278, 29939}, {279, 30182}, {280, 30424}, {281, 30666},
+-
+-{282, 30908}, {283, 31149}, {284, 31391}, {285, 31632}, {286, 31873},
+-
+-{287, 32113}, {288, 32353}, {289, 32593}, {290, 32833}, {291, 33073},
+-
+-{292, 33312}, {293, 33551}, {294, 33790}, {295, 34029}, {296, 34267},
+-
+-{297, 34505}, {298, 34743}, {299, 34980}, {300, 35218}, {301, 35455},
+-
+-{302, 35692}, {303, 35928}, {304, 36165}, {305, 36401}, {306, 36637},
+-
+-{307, 36872}, {308, 37108}, {309, 37343}, {310, 37578}, {311, 37813},
+-
+-{312, 38047}, {313, 38281}, {314, 38515}, {315, 38749}, {316, 38982},
+-
+-{317, 39216}, {318, 39448}, {319, 39681}, {320, 39914}, {321, 40146},
+-
+-{322, 40378}, {323, 40610}, {324, 40841}, {325, 41073}, {326, 41304},
+-
+-{327, 41535}, {328, 41765}, {329, 41996}, {330, 42226}, {331, 42456},
+-
+-{332, 42686}, {333, 42915}, {334, 43144}, {335, 43373}, {336, 43602},
+-
+-{337, 43830}, {338, 44059}, {339, 44287}, {340, 44515}, {341, 44742},
+-
+-{342, 44970}, {343, 45197}, {344, 45424}, {345, 45650}, {346, 45877},
+-
+-{347, 46103}, {348, 46329}, {349, 46555}, {350, 46780}, {351, 47006},
+-
+-{352, 47231}, {353, 47456}, {354, 47680}, {355, 47905}, {356, 48129},
+-
+-{357, 48353}, {358, 48576}, {359, 48800}, {360, 49023}, {361, 49246},
+-
+-{362, 49469}, {363, 49692}, {364, 49914}, {365, 50136}, {366, 50358},
+-
+-{367, 50580}, {368, 50801}, {369, 51023}, {370, 51244}, {371, 51464},
+-
+-{372, 51685}, {373, 51905}, {374, 52126}, {375, 52346}, {376, 52565},
+-
+-{377, 52785}, {378, 53004}, {379, 53223}, {380, 53442}, {381, 53661},
+-
+-{382, 53879}, {383, 54097}, {384, 54315}, {385, 54533}, {386, 54750},
+-
+-{387, 54968}, {388, 55185}, {389, 55402}, {390, 55618}, {391, 55835},
+-
+-{392, 56051}, {393, 56267}, {394, 56483}, {395, 56699}, {396, 56914},
+-
+-{397, 57129}, {398, 57344}, {399, 57559}, {400, 57773}, {401, 57988},
+-
+-{402, 58202}, {403, 58416}, {404, 58630}, {405, 58843}, {406, 59056},
+-
+-{407, 59269}, {408, 59482}, {409, 59695}, {410, 59907}, {411, 60120},
+-
+-{412, 60332}, {413, 60543}, {414, 60755}, {415, 60966}, {416, 61178},
+-
+-{417, 61389}, {418, 61599}, {419, 61810}, {420, 62020}, {421, 62231},
+-
+-{422, 62440}, {423, 62650}, {424, 62860}, {425, 63069}, {426, 63278},
+-
+-{427, 63487}, {428, 63696}, {429, 63904}, {430, 64113}, {431, 64321},
+-
+-{432, 64529}, {433, 64737}, {434, 64944}, {435, 65151}, {436, 65358},
+-
+-{437, 65565}, {438, 65772}, {439, 65979}, {440, 66185}, {441, 66391},
+-
+-{442, 66597}, {443, 66803}, {444, 67008}, {445, 67213}, {446, 67419},
+-
+-{447, 67624}, {448, 67828}, {449, 68033}, {450, 68237}, {451, 68441},
+-
+-{452, 68645}, {453, 68849}, {454, 69052}, {455, 69256}, {456, 69459},
+-
+-{457, 69662}, {458, 69865}, {459, 70067}, {460, 70270}, {461, 70472},
+-
+-{462, 70674}, {463, 70876}, {464, 71077}, {465, 71279}, {466, 71480},
+-
+-{467, 71681}, {468, 71882}, {469, 72082}, {470, 72283}, {471, 72483},
+-
+-{472, 72683}, {473, 72883}, {474, 73083}, {475, 73282}, {476, 73481},
+-
+-{477, 73680}, {478, 73879}, {479, 74078}, {480, 74277}, {481, 74475},
+-
+-{482, 74673}, {483, 74871}, {484, 75069}, {485, 75266}, {486, 75464},
+-
+-{487, 75661}, {488, 75858}, {489, 76055}, {490, 76252}, {491, 76448},
+-
+-{492, 76644}, {493, 76841}, {494, 77037}, {495, 77232}, {496, 77428},
+-
+-{497, 77623}, {498, 77818}, {499, 78013}, {500, 78208}, {501, 78403},
+-
+-{502, 78597}, {503, 78792}, {504, 78986}, {505, 79180}, {506, 79373},
+-
+-{507, 79567}, {508, 79760}, {509, 79953}, {510, 80146}, {511, 80339},
+-
+-{512, 80532}, {513, 80724}, {514, 80917}, {515, 81109}, {516, 81301},
+-
+-{517, 81492}, {518, 81684}, {519, 81875}, {520, 82066}, {521, 82258},
+-
+-{522, 82448}, {523, 82639}, {524, 82830}, {525, 83020}, {526, 83210},
+-
+-{527, 83400}, {528, 83590}, {529, 83779}, {530, 83969}, {531, 84158},
+-
+-{532, 84347}, {533, 84536}, {534, 84725}, {535, 84913}, {536, 85102},
+-
+-{537, 85290}, {538, 85478}, {539, 85666}, {540, 85854}, {541, 86041},
+-
+-{542, 86228}, {543, 86416}, {544, 86603}, {545, 86789}, {546, 86976},
+-
+-{547, 87163}, {548, 87349}, {549, 87535}, {550, 87721}, {551, 87907},
+-
+-{552, 88092}, {553, 88278}, {554, 88463}, {555, 88648}, {556, 88833},
+-
+-{557, 89018}, {558, 89203}, {559, 89387}, {560, 89571}, {561, 89755},
+-
+-{562, 89939}, {563, 90123}, {564, 90307}, {565, 90490}, {566, 90674},
+-
+-{567, 90857}, {568, 91040}, {569, 91222}, {570, 91405}, {571, 91587},
+-
+-{572, 91770}, {573, 91952}, {574, 92134}, {575, 92315}, {576, 92497},
+-
+-{577, 92679}, {578, 92860}, {579, 93041}, {580, 93222}, {581, 93403},
+-
+-{582, 93583}, {583, 93764}, {584, 93944}, {585, 94124}, {586, 94304},
+-
+-{587, 94484}, {588, 94664}, {589, 94843}, {590, 95023}, {591, 95202},
+-
+-{592, 95381}, {593, 95560}, {594, 95738}, {595, 95917}, {596, 96095},
+-
+-{597, 96273}, {598, 96451}, {599, 96629}, {600, 96807}, {601, 96985},
+-
+-{602, 97162}, {603, 97339}, {604, 97516}, {605, 97693}, {606, 97870},
+-
+-{607, 98047}, {608, 98223}, {609, 98399}, {610, 98576}, {611, 98752},
+-
+-{612, 98927}, {613, 99103}, {614, 99279}, {615, 99454}, {616, 99629},
+-
+-{617, 99804}, {618, 99979}, {619, 100154}, {620, 100328}, {621, 100503},
+-
+-{622, 100677}, {623, 100851}, {624, 101025}, {625, 101199}, {626, 101373},
+-
+-{627, 101546}, {628, 101720}, {629, 101893}, {630, 102066}, {631, 102239},
+-
+-{632, 102411}, {633, 102584}, {634, 102756}, {635, 102929}, {636, 103101},
+-
+-{637, 103273}, {638, 103445}, {639, 103616}, {640, 103788}, {641, 103959},
+-
+-{642, 104130}, {643, 104302}, {644, 104472}, {645, 104643}, {646, 104814},
+-
+-{647, 104984}, {648, 105155}, {649, 105325}, {650, 105495}, {651, 105665},
+-
+-{652, 105835}, {653, 106004}, {654, 106174}, {655, 106343}, {656, 106512},
+-
+-{657, 106681}, {658, 106850}, {659, 107019}, {660, 107187}, {661, 107355},
+-
+-{662, 107524}, {663, 107692}, {664, 107860}, {665, 108028}, {666, 108195},
+-
+-{667, 108363}, {668, 108530}, {669, 108697}, {670, 108865}, {671, 109031},
+-
+-{672, 109198}, {673, 109365}, {674, 109531}, {675, 109698}, {676, 109864},
+-
+-{677, 110030}, {678, 110196}, {679, 110362}, {680, 110528}, {681, 110693},
+-
+-{682, 110858}, {683, 111024}, {684, 111189}, {685, 111354}, {686, 111518},
+-
+-{687, 111683}, {688, 111848}, {689, 112012}, {690, 112176}, {691, 112340},
+-
+-{692, 112504}, {693, 112668}, {694, 112832}, {695, 112995}, {696, 113159},
+-
+-{697, 113322}, {698, 113485}, {699, 113648}, {700, 113811}, {701, 113973},
+-
+-{702, 114136}, {703, 114298}, {704, 114461}, {705, 114623}, {706, 114785},
+-
+-{707, 114947}, {708, 115108}, {709, 115270}, {710, 115431}, {711, 115593},
+-
+-{712, 115754}, {713, 115915}, {714, 116076}, {715, 116236}, {716, 116397},
+-
+-{717, 116558}, {718, 116718}, {719, 116878}, {720, 117038}, {721, 117198},
+-
+-{722, 117358}, {723, 117518}, {724, 117677}, {725, 117836}, {726, 117996},
+-
+-{727, 118155}, {728, 118314}, {729, 118473}, {730, 118631}, {731, 118790},
+-
+-{732, 118948}, {733, 119107}, {734, 119265}, {735, 119423}, {736, 119581},
+-
+-{737, 119739}, {738, 119896}, {739, 120054}, {740, 120211}, {741, 120368},
+-
+-{742, 120525}, {743, 120682}, {744, 120839}, {745, 120996}, {746, 121153},
+-
+-{747, 121309}, {748, 121465}, {749, 121622}, {750, 121778}, {751, 121934},
+-
+-{752, 122089}, {753, 122245}, {754, 122400}, {755, 122556}, {756, 122711},
+-
+-{757, 122866}, {758, 123021}, {759, 123176}, {760, 123331}, {761, 123486},
+-
+-{762, 123640}, {763, 123794}, {764, 123949}, {765, 124103}, {766, 124257},
+-
+-{767, 124411}, {768, 124564}, {769, 124718}, {770, 124871}, {771, 125025},
+-};
+-
+-enum { NUM_RAW_KMB = sizeof(raw_kmb_data) / sizeof(raw_kmb_data[0]) };
+-
+-
+ enum keembay_thermal_trip {
+ 	KEEMBAY_TRIP_PASSIVE,
+ 	KEEMBAY_TRIP_CRITICAL,
+@@ -399,4 +58,6 @@ struct kmb_trip_point_info {
+ 	struct thermal_zone_device *tz;
+ };
+ 
+-#endif /* _LINUX_KEEMBAY_TSENS_H */
++int *kmb_tj_get_temp_base(void);
++
++#endif /* _KEEMBAY_TSENS_H */
+diff --git a/drivers/misc/xlink-smbus/xlink-smbus.c b/drivers/misc/xlink-smbus/xlink-smbus.c
+index 9de37971c5d5..f97f94aa2d50 100644
+--- a/drivers/misc/xlink-smbus/xlink-smbus.c
++++ b/drivers/misc/xlink-smbus/xlink-smbus.c
+@@ -22,6 +22,8 @@
+ //#undef CONFIG_I2C_SLAVE
+ /* Define the xlink debug device structures to be used with dev_dbg() et al */
+ 
++#define XLINK_SMBUS_DEBUG 0
++
+ static struct device_driver dbg_name = {
+ 	.name = "xlink_i2c_dbg"
+ };
+@@ -115,8 +117,9 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 		} else {
+ 			dev_err(dbgxi2c,
+ 				"unknown protocol (%d) received in %s\n",
+-				__func__,
+-				msg->protocol);
++				msg->protocol,
++				__func__
++				);
+ 		}
+ 	} else {
+ 		if (msg->protocol == I2C_SMBUS_BYTE_DATA) {
+@@ -144,8 +147,8 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 		} else {
+ 			dev_err(dbgxi2c,
+ 				"unknown protocol (%d) received in %s\n",
+-				__func__,
+-				msg->protocol);
++				msg->protocol,
++				__func__);
+ 		}
+ 		i2c_slave_event(slave, I2C_SLAVE_READ_PROCESSED, &temp);
+ 	}
+@@ -167,15 +170,18 @@ static s32 xlink_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+ #endif
+ 	struct xlink_adapter_data *adapt_data = i2c_get_adapdata(adap);
+ 
+-	//dev_info(dbgxi2c, "%s was called with the following parameters:
+-	//\n", __FUNCTION__);
+-	//dev_info(dbgxi2c, "addr = %.4x\n", addr);
+-	//dev_info(dbgxi2c, "flags = %.4x\n", flags);
+-	//dev_info(dbgxi2c, "read_write = %s\n",
+-		//read_write == I2C_SMBUS_WRITE ? "write" : "read");
+-	//dev_info(dbgxi2c, "command = %d\n", command);
+-	//dev_info(dbgxi2c, "protocol = %d\n", protocol);
+-	//dev_info(dbgxi2c, "data = %p\n", data);
++#if XLINK_SMBUS_DEBUG
++	dev_info(dbgxi2c, "%s was called with the following parameters:\n",
++		__func__);
++	dev_info(dbgxi2c, "addr = %.4x\n", addr);
++	dev_info(dbgxi2c, "flags = %.4x\n", flags);
++	dev_info(dbgxi2c, "read_write = %s\n",
++			read_write == I2C_SMBUS_WRITE ? "write" : "read");
++	dev_info(dbgxi2c, "command = %d\n", command);
++	dev_info(dbgxi2c, "protocol = %d\n", protocol);
++	dev_info(dbgxi2c, "data = %p\n", data);
++#endif
++
+ 	msg = kzalloc(sizeof(struct xlink_msg), GFP_KERNEL);
+ 	if (!msg)
+ 		return X_LINK_ERROR;
+@@ -194,7 +200,8 @@ static s32 xlink_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+ 				sizeof(struct xlink_msg));
+ 	kfree(msg);
+ 	if (xerr != X_LINK_SUCCESS) {
+-		dev_info(dbgxi2c, "xlink_write_data failed (%d) dropping packet.\n",
++		dev_info(dbgxi2c,
++			"xlink_write_data failed (%d) dropping packet.\n",
+ 			xerr);
+ 		return -ENODEV;
+ 	}
+@@ -284,7 +291,9 @@ static int xlinki2c_receive_thread(void *param)
+ 			complete(&adapt_data->work);
+ 		}
+ 	}
+-	dev_info(dev, "[%d] %s stopped\n", __func__, adapt_data->adap->nr);
++#if XLINK_SMBUS_DEBUG
++	dev_info(dev, "[%d] %s stopped\n", adapt_data->adap->nr, __func__);
++#endif
+ 
+ 	return 0;
+ }
+@@ -341,9 +350,10 @@ static int xlink_i2c_probe(struct platform_device *pdev)
+ 	struct i2c_adapter *adap = &hddl_device->adap[pdev->id & 0x3];
+ 	struct device *dev = &pdev->dev;
+ 
++#if XLINK_SMBUS_DEBUG
+ 	dev_info(dev, "Registering xlink I2C adapter...\n");
++#endif
+ 
+-	//adap = kzalloc(sizeof(struct i2c_adapter), GFP_KERNEL);
+ 	memset(adap, 0, sizeof(struct i2c_adapter));
+ 	adap->class = 0; //I2C_CLASS_HWMON;
+ 	adap->owner  = THIS_MODULE;
+@@ -367,15 +377,19 @@ static int xlink_i2c_probe(struct platform_device *pdev)
+ 			RXB_TXB,  /* mode */
+ 			64*1024,
+ 			2000   /* timeout */);
++#if XLINK_SMBUS_DEBUG
+ 	dev_info(dev, "xlink_open_channel completed[%d][%d][%p]\n", rc,
+-		adapt_data->channel,
+-		adapt_data->xhandle);
++			adapt_data->channel,
++			adapt_data->xhandle);
++#endif
+ 
+ 	i2c_set_adapdata(adap, adapt_data);
+ 
+ 	rc = i2c_add_adapter(adap);
+ 
+-	dev_info(&adap->dev, "xlink_smbus_adapter[%d] [%d]\n", rc, adap->nr);
++	dev_info(&adap->dev, "xlink_smbus_adapter[%x] [%d]\n",
++		devH->sw_device_id,
++		adap->nr);
+ 	/* create receiver thread */
+ 	adapt_data->task_recv = kthread_run(xlinki2c_receive_thread,
+ 					adapt_data,
+@@ -389,19 +403,15 @@ static int xlink_i2c_remove(struct platform_device *pdev)
+ {
+ 	struct i2c_adapter *adap = platform_get_drvdata(pdev);
+ 	struct xlink_adapter_data *adapt_data = i2c_get_adapdata(adap);
+-	struct device *dev = &adapt_data->adap->dev;
+ 
+-	dev_info(dev, "Removing xlink I2C adapter...\n");
+ 	kthread_stop(adapt_data->task_recv);
+-	dev_info(dev, "stop the kthread...\n");
+ 
+ 	/* close the channel and disconnect */
+ 	xlink_close_channel(adapt_data->xhandle, adapt_data->channel);
+-	dev_info(dev, "close the channel...\n");
+ 	/* This will block the dynamic registration */
+ 	//i2c_del_adapter(adapt_data->adap);
+ 	kfree(adapt_data);
+-	dev_info(dev, "delete the adapter...\n");
++	dev_info(&adap->dev, "delete the adapter[%d]\n", adap->nr);
+ 
+ 	return 0;
+ }
+@@ -416,13 +426,17 @@ static struct platform_driver xlink_i2c_driver = {
+ 
+ static void __exit xlink_adapter_exit(void)
+ {
++#if XLINK_SMBUS_DEBUG
+ 	dev_info(dbgxi2c, "Unloading XLink I2C module...\n");
++#endif
+ 	platform_driver_unregister(&xlink_i2c_driver);
+ }
+ 
+ static int __init xlink_adapter_init(void)
+ {
++#if XLINK_SMBUS_DEBUG
+ 	dev_info(dbgxi2c, "Loading XLink I2C module...\n");
++#endif
+ 	platform_driver_register(&xlink_i2c_driver);
+ 	return 0;
+ 
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+index c5c598514124..d4c63c2e7bfc 100644
+--- a/include/linux/hddl_device.h
++++ b/include/linux/hddl_device.h
+@@ -1,4 +1,4 @@
+-// SPDX-License-Identifier: GPL-2.0-only
++/* SPDX-License-Identifier: GPL-2.0-only */
+ /*
+  * Keembay HDDL module.
+  *
+@@ -14,15 +14,14 @@
+ #include <linux/xlink.h>
+ 
+ #define HDDL_MAGIC 'x'
++#define HDDL_READ_SW_ID_DATA    _IOW(HDDL_MAGIC, 'a', void*)
++#define HDDL_SOFT_RESET		_IOW(HDDL_MAGIC, 'b', void*)
+ 
+-#define HDDL_READ_SW_ID_DATA    _IOW(HDDL_MAGIC,  'a', void*)
+-#define HDDL_SOFT_RESET		      _IOW(HDDL_MAGIC,  'b', void*)
+ 
+ #define HDDL_MAX_DEVICE 8
+ #define HDDL_MAX_BAY_DEVICE 3
+ 
+-
+-typedef struct hddl_device_kmb_st {
++struct hddl_device_kmb {
+ 	uint32_t board_id;
+ 	struct kmb {
+ 		uint32_t  id;
+@@ -40,7 +39,7 @@ typedef struct hddl_device_kmb_st {
+ 	} soc[HDDL_MAX_BAY_DEVICE];
+ } T_HDDL_DEVICE_KMB_NODE;
+ 
+-typedef struct sw_id_hddl_data {
++struct sw_id_hddl_data {
+ 	uint32_t board_id;
+ 	uint32_t soc_id;
+ 	uint32_t soc_adaptor_no[2];
+@@ -48,7 +47,7 @@ typedef struct sw_id_hddl_data {
+ 	uint32_t return_id;
+ } T_SW_ID_HDDL_DATA;
+ 
+-typedef struct sw_id_soft_reset {
++struct sw_id_soft_reset {
+ 	uint32_t sw_id;
+ 	uint32_t return_id;
+ } T_SW_ID_SOFT_RESET;
+-- 
+2.17.1
+

@@ -1,0 +1,67 @@
+From 21b17e4c0e8c31cae86fa13ecc599a2ad981a8df Mon Sep 17 00:00:00 2001
+From: Yuan Liu <yuan1.liu@intel.com>
+Date: Fri, 4 Sep 2020 14:23:14 +0800
+Subject: [PATCH 16/48] set SR-IOV assigned VF state
+
+If a SR-IOV VF PCI device is assigned to guest VM or deassigned
+from a guest VM, set corresponding assigned flag of the device.
+SR-IOV PF can't disable VFs if it already has the assigned VF.
+
+v2): Replace pci_scan_single_device with pci_get_slot to get
+     an existed pci device.
+
+Tracked-On:projectacrn/acrn-hypervisor#4433
+Signed-off-by: Yuan Liu <yuan1.liu@intel.com>
+Reviewed-by: Zhao Yakui <yakui.zhao@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 8fe199a8d34e..53b0236b605c 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -142,6 +142,24 @@ static ssize_t vhm_dev_write(struct file *filep, const char *buffer,
+ 	return 0;
+ }
+ 
++static void update_assigned_vf_state(uint16_t bdf, bool is_assigned)
++{
++	struct pci_dev *dev = NULL;
++
++	dev = pci_get_slot(pci_find_bus(0, PCI_BUS_NUM(bdf)),
++			(bdf & 0xFF));
++
++	if (dev) {
++		if (dev->is_virtfn) {
++			if (is_assigned)
++				pci_set_dev_assigned(dev);
++			else
++				pci_clear_dev_assigned(dev);
++		}
++		pci_dev_put(dev);
++	}
++}
++
+ static long vhm_dev_ioctl(struct file *filep,
+ 		unsigned int ioctl_num, unsigned long ioctl_param)
+ {
+@@ -543,6 +561,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 				(void *)ioctl_param, sizeof(*pcidev))) {
+ 			ret = -EFAULT;
+ 		} else {
++			update_assigned_vf_state(pcidev->phys_bdf, true);
+ 			ret = hcall_assign_pcidev(vm->vmid,
+ 					virt_to_phys(pcidev));
+ 			if (ret < 0)
+@@ -563,6 +582,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 				(void *)ioctl_param, sizeof(*pcidev))) {
+ 			ret = -EFAULT;
+ 		} else {
++			update_assigned_vf_state(pcidev->phys_bdf, false);
+ 			ret = hcall_deassign_pcidev(vm->vmid,
+ 					virt_to_phys(pcidev));
+ 			if (ret < 0)
+-- 
+2.17.1
+
