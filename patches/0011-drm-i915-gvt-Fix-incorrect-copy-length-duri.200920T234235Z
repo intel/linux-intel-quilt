@@ -1,0 +1,52 @@
+From 5976899485b68b2b23b6d1bb29ffc98cb46351d7 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Fri, 28 Aug 2020 15:51:16 +0800
+Subject: [PATCH 11/13] drm/i915/gvt: Fix incorrect copy length during pm
+ save/restore.
+
+Should use num entries * entry as size in bytes.
+Use memcpy_toio()/memcpy_fromio() instead of memcpy for iomem.
+
+Signed-off-by: Hang Yuan <hang.yuan@linux.intel.com>
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit df3d80791e972ecad7c8aaf1085d13401dc48b24)
+---
+ drivers/gpu/drm/i915/gvt/gtt.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/gtt.c b/drivers/gpu/drm/i915/gvt/gtt.c
+index e5054d863900..5e65f582f6f5 100644
+--- a/drivers/gpu/drm/i915/gvt/gtt.c
++++ b/drivers/gpu/drm/i915/gvt/gtt.c
+@@ -2883,11 +2883,12 @@ void intel_gvt_save_ggtt(struct intel_gvt *gvt)
+ 
+ 		index = vgpu_aperture_gmadr_base(vgpu) >> PAGE_SHIFT;
+ 		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
+-		memcpy(vgpu->ggtt_entries, addr, num_low);
++		memcpy_fromio(vgpu->ggtt_entries, addr, num_low * sizeof(u64));
+ 
+ 		index = vgpu_hidden_gmadr_base(vgpu) >> PAGE_SHIFT;
+ 		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
+-		memcpy((u64 *)vgpu->ggtt_entries + num_low, addr, num_hi);
++		memcpy_fromio(vgpu->ggtt_entries + num_low, addr,
++			      num_hi * sizeof(u64));
+ 	}
+ }
+ 
+@@ -2917,10 +2918,11 @@ void intel_gvt_restore_ggtt(struct intel_gvt *gvt)
+ 
+ 		index = vgpu_aperture_gmadr_base(vgpu) >> PAGE_SHIFT;
+ 		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
+-		memcpy(addr, vgpu->ggtt_entries, num_low);
++		memcpy_toio(addr, vgpu->ggtt_entries, num_low * sizeof(u64));
+ 		index = vgpu_hidden_gmadr_base(vgpu) >> PAGE_SHIFT;
+ 		addr = (gen8_pte_t __iomem *)gvt->dev_priv->ggtt.gsm + index;
+-		memcpy(addr, (u64 *)vgpu->ggtt_entries + num_low, num_hi);
++		memcpy_toio(addr, vgpu->ggtt_entries + num_low,
++			    num_hi * sizeof(u64));
+ 
+ 		vfree(vgpu->ggtt_entries);
+ 		vgpu->ggtt_entries = NULL;
+-- 
+2.17.1
+
