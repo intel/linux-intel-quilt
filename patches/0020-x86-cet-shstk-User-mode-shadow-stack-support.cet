@@ -1,13 +1,19 @@
-From 16bc9309b3663f212fcd4ea06dedcdf6ad006694 Mon Sep 17 00:00:00 2001
+From 9bf1b1a2e21e2275cc36c72784a23ccc549ddfed Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 22 Aug 2019 10:06:11 -0700
-Subject: [PATCH 20/42] x86/cet/shstk: User-mode shadow stack support
+Subject: [PATCH 20/43] x86/cet/shstk: User-mode shadow stack support
 
 This patch adds basic shadow stack enabling/disabling routines.  A task's
 shadow stack is allocated from memory with VM_SHSTK flag and has a fixed
 size of min(RLIMIT_STACK, 4GB).
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+
+v12:
+- Split cet_disable_free_shstk() into disable and free parts, because
+  only the disable shadow stack arch_prctl() needs the disable part.
+  Other cases need only the free part.  In an exit syscall, there is
+  no need to write CET MSRs.
 
 v11:
 - Modify alloc_shstk() to take flags and pass to do_mmap().
@@ -32,24 +38,24 @@ v6:
 v2:
 - Change noshstk to no_cet_shstk.
 ---
- arch/x86/include/asm/cet.h                    |  26 ++++
+ arch/x86/include/asm/cet.h                    |  28 ++++
  arch/x86/include/asm/disabled-features.h      |   8 +-
  arch/x86/include/asm/processor.h              |   5 +
  arch/x86/kernel/Makefile                      |   2 +
- arch/x86/kernel/cet.c                         | 138 ++++++++++++++++++
+ arch/x86/kernel/cet.c                         | 147 ++++++++++++++++++
  arch/x86/kernel/cpu/common.c                  |  28 ++++
  arch/x86/kernel/process.c                     |   1 +
  .../arch/x86/include/asm/disabled-features.h  |   8 +-
- 8 files changed, 214 insertions(+), 2 deletions(-)
+ 8 files changed, 225 insertions(+), 2 deletions(-)
  create mode 100644 arch/x86/include/asm/cet.h
  create mode 100644 arch/x86/kernel/cet.c
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
 new file mode 100644
-index 000000000000..caac0687c8e4
+index 000000000000..967765c35969
 --- /dev/null
 +++ b/arch/x86/include/asm/cet.h
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,28 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _ASM_X86_CET_H
 +#define _ASM_X86_CET_H
@@ -68,9 +74,11 @@ index 000000000000..caac0687c8e4
 +
 +#ifdef CONFIG_X86_INTEL_CET
 +int cet_setup_shstk(void);
-+void cet_disable_free_shstk(struct task_struct *p);
++void cet_disable_shstk(void);
++void cet_free_shstk(struct task_struct *p);
 +#else
-+static inline void cet_disable_free_shstk(struct task_struct *p) {}
++static inline void cet_disable_shstk(void) {}
++static inline void cet_free_shstk(struct task_struct *p) {}
 +#endif
 +
 +#endif /* __ASSEMBLY__ */
@@ -140,10 +148,10 @@ index e77261db2391..76f27f518266 100644
  ifeq ($(CONFIG_X86_64),y)
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
 new file mode 100644
-index 000000000000..a1be8ccee1cc
+index 000000000000..f8b0a077594f
 --- /dev/null
 +++ b/arch/x86/kernel/cet.c
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,147 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * cet.c - Control-flow Enforcement (CET)
@@ -242,7 +250,25 @@ index 000000000000..a1be8ccee1cc
 +	return 0;
 +}
 +
-+void cet_disable_free_shstk(struct task_struct *tsk)
++void cet_disable_shstk(void)
++{
++	struct cet_status *cet = &current->thread.cet;
++	u64 msr_val;
++
++	if (!static_cpu_has(X86_FEATURE_SHSTK) ||
++	    !cet->shstk_size || !cet->shstk_base)
++		return;
++
++	start_update_msrs();
++	rdmsrl(MSR_IA32_U_CET, msr_val);
++	wrmsrl(MSR_IA32_U_CET, msr_val & ~CET_SHSTK_EN);
++	wrmsrl(MSR_IA32_PL3_SSP, 0);
++	end_update_msrs();
++
++	cet_free_shstk(current);
++}
++
++void cet_free_shstk(struct task_struct *tsk)
 +{
 +	struct cet_status *cet = &tsk->thread.cet;
 +
@@ -252,16 +278,6 @@ index 000000000000..a1be8ccee1cc
 +
 +	if (!tsk->mm || (tsk->mm != current->mm))
 +		return;
-+
-+	if (tsk == current) {
-+		u64 msr_val;
-+
-+		start_update_msrs();
-+		rdmsrl(MSR_IA32_U_CET, msr_val);
-+		wrmsrl(MSR_IA32_U_CET, msr_val & ~CET_SHSTK_EN);
-+		wrmsrl(MSR_IA32_PL3_SSP, 0);
-+		end_update_msrs();
-+	}
 +
 +	while (1) {
 +		int r;
@@ -279,6 +295,7 @@ index 000000000000..a1be8ccee1cc
 +		WARN_ON_ONCE(r);
 +		break;
 +	}
++
 +	cet->shstk_base = 0;
 +	cet->shstk_size = 0;
 +}
@@ -336,13 +353,13 @@ index c5d6f17d9b9d..5f60ddaabc46 100644
  	/*
  	 * Clear/Set all flags overridden by options, need do it
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index 13ce616cc7af..d54f0425aac0 100644
+index ba4593a913fa..ff3b44d6740b 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
-@@ -42,6 +42,7 @@
- #include <asm/spec-ctrl.h>
+@@ -43,6 +43,7 @@
  #include <asm/io_bitmap.h>
  #include <asm/proto.h>
+ #include <asm/frame.h>
 +#include <asm/cet.h>
  
  #include "process.h"

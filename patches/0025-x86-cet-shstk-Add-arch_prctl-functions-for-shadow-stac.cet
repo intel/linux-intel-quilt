@@ -1,7 +1,7 @@
-From 65e2ab5db5a14b0324816c383f1d92d996e44a57 Mon Sep 17 00:00:00 2001
+From e1d35a3ef843b3e8b2ce7b6862133d4b5a06fbb2 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 3 May 2018 13:04:29 -0700
-Subject: [PATCH 25/42] x86/cet/shstk: Add arch_prctl functions for shadow
+Subject: [PATCH 25/43] x86/cet/shstk: Add arch_prctl functions for shadow
  stack
 
 arch_prctl(ARCH_X86_CET_STATUS, u64 *args)
@@ -21,20 +21,13 @@ arch_prctl(ARCH_X86_CET_DISABLE, unsigned int features)
 arch_prctl(ARCH_X86_CET_LOCK)
     Lock in CET features.
 
-arch_prctl(ARCH_X86_CET_MMAP_SHSTK, u64 *args)
-    Allocate a new shadow stack.
-
-    The parameter 'args' is a pointer to a user buffer.
-
-    *args = desired size
-    *(args + 1) = MAP_32BIT or MAP_POPULATE
-
-    On returning, *args is the allocated shadow stack address.
-
 Also change do_arch_prctl_common()'s parameter 'cpuid_enabled' to
 'arg2', as it is now also passed to prctl_cet().
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+
+v12:
+- Remove ARCH_X86_CET_MMAP_SHSTK.
 
 v11:
 - Check input for invalid features.
@@ -47,21 +40,20 @@ v10:
 - Change input parameters from unsigned long to u64, to make it clear they
   are 64-bit.
 ---
- arch/x86/include/asm/cet.h              |   4 +
- arch/x86/include/uapi/asm/prctl.h       |   5 ++
- arch/x86/kernel/Makefile                |   2 +-
- arch/x86/kernel/cet.c                   |  26 ++++++
- arch/x86/kernel/cet_prctl.c             | 102 ++++++++++++++++++++++++
- arch/x86/kernel/process.c               |   6 +-
- tools/arch/x86/include/uapi/asm/prctl.h |   5 ++
- 7 files changed, 146 insertions(+), 4 deletions(-)
+ arch/x86/include/asm/cet.h              |  3 ++
+ arch/x86/include/uapi/asm/prctl.h       |  4 ++
+ arch/x86/kernel/Makefile                |  2 +-
+ arch/x86/kernel/cet_prctl.c             | 68 +++++++++++++++++++++++++
+ arch/x86/kernel/process.c               |  6 +--
+ tools/arch/x86/include/uapi/asm/prctl.h |  4 ++
+ 6 files changed, 83 insertions(+), 4 deletions(-)
  create mode 100644 arch/x86/kernel/cet_prctl.c
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index ca671c9b747b..0a829f1cf9ee 100644
+index 7a416c8af791..1ebe82416196 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
-@@ -14,16 +14,20 @@ struct sc_ext;
+@@ -14,9 +14,11 @@ struct sc_ext;
  struct cet_status {
  	unsigned long	shstk_base;
  	unsigned long	shstk_size;
@@ -72,28 +64,26 @@ index ca671c9b747b..0a829f1cf9ee 100644
 +int prctl_cet(int option, u64 arg2);
  int cet_setup_shstk(void);
  int cet_setup_thread_shstk(struct task_struct *p, unsigned long clone_flags);
-+unsigned long cet_alloc_shstk(unsigned long size, int flags);
- void cet_disable_free_shstk(struct task_struct *p);
- int cet_verify_rstor_token(bool ia32, unsigned long ssp, unsigned long *new_ssp);
+ void cet_disable_shstk(void);
+@@ -25,6 +27,7 @@ int cet_verify_rstor_token(bool ia32, unsigned long ssp, unsigned long *new_ssp)
  void cet_restore_signal(struct sc_ext *sc);
  int cet_setup_signal(bool ia32, unsigned long rstor, struct sc_ext *sc);
  #else
 +static inline int prctl_cet(int option, u64 arg2) { return -EINVAL; }
  static inline int cet_setup_thread_shstk(struct task_struct *p,
  					 unsigned long clone_flags) { return 0; }
- static inline void cet_disable_free_shstk(struct task_struct *p) {}
+ static inline void cet_disable_shstk(void) {}
 diff --git a/arch/x86/include/uapi/asm/prctl.h b/arch/x86/include/uapi/asm/prctl.h
-index 5a6aac9fa41f..3aaac13cdc87 100644
+index 5a6aac9fa41f..9245bf629120 100644
 --- a/arch/x86/include/uapi/asm/prctl.h
 +++ b/arch/x86/include/uapi/asm/prctl.h
-@@ -14,4 +14,9 @@
+@@ -14,4 +14,8 @@
  #define ARCH_MAP_VDSO_32	0x2002
  #define ARCH_MAP_VDSO_64	0x2003
  
 +#define ARCH_X86_CET_STATUS		0x3001
 +#define ARCH_X86_CET_DISABLE		0x3002
 +#define ARCH_X86_CET_LOCK		0x3003
-+#define ARCH_X86_CET_MMAP_SHSTK		0x3004
 +
  #endif /* _ASM_X86_PRCTL_H */
 diff --git a/arch/x86/kernel/Makefile b/arch/x86/kernel/Makefile
@@ -109,49 +99,12 @@ index 76f27f518266..97556e4204d6 100644
  
  ###
  # 64 bit specific files
-diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index a46ef73ea0bb..d5aceec7c50c 100644
---- a/arch/x86/kernel/cet.c
-+++ b/arch/x86/kernel/cet.c
-@@ -148,6 +148,32 @@ static int create_rstor_token(bool ia32, unsigned long ssp,
- 	return 0;
- }
- 
-+unsigned long cet_alloc_shstk(unsigned long len, int flags)
-+{
-+	unsigned long token;
-+	unsigned long addr, ssp;
-+
-+	addr = alloc_shstk(round_up(len, PAGE_SIZE), flags);
-+
-+	if (IS_ERR_VALUE(addr))
-+		return addr;
-+
-+	/* Restore token is 8 bytes and aligned to 8 bytes */
-+	ssp = addr + len;
-+	token = ssp;
-+
-+	if (!in_ia32_syscall())
-+		token |= TOKEN_MODE_64;
-+	ssp -= 8;
-+
-+	if (write_user_shstk_64(ssp, token)) {
-+		vm_munmap(addr, len);
-+		return -EINVAL;
-+	}
-+
-+	return addr;
-+}
-+
- int cet_setup_shstk(void)
- {
- 	unsigned long addr, size;
 diff --git a/arch/x86/kernel/cet_prctl.c b/arch/x86/kernel/cet_prctl.c
 new file mode 100644
-index 000000000000..0388dd425504
+index 000000000000..3e1d049e65c3
 --- /dev/null
 +++ b/arch/x86/kernel/cet_prctl.c
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,68 @@
 +// SPDX-License-Identifier: GPL-2.0
 +
 +#include <linux/errno.h>
@@ -177,37 +130,6 @@ index 000000000000..0388dd425504
 +	}
 +
 +	return copy_to_user((u64 __user *)arg2, buf, sizeof(buf));
-+}
-+
-+static int handle_mmap_shstk(u64 arg2)
-+{
-+	u64 buf[3];
-+	unsigned long addr, size;
-+	int allowed_flags;
-+
-+	if (copy_from_user(buf, (unsigned long __user *)arg2, sizeof(buf)))
-+		return -EFAULT;
-+
-+	size = buf[0];
-+
-+	/*
-+	 * Check invalid flags
-+	 */
-+	allowed_flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_32BIT | MAP_POPULATE;
-+
-+	if (buf[1] & ~allowed_flags)
-+		return -EINVAL;
-+
-+	addr = cet_alloc_shstk(size, buf[1]);
-+	if (IS_ERR_VALUE(addr))
-+		return PTR_ERR((void *)addr);
-+
-+	if (put_user(addr, (u64 __user *)arg2)) {
-+		vm_munmap(addr, size);
-+		return -EFAULT;
-+	}
-+
-+	return 0;
 +}
 +
 +int prctl_cet(int option, u64 arg2)
@@ -240,25 +162,22 @@ index 000000000000..0388dd425504
 +		if (features & GNU_PROPERTY_X86_FEATURE_1_INVAL)
 +			return -EINVAL;
 +		if (features & GNU_PROPERTY_X86_FEATURE_1_SHSTK)
-+			cet_disable_free_shstk(current);
++			cet_disable_shstk();
 +		return 0;
 +
 +	case ARCH_X86_CET_LOCK:
 +		cet->locked = 1;
 +		return 0;
 +
-+	case ARCH_X86_CET_MMAP_SHSTK:
-+		return handle_mmap_shstk(arg2);
-+
 +	default:
 +		return -ENOSYS;
 +	}
 +}
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index 2afcf5a898b5..d44855842950 100644
+index 67632ba893b7..33cb6da22ef0 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
-@@ -976,14 +976,14 @@ unsigned long get_wchan(struct task_struct *p)
+@@ -977,14 +977,14 @@ unsigned long get_wchan(struct task_struct *p)
  }
  
  long do_arch_prctl_common(struct task_struct *task, int option,
@@ -277,17 +196,16 @@ index 2afcf5a898b5..d44855842950 100644
 +	return prctl_cet(option, arg2);
  }
 diff --git a/tools/arch/x86/include/uapi/asm/prctl.h b/tools/arch/x86/include/uapi/asm/prctl.h
-index 5a6aac9fa41f..3aaac13cdc87 100644
+index 5a6aac9fa41f..9245bf629120 100644
 --- a/tools/arch/x86/include/uapi/asm/prctl.h
 +++ b/tools/arch/x86/include/uapi/asm/prctl.h
-@@ -14,4 +14,9 @@
+@@ -14,4 +14,8 @@
  #define ARCH_MAP_VDSO_32	0x2002
  #define ARCH_MAP_VDSO_64	0x2003
  
 +#define ARCH_X86_CET_STATUS		0x3001
 +#define ARCH_X86_CET_DISABLE		0x3002
 +#define ARCH_X86_CET_LOCK		0x3003
-+#define ARCH_X86_CET_MMAP_SHSTK		0x3004
 +
  #endif /* _ASM_X86_PRCTL_H */
 -- 

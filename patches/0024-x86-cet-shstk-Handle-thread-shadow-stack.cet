@@ -1,7 +1,7 @@
-From 1404413cb796d4cbd5910fddc3148cf01dac1fc4 Mon Sep 17 00:00:00 2001
+From b652927f0d450e31005bbbda96b501fa79a39dcb Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 3 May 2018 12:40:57 -0700
-Subject: [PATCH 24/42] x86/cet/shstk: Handle thread shadow stack
+Subject: [PATCH 24/43] x86/cet/shstk: Handle thread shadow stack
 
 The kernel allocates (and frees on thread exit) a new shadow stack for a
 pthread child.
@@ -29,26 +29,27 @@ v10:
  4 files changed, 57 insertions(+)
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index 56fe08eebae6..ca671c9b747b 100644
+index 391bd56a3b4e..7a416c8af791 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
-@@ -18,11 +18,14 @@ struct cet_status {
+@@ -18,12 +18,15 @@ struct cet_status {
  
  #ifdef CONFIG_X86_INTEL_CET
  int cet_setup_shstk(void);
 +int cet_setup_thread_shstk(struct task_struct *p, unsigned long clone_flags);
- void cet_disable_free_shstk(struct task_struct *p);
+ void cet_disable_shstk(void);
+ void cet_free_shstk(struct task_struct *p);
  int cet_verify_rstor_token(bool ia32, unsigned long ssp, unsigned long *new_ssp);
  void cet_restore_signal(struct sc_ext *sc);
  int cet_setup_signal(bool ia32, unsigned long rstor, struct sc_ext *sc);
  #else
 +static inline int cet_setup_thread_shstk(struct task_struct *p,
 +					 unsigned long clone_flags) { return 0; }
- static inline void cet_disable_free_shstk(struct task_struct *p) {}
+ static inline void cet_disable_shstk(void) {}
+ static inline void cet_free_shstk(struct task_struct *p) {}
  static inline void cet_restore_signal(struct sc_ext *sc) { return; }
- static inline int cet_setup_signal(bool ia32, unsigned long rstor,
 diff --git a/arch/x86/include/asm/mmu_context.h b/arch/x86/include/asm/mmu_context.h
-index d98016b83755..e3ca4397258b 100644
+index d98016b83755..ceb593e405e1 100644
 --- a/arch/x86/include/asm/mmu_context.h
 +++ b/arch/x86/include/asm/mmu_context.h
 @@ -11,6 +11,7 @@
@@ -64,12 +65,12 @@ index d98016b83755..e3ca4397258b 100644
  #define deactivate_mm(tsk, mm)			\
  do {						\
 +	if (!tsk->vfork_done)			\
-+		cet_disable_free_shstk(tsk);	\
++		cet_free_shstk(tsk);		\
  	load_gs_index(0);			\
  	loadsegment(fs, 0);			\
  } while (0)
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index a08a956ac3aa..a46ef73ea0bb 100644
+index 51ddd17aee8f..b285c726bb88 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
 @@ -172,6 +172,50 @@ int cet_setup_shstk(void)
@@ -120,22 +121,22 @@ index a08a956ac3aa..a46ef73ea0bb 100644
 +	return 0;
 +}
 +
- void cet_disable_free_shstk(struct task_struct *tsk)
+ void cet_disable_shstk(void)
  {
- 	struct cet_status *cet = &tsk->thread.cet;
+ 	struct cet_status *cet = &current->thread.cet;
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index d54f0425aac0..2afcf5a898b5 100644
+index ff3b44d6740b..67632ba893b7 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
-@@ -109,6 +109,7 @@ void exit_thread(struct task_struct *tsk)
+@@ -110,6 +110,7 @@ void exit_thread(struct task_struct *tsk)
  
  	free_vm86(t);
  
-+	cet_disable_free_shstk(tsk);
++	cet_free_shstk(tsk);
  	fpu__drop(fpu);
  }
  
-@@ -181,6 +182,12 @@ int copy_thread(unsigned long clone_flags, unsigned long sp, unsigned long arg,
+@@ -182,6 +183,12 @@ int copy_thread(unsigned long clone_flags, unsigned long sp, unsigned long arg,
  	if (clone_flags & CLONE_SETTLS)
  		ret = set_new_tls(p, tls);
  
