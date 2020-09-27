@@ -1,0 +1,46 @@
+From 96925555360f63ac0c9146716783a88f4d8ae546 Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Thu, 13 Aug 2020 16:46:49 +0800
+Subject: [PATCH 09/13] drm/i915/gvt: Fix missing clear ddb for disabled plane
+
+Missing braces around plane loop. For invisible plane, sw ddb is zero
+out so hw ddb should match that in IDV case.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit f7e296e790041343bb571b5b097c29acc8d67035)
+---
+ drivers/gpu/drm/i915/intel_pm.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
+index 8eadd94e2ec2..e1101b8fa619 100644
+--- a/drivers/gpu/drm/i915/intel_pm.c
++++ b/drivers/gpu/drm/i915/intel_pm.c
+@@ -4078,7 +4078,7 @@ void skl_pipe_ddb_get_hw_state(struct intel_crtc *crtc,
+ 	if (!wakeref)
+ 		return;
+ 
+-	for_each_plane_id_on_crtc(crtc, plane_id)
++	for_each_plane_id_on_crtc(crtc, plane_id) {
+ 		skl_ddb_get_hw_plane_state(dev_priv, pipe,
+ 					   plane_id,
+ 					   &ddb_y[plane_id],
+@@ -4086,11 +4086,14 @@ void skl_pipe_ddb_get_hw_state(struct intel_crtc *crtc,
+ #if IS_ENABLED(CONFIG_DRM_I915_GVT)
+ 		// skl_allocate_pipe_ddb will zero out sw ddb for inactive ddb
+ 		// so we fake hw ddb as well.
+-		if (gvt && !crtc->config->hw.active) {
++		if (gvt && (plane_id != PLANE_CURSOR) &&
++		    (!crtc->config->hw.active ||
++		     !(I915_READ_FW(PLANE_CTL(pipe, plane_id)) & PLANE_CTL_ENABLE))) {
+ 			memset(&ddb_y[plane_id], 0, sizeof(struct skl_ddb_entry));
+ 			memset(&ddb_uv[plane_id], 0, sizeof(struct skl_ddb_entry));
+ 		}
+ #endif
++	}
+ 	intel_display_power_put(dev_priv, power_domain, wakeref);
+ }
+ 
+-- 
+2.17.1
+

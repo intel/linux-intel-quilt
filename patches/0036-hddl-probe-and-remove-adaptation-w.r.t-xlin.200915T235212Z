@@ -1,0 +1,70 @@
+From cd6ec5c5bbfa5e84bbc3a3cedc354b3c7f92547a Mon Sep 17 00:00:00 2001
+From: sandeep singh <sandeep1.singh@intel.com>
+Date: Wed, 24 Jun 2020 13:56:20 +0530
+Subject: [PATCH 36/48] hddl probe and remove adaptation w.r.t xlink
+
+Signed-off-by: sandeep singh <sandeep1.singh@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device.c | 37 +++++++++++++++++++++++---
+ 1 file changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+index ae0756782742..7ba68f34267e 100644
+--- a/drivers/misc/hddl_device/hddl_device.c
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -296,11 +296,36 @@ void hddl_device_remove(uint32_t sw_device_id)
+ 	}
+ }
+ 
+-const struct xlink_drv_event_ops ops = {
+-	.probe = hddl_device_probe,
+-	.remove = hddl_device_remove,
++uint32_t xlink_device_events[] = {
++	_NOTIFY_INCOMING_DISCONNECTION,
++	_NOTIFY_DEVICE_DISCONNECTED,
++	_NOTIFY_DEVICE_CONNECTED,
++	_ERROR_UNEXPECTED_DISCONNECTION,
++	_NUM_EVENT_TYPE
+ };
+ 
++
++int hddl_device_pcie_event_notify(uint32_t sw_device_id, enum _xlink_device_event_type event_type)
++{
++	printk(KERN_INFO "HDDL:xlink pcie notify[%x]: [%d]\n", sw_device_id, event_type);
++	switch (event_type) {
++	case _NOTIFY_INCOMING_DISCONNECTION:
++	case _NOTIFY_DEVICE_DISCONNECTED:
++	case _ERROR_UNEXPECTED_DISCONNECTION:
++			hddl_device_remove(sw_device_id);
++			break;
++
++	case _NOTIFY_DEVICE_CONNECTED:
++			hddl_device_probe(sw_device_id);
++			break;
++
++	default:
++			printk(KERN_INFO "HDDL:xlink pcie notify - Error[%x]: [%d]\n", sw_device_id, event_type);
++			break;
++	}
++	return 0;
++}
++
+ int hddl_per_device_connect_thread(void *thread_param)
+ {
+ 	struct kmb *soc;
+@@ -365,7 +390,11 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 	//chan_num = HDDL_NODE_XLINK_CHANNEL;
+ 	printk(KERN_INFO "HDDL:Channel Number[%x]: %u\n", devH->sw_device_id, chan_num);
+ 
+-	xlink_pcie_register_events(devH->sw_device_id, &ops);
++	xlink_pcie_register_device_event(devH->sw_device_id,
++																		xlink_device_events,
++																		_NUM_EVENT_TYPE,
++																		hddl_device_pcie_event_notify,
++																		0);
+ 
+ 	while ((rc = xlink_open_channel(devH,
+ 			chan_num,
+-- 
+2.17.1
+

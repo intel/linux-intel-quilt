@@ -1,0 +1,357 @@
+From d7b8091475c7c6a679a89ce676a5e843a287643c Mon Sep 17 00:00:00 2001
+From: "Vineetha G. Jaya Kumaran" <vineetha.g.jaya.kumaran@intel.com>
+Date: Thu, 13 Aug 2020 18:23:41 +0800
+Subject: [PATCH 26/48] xlink-pcie: Enable event notifications
+
+This patch enables support for asynchronous device event
+notifications for XLink PCIe.
+
+Signed-off-by: Vineetha G. Jaya Kumaran <vineetha.g.jaya.kumaran@intel.com>
+---
+ drivers/misc/xlink-pcie/local_host/mxlk_inf.c |  15 ++
+ .../misc/xlink-pcie/remote_host/mxlk_inf.c    |  17 +++
+ .../misc/xlink-pcie/remote_host/mxlk_main.c   |  10 ++
+ .../misc/xlink-pcie/remote_host/mxlk_pci.c    | 139 +++++++++++++++++-
+ .../misc/xlink-pcie/remote_host/mxlk_pci.h    |  15 ++
+ include/linux/xlink_drv_inf.h                 |  16 ++
+ 6 files changed, 211 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/xlink-pcie/local_host/mxlk_inf.c b/drivers/misc/xlink-pcie/local_host/mxlk_inf.c
+index 740d72603e8c..caef8a680e2e 100644
+--- a/drivers/misc/xlink-pcie/local_host/mxlk_inf.c
++++ b/drivers/misc/xlink-pcie/local_host/mxlk_inf.c
+@@ -117,3 +117,18 @@ int xlink_pcie_reset_device(uint32_t sw_device_id)
+ 	return 0;
+ }
+ EXPORT_SYMBOL(xlink_pcie_reset_device);
++
++int xlink_pcie_register_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events,
++		_xlink_device_event event_notif_fn, int pid)
++{
++	return 0;
++}
++EXPORT_SYMBOL(xlink_pcie_register_device_event);
++
++int xlink_pcie_unregister_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events, int pid)
++{
++	return 0;
++}
++EXPORT_SYMBOL(xlink_pcie_unregister_device_event);
+diff --git a/drivers/misc/xlink-pcie/remote_host/mxlk_inf.c b/drivers/misc/xlink-pcie/remote_host/mxlk_inf.c
+index d79a013a987d..cd14277b2454 100644
+--- a/drivers/misc/xlink-pcie/remote_host/mxlk_inf.c
++++ b/drivers/misc/xlink-pcie/remote_host/mxlk_inf.c
+@@ -91,3 +91,20 @@ int xlink_pcie_reset_device(uint32_t sw_device_id)
+ 	return mxlk_pci_reset_device(sw_device_id);
+ }
+ EXPORT_SYMBOL(xlink_pcie_reset_device);
++
++int xlink_pcie_register_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events,
++		_xlink_device_event event_notif_fn, int pid)
++{
++	return mxlk_pci_set_event_op(sw_device_id, event_list, num_events,
++				     event_notif_fn, pid);
++}
++EXPORT_SYMBOL(xlink_pcie_register_device_event);
++
++int xlink_pcie_unregister_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events, int pid)
++{
++	return mxlk_pci_set_event_op(sw_device_id, event_list, num_events,
++				     NULL, pid);
++}
++EXPORT_SYMBOL(xlink_pcie_unregister_device_event);
+diff --git a/drivers/misc/xlink-pcie/remote_host/mxlk_main.c b/drivers/misc/xlink-pcie/remote_host/mxlk_main.c
+index 5cf19847a027..d5f31b58b42e 100644
+--- a/drivers/misc/xlink-pcie/remote_host/mxlk_main.c
++++ b/drivers/misc/xlink-pcie/remote_host/mxlk_main.c
+@@ -50,14 +50,24 @@ static int mxlk_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (new_device)
+ 		mxlk_list_add_device(xdev);
+ 
++	mxlk_pci_notify_event(xdev, _NOTIFY_DEVICE_CONNECTED);
++
+ 	return ret;
+ }
+ 
+ static void mxlk_remove(struct pci_dev *pdev)
+ {
++	enum _xlink_device_event_type event_type;
+ 	struct mxlk_pcie *xdev = pci_get_drvdata(pdev);
+ 
+ 	if (xdev) {
++		if (!driver_unload) {
++			event_type = xdev->reset_sent ?
++				_NOTIFY_DEVICE_DISCONNECTED :
++				_ERROR_UNEXPECTED_DISCONNECTION;
++			mxlk_pci_notify_event(xdev, event_type);
++		}
++
+ 		mxlk_pci_cleanup(xdev);
+ 		if (driver_unload)
+ 			mxlk_remove_device(xdev);
+diff --git a/drivers/misc/xlink-pcie/remote_host/mxlk_pci.c b/drivers/misc/xlink-pcie/remote_host/mxlk_pci.c
+index 33f432f21645..35811f8c68bd 100644
+--- a/drivers/misc/xlink-pcie/remote_host/mxlk_pci.c
++++ b/drivers/misc/xlink-pcie/remote_host/mxlk_pci.c
+@@ -73,12 +73,23 @@ struct mxlk_pcie *mxlk_create_device(u32 sw_device_id, struct pci_dev *pdev)
+ 		 PCI_FUNC(pdev->devfn));
+ 
+ 	mutex_init(&xdev->lock);
++	INIT_LIST_HEAD(&xdev->event_notif_list);
+ 
+ 	return xdev;
+ }
+ 
+ void mxlk_remove_device(struct mxlk_pcie *xdev)
+ {
++	struct mxlk_pcie_event_op *op, *next;
++
++	if (!list_empty(&xdev->event_notif_list)) {
++		list_for_each_entry_safe(op, next, &xdev->event_notif_list,
++					list) {
++			list_del(&op->list);
++			kfree(op);
++		}
++	}
++
+ 	mutex_destroy(&xdev->lock);
+ 	kfree(xdev);
+ }
+@@ -619,6 +630,7 @@ int mxlk_pci_cleanup(struct mxlk_pcie *xdev)
+ 	pci_set_drvdata(xdev->pci, NULL);
+ 	xdev->mxlk.status = MXLK_STATUS_OFF;
+ 	xdev->irq_enabled = false;
++	xdev->reset_sent = false;
+ 
+ 	mutex_unlock(&xdev->lock);
+ 
+@@ -851,6 +863,8 @@ int mxlk_pci_write(u32 id, void *data, size_t *size, u32 timeout)
+ 
+ static int mxlk_pci_prepare_dev_reset(struct mxlk_pcie *xdev, bool notify)
+ {
++	mxlk_pci_notify_event(xdev, _NOTIFY_INCOMING_DISCONNECTION);
++
+ 	if (mutex_lock_interruptible(&xdev->lock))
+ 		return -EINTR;
+ 
+@@ -859,8 +873,10 @@ static int mxlk_pci_prepare_dev_reset(struct mxlk_pcie *xdev, bool notify)
+ 		mxlk_core_cleanup(&xdev->mxlk);
+ 	}
+ 	xdev->mxlk.status = MXLK_STATUS_OFF;
+-	if (notify)
++	if (notify) {
+ 		mxlk_pci_raise_irq(xdev, DEV_EVENT, REQUEST_RESET);
++		xdev->reset_sent = true;
++	}
+ 
+ 	mutex_unlock(&xdev->lock);
+ 
+@@ -877,6 +893,127 @@ int mxlk_pci_reset_device(u32 id)
+ 	return mxlk_pci_prepare_dev_reset(xdev, true);
+ }
+ 
++static int mxlk_register_event_op(struct mxlk_pcie *xdev, u32 event_map,
++				  _xlink_device_event event_notif_fn, int pid)
++{
++	int i;
++	struct mxlk_pcie_event_op *op;
++
++	if (!list_empty(&xdev->event_notif_list)) {
++		list_for_each_entry(op, &xdev->event_notif_list, list) {
++			if (op->pid != pid)
++				continue;
++			if (op->event_map & event_map)
++				return -EINVAL;
++			for (i = 0; i < _NUM_EVENT_TYPE; i++) {
++				if (BIT(i) & event_map)
++					op->event_fn[i] = event_notif_fn;
++			}
++			op->event_map |= event_map;
++			return 0;
++		}
++	}
++
++	op = kzalloc(sizeof(struct mxlk_pcie_event_op), GFP_KERNEL);
++	if (!op)
++		return -ENOMEM;
++	op->pid = pid;
++	for (i = 0; i < _NUM_EVENT_TYPE; i++) {
++		if (BIT(i) & event_map)
++			op->event_fn[i] = event_notif_fn;
++	}
++	op->event_map = event_map;
++	list_add_tail(&op->list, &xdev->event_notif_list);
++
++	return 0;
++}
++
++static int mxlk_unregister_event_op(struct mxlk_pcie *xdev, u32 event_map,
++				    int pid)
++{
++	int i;
++	struct mxlk_pcie_event_op *op;
++
++	if (list_empty(&xdev->event_notif_list))
++		return 0;
++
++	list_for_each_entry(op, &xdev->event_notif_list, list) {
++		if (op->pid != pid)
++			continue;
++		if (!(op->event_map & event_map))
++			return 0;
++		for (i = 0; i < _NUM_EVENT_TYPE; i++) {
++			if (BIT(i) & event_map)
++				op->event_fn[i] = NULL;
++		}
++		op->event_map &= ~event_map;
++		if (op->event_map == 0) {
++			list_del(&op->list);
++			kfree(op);
++		}
++		return 0;
++	}
++
++	return 0;
++}
++
++int mxlk_pci_set_event_op(u32 id, u32 *event_list, u32 num_events,
++			  _xlink_device_event event_notif_fn, int pid)
++{
++	int i, rc = 0;
++	u32 event_map = 0;
++	struct mxlk_pcie *xdev = mxlk_get_device_by_id(id);
++
++	if (!xdev)
++		return -EINVAL;
++
++	if (num_events == 0 || num_events > _NUM_EVENT_TYPE)
++		return -EINVAL;
++
++	for (i = 0; i < num_events; i++) {
++		if (event_list[i] >= _NUM_EVENT_TYPE)
++			return -EINVAL;
++		event_map |= BIT(event_list[i]);
++	}
++
++	if (mutex_lock_interruptible(&xdev->lock))
++		return -EINTR;
++
++	if (event_notif_fn)
++		rc = mxlk_register_event_op(xdev, event_map, event_notif_fn,
++					    pid);
++	else
++		rc = mxlk_unregister_event_op(xdev, event_map, pid);
++
++	mutex_unlock(&xdev->lock);
++
++	return rc;
++}
++
++void mxlk_pci_notify_event(struct mxlk_pcie *xdev,
++			   enum _xlink_device_event_type event_type)
++{
++	struct mxlk_pcie_event_op *op;
++
++	if (event_type >= _NUM_EVENT_TYPE)
++		return;
++
++	if (mutex_lock_interruptible(&xdev->lock))
++		return;
++
++	if (list_empty(&xdev->event_notif_list)) {
++		mutex_unlock(&xdev->lock);
++		return;
++	}
++
++	mutex_unlock(&xdev->lock);
++
++	list_for_each_entry(op, &xdev->event_notif_list, list) {
++		if (BIT(event_type) & op->event_map)
++			op->event_fn[event_type](xdev->devid, event_type);
++	}
++}
++
+ u64 mxlk_pci_hw_dev_id(struct mxlk_pcie *xdev)
+ {
+ 	return _ioread64(&xdev->mxlk.io_comm->dev_id);
+diff --git a/drivers/misc/xlink-pcie/remote_host/mxlk_pci.h b/drivers/misc/xlink-pcie/remote_host/mxlk_pci.h
+index 835d2214991e..98574acab3bc 100644
+--- a/drivers/misc/xlink-pcie/remote_host/mxlk_pci.h
++++ b/drivers/misc/xlink-pcie/remote_host/mxlk_pci.h
+@@ -19,6 +19,14 @@
+ 
+ #define MXLK_MAX_NAME_LEN (32)
+ 
++
++struct mxlk_pcie_event_op {
++	struct list_head list;
++	int pid;
++	u32 event_map;
++	_xlink_device_event event_fn[_NUM_EVENT_TYPE];
++};
++
+ struct mxlk_pcie {
+ 	struct list_head list;
+ 	struct mutex lock;
+@@ -26,6 +34,8 @@ struct mxlk_pcie {
+ 	struct pci_dev *pci;
+ 	char name[MXLK_MAX_NAME_LEN];
+ 	u32 devid;
++	struct list_head event_notif_list;
++	bool reset_sent;
+ 	char fw_name[MXLK_MAX_NAME_LEN];
+ 
+ 	struct delayed_work wait_event;
+@@ -70,6 +80,11 @@ int mxlk_pci_read(u32 id, void *data, size_t *size, u32 timeout);
+ int mxlk_pci_write(u32 id, void *data, size_t *size, u32 timeout);
+ int mxlk_pci_reset_device(u32 id);
+ 
++int mxlk_pci_set_event_op(u32 id, u32 *event_list, u32 num_events,
++			  _xlink_device_event event_notif_fn, int pid);
++void mxlk_pci_notify_event(struct mxlk_pcie *xdev,
++			   enum _xlink_device_event_type event_type);
++
+ u64 mxlk_pci_hw_dev_id(struct mxlk_pcie *xdev);
+ 
+ #endif
+diff --git a/include/linux/xlink_drv_inf.h b/include/linux/xlink_drv_inf.h
+index 88e1efd5ee3a..3036576de23f 100644
+--- a/include/linux/xlink_drv_inf.h
++++ b/include/linux/xlink_drv_inf.h
+@@ -59,6 +59,17 @@ enum _xlink_device_status {
+ 	_XLINK_DEV_READY
+ };
+ 
++enum _xlink_device_event_type {
++	_NOTIFY_INCOMING_DISCONNECTION,
++	_NOTIFY_DEVICE_DISCONNECTED,
++	_NOTIFY_DEVICE_CONNECTED,
++	_ERROR_UNEXPECTED_DISCONNECTION,
++	_NUM_EVENT_TYPE
++};
++
++typedef int (*_xlink_device_event)(uint32_t sw_device_id,
++				   enum _xlink_device_event_type event_type);
++
+ int xlink_pcie_get_device_list(uint32_t *sw_device_id_list,
+ 			       uint32_t *num_devices);
+ int xlink_pcie_get_device_name(uint32_t sw_device_id, char *device_name,
+@@ -72,6 +83,11 @@ int xlink_pcie_read(uint32_t sw_device_id, void *data, size_t *const size,
+ int xlink_pcie_write(uint32_t sw_device_id, void *data, size_t *const size,
+ 		     uint32_t timeout);
+ int xlink_pcie_reset_device(uint32_t sw_device_id);
++int xlink_pcie_register_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events,
++		_xlink_device_event event_notif_fn, int pid);
++int xlink_pcie_unregister_device_event(uint32_t sw_device_id,
++		uint32_t *event_list, uint32_t num_events, int pid);
+ 
+ int xlink_usb_get_device_list(uint32_t *sw_device_id_list,
+ 			       uint32_t *num_devices);
+-- 
+2.17.1
+

@@ -1,0 +1,4127 @@
+From 4e2c051f2e9c5cfc79aa9715f43f01c7bd585833 Mon Sep 17 00:00:00 2001
+From: mahesh vaidya <mahesh.r.vaidya@intel.com>
+Date: Thu, 21 May 2020 02:17:16 +0530
+Subject: [PATCH 27/48] Platform-Management: Platform-Management feature
+ changes
+
+HDDL Device Management - Draft xlink channel opened per device.
+Time synchronised between host and kmb using xlink pcie
+xlink-smbus support added. This code works only for the KMB 0.
+Other KMBs need be stopped at u-boot and configures the i2c pcl
+functions. A fixed xlink channel number.
+Registered lm75 with 0x48 and 0x49 slave address and verified whether
+read is happening from host side.
+
+Keembay Thermal Driver using PVT sensors, to read all the
+Keembay TJ temperature from host via thermal framework.
+(MSS, CSS, NCE(max) and SOC(max of all)), with Floating point
+accuracy temperature read. Registered all these temperatures,
+to the thermal framework.
+
+emc2103 cooling device driver registration for keembay thermal testing
+
+Enabled host side KMB Tj driver as platform device when
+hddl device is getting initialised.
+Enabled slave KMB Tj driver and address of slave KMB Tj driver
+is derived from Board and KMB Id
+
+Enabled ina3221 and emc2103 on host side.
+Added ACTIVE cooling state for host kmb tj driver.
+
+Added IOCTL functionality in hddl device driver
+
+Signed-off-by: mahesh vaidya <mahesh.r.vaidya@intel.com>
+---
+ drivers/misc/Kconfig                          |   5 +
+ drivers/misc/Makefile                         |   5 +
+ drivers/misc/emc2103/Kconfig                  |   9 +
+ drivers/misc/emc2103/Makefile                 |   5 +
+ drivers/misc/emc2103/emc2103.c                | 850 ++++++++++++++++++
+ drivers/misc/hddl_device/Kconfig              |  16 +
+ drivers/misc/hddl_device/Makefile             |   6 +
+ drivers/misc/hddl_device/hddl_device.c        | 537 +++++++++++
+ drivers/misc/host_kmb_tj/Kconfig              |   9 +
+ drivers/misc/host_kmb_tj/Makefile             |   5 +
+ drivers/misc/host_kmb_tj/host_kmb_tj.c        | 353 ++++++++
+ .../misc/host_kmb_tj/keembay_cooling_host.c   | 112 +++
+ drivers/misc/host_kmb_tj/keembay_tsens_host.h |  60 ++
+ drivers/misc/slave_kmb_tj/Kconfig             |   6 +
+ drivers/misc/slave_kmb_tj/Makefile            |  21 +
+ drivers/misc/slave_kmb_tj/slave_kmb_tj.c      | 269 ++++++
+ drivers/misc/thermal/Kconfig                  |  13 +
+ drivers/misc/thermal/Makefile                 |   6 +
+ drivers/misc/thermal/keembay_cooling.c        | 111 +++
+ drivers/misc/thermal/keembay_thermal.c        | 434 +++++++++
+ drivers/misc/thermal/keembay_tsens.h          | 397 ++++++++
+ drivers/misc/thermal/kmb_tj_uevent.c          |  60 ++
+ drivers/misc/xlink-smbus/Kconfig              |  18 +
+ drivers/misc/xlink-smbus/Makefile             |   5 +
+ drivers/misc/xlink-smbus/xlink-smbus.c        | 475 ++++++++++
+ include/linux/hddl_device.h                   |  34 +
+ scripts/hddl_device/Makefile                  |  47 +
+ 27 files changed, 3868 insertions(+)
+ create mode 100644 drivers/misc/emc2103/Kconfig
+ create mode 100644 drivers/misc/emc2103/Makefile
+ create mode 100644 drivers/misc/emc2103/emc2103.c
+ create mode 100644 drivers/misc/hddl_device/Kconfig
+ create mode 100644 drivers/misc/hddl_device/Makefile
+ create mode 100644 drivers/misc/hddl_device/hddl_device.c
+ create mode 100644 drivers/misc/host_kmb_tj/Kconfig
+ create mode 100644 drivers/misc/host_kmb_tj/Makefile
+ create mode 100644 drivers/misc/host_kmb_tj/host_kmb_tj.c
+ create mode 100644 drivers/misc/host_kmb_tj/keembay_cooling_host.c
+ create mode 100644 drivers/misc/host_kmb_tj/keembay_tsens_host.h
+ create mode 100644 drivers/misc/slave_kmb_tj/Kconfig
+ create mode 100644 drivers/misc/slave_kmb_tj/Makefile
+ create mode 100644 drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+ create mode 100644 drivers/misc/thermal/Kconfig
+ create mode 100644 drivers/misc/thermal/Makefile
+ create mode 100644 drivers/misc/thermal/keembay_cooling.c
+ create mode 100644 drivers/misc/thermal/keembay_thermal.c
+ create mode 100644 drivers/misc/thermal/keembay_tsens.h
+ create mode 100644 drivers/misc/thermal/kmb_tj_uevent.c
+ create mode 100644 drivers/misc/xlink-smbus/Kconfig
+ create mode 100644 drivers/misc/xlink-smbus/Makefile
+ create mode 100644 drivers/misc/xlink-smbus/xlink-smbus.c
+ create mode 100644 include/linux/hddl_device.h
+ create mode 100644 scripts/hddl_device/Makefile
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 0b774bf67fd0..cce3bb9fc577 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -485,4 +485,9 @@ source "drivers/misc/gna/Kconfig"
+ source "drivers/misc/xlink-pcie/Kconfig"
+ source "drivers/misc/xlink-usb/Kconfig"
+ source "drivers/misc/vpusmm/Kconfig"
++source "drivers/misc/hddl_device/Kconfig"
++source "drivers/misc/thermal/Kconfig"
++source "drivers/misc/slave_kmb_tj/Kconfig"
++source "drivers/misc/host_kmb_tj/Kconfig"
++source "drivers/misc/xlink-smbus/Kconfig"
+ endmenu
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index f0601cfdbbb6..0acfafbc36cb 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -61,3 +61,8 @@ obj-$(CONFIG_INTEL_GNA)        += gna/
+ obj-y                          += xlink-pcie/
+ obj-y                          += xlink-usb/
+ obj-$(CONFIG_VPUSMM)		+= vpusmm/
++obj-$(CONFIG_HDDL_DEVICE)	+= hddl_device/
++obj-y				+= thermal/
++obj-$(CONFIG_SLAVE_KMB_TJ) += slave_kmb_tj/
++obj-$(CONFIG_HOST_KMB_TJ) += host_kmb_tj/
++obj-$(CONFIG_XLINK_SMBUS) += xlink-smbus/
+diff --git a/drivers/misc/emc2103/Kconfig b/drivers/misc/emc2103/Kconfig
+new file mode 100644
+index 000000000000..340e8e9d76b1
+--- /dev/null
++++ b/drivers/misc/emc2103/Kconfig
+@@ -0,0 +1,9 @@
++#
++# kConfig for KeemBay Thermal Linux driver
++#
++
++config HOST_KMB_EMC
++	tristate "IA Host Keembay emc Driver"
++	default m
++	help
++	  Enable this option to get the KMB emc in the IA host
+diff --git a/drivers/misc/emc2103/Makefile b/drivers/misc/emc2103/Makefile
+new file mode 100644
+index 000000000000..c0518a1228e4
+--- /dev/null
++++ b/drivers/misc/emc2103/Makefile
+@@ -0,0 +1,5 @@
++#
++# Makefile for KeemBay Thermal Linux driver
++#
++
++obj-$(CONFIG_HOST_KMB_EMC)	+= emc2103.o
+diff --git a/drivers/misc/emc2103/emc2103.c b/drivers/misc/emc2103/emc2103.c
+new file mode 100644
+index 000000000000..d42c05c2f2bd
+--- /dev/null
++++ b/drivers/misc/emc2103/emc2103.c
+@@ -0,0 +1,850 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * emc2103.c - Support for SMSC EMC2103
++ * Copyright (c) 2010 SMSC
++ */
++
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/slab.h>
++#include <linux/jiffies.h>
++#include <linux/i2c.h>
++#include <linux/hwmon.h>
++#include <linux/hwmon-sysfs.h>
++#include <linux/err.h>
++#include <linux/mutex.h>
++#include <linux/thermal.h>
++
++/* Addresses scanned */
++static const unsigned short normal_i2c[] = { 0x2E, I2C_CLIENT_END };
++
++static const u8 REG_TEMP[4] = { 0x00, 0x02, 0x04, 0x06 };
++static const u8 REG_TEMP_MIN[4] = { 0x3c, 0x38, 0x39, 0x3a };
++static const u8 REG_TEMP_MAX[4] = { 0x34, 0x30, 0x31, 0x32 };
++
++#define REG_CONF1		0x20
++#define REG_CONF2		0x21
++#define REG_TEMP_MAX_ALARM	0x24
++#define REG_TEMP_MIN_ALARM	0x25
++#define REG_FAN_CONF1		0x42
++#define REG_FAN_TARGET_LO	0x4c
++#define REG_FAN_TARGET_HI	0x4d
++#define REG_FAN_TACH_HI		0x4e
++#define REG_FAN_TACH_LO		0x4f
++#define REG_PRODUCT_ID		0xfd
++#define REG_MFG_ID		0xfe
++
++
++
++/* equation 4 from datasheet: rpm = (3932160 * multipler) / count */
++#define FAN_RPM_FACTOR		3932160
++
++/*
++ * 2103-2 and 2103-4's 3rd temperature sensor can be connected to two diodes
++ * in anti-parallel mode, and in this configuration both can be read
++ * independently (so we have 4 temperature inputs).  The device can't
++ * detect if it's connected in this mode, so we have to manually enable
++ * it.  Default is to leave the device in the state it's already in (-1).
++ * This parameter allows APD mode to be optionally forced on or off
++ */
++static int apd = -1;
++module_param(apd, bint, 0);
++MODULE_PARM_DESC(apd, "Set to zero to disable anti-parallel diode mode");
++
++struct temperature {
++	s8	degrees;
++	u8	fraction;	/* 0-7 multiples of 0.125 */
++};
++
++struct emc2103_data {
++	struct i2c_client	*client;
++	const struct		attribute_group *groups[4];
++	struct mutex		update_lock;
++	bool			valid;		/* registers are valid */
++	bool			fan_rpm_control;
++	int			temp_count;	/* num of temp sensors */
++	unsigned long		last_updated;	/* in jiffies */
++	struct temperature	temp[4];	/* internal + 3 external */
++	s8			temp_min[4];	/* no fractional part */
++	s8			temp_max[4];    /* no fractional part */
++	u8			temp_min_alarm;
++	u8			temp_max_alarm;
++	u8			fan_multiplier;
++	u16			fan_tach;
++	u16			fan_target;
++};
++
++struct keembay_cooling_data {
++	unsigned int pwm_value;
++	unsigned int rpm_fan_state;
++	unsigned int rpm_fan_max_state;
++	unsigned int *rpm_fan_cooling_levels;
++	struct thermal_cooling_device *cooling_dev;
++	struct device *dev;
++};
++
++static int read_u8_from_i2c(struct i2c_client *client, u8 i2c_reg, u8 *output)
++{
++	int status = i2c_smbus_read_byte_data(client, i2c_reg);
++	if (status < 0) {
++		dev_warn(&client->dev, "reg 0x%02x, err %d\n",
++			i2c_reg, status);
++	} else {
++		*output = status;
++	}
++	return status;
++}
++
++static void read_temp_from_i2c(struct i2c_client *client, u8 i2c_reg,
++			       struct temperature *temp)
++{
++	u8 degrees, fractional;
++
++	if (read_u8_from_i2c(client, i2c_reg, &degrees) < 0)
++		return;
++
++	if (read_u8_from_i2c(client, i2c_reg + 1, &fractional) < 0)
++		return;
++
++	temp->degrees = degrees;
++	temp->fraction = (fractional & 0xe0) >> 5;
++}
++
++static void read_fan_from_i2c(struct i2c_client *client, u16 *output,
++			      u8 hi_addr, u8 lo_addr)
++{
++	u8 high_byte, lo_byte;
++
++	if (read_u8_from_i2c(client, hi_addr, &high_byte) < 0)
++		return;
++
++	if (read_u8_from_i2c(client, lo_addr, &lo_byte) < 0)
++		return;
++
++	*output = ((u16)high_byte << 5) | (lo_byte >> 3);
++}
++
++static void write_fan_target_to_i2c(struct i2c_client *client, u16 new_target)
++{
++	u8 high_byte = (new_target & 0x1fe0) >> 5;
++	u8 low_byte = (new_target & 0x001f) << 3;
++	i2c_smbus_write_byte_data(client, REG_FAN_TARGET_LO, low_byte);
++	i2c_smbus_write_byte_data(client, REG_FAN_TARGET_HI, high_byte);
++}
++
++static void read_fan_config_from_i2c(struct i2c_client *client)
++
++{
++	struct emc2103_data *data = i2c_get_clientdata(client);
++	u8 conf1;
++
++	if (read_u8_from_i2c(client, REG_FAN_CONF1, &conf1) < 0)
++		return;
++
++	data->fan_multiplier = 1 << ((conf1 & 0x60) >> 5);
++	data->fan_rpm_control = (conf1 & 0x80) != 0;
++}
++
++static struct emc2103_data *emc2103_update_device(struct device *dev)
++{
++	struct emc2103_data *data = dev_get_drvdata(dev);
++	struct i2c_client *client = data->client;
++
++	mutex_lock(&data->update_lock);
++
++	if (time_after(jiffies, data->last_updated + HZ + HZ / 2)
++	    || !data->valid) {
++		int i;
++
++		for (i = 0; i < data->temp_count; i++) {
++			read_temp_from_i2c(client, REG_TEMP[i], &data->temp[i]);
++			read_u8_from_i2c(client, REG_TEMP_MIN[i],
++				&data->temp_min[i]);
++			read_u8_from_i2c(client, REG_TEMP_MAX[i],
++				&data->temp_max[i]);
++		}
++
++		read_u8_from_i2c(client, REG_TEMP_MIN_ALARM,
++			&data->temp_min_alarm);
++		read_u8_from_i2c(client, REG_TEMP_MAX_ALARM,
++			&data->temp_max_alarm);
++
++		read_fan_from_i2c(client, &data->fan_tach,
++			REG_FAN_TACH_HI, REG_FAN_TACH_LO);
++		read_fan_from_i2c(client, &data->fan_target,
++			REG_FAN_TARGET_HI, REG_FAN_TARGET_LO);
++		read_fan_config_from_i2c(client);
++
++		data->last_updated = jiffies;
++		data->valid = true;
++	}
++
++	mutex_unlock(&data->update_lock);
++
++	return data;
++}
++
++static ssize_t
++temp_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int millidegrees = data->temp[nr].degrees * 1000
++		+ data->temp[nr].fraction * 125;
++	return sprintf(buf, "%d\n", millidegrees);
++}
++
++static ssize_t
++temp_min_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int millidegrees = data->temp_min[nr] * 1000;
++	return sprintf(buf, "%d\n", millidegrees);
++}
++
++static ssize_t
++temp_max_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int millidegrees = data->temp_max[nr] * 1000;
++	return sprintf(buf, "%d\n", millidegrees);
++}
++
++static ssize_t
++temp_fault_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	bool fault = (data->temp[nr].degrees == -128);
++	return sprintf(buf, "%d\n", fault ? 1 : 0);
++}
++
++static ssize_t
++temp_min_alarm_show(struct device *dev, struct device_attribute *da,
++		    char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	bool alarm = data->temp_min_alarm & (1 << nr);
++	return sprintf(buf, "%d\n", alarm ? 1 : 0);
++}
++
++static ssize_t
++temp_max_alarm_show(struct device *dev, struct device_attribute *da,
++		    char *buf)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = emc2103_update_device(dev);
++	bool alarm = data->temp_max_alarm & (1 << nr);
++	return sprintf(buf, "%d\n", alarm ? 1 : 0);
++}
++
++static ssize_t temp_min_store(struct device *dev, struct device_attribute *da,
++			      const char *buf, size_t count)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = dev_get_drvdata(dev);
++	struct i2c_client *client = data->client;
++	long val;
++
++	int result = kstrtol(buf, 10, &val);
++	if (result < 0)
++		return result;
++
++	val = DIV_ROUND_CLOSEST(clamp_val(val, -63000, 127000), 1000);
++
++	mutex_lock(&data->update_lock);
++	data->temp_min[nr] = val;
++	i2c_smbus_write_byte_data(client, REG_TEMP_MIN[nr], val);
++	mutex_unlock(&data->update_lock);
++
++	return count;
++}
++
++static ssize_t temp_max_store(struct device *dev, struct device_attribute *da,
++			      const char *buf, size_t count)
++{
++	int nr = to_sensor_dev_attr(da)->index;
++	struct emc2103_data *data = dev_get_drvdata(dev);
++	struct i2c_client *client = data->client;
++	long val;
++
++	int result = kstrtol(buf, 10, &val);
++	if (result < 0)
++		return result;
++
++	val = DIV_ROUND_CLOSEST(clamp_val(val, -63000, 127000), 1000);
++
++	mutex_lock(&data->update_lock);
++	data->temp_max[nr] = val;
++	i2c_smbus_write_byte_data(client, REG_TEMP_MAX[nr], val);
++	mutex_unlock(&data->update_lock);
++
++	return count;
++}
++
++static ssize_t
++fan1_input_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int rpm = 0;
++	if (data->fan_tach != 0)
++		rpm = (FAN_RPM_FACTOR * data->fan_multiplier) / data->fan_tach;
++	return sprintf(buf, "%d\n", rpm);
++}
++
++static ssize_t
++fan1_div_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int fan_div = 8 / data->fan_multiplier;
++	return sprintf(buf, "%d\n", fan_div);
++}
++
++/*
++ * Note: we also update the fan target here, because its value is
++ * determined in part by the fan clock divider.  This follows the principle
++ * of least surprise; the user doesn't expect the fan target to change just
++ * because the divider changed.
++ */
++static ssize_t fan1_div_store(struct device *dev, struct device_attribute *da,
++			      const char *buf, size_t count)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	struct i2c_client *client = data->client;
++	int new_range_bits, old_div = 8 / data->fan_multiplier;
++	long new_div;
++
++	int status = kstrtol(buf, 10, &new_div);
++	if (status < 0)
++		return status;
++
++	if (new_div == old_div) /* No change */
++		return count;
++
++	switch (new_div) {
++	case 1:
++		new_range_bits = 3;
++		break;
++	case 2:
++		new_range_bits = 2;
++		break;
++	case 4:
++		new_range_bits = 1;
++		break;
++	case 8:
++		new_range_bits = 0;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	mutex_lock(&data->update_lock);
++
++	status = i2c_smbus_read_byte_data(client, REG_FAN_CONF1);
++	if (status < 0) {
++		dev_dbg(&client->dev, "reg 0x%02x, err %d\n",
++			REG_FAN_CONF1, status);
++		mutex_unlock(&data->update_lock);
++		return status;
++	}
++	status &= 0x9F;
++	status |= (new_range_bits << 5);
++	i2c_smbus_write_byte_data(client, REG_FAN_CONF1, status);
++
++	data->fan_multiplier = 8 / new_div;
++
++	/* update fan target if high byte is not disabled */
++	if ((data->fan_target & 0x1fe0) != 0x1fe0) {
++		u16 new_target = (data->fan_target * old_div) / new_div;
++		data->fan_target = min(new_target, (u16)0x1fff);
++		write_fan_target_to_i2c(client, data->fan_target);
++	}
++
++	/* invalidate data to force re-read from hardware */
++	data->valid = false;
++
++	mutex_unlock(&data->update_lock);
++	return count;
++}
++
++static ssize_t
++fan1_target_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	int rpm = 0;
++
++	/* high byte of 0xff indicates disabled so return 0 */
++	if ((data->fan_target != 0) && ((data->fan_target & 0x1fe0) != 0x1fe0))
++		rpm = (FAN_RPM_FACTOR * data->fan_multiplier)
++			/ data->fan_target;
++
++	return sprintf(buf, "%d\n", rpm);
++}
++
++// fan speed control
++static ssize_t fan1_target_store(struct device *dev,
++				 struct device_attribute *da, const char *buf,
++				 size_t count)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	struct i2c_client *client = data->client;
++	unsigned long rpm_target;
++
++	int result = kstrtoul(buf, 10, &rpm_target);
++	if (result < 0)
++		return result;
++
++	/* Datasheet states 16384 as maximum RPM target (table 3.2) */
++	rpm_target = clamp_val(rpm_target, 0, 16384);
++
++	mutex_lock(&data->update_lock);
++
++	if (rpm_target == 0)
++		data->fan_target = 0x1fff;
++	else
++		data->fan_target = clamp_val(
++			(FAN_RPM_FACTOR * data->fan_multiplier) / rpm_target,
++			0, 0x1fff);
++
++	write_fan_target_to_i2c(client, data->fan_target);
++
++	mutex_unlock(&data->update_lock);
++	return count;
++}
++
++static ssize_t
++fan1_fault_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	bool fault = ((data->fan_tach & 0x1fe0) == 0x1fe0);
++	return sprintf(buf, "%d\n", fault ? 1 : 0);
++}
++
++static ssize_t
++pwm1_enable_show(struct device *dev, struct device_attribute *da, char *buf)
++{
++	struct emc2103_data *data = emc2103_update_device(dev);
++	return sprintf(buf, "%d\n", data->fan_rpm_control ? 3 : 0);
++}
++
++static ssize_t pwm1_enable_store(struct device *dev,
++				 struct device_attribute *da, const char *buf,
++				 size_t count)
++{
++	struct emc2103_data *data = dev_get_drvdata(dev);
++	struct i2c_client *client = data->client;
++	long new_value;
++	u8 conf_reg;
++
++	int result = kstrtol(buf, 10, &new_value);
++	if (result < 0)
++		return result;
++
++	mutex_lock(&data->update_lock);
++	switch (new_value) {
++	case 0:
++		data->fan_rpm_control = false;
++		break;
++	case 3:
++		data->fan_rpm_control = true;
++		break;
++	default:
++		count = -EINVAL;
++		goto err;
++	}
++
++	result = read_u8_from_i2c(client, REG_FAN_CONF1, &conf_reg);
++	if (result < 0) {
++		count = result;
++		goto err;
++	}
++
++	if (data->fan_rpm_control)
++		conf_reg |= 0x80;
++	else
++		conf_reg &= ~0x80;
++
++	i2c_smbus_write_byte_data(client, REG_FAN_CONF1, conf_reg);
++err:
++	mutex_unlock(&data->update_lock);
++	return count;
++}
++
++static SENSOR_DEVICE_ATTR_RO(temp1_input, temp, 0);
++static SENSOR_DEVICE_ATTR_RW(temp1_min, temp_min, 0);
++static SENSOR_DEVICE_ATTR_RW(temp1_max, temp_max, 0);
++static SENSOR_DEVICE_ATTR_RO(temp1_fault, temp_fault, 0);
++static SENSOR_DEVICE_ATTR_RO(temp1_min_alarm, temp_min_alarm, 0);
++static SENSOR_DEVICE_ATTR_RO(temp1_max_alarm, temp_max_alarm, 0);
++
++static SENSOR_DEVICE_ATTR_RO(temp2_input, temp, 1);
++static SENSOR_DEVICE_ATTR_RW(temp2_min, temp_min, 1);
++static SENSOR_DEVICE_ATTR_RW(temp2_max, temp_max, 1);
++static SENSOR_DEVICE_ATTR_RO(temp2_fault, temp_fault, 1);
++static SENSOR_DEVICE_ATTR_RO(temp2_min_alarm, temp_min_alarm, 1);
++static SENSOR_DEVICE_ATTR_RO(temp2_max_alarm, temp_max_alarm, 1);
++
++static SENSOR_DEVICE_ATTR_RO(temp3_input, temp, 2);
++static SENSOR_DEVICE_ATTR_RW(temp3_min, temp_min, 2);
++static SENSOR_DEVICE_ATTR_RW(temp3_max, temp_max, 2);
++static SENSOR_DEVICE_ATTR_RO(temp3_fault, temp_fault, 2);
++static SENSOR_DEVICE_ATTR_RO(temp3_min_alarm, temp_min_alarm, 2);
++static SENSOR_DEVICE_ATTR_RO(temp3_max_alarm, temp_max_alarm, 2);
++
++static SENSOR_DEVICE_ATTR_RO(temp4_input, temp, 3);
++static SENSOR_DEVICE_ATTR_RW(temp4_min, temp_min, 3);
++static SENSOR_DEVICE_ATTR_RW(temp4_max, temp_max, 3);
++static SENSOR_DEVICE_ATTR_RO(temp4_fault, temp_fault, 3);
++static SENSOR_DEVICE_ATTR_RO(temp4_min_alarm, temp_min_alarm, 3);
++static SENSOR_DEVICE_ATTR_RO(temp4_max_alarm, temp_max_alarm, 3);
++
++static DEVICE_ATTR_RO(fan1_input);
++static DEVICE_ATTR_RW(fan1_div);
++static DEVICE_ATTR_RW(fan1_target);
++static DEVICE_ATTR_RO(fan1_fault);
++
++static DEVICE_ATTR_RW(pwm1_enable);
++
++/* sensors present on all models */
++static struct attribute *emc2103_attributes[] = {
++	&sensor_dev_attr_temp1_input.dev_attr.attr,
++	&sensor_dev_attr_temp1_min.dev_attr.attr,
++	&sensor_dev_attr_temp1_max.dev_attr.attr,
++	&sensor_dev_attr_temp1_fault.dev_attr.attr,
++	&sensor_dev_attr_temp1_min_alarm.dev_attr.attr,
++	&sensor_dev_attr_temp1_max_alarm.dev_attr.attr,
++	&sensor_dev_attr_temp2_input.dev_attr.attr,
++	&sensor_dev_attr_temp2_min.dev_attr.attr,
++	&sensor_dev_attr_temp2_max.dev_attr.attr,
++	&sensor_dev_attr_temp2_fault.dev_attr.attr,
++	&sensor_dev_attr_temp2_min_alarm.dev_attr.attr,
++	&sensor_dev_attr_temp2_max_alarm.dev_attr.attr,
++	&dev_attr_fan1_input.attr,
++	&dev_attr_fan1_div.attr,
++	&dev_attr_fan1_target.attr,
++	&dev_attr_fan1_fault.attr,
++	&dev_attr_pwm1_enable.attr,
++	NULL
++};
++
++/* extra temperature sensors only present on 2103-2 and 2103-4 */
++static struct attribute *emc2103_attributes_temp3[] = {
++	&sensor_dev_attr_temp3_input.dev_attr.attr,
++	&sensor_dev_attr_temp3_min.dev_attr.attr,
++	&sensor_dev_attr_temp3_max.dev_attr.attr,
++	&sensor_dev_attr_temp3_fault.dev_attr.attr,
++	&sensor_dev_attr_temp3_min_alarm.dev_attr.attr,
++	&sensor_dev_attr_temp3_max_alarm.dev_attr.attr,
++	NULL
++};
++
++/* extra temperature sensors only present on 2103-2 and 2103-4 in APD mode */
++static struct attribute *emc2103_attributes_temp4[] = {
++	&sensor_dev_attr_temp4_input.dev_attr.attr,
++	&sensor_dev_attr_temp4_min.dev_attr.attr,
++	&sensor_dev_attr_temp4_max.dev_attr.attr,
++	&sensor_dev_attr_temp4_fault.dev_attr.attr,
++	&sensor_dev_attr_temp4_min_alarm.dev_attr.attr,
++	&sensor_dev_attr_temp4_max_alarm.dev_attr.attr,
++	NULL
++};
++
++static const struct attribute_group emc2103_group = {
++	.attrs = emc2103_attributes,
++};
++
++static const struct attribute_group emc2103_temp3_group = {
++	.attrs = emc2103_attributes_temp3,
++};
++
++static const struct attribute_group emc2103_temp4_group = {
++	.attrs = emc2103_attributes_temp4,
++};
++
++/***************************thermal cooling framework******************************/
++static int  __set_rpm(struct device *dev, unsigned long state)
++{
++	unsigned long period;
++	int ret = 0;
++	struct emc2103_data *data = emc2103_update_device(dev);
++		struct i2c_client *client = data->client;
++		unsigned long rpm_target;
++
++		/* Datasheet states 16384 as maximum RPM target (table 3.2) */
++		rpm_target = clamp_val(rpm_target, 0, 16384);
++
++if (state == 1) {
++	 rpm_target = 8000;
++} else if (state >= 2) {
++	rpm_target = 16384;
++} else {
++	rpm_target = 0;
++}
++
++		mutex_lock(&data->update_lock);
++
++		if (rpm_target == 0)
++			data->fan_target = 0x1fff;
++		else
++			data->fan_target = clamp_val(
++				(FAN_RPM_FACTOR * data->fan_multiplier) / rpm_target,
++				0, 0x1fff);
++
++		write_fan_target_to_i2c(client, data->fan_target);
++
++		mutex_unlock(&data->update_lock);
++		return 0;
++
++
++
++}
++
++
++static int
++keembay_cooling_get_max_state(struct thermal_cooling_device *cdev,
++			      unsigned long *state)
++{
++	struct keembay_cooling_data *ctx = cdev->devdata;
++
++	if (!ctx)
++		return -EINVAL;
++
++	*state = ctx->rpm_fan_max_state;
++
++	return 0;
++}
++
++static int
++keembay_cooling_set_cur_state(struct thermal_cooling_device *cdev,
++			      unsigned long state)
++{
++
++struct keembay_cooling_data *ctx = cdev->devdata;
++	int ret;
++
++	if (!ctx || (state > ctx->rpm_fan_max_state))
++		return -EINVAL;
++
++	if (state == ctx->rpm_fan_state)
++		return 0;
++
++	ret = __set_rpm(ctx->dev, state);
++	ctx->rpm_fan_state = state;
++
++printk("state %d", state);
++printk(KERN_WARNING "keembay_cooling_set_cur_state\n");
++return 0;
++				  }
++
++static int
++keembay_cooling_get_cur_state(struct thermal_cooling_device *cdev,
++			      unsigned long *state)
++{
++ struct keembay_cooling_data *ctx = cdev->devdata;
++
++	 if (!ctx)
++		 return -EINVAL;
++
++	 *state = ctx->rpm_fan_state;
++
++	 return 0;
++
++
++}
++
++static const struct thermal_cooling_device_ops keembay_cooling_ops = {
++	.get_max_state = keembay_cooling_get_max_state,
++	.get_cur_state = keembay_cooling_get_cur_state,
++	.set_cur_state = keembay_cooling_set_cur_state,
++
++};
++
++static int rpm_fan_of_get_cooling_data(struct device *dev,
++				       struct keembay_cooling_data *ctx)
++{
++   int num;
++	num = 3;
++	ctx->rpm_fan_cooling_levels = devm_kcalloc(dev, num, sizeof(u32),
++						   GFP_KERNEL);
++	if (!ctx->rpm_fan_cooling_levels)
++		return -ENOMEM;
++
++	ctx->dev = dev;
++	ctx->rpm_fan_max_state = num - 1;
++
++	return 0;
++}
++
++
++/***************************end-of thermal cooling framework**********************/
++
++
++
++
++
++
++static int
++emc2103_probe(struct i2c_client *client, const struct i2c_device_id *id)
++{
++
++
++
++	struct emc2103_data *data;
++	struct device *hwmon_dev;
++	struct keembay_cooling_data *d;
++	int status, idx = 0;
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
++		return -EIO;
++
++	data = devm_kzalloc(&client->dev, sizeof(struct emc2103_data),
++			    GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++
++	i2c_set_clientdata(client, data);
++	data->client = client;
++	mutex_init(&data->update_lock);
++
++	/* Offset reg 0x21 bit 5 - disable SMBus time out function */
++	status = i2c_smbus_read_byte_data(client, REG_CONF2);
++	if ((status & BIT(5)) != BIT(5)) {
++		dev_info(&client->dev, "reg 0x%02x, value 0x%02x\n", REG_CONF2,
++			status);
++		i2c_smbus_write_byte_data(client, REG_CONF2, status | BIT(5));
++		status = i2c_smbus_read_byte_data(client, REG_CONF2);
++	}
++	dev_info(&client->dev, "reg 0x%02x, value 0x%02x\n", REG_CONF2, status);
++
++	/* 2103-2 and 2103-4 have 3 external diodes, 2103-1 has 1 */
++	status = i2c_smbus_read_byte_data(client, REG_PRODUCT_ID);
++	if (status == 0x24) {
++		/* 2103-1 only has 1 external diode */
++		data->temp_count = 2;
++	} else {
++		/* 2103-2 and 2103-4 have 3 or 4 external diodes */
++		status = i2c_smbus_read_byte_data(client, REG_CONF1);
++		if (status < 0) {
++			dev_dbg(&client->dev, "reg 0x%02x, err %d\n", REG_CONF1,
++				status);
++			return status;
++		}
++
++		/* detect current state of hardware */
++		data->temp_count = (status & 0x01) ? 4 : 3;
++
++		/* force APD state if module parameter is set */
++		if (apd == 0) {
++			/* force APD mode off */
++			data->temp_count = 3;
++			status &= ~(0x01);
++			i2c_smbus_write_byte_data(client, REG_CONF1, status);
++		} else if (apd == 1) {
++			/* force APD mode on */
++			data->temp_count = 4;
++			status |= 0x01;
++			i2c_smbus_write_byte_data(client, REG_CONF1, status);
++		}
++	}
++
++	/* sysfs hooks */
++	data->groups[idx++] = &emc2103_group;
++	if (data->temp_count >= 3)
++		data->groups[idx++] = &emc2103_temp3_group;
++	if (data->temp_count == 4)
++		data->groups[idx++] = &emc2103_temp4_group;
++
++	hwmon_dev = devm_hwmon_device_register_with_groups(&client->dev,
++							   client->name, data,
++							   data->groups);
++	if (IS_ERR(hwmon_dev))
++		return PTR_ERR(hwmon_dev);
++
++	dev_info(&client->dev, "%s: sensor '%s'\n",
++		 dev_name(hwmon_dev), client->name);
++
++/*******************thermal driver********************/
++
++int ret;
++d = devm_kzalloc(&client->dev, sizeof(*d), GFP_KERNEL);
++	if (!d) {
++			printk(KERN_WARNING "keembay_thermal_cooling_dev_kzalloc_failed\n");
++			return -ENOMEM;
++		}
++
++
++ret = rpm_fan_of_get_cooling_data(&client->dev, d);
++	if (ret)
++		return ret;
++
++	d->rpm_fan_state = d->rpm_fan_max_state;
++		printk(KERN_WARNING "keembay_thermal_cooling_probe_start\n");
++		printk(KERN_WARNING "keembay_thermal_cooling_kzalloc\n");
++	d->cooling_dev = thermal_cooling_device_register("keembay_thermal",
++							 d, &keembay_cooling_ops);
++	if (IS_ERR(d->cooling_dev)) {
++		ret = PTR_ERR(d->cooling_dev);
++			printk(KERN_WARNING "keembay_thermal_cooling_register_failed\n");
++		}
++		printk(KERN_WARNING "keembay_thermal_cooling_register\n");
++
++
++/*****************end-of thermal driver **************/
++
++
++	return 0;
++}
++
++static const struct i2c_device_id emc2103_ids[] = {
++	{ "emc2103", 16 },
++	{ /* LIST END */ }
++};
++MODULE_DEVICE_TABLE(i2c, emc2103_ids);
++
++/* Return 0 if detection is successful, -ENODEV otherwise */
++static int
++emc2103_detect(struct i2c_client *new_client, struct i2c_board_info *info)
++{
++	struct i2c_adapter *adapter = new_client->adapter;
++	int manufacturer, product;
++
++	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
++		return -ENODEV;
++
++	manufacturer = i2c_smbus_read_byte_data(new_client, REG_MFG_ID);
++	if (manufacturer != 0x5D)
++		return -ENODEV;
++
++	product = i2c_smbus_read_byte_data(new_client, REG_PRODUCT_ID);
++	if ((product != 0x24) && (product != 0x26))
++		return -ENODEV;
++
++	strlcpy(info->type, "emc2103", I2C_NAME_SIZE);
++
++	return 0;
++}
++
++
++static struct i2c_driver emc2103_driver = {
++	.class		= I2C_CLASS_HWMON,
++	.driver = {
++		.name	= "emc2103",
++	},
++	.detect		= emc2103_detect,
++	.probe		= emc2103_probe,
++	.id_table	= emc2103_ids,
++	.address_list	= normal_i2c,
++};
++
++module_i2c_driver(emc2103_driver);
++
++
++
++MODULE_AUTHOR("Steve Glendinning <steve.glendinning@shawell.net>");
++MODULE_DESCRIPTION("SMSC EMC2103 hwmon driver");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/drivers/misc/hddl_device/Kconfig b/drivers/misc/hddl_device/Kconfig
+new file mode 100644
+index 000000000000..be4f8704edc9
+--- /dev/null
++++ b/drivers/misc/hddl_device/Kconfig
+@@ -0,0 +1,16 @@
++# Copyright (C) 2019 Intel Corporation
++# SPDX-License-Identifier: GPL-2.0-only
++
++config HDDL_DEVICE
++	tristate "Support for hddl device"
++	default M
++	depends on XLINK_CORE
++	help
++	  hddl device management
++
++
++config HDDL_LOCAL_HOST
++	tristate "Support for hddl device local host"
++	depends on XLINK_CORE
++	help
++	  hddl device management for local host
+diff --git a/drivers/misc/hddl_device/Makefile b/drivers/misc/hddl_device/Makefile
+new file mode 100644
+index 000000000000..b6fae62b8450
+--- /dev/null
++++ b/drivers/misc/hddl_device/Makefile
+@@ -0,0 +1,6 @@
++# Copyright (C) 2019 Intel Corporation
++# SPDX-License-Identifier: GPL-2.0-only
++#     Makefile for KeemBay VPUSMM
++#
++#obj-$(CONFIG_HDDL_DEVICE) += hddl_device.o
++obj-m += hddl_device.o
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+new file mode 100644
+index 000000000000..6752365de198
+--- /dev/null
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -0,0 +1,537 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * HDDL Device Kernel module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
++ */
++
++#include <asm/page.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/printk.h>
++#include <uapi/linux/stat.h>
++#include <linux/kthread.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include <linux/of_device.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/xlink.h>
++#include <linux/time.h>
++#include <linux/kmod.h>
++#include <linux/i2c.h>
++#include <linux/sched.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/task.h>
++#include <linux/hddl_device.h>
++#include <linux/ioctl.h>
++#include <linux/uaccess.h>
++#include <linux/cdev.h>
++
++
++#define DRIVER_NAME "hddl_device"
++
++#define HOST_KMB_TJ_DEVICE "host_kmb_tj"
++#define SLAVE_KMB_TJ_DRIVER "slave_kmb_tj"
++
++#define XLINK_MAX_DEVICE_NAME_SIZE 128
++#define XLINK_MAX_DEVICE_LIST_SIZE 8
++
++#ifndef CONFIG_HDDL_LOCAL_HOST
++static struct i2c_board_info host_i2c_devices[] = {
++	{
++		I2C_BOARD_INFO("tmp112", 0x48),
++	},
++	{
++		I2C_BOARD_INFO("tmp112", 0x49),
++	},
++	{
++		I2C_BOARD_INFO("emc2103", 0x2e),
++	},
++	{
++		I2C_BOARD_INFO("host_kmb_tj", 0x5a),
++	},
++	{
++		I2C_BOARD_INFO("ina3221", 0x40),
++	},
++};
++#else
++	static struct i2c_board_info kmb_i2c_devices[] = {
++		{
++			I2C_BOARD_INFO("slave-kmb-tj", 0x4000005b),
++		},
++	};
++#endif
++
++#define MAX_HDDL_DEVICES 8
++T_HDDL_DEVICE_KMB_NODE kmb_hddls[MAX_HDDL_DEVICES] = {0};
++T_SW_ID_HDDL_DATA swid_data;
++#define HDDL_NODE_XLINK_CHANNEL 1050
++#define HDDL_I2C_XLINK_CHANNEL 1080
++
++#ifdef CONFIG_HDDL_LOCAL_HOST
++
++uint32_t hddl_board_id;
++uint32_t hddl_kmb_id;
++
++int hddl_get_board_id(void)
++{
++	return hddl_board_id;
++}
++EXPORT_SYMBOL(hddl_get_board_id);
++
++int hddl_get_kmb_id(void)
++{
++	return hddl_kmb_id;
++}
++EXPORT_SYMBOL(hddl_get_kmb_id);
++
++int hddl_get_i2c_slave_address(void)
++{
++	return ((hddl_board_id << 3) | hddl_kmb_id);
++}
++EXPORT_SYMBOL(hddl_get_i2c_slave_address);
++
++int hddl_device_thread_create(void);
++
++static int __init hddl_device_init(void)
++{
++	char *gpio_base_address; // = NULL;
++	uint32_t board_id;
++	uint32_t kmb_id;
++
++	//int gpio_base_address1;
++	gpio_base_address = ioremap(0x20320000, 2048);
++
++	/* Configure the GPIOs */
++
++	*((volatile int *)(gpio_base_address + 0x2CC)) = 0x1C0F;
++	*((volatile int *)(gpio_base_address + 0x2D0)) = 0x1C0F;
++	*((volatile int *)(gpio_base_address + 0x2D4)) = 0x1C0F;
++
++	printk(KERN_INFO "0x2CC = %x\n",
++	*(volatile int *)(gpio_base_address + 0x2CC));
++	printk(KERN_INFO "0x2D0 = %x\n",
++	*(volatile int *)(gpio_base_address + 0x2D0));
++	printk(KERN_INFO "0x2D4 = %x\n",
++	*(volatile int *)(gpio_base_address + 0x2D4));
++
++	*(volatile int *)(gpio_base_address + 0x328) = 0x1C0F;
++	*(volatile int *)(gpio_base_address + 0x32C) = 0x1C0F;
++	*(volatile int *)(gpio_base_address + 0x330) = 0x1C0F;
++
++	printk(KERN_INFO "0x328 = %x\n",
++	*(volatile int *)(gpio_base_address + 0x328));
++	printk(KERN_INFO "0x32C = %x\n",
++	*(volatile int *)(gpio_base_address + 0x32C));
++	printk(KERN_INFO "0x330 = %x\n",
++	*(volatile int *)(gpio_base_address + 0x330));
++
++	board_id = *((volatile int*)(gpio_base_address + 0x24));
++	board_id = (board_id >> 19) & 0x7;
++	kmb_id = *((volatile int*)(gpio_base_address + 0x28));
++	kmb_id = (kmb_id >> 10) & 0x7;
++	kmb_hddls[board_id].board_id = board_id;
++	kmb_hddls[board_id].soc[kmb_id].id = (board_id << 4) | kmb_id;
++	hddl_board_id = board_id;
++	hddl_kmb_id = kmb_id;
++
++	printk(KERN_INFO "HDDL:Board Id = %x\n", hddl_board_id);
++	printk(KERN_INFO "HDDL:Kmb Id = %x\n", hddl_kmb_id);
++
++	pr_info("HDDL:hddl_device_init done\n");
++	hddl_device_thread_create();
++	return 0;
++}
++
++static void hddl_device_exit(void)
++{
++	pr_info("HDDL:hddl_device_exit\n");
++}
++
++#endif
++
++		/*ioctl*/
++dev_t dev;
++int sw_id_value;
++static struct class *dev_class;
++static struct cdev hddl_cdev;
++
++static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++
++		int i, j, sw_id_found = 0;
++
++	switch (cmd) {
++	case HDDL_WRITE_SW_ID:
++		copy_from_user(&sw_id_value, (int32_t *) arg, sizeof(sw_id_value));
++		printk("sw_id_value = %d\n", sw_id_value);
++		break;
++	case HDDL_READ_SW_ID_DATA:
++
++		for (i = 0; i < 8; i++) {
++			for (j = 0; j < 3; j++) {
++				if (kmb_hddls[i].soc[j].devH.sw_device_id == sw_id_value) {
++					swid_data.board_id = kmb_hddls[i].board_id;
++					swid_data.soc_id = kmb_hddls[i].soc[j].id;
++					swid_data.soc_adaptor_no[0] = kmb_hddls[i].soc[j].adap[0].nr;
++					swid_data.soc_adaptor_no[1] = kmb_hddls[i].soc[j].adap[1].nr;
++					copy_to_user((T_SW_ID_HDDL_DATA *) arg, &swid_data, sizeof(T_SW_ID_HDDL_DATA));
++					sw_id_found = 1;
++					break;
++				}
++			}
++		}
++		if (sw_id_found != 1) {
++			swid_data.board_id = -1;
++			swid_data.soc_id = -1;
++			swid_data.soc_adaptor_no[0] = -1;
++			swid_data.soc_adaptor_no[1] = -1;
++			copy_to_user((T_SW_ID_HDDL_DATA *) arg, &swid_data, sizeof(T_SW_ID_HDDL_DATA));
++		}
++		break;
++	}
++	return 0;
++}
++
++static struct file_operations fops = {
++	.owner	= THIS_MODULE,
++	.unlocked_ioctl = hddl_ioctl,
++};
++
++		/*ioctl-end*/
++
++
++
++
++static int hddl_per_device_connect_thread(void *thread_param)
++{
++	char device_name[XLINK_MAX_DEVICE_NAME_SIZE];
++	uint32_t device_status = 0xFF;
++	uint32_t board_info;
++	uint32_t board_id_rcvd;
++	uint32_t size = 0;
++	uint32_t rc = 0;
++	uint32_t board_id = 0;
++	uint32_t kmb_id = 0;
++	struct timespec64 ts;
++	uint32_t chan_num;
++	uint32_t j = 0;
++	struct i2c_adapter *temp;
++	struct xlink_handle *devH = thread_param;
++
++	struct platform_device_info xlink_i2c_info = {0};
++
++	rc = xlink_get_device_name(devH->sw_device_id,
++	device_name, XLINK_MAX_DEVICE_NAME_SIZE);
++	if (rc > 0) {
++		printk(KERN_INFO
++		"HDDL:Failed to get device name of id [EC%d] %u\n",
++		rc, devH->sw_device_id);
++		return rc;
++	}
++	printk(KERN_INFO "HDDL:Device name: %d %s\n",
++	devH->sw_device_id, device_name);
++	while ((rc = xlink_get_device_status(devH->sw_device_id,
++	&device_status)) != X_LINK_SUCCESS) {
++	}
++	printk(KERN_INFO "HDDL:Device status[%d]: %u\n", rc, device_status);
++	while ((rc = xlink_connect(devH)) != 0) {
++	}
++	#ifdef CONFIG_HDDL_LOCAL_HOST
++	chan_num = HDDL_NODE_XLINK_CHANNEL + hddl_get_kmb_id();
++	#else
++		switch (devH->sw_device_id) {
++		default:
++		case 0:
++		case 3:
++			chan_num = HDDL_NODE_XLINK_CHANNEL + 0;
++			break;
++
++		case 1:
++		case 4:
++			chan_num = HDDL_NODE_XLINK_CHANNEL + 2;
++			break;
++
++		case 2:
++		case 5:
++			chan_num = HDDL_NODE_XLINK_CHANNEL + 1;
++			break;
++		}
++	//chan_num =  HDDL_NODE_XLINK_CHANNEL + i - 3;
++	#endif
++
++	//chan_num = HDDL_NODE_XLINK_CHANNEL;
++	printk(KERN_INFO "HDDL:Channel Number: %u\n", chan_num);
++
++	while ((rc = xlink_open_channel(devH,
++			chan_num,
++			RXB_TXB, /* mode */
++			64 * 1024,
++			0 /* timeout */)) != 0) {
++	}
++	printk(KERN_INFO "HDDL: xlink_open_channel completed[%d]\n", rc);
++	#ifdef CONFIG_HDDL_LOCAL_HOST
++	size = sizeof(ts);
++	rc = xlink_read_data_to_buffer(devH, chan_num, (uint8_t *)&ts, &size);
++	xlink_release_data(devH, chan_num, NULL);
++
++	printk(KERN_INFO "HDDL: Received %d Bytes [%d]\n", size, rc);
++	printk(KERN_INFO "S[%llx] NS[%lx]\n", ts.tv_sec, ts.tv_nsec);
++	do_settimeofday64(&ts);
++
++	printk(KERN_INFO "HDDL: xlink_write_data to start...\n");
++	board_id = hddl_get_board_id();
++	kmb_id = hddl_get_kmb_id();
++	board_info = (board_id << 4) | kmb_id;
++	rc = xlink_write_volatile(devH, chan_num,
++	(uint8_t *)&board_info, sizeof(board_info));
++	printk(KERN_INFO "HDDL: xlink_write_data complete[%d].\n", rc);
++
++	printk(KERN_INFO "HDDL: xlink_read_data to start...\n");
++	size = sizeof(board_id_rcvd);
++	rc = xlink_read_data_to_buffer(devH, chan_num,
++	(uint8_t *) &board_id_rcvd, &size);
++	xlink_release_data(devH, chan_num, NULL);
++	printk(KERN_INFO
++	"HDDL: [%d]xlink_read_data completed Rcvd Size[%d]\n", rc, size);
++	printk(KERN_INFO "HDDL: Board Info[%x %x]\n", board_info,
++	board_id_rcvd);
++	if (board_info == ~(board_id_rcvd)) {
++		memcpy(&kmb_hddls[board_id].soc[kmb_id].devH, devH,
++		sizeof(struct xlink_handle));
++		printk(KERN_INFO "HDDL: Handshake Complete = %x\n",
++		board_info);
++		printk(KERN_INFO
++		"HDDL: Board[%x] Soc[%x] DevType[%x] LinkID[%x]\n",
++			kmb_hddls[board_id].board_id,
++			kmb_hddls[board_id].soc[kmb_id].id,
++			kmb_hddls[board_id].soc[kmb_id].devH.dev_type,
++			kmb_hddls[board_id].soc[kmb_id].devH.link_id
++		);
++	}
++	#else
++		ktime_get_real_ts64(&ts);
++	printk(KERN_INFO "S[%llx] NS[%lx]\n", ts.tv_sec, ts.tv_nsec);
++	rc = xlink_write_volatile(devH, chan_num,
++	(uint8_t *) &ts, sizeof(struct timespec64));
++	printk(KERN_INFO "HDDL: Size Transferred[%d] = %ld\n",
++	rc, sizeof(struct timespec64));
++
++	printk(KERN_INFO "HDDL: xlink_read_data to start...\n");
++	size = sizeof(board_id_rcvd);
++	rc = xlink_read_data_to_buffer(devH, chan_num,
++	(uint8_t *)&board_id_rcvd, &size);
++	xlink_release_data(devH, chan_num, NULL);
++	printk(KERN_INFO "HDDL: xlink_read_data completed Rcvd Size[%d][%d]\n",
++	rc, size);
++
++	board_info = ~(board_id_rcvd);
++	printk(KERN_INFO "HDDL: xlink_write_data to start...\n");
++	rc = xlink_write_volatile(devH, chan_num, (uint8_t *)&board_info,
++	sizeof(board_info));
++	printk(KERN_INFO "HDDL: xlink_write_data complete.[%d]\n", rc);
++	printk(KERN_INFO "HDDL: Board Info[%x %x]", board_id_rcvd, board_info);
++	board_id = (board_id_rcvd >> 4) & 0xF;
++	kmb_id = (board_id_rcvd & 0xF);
++	kmb_hddls[board_id].board_id = board_id;
++	kmb_hddls[board_id].soc[kmb_id].id = board_id_rcvd;
++	memcpy(&kmb_hddls[board_id].soc[kmb_id].devH, devH,
++	sizeof(struct xlink_handle));
++	printk(KERN_INFO "HDDL: Board[%x] Soc[%x] DevType[%x] LinkID[%x]\n",
++		kmb_hddls[board_id].board_id,
++		kmb_hddls[board_id].soc[kmb_id].id,
++		kmb_hddls[board_id].soc[kmb_id].devH.dev_type,
++		kmb_hddls[board_id].soc[kmb_id].devH.link_id
++	);
++	#endif
++	for (j = 0; j < 2; ++j) {
++		xlink_i2c_info.name = "i2c_xlink";
++		xlink_i2c_info.id = board_id << 4 | kmb_id << 2 | j;
++		kmb_hddls[board_id].soc[kmb_id].xlink_i2c_ch[j] =
++		HDDL_I2C_XLINK_CHANNEL + (kmb_id * 2) + j;
++		xlink_i2c_info.data = &kmb_hddls[board_id].soc[kmb_id];
++		xlink_i2c_info.size_data =
++				sizeof(kmb_hddls[board_id].soc[kmb_id]);
++		kmb_hddls[board_id].soc[kmb_id].xlink_i2c_plt_dev[j] =
++		platform_device_register_full(&xlink_i2c_info);
++		kmb_hddls[board_id].soc[kmb_id].adap[j] = *
++		((struct i2c_adapter *)
++		platform_get_drvdata(
++		kmb_hddls[board_id].soc[kmb_id].xlink_i2c_plt_dev[j]));
++		printk(KERN_INFO "Adapter number = %d\n",
++		kmb_hddls[board_id].soc[kmb_id].adap[j].nr);
++	}
++	#ifndef CONFIG_HDDL_LOCAL_HOST
++	i2c_new_client_device(
++	i2c_get_adapter(kmb_hddls[board_id].soc[kmb_id].adap[0].nr),
++	&host_i2c_devices[0]); /* TODO */
++	i2c_new_client_device(
++	i2c_get_adapter(kmb_hddls[board_id].soc[kmb_id].adap[0].nr),
++	&host_i2c_devices[1]); /* TODO */
++	i2c_new_client_device(
++	i2c_get_adapter(kmb_hddls[board_id].soc[kmb_id].adap[0].nr),
++	&host_i2c_devices[2]); /* TODO */
++	i2c_new_client_device(
++	i2c_get_adapter(kmb_hddls[board_id].soc[kmb_id].adap[0].nr),
++	&host_i2c_devices[4]); /* TODO */
++
++	if (board_id <= 4) {
++		/* slave address range 0x10 -- 0x1F */
++		host_i2c_devices[3].addr = kmb_id + 0x10 + (board_id * 3);
++	} else {
++		/* Slave address range 0x60 -- 0x6F */
++		host_i2c_devices[3].addr = kmb_id + 0x60 + ((board_id - 5) * 3);
++	}
++	host_i2c_devices[3].platform_data = &kmb_hddls[board_id].soc[kmb_id].id;
++	j = 0;
++	while ((temp = i2c_get_adapter(j)) != NULL) {
++		if (strstr(temp->name, "SMBus I801") != NULL) {
++			i2c_new_client_device(temp, &host_i2c_devices[3]);
++			break;
++		}
++		j++;
++	}
++	printk(KERN_INFO
++	"Host_kmb_tj [%s] %d\n",
++	host_i2c_devices[3].type, host_i2c_devices[3].addr);
++	i2c_new_client_device(i2c_get_adapter(
++	kmb_hddls[board_id].soc[kmb_id].adap[1].nr),
++	&host_i2c_devices[3]); /* TODO */
++	#else
++		i2c_new_client_device(
++	i2c_get_adapter(kmb_hddls[board_id].soc[kmb_id].adap[1].nr),
++	&kmb_i2c_devices[0]); /* TODO */
++	#endif
++	return 0;
++}
++
++#define XLINK_CONNECT_THREAD_BASED
++static struct xlink_handle xdevH[6];
++static int hddl_device_thermal_init(void *thread_param)
++{
++	uint32_t num_devices = 0, i = 0;
++	uint32_t sw_device_id_list[XLINK_MAX_DEVICE_LIST_SIZE];
++	char device_name[XLINK_MAX_DEVICE_NAME_SIZE];
++	uint32_t rc = 0;
++
++	printk(KERN_INFO "HDDL:Getting device list...\n");
++
++	xlink_get_device_list(sw_device_id_list, &num_devices, 0x6240);
++	if (num_devices == 0) {
++		printk(KERN_INFO "HDDL:No devices found\n");
++		return 0;
++	}
++	printk(KERN_INFO "HDDL:%u devices found...\n", num_devices);
++	for (i = 0; i < num_devices; i++) {
++		memset(&xdevH[i], 0, sizeof(struct xlink_handle));
++		xdevH[i].dev_type = PCIE_DEVICE;
++		xdevH[i].sw_device_id = sw_device_id_list[i];
++		xlink_get_device_name(xdevH[i].sw_device_id,
++		device_name, XLINK_MAX_DEVICE_NAME_SIZE);
++		printk(KERN_INFO "HDDL:Device name: %d %s\n",
++		xdevH[i].sw_device_id, device_name);
++	}
++	for (i = 0; i < num_devices; i++) {
++		#ifdef XLINK_CONNECT_THREAD_BASED
++		struct task_struct *task_recv;
++		#endif
++		printk(KERN_INFO "HDDL:Booting device...\n");
++		rc = xlink_boot_device(&xdevH[i], DEFAULT_NOMINAL_MAX);
++		if (rc > 0) {
++			printk(KERN_WARNING
++			"HDDL:Failed to boot device [EC%d] %s\n", rc,
++			device_name);
++			continue;
++		}
++		#ifdef XLINK_CONNECT_THREAD_BASED
++		task_recv = kthread_run(hddl_per_device_connect_thread,
++		(void *)&xdevH[i],
++		"hddl_per_device_thread");
++		if (task_recv == NULL)
++			printk(KERN_WARNING "hddl_device_init Thread creation failed");
++		#else
++			hddl_per_device_connect_thread(&xdevH[i]);
++		#endif
++
++	}
++	return 0;
++}
++
++#ifndef CONFIG_HDDL_LOCAL_HOST
++static void hddl_device_thermal_exit(void)
++{
++ /*ioctl*/
++device_destroy(dev_class, dev);
++class_destroy(dev_class);
++cdev_del(&hddl_cdev);
++unregister_chrdev_region(dev, 1);
++	printk(KERN_INFO "Device Driver Remove...Done!!!\n");
++
++/*ioctl-end*/
++  return;
++};
++#endif
++
++int hddl_device_thread_create(void)
++{
++	struct task_struct *task_recv;
++
++	/* create receiver thread */
++	task_recv = kthread_run(hddl_device_thermal_init, NULL,
++	"hddl_device receiver_thread");
++	if (task_recv == NULL) {
++		printk(KERN_WARNING
++		"hddl_device_init Thread creation failed");
++	}
++		/*ioctl*/
++
++  /*Allocating Major number*/
++	  if ((alloc_chrdev_region(&dev, 0, 1, "Hddl_Dev")) < 0) {
++		printk(KERN_INFO "Cannot allocate major number\n");
++		return -1;
++	}
++	printk(KERN_INFO "Major = %d Minor = %d \n", MAJOR(dev), MINOR(dev));
++	/*Creating cdev structure*/
++	cdev_init(&hddl_cdev, &fops);
++	/*Adding character device to the system*/
++	if ((cdev_add(&hddl_cdev, dev, 1)) < 0) {
++		printk(KERN_INFO "Cannot add the device to the system\n");
++		goto r_class;
++	}
++	/*Creating struct class*/
++	dev_class = class_create(THIS_MODULE, "hddl_class");
++	if (dev_class == NULL) {
++		printk(KERN_INFO "Cannot create the struct class\n");
++		goto r_class;
++	}
++	/*Creating device*/
++	if ((device_create(dev_class, NULL, dev, NULL, "hddl_device")) == NULL) {
++		printk(KERN_INFO "Cannot create the Device 1\n");
++		goto r_device;
++	}
++	printk(KERN_INFO "Device Driver Insert...Done!!!\n");
++		return 0;
++r_device:
++	class_destroy(dev_class);
++r_class:
++	unregister_chrdev_region(dev, 1);
++
++/*ioctl-end*/
++	return 0;
++}
++
++#ifdef CONFIG_HDDL_LOCAL_HOST
++module_init(hddl_device_init);
++module_exit(hddl_device_exit);
++#else
++module_init(hddl_device_thread_create);
++module_exit(hddl_device_thermal_exit);
++#endif
++
++MODULE_DESCRIPTION("KeemBay HDDL Device driver");
++MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>");
++MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
++MODULE_AUTHOR("Vaidya, Mahesh R <mahesh.r.vaidya@intel.com>");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/misc/host_kmb_tj/Kconfig b/drivers/misc/host_kmb_tj/Kconfig
+new file mode 100644
+index 000000000000..7e2b18d33ba5
+--- /dev/null
++++ b/drivers/misc/host_kmb_tj/Kconfig
+@@ -0,0 +1,9 @@
++#
++# kConfig for KeemBay Thermal Linux driver
++#
++
++config HOST_KMB_TJ
++	tristate "IA Host Keembay Tj Driver"
++	default m
++	help
++	  Enable this option to get the KMB Tj in the IA host
+diff --git a/drivers/misc/host_kmb_tj/Makefile b/drivers/misc/host_kmb_tj/Makefile
+new file mode 100644
+index 000000000000..3cd38e36e17e
+--- /dev/null
++++ b/drivers/misc/host_kmb_tj/Makefile
+@@ -0,0 +1,5 @@
++#
++# Makefile for KeemBay Thermal Linux driver
++#
++
++obj-$(CONFIG_HOST_KMB_TJ)	+= host_kmb_tj.o
+diff --git a/drivers/misc/host_kmb_tj/host_kmb_tj.c b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+new file mode 100644
+index 000000000000..426cab3fa0d1
+--- /dev/null
++++ b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+@@ -0,0 +1,353 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * host_kmb_tj.c - Host KeemBay Thermal Driver.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
++ */
++
++#include <linux/clk.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/of.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/thermal.h>
++#include <linux/delay.h>
++#include "keembay_tsens_host.h"
++#include <linux/slab.h>
++
++#include <linux/ioctl.h>
++#include <linux/i2c.h>
++#include <linux/i2c-dev.h>
++
++static int keembay_get_temp_host(struct thermal_zone_device *thermal,
++							int *temp)
++{
++	struct kmb_trip_point_info *kmb_zone_info = thermal->devdata;
++	struct keembay_therm_info *ktherm = kmb_zone_info->thermal_info;
++	unsigned char rx_buf[4] = {0, 0, 0, 0};
++
++	spin_lock(&ktherm->lock);
++	*temp = 0;
++	switch (kmb_zone_info->sensor_type) {
++	case KEEMBAY_SENSOR_MSS_HOST:
++		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 8);
++		mdelay(100);
++		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 9);
++		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		break;
++
++	case KEEMBAY_SENSOR_CSS_HOST:
++		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 12);
++		mdelay(100);
++		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 13);
++		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		break;
++
++	case KEEMBAY_SENSOR_NCE_HOST:
++		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 4);
++		mdelay(100);
++		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 5);
++		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		break;
++
++	case KEEMBAY_SENSOR_SOC_HOST:
++		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 0);
++		mdelay(100);
++		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 1);
++		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		break;
++
++	default:
++		break;
++	}
++	spin_unlock(&ktherm->lock);
++
++	/* TODO: How to do error handling here */
++	return 0;
++}
++
++static int keembay_thermal_get_trip_type_host(struct thermal_zone_device *zone,
++			int trip, enum thermal_trip_type *type)
++{
++
++	struct kmb_trip_point_info *kmb_zone_info = zone->devdata;
++
++	*type = kmb_zone_info->trip_info[trip].trip_type;
++	return 0;
++}
++
++
++static int keembay_thermal_get_trip_temp_host(struct thermal_zone_device *zone,
++				int trip, int *temp)
++{
++
++	struct kmb_trip_point_info *kmb_zone_info = zone->devdata;
++
++	*temp = kmb_zone_info->trip_info[trip].temperature;
++	return 0;
++}
++
++
++
++static int keembay_thermal_notify_host(struct thermal_zone_device *zone,
++			       int trip, enum thermal_trip_type type)
++{
++
++	switch (type) {
++	case THERMAL_TRIP_ACTIVE:
++		printk(KERN_WARNING "Thermal reached to active temperature\n");
++		break;
++	case THERMAL_TRIP_CRITICAL:
++		printk(KERN_WARNING "Thermal reached to critical temperature\n");
++		break;
++	default:
++		printk(KERN_WARNING "Thermal not reached to active temperature\n");
++		break;
++	}
++	thermal_generate_netlink_event(zone, type);
++	return 0;
++}
++
++static int keembay_bind_host(struct thermal_zone_device *tz,
++		    struct thermal_cooling_device *cdev)
++{
++	int ret;
++
++	/*Check here thermal device zone name and*/
++	/*cdev name to match, then call the bind device */
++	if (strncmp("keembay_thermal", cdev->type, THERMAL_NAME_LENGTH) == 0) {
++		ret = thermal_zone_bind_cooling_device
++				(tz,
++				KEEMBAY_TRIP_ACTIVE,
++				cdev,
++				THERMAL_NO_LIMIT,
++				THERMAL_NO_LIMIT,
++				THERMAL_WEIGHT_DEFAULT);
++		if (ret) {
++			dev_err(&tz->device,
++				"binding zone %s with cdev %s failed:%d\n",
++				tz->type, cdev->type, ret);
++			return ret;
++		}
++	}
++	return 0;
++}
++
++static int keembay_unbind_host(struct thermal_zone_device *tz,
++		      struct thermal_cooling_device *cdev)
++{
++	int ret;
++
++	ret = thermal_zone_unbind_cooling_device(tz, 0, cdev);
++	if (ret) {
++		dev_err(&tz->device,
++			"unbinding zone %s with cdev %s failed:%d\n",
++			tz->type, cdev->type, ret);
++		return ret;
++	}
++	return 0;
++}
++
++
++static struct thermal_zone_device_ops ops_host = {
++	.bind = keembay_bind_host,
++	.unbind = keembay_unbind_host,
++	.get_temp = keembay_get_temp_host,
++	.get_trip_type	= keembay_thermal_get_trip_type_host,
++	.get_trip_temp	= keembay_thermal_get_trip_temp_host,
++	.notify		= keembay_thermal_notify_host,
++
++};
++
++int keembay_thermal_zone_register_host(
++		struct kmb_trip_point_info *zone_trip_info)
++{
++	int ret;
++
++	zone_trip_info->tz =  thermal_zone_device_register(
++		zone_trip_info->sensor_name,
++		zone_trip_info->n_trips,
++		0,
++		zone_trip_info,
++		&ops_host,
++		NULL,
++		zone_trip_info->passive_delay,
++		zone_trip_info->polling_delay
++		);
++	if (IS_ERR(zone_trip_info->tz)) {
++		ret = PTR_ERR(zone_trip_info->tz);
++		printk(KERN_WARNING "failed to"
++				"register thermal zone device %d\n", ret);
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keembay_thermal_zone_register_host);
++
++int keembay_thermal_zone_unregister_host(
++			struct kmb_trip_point_info *zone_trip_info)
++{
++	thermal_zone_device_unregister(zone_trip_info->tz);
++	if (zone_trip_info->thermal_info != NULL)
++		kfree(zone_trip_info->thermal_info);
++	return 0;
++}
++
++
++struct kmb_trip_point_info mss_zone_trip_info_host = {
++	.sensor_type = KEEMBAY_SENSOR_MSS_HOST,
++	.sensor_name = NULL,
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 2,
++	.trip_info = {
++		{ THERMAL_TRIP_ACTIVE, 40000 },
++		{ THERMAL_TRIP_ACTIVE, 80000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info css_zone_trip_info_host = {
++	.sensor_type = KEEMBAY_SENSOR_CSS_HOST,
++	.sensor_name = NULL,
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 2,
++	.trip_info = {
++		{ THERMAL_TRIP_ACTIVE, 40000 },
++		{ THERMAL_TRIP_ACTIVE, 80000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info nce_max_zone_trip_info_host = {
++	.sensor_type = KEEMBAY_SENSOR_NCE_HOST,
++	.sensor_name = NULL,
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 2,
++	.trip_info = {
++		{ THERMAL_TRIP_ACTIVE, 40000 },
++		{ THERMAL_TRIP_ACTIVE, 80000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info soc_max_zone_trip_info_host = {
++	.sensor_type = KEEMBAY_SENSOR_SOC_HOST,
++	.sensor_name = NULL,
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 2,
++	.trip_info = {
++		{ THERMAL_TRIP_ACTIVE, 40000 },
++		{ THERMAL_TRIP_ACTIVE, 80000 },
++	},
++	NULL,
++	NULL,
++};
++
++static int host_kmb_tj_probe(struct i2c_client *client,
++				const struct i2c_device_id *id)
++{
++	struct kmb_trip_point_info *host_kmb_trip_info1 = NULL;
++	struct kmb_trip_point_info *host_kmb_trip_info2 = NULL;
++	struct kmb_trip_point_info *host_kmb_trip_info3 = NULL;
++	struct kmb_trip_point_info *host_kmb_trip_info4 = NULL;
++	char *i2c_str;
++	uint32_t *device_id = client->dev.platform_data;
++
++	if (strstr(client->adapter->name, "SMBus I801") != NULL)
++		i2c_str = "smbus";
++	else
++		i2c_str = "xlink";
++
++	host_kmb_trip_info1 = kzalloc(
++			sizeof(struct kmb_trip_point_info), GFP_KERNEL);
++	memcpy(host_kmb_trip_info1, &mss_zone_trip_info_host,
++				sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info1->sensor_name = kasprintf(GFP_KERNEL,
++				"mss_host_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info1->thermal_info =  kzalloc(
++			sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info1->thermal_info->i2c_c = client;
++
++	host_kmb_trip_info2 = kzalloc(
++			sizeof(struct kmb_trip_point_info), GFP_KERNEL);
++	memcpy(host_kmb_trip_info2, &css_zone_trip_info_host,
++				sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info2->sensor_name = kasprintf(GFP_KERNEL,
++				"css_host_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info2->thermal_info =  kzalloc(
++			sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info2->thermal_info->i2c_c = client;
++
++	host_kmb_trip_info3 = kzalloc(
++			sizeof(struct kmb_trip_point_info), GFP_KERNEL);
++	memcpy(host_kmb_trip_info3, &nce_max_zone_trip_info_host,
++				sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info3->sensor_name = kasprintf(GFP_KERNEL,
++				"nce_host_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info3->thermal_info =
++		kzalloc(sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info3->thermal_info->i2c_c = client;
++
++	host_kmb_trip_info4 = kzalloc(
++			sizeof(struct kmb_trip_point_info), GFP_KERNEL);
++	memcpy(host_kmb_trip_info4, &soc_max_zone_trip_info_host,
++				sizeof(struct kmb_trip_point_info));
++	host_kmb_trip_info4->sensor_name = kasprintf(
++			GFP_KERNEL, "soc_host_%s-%x", i2c_str, *device_id);
++	host_kmb_trip_info4->thermal_info =  kzalloc(
++			sizeof(struct keembay_therm_info), GFP_KERNEL);
++	host_kmb_trip_info4->thermal_info->i2c_c = client;
++
++	/* i2c_set_clientdata(client, host_kmb_trip_info); */
++	keembay_thermal_zone_register_host(host_kmb_trip_info1);
++	keembay_thermal_zone_register_host(host_kmb_trip_info2);
++	keembay_thermal_zone_register_host(host_kmb_trip_info3);
++	keembay_thermal_zone_register_host(host_kmb_trip_info4);
++
++	printk(KERN_INFO "host_kmb_tj: probe success\n");
++
++	return 0;
++}
++
++static int host_kmb_tj_exit(struct i2c_client *client)
++{
++	struct kmb_trip_point_info *host_kmb_trip_info =
++					i2c_get_clientdata(client);
++
++	kfree(host_kmb_trip_info->thermal_info);
++	kfree(host_kmb_trip_info);
++
++	return 0;
++}
++
++
++static const struct i2c_device_id i2c_host_kmb_tj_id[] = {
++	{ "host_kmb_tj", 16 },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, i2c_host_kmb_tj_id);
++
++static struct i2c_driver i2c_host_kmb_tj_driver = {
++	.driver = {
++		.name = "host_kmb_tj",
++	},
++	.probe = host_kmb_tj_probe,
++	.remove = host_kmb_tj_exit,
++	.id_table = i2c_host_kmb_tj_id,
++};
++module_i2c_driver(i2c_host_kmb_tj_driver);
++
++
++MODULE_DESCRIPTION("Host KeemBay Thermal Driver");
++MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
++MODULE_AUTHOR("Vaidya, Mahesh R <mahesh.r.vaidya@intel.com>");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/misc/host_kmb_tj/keembay_cooling_host.c b/drivers/misc/host_kmb_tj/keembay_cooling_host.c
+new file mode 100644
+index 000000000000..35b7b1dec511
+--- /dev/null
++++ b/drivers/misc/host_kmb_tj/keembay_cooling_host.c
+@@ -0,0 +1,112 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++
++
++ */
++
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/acpi.h>
++#include <linux/thermal.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/of.h>
++#include "thermal_hwmon.h"
++#include "thermal_core.h"
++
++
++
++struct keembay_cooling_data {
++	struct thermal_cooling_device *cooling_dev;
++};
++
++static int
++keembay_cooling_get_max_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long *state)
++{
++	*state = 4;
++	return 0;
++}
++
++static int
++keembay_cooling_set_cur_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long state)
++{
++state = 0;
++printk(KERN_WARNING "keembay_cooling_set_cur_state\n");
++return 0;
++				  }
++
++static int
++keembay_cooling_get_cur_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long *state)
++{
++	//printk(KERN_WARNING "keembay_cooling_get_cur_state\n");
++ *state = 0;
++ return 0;
++}
++
++static const struct thermal_cooling_device_ops keembay_cooling_ops = {
++	.get_max_state = keembay_cooling_get_max_state,
++	.get_cur_state = keembay_cooling_get_cur_state,
++	.set_cur_state = keembay_cooling_set_cur_state,
++
++};
++
++static int keembay_cooling_probe(struct platform_device *pdev)
++{
++	struct keembay_cooling_data *d;
++	int ret;
++		printk(KERN_WARNING "keembay_thermal_cooling_probe_start\n");
++		d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
++	if (!d) {
++			printk(KERN_WARNING "keembay_thermal_cooling_dev_kzalloc_failed\n");
++			return -ENOMEM;
++		}
++		printk(KERN_WARNING "keembay_thermal_cooling_kzalloc\n");
++	d->cooling_dev = thermal_cooling_device_register("keembay_thermal",
++							 d, &keembay_cooling_ops);
++	if (IS_ERR(d->cooling_dev)) {
++		ret = PTR_ERR(d->cooling_dev);
++		dev_err(&pdev->dev,
++			"failed to register thermal zone device %d\n", ret);
++			printk(KERN_WARNING "keembay_thermal_cooling_register_failed\n");
++		}
++		printk(KERN_WARNING "keembay_thermal_cooling_register\n");
++
++	return 0;
++}
++
++static int keembay_cooling_remove(struct platform_device *pdev)
++{
++	struct keembay_cooling_data *d = platform_get_drvdata(pdev);
++
++	thermal_cooling_device_unregister(d->cooling_dev);
++	return 0;
++}
++
++static const struct of_device_id keembay_cooling_id_table[] = {
++	{ .compatible = "intel,keembay-dummy" },
++	{}
++};
++
++MODULE_DEVICE_TABLE(of, keembay_cooling_id_table);
++
++static struct platform_driver keembay_cooling_driver = {
++	.probe = keembay_cooling_probe,
++	.remove = keembay_cooling_remove,
++	.driver = {
++		.name = "keembay_cooling",
++		.of_match_table = keembay_cooling_id_table,
++	},
++};
++
++module_platform_driver(keembay_cooling_driver);
++
++MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
++MODULE_DESCRIPTION("keembay thermal driver");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/drivers/misc/host_kmb_tj/keembay_tsens_host.h b/drivers/misc/host_kmb_tj/keembay_tsens_host.h
+new file mode 100644
+index 000000000000..530a64410205
+--- /dev/null
++++ b/drivers/misc/host_kmb_tj/keembay_tsens_host.h
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keembay Temperature sensor module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation.
++ */
++
++#ifndef _LINUX_KEEMBAY_TSENS_HOST_H
++#define _LINUX_KEEMBAY_TSENS_HOST_H
++
++#include <linux/thermal.h>
++
++
++enum keembay_thermal_trip {
++	KEEMBAY_TRIP_ACTIVE,
++	KEEMBAY_TRIP_PASSIVE,
++	KEEMBAY_TRIP_CRITICAL,
++	KEEMBAY_TRIP_NUM,
++};
++
++enum keembay_thermal_sensor_en {
++	KEEMBAY_SENSOR_MSS,
++	KEEMBAY_SENSOR_CSS,
++	KEEMBAY_SENSOR_NCE,
++	KEEMBAY_SENSOR_SOC,
++	KEEMBAY_SENSOR_MSS_HOST,
++	KEEMBAY_SENSOR_CSS_HOST,
++	KEEMBAY_SENSOR_NCE_HOST,
++	KEEMBAY_SENSOR_SOC_HOST
++};
++
++struct kmb_trip_info_st {
++	enum thermal_trip_type trip_type;
++	int temperature;
++};
++
++
++struct keembay_therm_info {
++	struct i2c_client *i2c_c;
++	struct i2c_adapter *host_kmb_tj_adap;
++	spinlock_t lock;
++	struct device *dev;
++	int temperature;
++};
++
++
++#define HOST_KEEMBAY_MAX_TRIP_INFO 10
++struct kmb_trip_point_info {
++	enum keembay_thermal_sensor_en sensor_type;
++	const char *sensor_name;
++	int n_trips;
++	int passive_delay;
++	int polling_delay;
++	struct kmb_trip_info_st trip_info[HOST_KEEMBAY_MAX_TRIP_INFO];
++	struct keembay_therm_info *thermal_info;
++	struct thermal_zone_device *tz;
++	int kmb_address;
++};
++
++#endif /* _LINUX_KEEMBAY_TSENS_HOST_H */
+diff --git a/drivers/misc/slave_kmb_tj/Kconfig b/drivers/misc/slave_kmb_tj/Kconfig
+new file mode 100644
+index 000000000000..60391947ef22
+--- /dev/null
++++ b/drivers/misc/slave_kmb_tj/Kconfig
+@@ -0,0 +1,6 @@
++config SLAVE_KMB_TJ
++	tristate "KMB Tj in slave mode"
++	default y
++	help
++	  Enable this option if you want to have support for thermal management
++	  controller present in Keembay
+diff --git a/drivers/misc/slave_kmb_tj/Makefile b/drivers/misc/slave_kmb_tj/Makefile
+new file mode 100644
+index 000000000000..7229f7a3cff9
+--- /dev/null
++++ b/drivers/misc/slave_kmb_tj/Makefile
+@@ -0,0 +1,21 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Makefile for the i2c core.
++#
++
++#obj-$(CONFIG_I2C_BOARDINFO)	+= i2c-boardinfo.o
++#obj-$(CONFIG_I2C)		+= i2c-core.o
++#i2c-core-objs 			:= i2c-core-base.o i2c-core-smbus.o
++#i2c-core-$(CONFIG_ACPI)		+= i2c-core-acpi.o
++#i2c-core-$(CONFIG_I2C_SLAVE) 	+= i2c-core-slave.o
++#i2c-core-$(CONFIG_OF) 		+= i2c-core-of.o
++#
++#obj-$(CONFIG_I2C_SMBUS)		+= i2c-smbus.o
++#obj-$(CONFIG_I2C_CHARDEV)	+= i2c-dev.o
++#obj-$(CONFIG_I2C_MUX)		+= i2c-mux.o
++#obj-y				+= algos/ busses/ muxes/
++#obj-$(CONFIG_I2C_STUB)		+= i2c-stub.o
++#obj-$(CONFIG_I2C_SLAVE_EEPROM)	+= i2c-slave-eeprom.o
++obj-$(CONFIG_SLAVE_KMB_TJ)	+= slave_kmb_tj.o
++
++#ccflags-$(CONFIG_I2C_DEBUG_CORE) := -DDEBUG
+diff --git a/drivers/misc/slave_kmb_tj/slave_kmb_tj.c b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+new file mode 100644
+index 000000000000..9ecd6257e7fc
+--- /dev/null
++++ b/drivers/misc/slave_kmb_tj/slave_kmb_tj.c
+@@ -0,0 +1,269 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * I2C slave mode Keembay Junction Tj temperature.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
++ */
++
++
++#include <asm/page.h>
++#include <linux/bitfield.h>
++#include <linux/i2c.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/sysfs.h>
++#include <linux/sched/mm.h>
++#include <linux/of_address.h>
++
++#define I2C_SLAVE_BYTELEN GENMASK(15, 0)
++#define I2C_SLAVE_FLAG_ADDR16 BIT(16)
++#define I2C_SLAVE_FLAG_RO BIT(17)
++#define I2C_SLAVE_DEVICE_MAGIC(_len, _flags) ((_flags) | (_len))
++
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++
++struct kmb_tj_data {
++	struct bin_attribute bin;
++	spinlock_t buffer_lock;
++	u16 buffer_idx;
++	u16 address_mask;
++	u8 num_address_bytes;
++	u8 idx_write_cnt;
++	bool read_only;
++	u8 buffer[];
++};
++
++extern int kmb_tj_temp_list[];
++
++static int i2c_slave_kmb_tj_slave_cb(struct i2c_client *client,
++				     enum i2c_slave_event event, u8 *val)
++{
++	struct kmb_tj_data *kmb_tj = i2c_get_clientdata(client);
++	unsigned char *temp;
++
++	switch (event) {
++	case I2C_SLAVE_WRITE_RECEIVED:
++	{
++		if (kmb_tj->idx_write_cnt < kmb_tj->num_address_bytes) {
++			if (kmb_tj->idx_write_cnt == 0)
++				kmb_tj->buffer_idx = 0;
++
++			kmb_tj->buffer_idx = *val | (kmb_tj->buffer_idx << 8);
++			kmb_tj->idx_write_cnt++;
++			spin_lock(&kmb_tj->buffer_lock);
++			temp = (unsigned char *)(kmb_tj_temp_list);
++			kmb_tj->buffer[kmb_tj->buffer_idx]
++				= temp[kmb_tj->buffer_idx];
++			spin_unlock(&kmb_tj->buffer_lock);
++		} else {
++			if (!kmb_tj->read_only) {
++				printk(KERN_WARNING "Error"
++						"I2C_SLAVE_WRITE_RECEIVED,"
++						"KMB TJ reg are readonly\n");
++				return -1; /* write not allowed */
++			}
++		}
++		break;
++	}
++
++	case I2C_SLAVE_READ_PROCESSED:
++	{
++		/* The previous byte made it to the bus, get next one */
++		kmb_tj->buffer_idx++;
++	}
++		/* fallthrough */
++	case I2C_SLAVE_READ_REQUESTED:
++	{
++		if (kmb_tj->buffer_idx >= (6 * sizeof(int))) {
++			printk(KERN_WARNING "Error Wrong Offset \n");
++			/* only first four bytes correspond to Tj Temperature */
++			return -1;
++		}
++
++		spin_lock(&kmb_tj->buffer_lock);
++		*val = kmb_tj->buffer[kmb_tj->buffer_idx];
++		spin_unlock(&kmb_tj->buffer_lock);
++		/*
++		 * Do not increment buffer_idx here, because we don't know if
++		 * this byte will be actually used. Read Linux I2C slave docs
++		 * for details.
++		 */
++		break;
++	}
++
++	case I2C_SLAVE_STOP:
++	{
++		kmb_tj->idx_write_cnt = 0;
++		break;
++	}
++	case I2C_SLAVE_WRITE_REQUESTED:
++	{
++
++		kmb_tj->idx_write_cnt = 0;
++		break;
++	}
++
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++static ssize_t i2c_slave_kmb_tj_bin_read(struct file *filp,
++					struct kobject *kobj,
++					struct bin_attribute *attr,
++					char *buf, loff_t off, size_t count)
++{
++	struct kmb_tj_data *kmb_tj;
++	unsigned long flags;
++
++	kmb_tj = dev_get_drvdata(container_of(kobj, struct device, kobj));
++
++	spin_lock_irqsave(&kmb_tj->buffer_lock, flags);
++	memcpy(buf, &kmb_tj->buffer[off], count);
++	spin_unlock_irqrestore(&kmb_tj->buffer_lock, flags);
++
++	return count;
++}
++
++#if 0
++/* Write to keembay TJ sensor registers not allowed, as they are readonly */
++static ssize_t i2c_slave_kmb_tj_bin_write(
++		struct file *filp, struct kobject *kobj,
++		struct bin_attribute *attr, char *buf,
++		loff_t off, size_t count)
++{
++	struct kmb_tj_data *kmb_tj;
++	unsigned long flags;
++
++	kmb_tj = dev_get_drvdata(container_of(kobj, struct device, kobj));
++
++	spin_lock_irqsave(&kmb_tj->buffer_lock, flags);
++	memcpy(&kmb_tj->buffer[off], buf, count);
++	spin_unlock_irqrestore(&kmb_tj->buffer_lock, flags);
++
++	return count;
++}
++#endif
++
++static int hddl_device_identify(uint32_t *board_id, uint32_t *kmb_id) /* TODO */
++{
++	char *gpio_base_address;
++
++	gpio_base_address = ioremap(0x20320000, 2048);
++
++
++	/* Configure the GPIOs */
++
++	*((volatile int*)(gpio_base_address + 0x2CC)) =  0x1C0F;
++	*((volatile int*)(gpio_base_address + 0x2D0)) =  0x1C0F;
++	*((volatile int*)(gpio_base_address + 0x2D4)) =  0x1C0F;
++
++	*(volatile int*)(gpio_base_address + 0x328) =  0x1C0F;
++	*(volatile int*)(gpio_base_address + 0x32C) =  0x1C0F;
++	*(volatile int*)(gpio_base_address + 0x330) =  0x1C0F;
++
++	*board_id = *((volatile int*)(gpio_base_address + 0x24));
++	*board_id = (*board_id >> 19)&0x7;
++	*kmb_id = *((volatile int*)(gpio_base_address + 0x28));
++	*kmb_id = (*kmb_id >> 10)&0x7;
++	printk(KERN_INFO "HDDL:Board Id = %x\n", *board_id);
++	printk(KERN_INFO "HDDL:Kmb Id = %x\n", *kmb_id);
++
++	pr_info("HDDL: hddl_device_identify done\n");
++	return 0;
++}
++
++static int i2c_slave_kmb_tj_probe(struct i2c_client *client,
++				const struct i2c_device_id *id)
++{
++	struct kmb_tj_data *kmb_tj;
++	int ret;
++	unsigned int size =
++		FIELD_GET(I2C_SLAVE_BYTELEN, id->driver_data);
++	unsigned int flag_addr16 =
++		FIELD_GET(I2C_SLAVE_FLAG_ADDR16, id->driver_data);
++	unsigned int slave_addr;
++	uint32_t board_id, kmb_id;
++
++	hddl_device_identify(&board_id, &kmb_id);
++	if (board_id <= 4) {
++		/* Slave address range 0x10 -- 0x1F */
++		slave_addr = kmb_id + 0x10 + (board_id * 3);
++	} else {
++		/* slave address range 0x60 -- 0x6F */
++		slave_addr = kmb_id + 0x60 + ((board_id - 5) * 3);
++	}
++
++	printk(KERN_INFO "HDDL: Slave Address = %x\n", slave_addr);
++
++	kmb_tj = devm_kzalloc(&client->dev,
++			sizeof(struct kmb_tj_data) + size, GFP_KERNEL);
++	if (!kmb_tj)
++		return -ENOMEM;
++
++	client->addr = slave_addr;
++	kmb_tj->idx_write_cnt = 0;
++	kmb_tj->num_address_bytes = flag_addr16 ? 2 : 1;
++	kmb_tj->address_mask = size - 1;
++	kmb_tj->read_only = FIELD_GET(I2C_SLAVE_FLAG_RO, id->driver_data);
++	spin_lock_init(&kmb_tj->buffer_lock);
++	i2c_set_clientdata(client, kmb_tj);
++
++	sysfs_bin_attr_init(&kmb_tj->bin);	/* TODO */
++	kmb_tj->bin.attr.name = "slave-kmb-tj";
++	kmb_tj->bin.attr.mode = S_IRUSR | S_IWUSR;
++	kmb_tj->bin.read = i2c_slave_kmb_tj_bin_read;
++	/* kmb_tj->bin.write = i2c_slave_kmb_tj_bin_write; */
++	/* Write not allowed to registers */
++	kmb_tj->bin.size = size;
++
++	ret = sysfs_create_bin_file(&client->dev.kobj, &kmb_tj->bin);
++	if (ret)
++		return ret;
++
++	ret = i2c_slave_register(client, i2c_slave_kmb_tj_slave_cb);
++	if (ret) {
++		sysfs_remove_bin_file(&client->dev.kobj, &kmb_tj->bin);
++		return ret;
++	}
++
++	return 0;
++};
++
++static int i2c_slave_kmb_tj_remove(struct i2c_client *client)
++{
++	struct kmb_tj_data *kmb_tj = i2c_get_clientdata(client);
++
++	/* kfree(kmb_tj);  not required as for devm_kzalloc */
++	i2c_slave_unregister(client);
++	sysfs_remove_bin_file(&client->dev.kobj, &kmb_tj->bin);
++
++	return 0;
++}
++
++static const struct i2c_device_id i2c_slave_kmb_tj_id[] = {
++	{ "slave-kmb-tj", 16 },
++	{}
++};
++MODULE_DEVICE_TABLE(i2c, i2c_slave_kmb_tj_id);
++
++static struct i2c_driver i2c_slave_kmb_tj_driver = {
++	.driver = {
++		.name = "slave-kmb-tj",
++	},
++	.probe = i2c_slave_kmb_tj_probe,
++	.remove = i2c_slave_kmb_tj_remove,
++	.id_table = i2c_slave_kmb_tj_id,
++};
++module_i2c_driver(i2c_slave_kmb_tj_driver);
++
++#endif /* CONFIG_I2C_SLAVE */
++
++MODULE_AUTHOR("Vaidya, Mahesh R <mahesh.r.vaidya@intel.com>");
++MODULE_DESCRIPTION("I2C slave mode Keembay Junction temperature Driver");
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/misc/thermal/Kconfig b/drivers/misc/thermal/Kconfig
+new file mode 100644
+index 000000000000..15e42b1643b6
+--- /dev/null
++++ b/drivers/misc/thermal/Kconfig
+@@ -0,0 +1,13 @@
++config KEEMBAY_THERMAL
++	tristate "Temperature sensor driver for intel keembay"
++	default y
++	help
++	  Enable this option if you want to have support for thermal management
++	  controller present in Keembay
++
++config KEEMBAY_COOLING
++	tristate "dummy cooling driver for intel keembay"
++	default y
++	help
++	  Enable this option if you want to have support for thermal management
++	  controller present in Keembay
+diff --git a/drivers/misc/thermal/Makefile b/drivers/misc/thermal/Makefile
+new file mode 100644
+index 000000000000..189cb9f6b3ed
+--- /dev/null
++++ b/drivers/misc/thermal/Makefile
+@@ -0,0 +1,6 @@
++#
++# Makefile for KeemBay Thermal Linux driver
++#
++
++obj-$(CONFIG_KEEMBAY_THERMAL)	+= keembay_thermal.o
++obj-$(CONFIG_KEEMBAY_THERMAL)	+= keembay_cooling.o
+\ No newline at end of file
+diff --git a/drivers/misc/thermal/keembay_cooling.c b/drivers/misc/thermal/keembay_cooling.c
+new file mode 100644
+index 000000000000..70fb47a7cf0a
+--- /dev/null
++++ b/drivers/misc/thermal/keembay_cooling.c
+@@ -0,0 +1,111 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keembay cooling Device Kernel module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
++ */
++
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/acpi.h>
++#include <linux/thermal.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/of.h>
++
++
++
++struct keembay_cooling_data {
++	struct thermal_cooling_device *cooling_dev;
++};
++
++static int
++keembay_cooling_get_max_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long *state)
++{
++	*state = 4;
++	return 0;
++}
++
++static int
++keembay_cooling_set_cur_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long state)
++{
++	state = 0;
++	printk(KERN_WARNING "keembay_cooling_set_cur_state\n");
++	return 0;
++}
++
++static int
++keembay_cooling_get_cur_state(struct thermal_cooling_device *cooling_dev,
++			      unsigned long *state)
++{
++	*state = 0;
++	return 0;
++}
++
++static const struct thermal_cooling_device_ops keembay_cooling_ops = {
++	.get_max_state = keembay_cooling_get_max_state,
++	.get_cur_state = keembay_cooling_get_cur_state,
++	.set_cur_state = keembay_cooling_set_cur_state,
++
++};
++
++static int keembay_cooling_probe(struct platform_device *pdev)
++{
++	struct keembay_cooling_data *d;
++	int ret;
++
++	printk(KERN_WARNING "keembay_thermal_cooling_probe_start\n");
++	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
++	if (!d) {
++		printk(KERN_WARNING "keembay_thermal_cooling_dev_kzalloc_failed\n");
++		return -ENOMEM;
++	}
++	printk(KERN_WARNING "keembay_thermal_cooling_kzalloc\n");
++	d->cooling_dev = thermal_cooling_device_register(
++			"keembay_thermal", d, &keembay_cooling_ops);
++	if (IS_ERR(d->cooling_dev)) {
++		ret = PTR_ERR(d->cooling_dev);
++		dev_err(&pdev->dev,
++		"failed to register thermal zone device %d\n", ret);
++		printk(KERN_WARNING "keembay_thermal_cooling_register_failed\n");
++	}
++	printk(KERN_WARNING "keembay_thermal_cooling_register\n");
++
++	return 0;
++}
++
++static int keembay_cooling_remove(struct platform_device *pdev)
++{
++	struct keembay_cooling_data *d = platform_get_drvdata(pdev);
++
++	thermal_cooling_device_unregister(d->cooling_dev);
++	return 0;
++}
++
++static const struct of_device_id keembay_cooling_id_table[] = {
++	{ .compatible = "intel,keembay-dummy" },
++	{}
++};
++
++MODULE_DEVICE_TABLE(of, keembay_cooling_id_table);
++
++static struct platform_driver keembay_cooling_driver = {
++	.probe = keembay_cooling_probe,
++	.remove = keembay_cooling_remove,
++	.driver = {
++		.name = "keembay_cooling",
++		.of_match_table = keembay_cooling_id_table,
++	},
++};
++
++module_platform_driver(keembay_cooling_driver);
++
++MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
++MODULE_DESCRIPTION("keembay thermal driver");
++MODULE_LICENSE("GPL");
++
++
+diff --git a/drivers/misc/thermal/keembay_thermal.c b/drivers/misc/thermal/keembay_thermal.c
+new file mode 100644
+index 000000000000..4a7d03658a40
+--- /dev/null
++++ b/drivers/misc/thermal/keembay_thermal.c
+@@ -0,0 +1,434 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * keembay-thermal.c - KeemBay Thermal Driver.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation
++ */
++
++#include <linux/clk.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/of.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/thermal.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include "keembay_tsens.h"
++
++static int TempLookupSearch(int low, int high, int n)
++{
++	int mid;
++
++	mid = low + (high - low) / 2;
++	if (raw_kmb_data[mid].N == n)
++		return raw_kmb_data[mid].temp;
++	if (raw_kmb_data[mid].N > n)
++		return TempLookupSearch(low, mid - 1, n);
++	if (raw_kmb_data[mid].N < n)
++		return TempLookupSearch(mid + 1, high, n);
++	return 0;
++}
++
++static int kmb_sensor_read_temp(void __iomem *regs_val,
++						int offset,
++						int sample_valid_mask,
++						int sample_value,
++						int *temp)
++{
++	int result;
++	/* clear the bit of TSENS_EN and re-enable again */
++	iowrite32(0x00, regs_val+AON_TSENS_CFG);
++	iowrite32(CFG_MASK_MANUAL, regs_val+AON_TSENS_CFG);
++	*temp = ioread32(regs_val+offset);
++	if (*temp & sample_valid_mask) {
++		*temp = (*temp & sample_value);
++		if (*temp >= Lower_Temp_Nrange && *temp <= Upper_Temp_Nrange) {
++			result = TempLookupSearch(0, NUM_RAW_KMB - 1, *temp);
++			*temp = result;
++		} else {
++			if (*temp < Lower_Temp_Nrange)
++				*temp = Lower_Temp;
++			else
++				*temp = Upper_Temp;
++		}
++	} else {
++		*temp = 0;
++	}
++	return 0;
++}
++
++int kmb_tj_temp_list[6];
++static int keembay_get_temp(struct thermal_zone_device *thermal,
++							int *temp)
++{
++	struct kmb_trip_point_info *kmb_zone_info = thermal->devdata;
++	struct keembay_therm_info *ktherm = kmb_zone_info->thermal_info;
++
++	spin_lock(&ktherm->lock);
++	switch (kmb_zone_info->sensor_type) {
++	case KEEMBAY_SENSOR_MSS:
++			kmb_sensor_read_temp(ktherm->regs_val,
++					AON_TSENS_DATA0,
++					MSS_T_SAMPLE_VALID,
++					MSS_T_SAMPLE, temp);
++			ktherm->mss = *temp;
++			kmb_tj_temp_list[2] = *temp;
++			break;
++
++	case KEEMBAY_SENSOR_CSS:
++			kmb_sensor_read_temp(ktherm->regs_val,
++					AON_TSENS_DATA0,
++					CSS_T_SAMPLE_VALID,
++					CSS_T_SAMPLE,
++					temp);
++			ktherm->css = *temp;
++			kmb_tj_temp_list[3] = *temp;
++			break;
++
++	case KEEMBAY_SENSOR_NCE:
++			kmb_sensor_read_temp(ktherm->regs_val,
++					AON_TSENS_DATA1,
++					NCE0_T_SAMPLE_VALID,
++					NCE0_T_SAMPLE,
++					&ktherm->nce0);
++			kmb_sensor_read_temp(ktherm->regs_val,
++					AON_TSENS_DATA1,
++					NCE1_T_SAMPLE_VALID,
++					NCE1_T_SAMPLE,
++					&ktherm->nce1);
++			kmb_tj_temp_list[4] = ktherm->nce0;
++			kmb_tj_temp_list[5] = ktherm->nce1;
++			ktherm->nce = ktherm->nce1;
++			*temp = ktherm->nce1;
++			if (ktherm->nce0 > ktherm->nce1) {
++				ktherm->nce = ktherm->nce0;
++				*temp = ktherm->nce0;
++			}
++			kmb_tj_temp_list[1] = *temp;
++			break;
++
++	case KEEMBAY_SENSOR_SOC:
++			//temp = css > mss ? (css > nce ? css : nce)
++			//: (mss > nce ? mss : nce);
++			*temp = ktherm->css > ktherm->mss ?
++					(ktherm->css > ktherm->nce ?
++					ktherm->css : ktherm->nce)
++					: (ktherm->mss > ktherm->css ?
++					ktherm->mss : ktherm->css);
++					kmb_tj_temp_list[0] = *temp;
++			break;
++	default:
++			break;
++	}
++	spin_unlock(&ktherm->lock);
++	return 0;
++}
++EXPORT_SYMBOL(kmb_tj_temp_list);
++
++static int keembay_thermal_get_trip_type(struct thermal_zone_device *zone,
++			int trip, enum thermal_trip_type *type)
++{
++
++	struct kmb_trip_point_info *kmb_zone_info = zone->devdata;
++
++	*type = kmb_zone_info->trip_info[trip].trip_type;
++	return 0;
++}
++
++
++static int keembay_thermal_get_trip_temp(struct thermal_zone_device *zone,
++				int trip, int *temp)
++{
++
++	struct kmb_trip_point_info *kmb_zone_info = zone->devdata;
++
++	*temp = kmb_zone_info->trip_info[trip].temperature;
++	return 0;
++}
++
++
++int notify_user_space(struct thermal_zone_device *tz, int trip)
++{
++	char *thermal_prop[5];
++	int i;
++
++	mutex_lock(&tz->lock);
++	thermal_prop[0] = kasprintf(GFP_KERNEL, "NAME=%s", tz->type);
++	thermal_prop[1] = kasprintf(GFP_KERNEL, "TEMP=%d",
++						tz->emul_temperature);
++	thermal_prop[2] = kasprintf(GFP_KERNEL, "TRIP=%d", trip);
++	thermal_prop[3] = kasprintf(GFP_KERNEL, "EVENT=%d", tz->notify_event);
++	thermal_prop[4] = NULL;
++	kobject_uevent_env(&tz->device.kobj, KOBJ_CHANGE, thermal_prop);
++	for (i = 0; i < 4; ++i)
++		kfree(thermal_prop[i]);
++	mutex_unlock(&tz->lock);
++	return 0;
++}
++
++
++static int keembay_thermal_notify(struct thermal_zone_device *zone,
++			       int trip, enum thermal_trip_type type)
++{
++	struct kmb_trip_point_info *kmb_zone_info = zone->devdata;
++	struct keembay_therm_info *ktherm = kmb_zone_info->thermal_info;
++
++	notify_user_space(zone, trip);
++	switch (type) {
++	case THERMAL_TRIP_PASSIVE:
++		dev_warn(ktherm->dev, "Thermal reached to passive temperature\n");
++		break;
++	case THERMAL_TRIP_CRITICAL:
++		dev_warn(ktherm->dev, "Thermal reached to critical temperature\n");
++		break;
++	default:
++		dev_warn(ktherm->dev, "Thermal not reached to passive temperature\n");
++		break;
++	}
++	return 0;
++}
++
++static int keembay_bind(struct thermal_zone_device *tz,
++		    struct thermal_cooling_device *cdev)
++{
++	int ret;
++
++	/*Check here thermal device zone name and*/
++	/*cdev name to match, then call the bind device */
++	if (strncmp(tz->type, cdev->type, THERMAL_NAME_LENGTH) == 0) {
++		ret = thermal_zone_bind_cooling_device
++				(tz,
++				KEEMBAY_TRIP_PASSIVE,
++				cdev,
++				THERMAL_NO_LIMIT,
++				THERMAL_NO_LIMIT,
++				THERMAL_WEIGHT_DEFAULT);
++		if (ret) {
++			dev_err(&tz->device,
++				"binding zone %s with cdev %s failed:%d\n",
++				tz->type, cdev->type, ret);
++			return ret;
++		}
++	}
++	return 0;
++}
++
++static int keembay_unbind(struct thermal_zone_device *tz,
++		      struct thermal_cooling_device *cdev)
++{
++	int ret;
++
++	ret = thermal_zone_unbind_cooling_device(tz, 0, cdev);
++	if (ret) {
++		dev_err(&tz->device,
++			"unbinding zone %s with cdev %s failed:%d\n",
++			tz->type, cdev->type, ret);
++		return ret;
++	}
++	return 0;
++}
++
++static struct thermal_zone_device_ops ops = {
++	.bind = keembay_bind,
++	.unbind = keembay_unbind,
++	.get_temp = keembay_get_temp,
++	.get_trip_type	= keembay_thermal_get_trip_type,
++	.get_trip_temp	= keembay_thermal_get_trip_temp,
++	.notify		= keembay_thermal_notify,
++/*	.set_emul_temp = keembay_thermal_emulation */
++
++};
++
++
++static const struct of_device_id keembay_thermal_id_table[] = {
++	{ .compatible = "intel,keembay-tsens" },
++	{}
++};
++
++struct keembay_therm_info *g_thermal_data;
++
++static int keembay_thermal_probe(struct platform_device *pdev)
++{
++	int ret;
++	int error;
++
++	printk(KERN_INFO "Keembay thermal probe \n");
++
++	g_thermal_data = devm_kzalloc(&pdev->dev,
++					sizeof(struct keembay_therm_info),
++					GFP_KERNEL);
++	if (!g_thermal_data)
++		return -ENOMEM;
++	/* spin lock init */
++	spin_lock_init(&g_thermal_data->lock);
++	g_thermal_data->regs_val = ioremap(AON_INTERFACE, 32);
++	/* getting clk */
++	g_thermal_data->thermal_clk = devm_clk_get(&pdev->dev, NULL);
++	if (IS_ERR(g_thermal_data->thermal_clk)) {
++		ret = PTR_ERR(g_thermal_data->thermal_clk);
++		if (ret != -EPROBE_DEFER) {
++			dev_err(&pdev->dev,
++					"failed to get thermal clk: %d\n", ret);
++		}
++		return PTR_ERR(g_thermal_data->thermal_clk);
++	}
++	ret = clk_prepare_enable(g_thermal_data->thermal_clk);
++	if (ret) {
++		dev_err(&pdev->dev,
++		"failed to enable thermal clk: %d\n",
++		ret);
++	}
++	//Temperature sensor clock must be in the range 1.25MHz.
++	ret = clk_set_rate(g_thermal_data->thermal_clk, 1250000);
++	ret = clk_prepare_enable(g_thermal_data->thermal_clk);
++	error = clk_enable(g_thermal_data->thermal_clk);
++	if (error)
++		return error;
++	return 0;
++}
++
++int keembay_thermal_zone_register(struct kmb_trip_point_info *zone_trip_info)
++{
++	int ret;
++
++	zone_trip_info->thermal_info = g_thermal_data;
++	zone_trip_info->tz =  thermal_zone_device_register(
++		zone_trip_info->sensor_name,
++		zone_trip_info->n_trips,
++		0,
++		zone_trip_info,
++		&ops,
++		NULL,
++		zone_trip_info->passive_delay,
++		zone_trip_info->polling_delay
++		);
++	if (IS_ERR(zone_trip_info->tz)) {
++		ret = PTR_ERR(zone_trip_info->tz);
++		dev_err(g_thermal_data->dev,
++			"failed to register thermal zone device %d\n", ret);
++	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keembay_thermal_zone_register);
++
++/* Zone Exit */
++int keembay_thermal_zone_unregister(struct kmb_trip_point_info *zone_trip_info)
++{
++	thermal_zone_device_unregister(zone_trip_info->tz);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(keembay_thermal_zone_unregister);
++
++
++/* Device Exit */
++static int keembay_thermal_exit(struct platform_device *pdev)
++{
++	struct thermal_zone_device *keembay_thermal =
++				platform_get_drvdata(pdev);
++
++	thermal_zone_device_unregister(keembay_thermal);
++	clk_disable_unprepare(g_thermal_data->thermal_clk);
++	return 0;
++}
++MODULE_DEVICE_TABLE(of, keembay_thermal_id_table);
++
++static struct platform_driver keembay_thermal_driver = {
++	.probe = keembay_thermal_probe,
++	.remove = keembay_thermal_exit,
++	.driver = {
++		.name = "keembay_thermal",
++		.of_match_table = keembay_thermal_id_table,
++	},
++};
++
++module_platform_driver(keembay_thermal_driver);
++
++
++struct kmb_trip_point_info mss_zone_trip_info = {
++	.sensor_type = KEEMBAY_SENSOR_MSS,
++	.sensor_name = "mss",
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 3,
++	.trip_info = {
++		{ THERMAL_TRIP_PASSIVE, 40000 },
++		{ THERMAL_TRIP_PASSIVE, 80000 },
++		{ THERMAL_TRIP_CRITICAL, 1000000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info css_zone_trip_info = {
++	.sensor_type = KEEMBAY_SENSOR_CSS,
++	.sensor_name = "css",
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 3,
++	.trip_info = {
++		{ THERMAL_TRIP_PASSIVE, 40000 },
++		{ THERMAL_TRIP_PASSIVE, 80000 },
++		{ THERMAL_TRIP_CRITICAL, 1000000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info nce_zone_trip_info = {
++	.sensor_type = KEEMBAY_SENSOR_NCE,
++	.sensor_name = "nce",
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 3,
++	.trip_info = {
++		{ THERMAL_TRIP_PASSIVE, 40000 },
++		{ THERMAL_TRIP_PASSIVE, 80000 },
++		{ THERMAL_TRIP_CRITICAL, 1000000 },
++	},
++	NULL,
++	NULL,
++};
++
++struct kmb_trip_point_info soc_zone_trip_info = {
++	.sensor_type = KEEMBAY_SENSOR_SOC,
++	.sensor_name = "keembay_thermal",
++	.passive_delay = 1000,
++	.polling_delay = 2000,
++	.n_trips = 2,
++	.trip_info = {
++		{ THERMAL_TRIP_PASSIVE, 80000 },
++		{ THERMAL_TRIP_CRITICAL, 1000000 },
++	},
++	NULL,
++	NULL,
++};
++
++static int hddl_device_thermal_init(void)
++{
++	printk(KERN_INFO "Keembay thermal init \n");
++	keembay_thermal_zone_register(&mss_zone_trip_info);
++	keembay_thermal_zone_register(&css_zone_trip_info);
++	keembay_thermal_zone_register(&nce_zone_trip_info);
++	keembay_thermal_zone_register(&soc_zone_trip_info);
++	return 0;
++};
++
++static int hddl_device_thermal_exit(void)
++{
++	return 0;
++};
++
++late_initcall(hddl_device_thermal_init);
++late_initcall(hddl_device_thermal_exit);
++
++MODULE_DESCRIPTION("KeemBay Thermal Driver");
++MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
++MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>");
++MODULE_LICENSE("GPL v2");
++
++
++
++
+diff --git a/drivers/misc/thermal/keembay_tsens.h b/drivers/misc/thermal/keembay_tsens.h
+new file mode 100644
+index 000000000000..82fd0f510198
+--- /dev/null
++++ b/drivers/misc/thermal/keembay_tsens.h
+@@ -0,0 +1,397 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keembay Temperature sensor local-host module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation.
++ */
++
++#ifndef _LINUX_KEEMBAY_TSENS_H
++#define _LINUX_KEEMBAY_TSENS_H
++
++
++#include <linux/thermal.h>
++
++/* Register values for keembay temperature (PVT Sensor) */
++#define AON_TSENS_TRIM0_CFG 0x0030
++#define AON_TSENS_TRIM1_CFG 0x0034
++#define AON_TSENS_CFG 0x0038
++#define AON_TSENS_INT0 0x203c
++#define AON_TSENS_INT1 0x2040
++#define AON_TSENS_IRQ_CLEAR 0x0044
++#define AON_TSENS_DATA0 0x0048
++#define MSS_T_SAMPLE_VALID 0x80000000
++#define MSS_T_SAMPLE 0x3ff
++#define CSS_T_SAMPLE_VALID 0x8000
++#define CSS_T_SAMPLE 0x3ff
++#define NCE1_T_SAMPLE_VALID 0x80000000
++#define NCE1_T_SAMPLE 0x3ff
++#define NCE0_T_SAMPLE_VALID 0x8000
++#define NCE0_T_SAMPLE 0x3ff
++#define AON_TSENS_DATA1 0x004c
++#define AON_INTERFACE 0x20260000
++/* mask values for config register */
++#define CFG_MASK_AUTO 0x80ff //(auto configuration)
++#define CFG_IRQ_MASK 0x8fff
++#define CFG_MASK_MANUAL  0x000f // TSENS_EN (manual configuration)
++/* temperature boundary cases */
++#define Lower_Temp_Nrange 27
++#define Upper_Temp_Nrange 771
++#define Lower_Temp -39956
++#define Upper_Temp 125025
++
++/* temperature calculation lookup */
++struct raw_kmb {
++	int N;
++	int temp;
++};
++static struct raw_kmb raw_kmb_data[] = {
++{27, -39956}, {28, -39637}, {29, -39319}, {30, -39001}, {31, -38684},
++
++{32, -38367}, {33, -38050}, {34, -37734}, {35, -37418}, {36, -37103},
++
++{37, -36787}, {38, -36472}, {39, -36158}, {40, -35844}, {41, -35530},
++
++{42, -35216}, {43, -34903}, {44, -34590}, {45, -34278}, {46, -33966},
++
++{47, -33654}, {48, -33343}, {49, -33032}, {50, -32721}, {51, -32411},
++
++{52, -32101}, {53, -31791}, {54, -31482}, {55, -31173}, {56, -30864},
++
++{57, -30556}, {58, -30248}, {59, -29940}, {60, -29633}, {61, -29326},
++
++{62, -29020}, {63, -28713}, {64, -28407}, {65, -28102}, {66, -27797},
++
++{67, -27492}, {68, -27187}, {69, -26883}, {70, -26579}, {71, -26276},
++
++{72, -25973}, {73, -25670}, {74, -25367}, {75, -25065}, {76, -24763},
++
++{77, -24462}, {78, -24160}, {79, -23860}, {80, -23559}, {81, -23259},
++
++{82, -22959}, {83, -22660}, {84, -22360}, {85, -22062}, {86, -21763},
++
++{87, -21465}, {88, -21167}, {89, -20869}, {90, -20572}, {91, -20275},
++
++{92, -19979}, {93, -19683}, {94, -19387}, {95, -19091}, {96, -18796},
++
++{97, -18501}, {98, -18206}, {99, -17912}, {100, -17618}, {101, -17325},
++
++{102, -17031}, {103, -16738}, {104, -16446}, {105, -16153}, {106, -15861},
++
++{107, -15570}, {108, -15278}, {109, -14987}, {110, -14697}, {111, -14406},
++
++{112, -14116}, {113, -13826}, {114, -13537}, {115, -13248}, {116, -12959},
++
++{117, -12670}, {118, -12382}, {119, -12094}, {120, -11807}, {121, -11520},
++
++{122, -11233}, {123, -10946}, {124, -10660}, {125, -10374}, {126, -10088},
++
++{127, -9803}, {128, -9518}, {129, -9233}, {130, -8949}, {131, -8665},
++
++{132, -8381}, {133, -8097}, {134, -7814}, {135, -7531}, {136, -7249},
++
++{137, -6967}, {138, -6685}, {139, -6403}, {140, -6122}, {141, -5841},
++
++{142, -5560}, {143, -5279}, {144, -4999}, {145, -4720}, {146, -4440},
++
++{147, -4161}, {148, -3882}, {149, -3603}, {150, -3325}, {151, -3047},
++
++{152, -2770}, {153, -2492}, {154, -2215}, {155, -1938}, {156, -1662},
++
++{157, -1386}, {158, -1110}, {159, -834}, {160, -559}, {161, -284},
++
++{162, -9}, {163, 265}, {164, 539}, {165, 813}, {166, 1086},
++
++{167, 1360}, {168, 1633}, {169, 1905}, {170, 2177}, {171, 2449},
++
++{172, 2721}, {173, 2993}, {174, 3264}, {175, 3535}, {176, 3805},
++
++{177, 4075}, {178, 4345}, {179, 4615}, {180, 4884}, {181, 5153},
++
++{182, 5422}, {183, 5691}, {184, 5959}, {185, 6227}, {186, 6495},
++
++{187, 6762}, {188, 7029}, {189, 7296}, {190, 7562}, {191, 7829},
++
++{192, 8095}, {193, 8360}, {194, 8626}, {195, 8891}, {196, 9155},
++
++{197, 9420}, {198, 9684}, {199, 9948}, {200, 10212}, {201, 10475},
++
++{202, 10738}, {203, 11001}, {204, 11264}, {205, 11526}, {206, 11788},
++
++{207, 12049}, {208, 12311}, {209, 12572}, {210, 12833}, {211, 13093},
++
++{212, 13354}, {213, 13614}, {214, 13874}, {215, 14133}, {216, 14392},
++
++{217, 14651}, {218, 14910}, {219, 15168}, {220, 15426}, {221, 15684},
++
++{222, 15942}, {223, 16199}, {224, 16456}, {225, 16713}, {226, 16969},
++
++{227, 17225}, {228, 17481}, {229, 17737}, {230, 17992}, {231, 18247},
++
++{232, 18502}, {233, 18757}, {234, 19011}, {235, 19265}, {236, 19519},
++
++{237, 19772}, {238, 20025}, {239, 20278}, {240, 20531}, {241, 20784},
++
++{242, 21036}, {243, 21288}, {244, 21539}, {245, 21791}, {246, 22042},
++
++{247, 22292}, {248, 22543}, {249, 22793}, {250, 23043}, {251, 23293},
++
++{252, 23543}, {253, 23792}, {254, 24041}, {255, 24290}, {256, 24538},
++
++{257, 24786}, {258, 25034}, {259, 25282}, {260, 25529}, {261, 25776},
++
++{262, 26023}, {263, 26270}, {264, 26516}, {265, 26763}, {266, 27008},
++
++{267, 27254}, {268, 27499}, {269, 27745}, {270, 27989}, {271, 28234},
++
++{272, 28478}, {273, 28722}, {274, 28966}, {275, 29210}, {276, 29453},
++
++{277, 29696}, {278, 29939}, {279, 30182}, {280, 30424}, {281, 30666},
++
++{282, 30908}, {283, 31149}, {284, 31391}, {285, 31632}, {286, 31873},
++
++{287, 32113}, {288, 32353}, {289, 32593}, {290, 32833}, {291, 33073},
++
++{292, 33312}, {293, 33551}, {294, 33790}, {295, 34029}, {296, 34267},
++
++{297, 34505}, {298, 34743}, {299, 34980}, {300, 35218}, {301, 35455},
++
++{302, 35692}, {303, 35928}, {304, 36165}, {305, 36401}, {306, 36637},
++
++{307, 36872}, {308, 37108}, {309, 37343}, {310, 37578}, {311, 37813},
++
++{312, 38047}, {313, 38281}, {314, 38515}, {315, 38749}, {316, 38982},
++
++{317, 39216}, {318, 39448}, {319, 39681}, {320, 39914}, {321, 40146},
++
++{322, 40378}, {323, 40610}, {324, 40841}, {325, 41073}, {326, 41304},
++
++{327, 41535}, {328, 41765}, {329, 41996}, {330, 42226}, {331, 42456},
++
++{332, 42686}, {333, 42915}, {334, 43144}, {335, 43373}, {336, 43602},
++
++{337, 43830}, {338, 44059}, {339, 44287}, {340, 44515}, {341, 44742},
++
++{342, 44970}, {343, 45197}, {344, 45424}, {345, 45650}, {346, 45877},
++
++{347, 46103}, {348, 46329}, {349, 46555}, {350, 46780}, {351, 47006},
++
++{352, 47231}, {353, 47456}, {354, 47680}, {355, 47905}, {356, 48129},
++
++{357, 48353}, {358, 48576}, {359, 48800}, {360, 49023}, {361, 49246},
++
++{362, 49469}, {363, 49692}, {364, 49914}, {365, 50136}, {366, 50358},
++
++{367, 50580}, {368, 50801}, {369, 51023}, {370, 51244}, {371, 51464},
++
++{372, 51685}, {373, 51905}, {374, 52126}, {375, 52346}, {376, 52565},
++
++{377, 52785}, {378, 53004}, {379, 53223}, {380, 53442}, {381, 53661},
++
++{382, 53879}, {383, 54097}, {384, 54315}, {385, 54533}, {386, 54750},
++
++{387, 54968}, {388, 55185}, {389, 55402}, {390, 55618}, {391, 55835},
++
++{392, 56051}, {393, 56267}, {394, 56483}, {395, 56699}, {396, 56914},
++
++{397, 57129}, {398, 57344}, {399, 57559}, {400, 57773}, {401, 57988},
++
++{402, 58202}, {403, 58416}, {404, 58630}, {405, 58843}, {406, 59056},
++
++{407, 59269}, {408, 59482}, {409, 59695}, {410, 59907}, {411, 60120},
++
++{412, 60332}, {413, 60543}, {414, 60755}, {415, 60966}, {416, 61178},
++
++{417, 61389}, {418, 61599}, {419, 61810}, {420, 62020}, {421, 62231},
++
++{422, 62440}, {423, 62650}, {424, 62860}, {425, 63069}, {426, 63278},
++
++{427, 63487}, {428, 63696}, {429, 63904}, {430, 64113}, {431, 64321},
++
++{432, 64529}, {433, 64737}, {434, 64944}, {435, 65151}, {436, 65358},
++
++{437, 65565}, {438, 65772}, {439, 65979}, {440, 66185}, {441, 66391},
++
++{442, 66597}, {443, 66803}, {444, 67008}, {445, 67213}, {446, 67419},
++
++{447, 67624}, {448, 67828}, {449, 68033}, {450, 68237}, {451, 68441},
++
++{452, 68645}, {453, 68849}, {454, 69052}, {455, 69256}, {456, 69459},
++
++{457, 69662}, {458, 69865}, {459, 70067}, {460, 70270}, {461, 70472},
++
++{462, 70674}, {463, 70876}, {464, 71077}, {465, 71279}, {466, 71480},
++
++{467, 71681}, {468, 71882}, {469, 72082}, {470, 72283}, {471, 72483},
++
++{472, 72683}, {473, 72883}, {474, 73083}, {475, 73282}, {476, 73481},
++
++{477, 73680}, {478, 73879}, {479, 74078}, {480, 74277}, {481, 74475},
++
++{482, 74673}, {483, 74871}, {484, 75069}, {485, 75266}, {486, 75464},
++
++{487, 75661}, {488, 75858}, {489, 76055}, {490, 76252}, {491, 76448},
++
++{492, 76644}, {493, 76841}, {494, 77037}, {495, 77232}, {496, 77428},
++
++{497, 77623}, {498, 77818}, {499, 78013}, {500, 78208}, {501, 78403},
++
++{502, 78597}, {503, 78792}, {504, 78986}, {505, 79180}, {506, 79373},
++
++{507, 79567}, {508, 79760}, {509, 79953}, {510, 80146}, {511, 80339},
++
++{512, 80532}, {513, 80724}, {514, 80917}, {515, 81109}, {516, 81301},
++
++{517, 81492}, {518, 81684}, {519, 81875}, {520, 82066}, {521, 82258},
++
++{522, 82448}, {523, 82639}, {524, 82830}, {525, 83020}, {526, 83210},
++
++{527, 83400}, {528, 83590}, {529, 83779}, {530, 83969}, {531, 84158},
++
++{532, 84347}, {533, 84536}, {534, 84725}, {535, 84913}, {536, 85102},
++
++{537, 85290}, {538, 85478}, {539, 85666}, {540, 85854}, {541, 86041},
++
++{542, 86228}, {543, 86416}, {544, 86603}, {545, 86789}, {546, 86976},
++
++{547, 87163}, {548, 87349}, {549, 87535}, {550, 87721}, {551, 87907},
++
++{552, 88092}, {553, 88278}, {554, 88463}, {555, 88648}, {556, 88833},
++
++{557, 89018}, {558, 89203}, {559, 89387}, {560, 89571}, {561, 89755},
++
++{562, 89939}, {563, 90123}, {564, 90307}, {565, 90490}, {566, 90674},
++
++{567, 90857}, {568, 91040}, {569, 91222}, {570, 91405}, {571, 91587},
++
++{572, 91770}, {573, 91952}, {574, 92134}, {575, 92315}, {576, 92497},
++
++{577, 92679}, {578, 92860}, {579, 93041}, {580, 93222}, {581, 93403},
++
++{582, 93583}, {583, 93764}, {584, 93944}, {585, 94124}, {586, 94304},
++
++{587, 94484}, {588, 94664}, {589, 94843}, {590, 95023}, {591, 95202},
++
++{592, 95381}, {593, 95560}, {594, 95738}, {595, 95917}, {596, 96095},
++
++{597, 96273}, {598, 96451}, {599, 96629}, {600, 96807}, {601, 96985},
++
++{602, 97162}, {603, 97339}, {604, 97516}, {605, 97693}, {606, 97870},
++
++{607, 98047}, {608, 98223}, {609, 98399}, {610, 98576}, {611, 98752},
++
++{612, 98927}, {613, 99103}, {614, 99279}, {615, 99454}, {616, 99629},
++
++{617, 99804}, {618, 99979}, {619, 100154}, {620, 100328}, {621, 100503},
++
++{622, 100677}, {623, 100851}, {624, 101025}, {625, 101199}, {626, 101373},
++
++{627, 101546}, {628, 101720}, {629, 101893}, {630, 102066}, {631, 102239},
++
++{632, 102411}, {633, 102584}, {634, 102756}, {635, 102929}, {636, 103101},
++
++{637, 103273}, {638, 103445}, {639, 103616}, {640, 103788}, {641, 103959},
++
++{642, 104130}, {643, 104302}, {644, 104472}, {645, 104643}, {646, 104814},
++
++{647, 104984}, {648, 105155}, {649, 105325}, {650, 105495}, {651, 105665},
++
++{652, 105835}, {653, 106004}, {654, 106174}, {655, 106343}, {656, 106512},
++
++{657, 106681}, {658, 106850}, {659, 107019}, {660, 107187}, {661, 107355},
++
++{662, 107524}, {663, 107692}, {664, 107860}, {665, 108028}, {666, 108195},
++
++{667, 108363}, {668, 108530}, {669, 108697}, {670, 108865}, {671, 109031},
++
++{672, 109198}, {673, 109365}, {674, 109531}, {675, 109698}, {676, 109864},
++
++{677, 110030}, {678, 110196}, {679, 110362}, {680, 110528}, {681, 110693},
++
++{682, 110858}, {683, 111024}, {684, 111189}, {685, 111354}, {686, 111518},
++
++{687, 111683}, {688, 111848}, {689, 112012}, {690, 112176}, {691, 112340},
++
++{692, 112504}, {693, 112668}, {694, 112832}, {695, 112995}, {696, 113159},
++
++{697, 113322}, {698, 113485}, {699, 113648}, {700, 113811}, {701, 113973},
++
++{702, 114136}, {703, 114298}, {704, 114461}, {705, 114623}, {706, 114785},
++
++{707, 114947}, {708, 115108}, {709, 115270}, {710, 115431}, {711, 115593},
++
++{712, 115754}, {713, 115915}, {714, 116076}, {715, 116236}, {716, 116397},
++
++{717, 116558}, {718, 116718}, {719, 116878}, {720, 117038}, {721, 117198},
++
++{722, 117358}, {723, 117518}, {724, 117677}, {725, 117836}, {726, 117996},
++
++{727, 118155}, {728, 118314}, {729, 118473}, {730, 118631}, {731, 118790},
++
++{732, 118948}, {733, 119107}, {734, 119265}, {735, 119423}, {736, 119581},
++
++{737, 119739}, {738, 119896}, {739, 120054}, {740, 120211}, {741, 120368},
++
++{742, 120525}, {743, 120682}, {744, 120839}, {745, 120996}, {746, 121153},
++
++{747, 121309}, {748, 121465}, {749, 121622}, {750, 121778}, {751, 121934},
++
++{752, 122089}, {753, 122245}, {754, 122400}, {755, 122556}, {756, 122711},
++
++{757, 122866}, {758, 123021}, {759, 123176}, {760, 123331}, {761, 123486},
++
++{762, 123640}, {763, 123794}, {764, 123949}, {765, 124103}, {766, 124257},
++
++{767, 124411}, {768, 124564}, {769, 124718}, {770, 124871}, {771, 125025},
++};
++
++enum { NUM_RAW_KMB = sizeof(raw_kmb_data) / sizeof(raw_kmb_data[0]) };
++
++
++enum keembay_thermal_trip {
++	KEEMBAY_TRIP_PASSIVE,
++	KEEMBAY_TRIP_CRITICAL,
++	KEEMBAY_TRIP_NUM,
++};
++
++enum keembay_thermal_sensor_en {
++	KEEMBAY_SENSOR_MSS,
++	KEEMBAY_SENSOR_CSS,
++	KEEMBAY_SENSOR_NCE,
++	KEEMBAY_SENSOR_SOC
++};
++
++struct kmb_trip_info_st {
++	enum thermal_trip_type trip_type;
++	int temperature;
++};
++
++
++
++struct keembay_therm_info {
++	int current_temp;
++	int alarm_temp;
++	void __iomem *regs_val;
++	struct clk *thermal_clk;
++	spinlock_t lock;
++	int mss;
++	int css;
++	int nce;
++	int nce0;
++	int nce1;
++	struct device *dev;
++	const struct thermal_soc_data *socdata;
++};
++
++#define KEEMBAY_MAX_TRIP_INFO 10
++struct kmb_trip_point_info {
++	enum keembay_thermal_sensor_en sensor_type;
++	const char *sensor_name;
++	int n_trips;
++	int passive_delay;
++	int polling_delay;
++	struct kmb_trip_info_st trip_info[KEEMBAY_MAX_TRIP_INFO];
++	struct keembay_therm_info *thermal_info;
++	struct thermal_zone_device *tz;
++};
++
++#endif /* _LINUX_KEEMBAY_TSENS_H */
+diff --git a/drivers/misc/thermal/kmb_tj_uevent.c b/drivers/misc/thermal/kmb_tj_uevent.c
+new file mode 100644
+index 000000000000..2481bead396e
+--- /dev/null
++++ b/drivers/misc/thermal/kmb_tj_uevent.c
+@@ -0,0 +1,60 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keembay Temperature sensor uevent module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/poll.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <linux/types.h>
++#include <linux/netlink.h>
++
++void die(char *s)
++{
++	write(2, s, strlen(s));
++	exit(1);
++}
++
++int main(int argc, char *argv[])
++{
++	struct sockaddr_nl nls;
++	struct pollfd pfd;
++	char buf[512];
++
++	// Open hotplug event netlink socket
++	memset(&nls, 0, sizeof(struct sockaddr_nl));
++	nls.nl_family = AF_NETLINK;
++	nls.nl_pid = getpid();
++	nls.nl_groups = -1;
++	pfd.events = POLLIN;
++	pfd.fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_KOBJECT_UEVENT);
++	if (pfd.fd == -1)
++		die("Not root\n");
++
++	// Listen to netlink socket
++	if (bind(pfd.fd, (void *)&nls, sizeof(struct sockaddr_nl)))
++		die("Bind failed\n");
++	while (-1 != poll(&pfd, 1, -1)) {
++		int i, len = recv(pfd.fd, buf, sizeof(buf), MSG_DONTWAIT);
++
++		if (len == -1)
++			die("recv\n");
++
++		// Print the data to stdout.
++		i = 0;
++		while (i < len) {
++			printf("%s\n", buf+i);
++			i += strlen(buf+i)+1;
++		}
++	}
++	die("poll\n");
++
++	// Dear gcc: shut up.
++	return 0;
++}
+diff --git a/drivers/misc/xlink-smbus/Kconfig b/drivers/misc/xlink-smbus/Kconfig
+new file mode 100644
+index 000000000000..5f51f19bd76f
+--- /dev/null
++++ b/drivers/misc/xlink-smbus/Kconfig
+@@ -0,0 +1,18 @@
++# Copyright (C) 2019 Intel Corporation
++# SPDX-License-Identifier: GPL-2.0-only
++
++config XLINK_SMBUS
++	tristate "Enable smbus interface over xlink PCIe"
++	default m
++	depends on XLINK_CORE
++	help
++	 Enable xlink-pcie as i2c adapater both slave and master
++
++
++config XLINKI2C_ADAPTER
++	tristate "Enable as i2c controller -> Local Host-Disabled, RemoteHost - Enabled"
++	default n
++	help
++	 Enable I2C adapter over xlink - calls xlink APIs for transfer,
++	 and if not defined, calls the real i2c adapter APIs (here it is synopsys)
++
+diff --git a/drivers/misc/xlink-smbus/Makefile b/drivers/misc/xlink-smbus/Makefile
+new file mode 100644
+index 000000000000..62e0aad53c57
+--- /dev/null
++++ b/drivers/misc/xlink-smbus/Makefile
+@@ -0,0 +1,5 @@
++# Copyright (C) 2019 Intel Corporation
++# SPDX-License-Identifier: GPL-2.0-only
++#     Makefile for KeemBay VPUSMM
++#
++obj-$(CONFIG_XLINK_SMBUS) += xlink-smbus.o
+diff --git a/drivers/misc/xlink-smbus/xlink-smbus.c b/drivers/misc/xlink-smbus/xlink-smbus.c
+new file mode 100644
+index 000000000000..dc16e404013c
+--- /dev/null
++++ b/drivers/misc/xlink-smbus/xlink-smbus.c
+@@ -0,0 +1,475 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Xlink I2C Adapter Driver
++ *
++ * SMBus transfer over Xlink
++ *
++ * Copyright (C) 2020 Intel Corporation
++ */
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/stddef.h>
++#include <linux/i2c.h>
++#include <linux/init.h>
++#include <linux/platform_device.h>
++#include <linux/xlink.h>
++#include <linux/time.h>
++#include <linux/kmod.h>
++#include <linux/kthread.h>
++#include <linux/hddl_device.h>
++
++
++//#undef CONFIG_I2C_SLAVE
++/* Define the xlink debug device structures to be used with dev_dbg() et al */
++
++static struct device_driver dbg_name = {
++	.name = "xlink_i2c_dbg"
++};
++
++static struct device dbg_subname = {
++	.init_name = "xlink_i2c_dbg",
++	.driver = &dbg_name
++};
++
++static struct device *dbgxi2c = &dbg_subname;
++
++struct xlink_msg {
++	u16			addr;
++	unsigned short		flags;
++	char			read_write;
++	u8			command;
++	int			protocol;
++	union i2c_smbus_data	data;
++	int			status;
++	struct list_head	node;
++};
++
++struct xlink_adapter_data {
++	struct xlink_handle *xhandle;
++	u32		channel;
++	struct completion work;
++	struct task_struct *task_recv;
++	struct i2c_client *slave;
++	struct list_head head;
++};
++
++
++#define XLINKI2C_XLINK_CHANNEL_BASE	1055
++
++static struct i2c_adapter *get_adapter_from_channel(u32 channel)
++{
++#if defined(CONFIG_XLINKI2C_ADAPTER)
++	// this is an adapter by itself.
++	//it doesn't proxy transfer on another adapter
++	return NULL;
++#else
++	/* PROXY the commands usign existing adapter */
++	s32 nr = channel - XLINKI2C_XLINK_CHANNEL_BASE;
++
++	nr = 2;
++	if (nr < 0)
++		return NULL;
++
++	return i2c_get_adapter(nr);
++#endif
++}
++
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
++{
++	//the complete slave protocol is implemented in one shot here as
++	//the whole chunk of data is transfered or received via xlink
++	//, not byte-by-byte
++	u8 temp;
++
++	/* refer https://lwn.net/Articles/640346/ for protocol */
++	//dev_info(dbgxi2c,
++		//"handle_slave_mode:
++		//read_write[%d] protocol[%d] command[%x]\n",
++		//msg->read_write,
++		//msg->protocol,
++		//msg->command);
++
++	/* send the command as first write */
++	//dev_info(dbgxi2c, "handle_slave_mode: I2C_SLAVE_WRITE_REQUESTED:\n");
++	i2c_slave_event(slave, I2C_SLAVE_WRITE_REQUESTED, 0 /* unused */);
++	i2c_slave_event(slave, I2C_SLAVE_WRITE_RECEIVED, &(msg->command));
++
++	/* now handle specifics to read/write */
++	if (msg->read_write == I2C_SMBUS_WRITE) {
++		if (msg->protocol == I2C_SMBUS_BYTE_DATA) {
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
++			//msg->data.byte);
++			i2c_slave_event(slave, I2C_SLAVE_WRITE_RECEIVED,
++					&(msg->data.byte));
++		} else if (msg->protocol == I2C_SMBUS_WORD_DATA) {
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
++			//msg->data.word & 0XFF);
++			temp = msg->data.word & 0xFF;
++			i2c_slave_event(slave,
++					I2C_SLAVE_WRITE_RECEIVED,
++					&temp);
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
++			//(msg->data.word >> 8) & 0xFF);
++			temp = (msg->data.word >> 8) & 0xFF;
++			i2c_slave_event(slave,
++					I2C_SLAVE_WRITE_RECEIVED,
++					&temp);
++		} else if (msg->protocol == I2C_SMBUS_BLOCK_DATA) {
++			int i;
++
++			for (i = 1; (i < msg->data.block[0] ||
++				i <= I2C_SMBUS_BLOCK_MAX); ++i) {
++				//dev_info(dbgxi2c, "handle_slave_mode:
++				//I2C_SLAVE_WRITE_RECEIVED: D[%X]\n",
++				//msg->data.block[i]);
++				i2c_slave_event(slave,
++						I2C_SLAVE_WRITE_RECEIVED,
++						&(msg->data.block[i]));
++			}
++		} else {
++			dev_err(dbgxi2c,
++				"unknown protocol (%d)"
++				"received in handle_slave_mode\n",
++				msg->protocol);
++		}
++	} else {
++		if (msg->protocol == I2C_SMBUS_BYTE_DATA) {
++			i2c_slave_event(slave,
++					I2C_SLAVE_READ_REQUESTED,
++					&(msg->data.byte));
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
++			//msg->data.byte);
++		} else if (msg->protocol == I2C_SMBUS_WORD_DATA) {
++			i2c_slave_event(slave,
++					I2C_SLAVE_READ_REQUESTED,
++					&temp);
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
++			//temp);
++			msg->data.word = temp << 8;
++			i2c_slave_event(slave,
++					I2C_SLAVE_READ_REQUESTED,
++					&temp);
++			//dev_info(dbgxi2c, "handle_slave_mode:
++			//I2C_SLAVE_READ_REQUESTED: D[%X]\n", temp);
++			msg->data.word |= temp;
++		} else if (msg->protocol == I2C_SMBUS_BLOCK_DATA) {
++			int i;
++
++			for (i = 1; (i < msg->data.block[0] ||
++					i <= I2C_SMBUS_BLOCK_MAX); ++i) {
++				i2c_slave_event(slave,
++						I2C_SLAVE_READ_REQUESTED,
++						&(msg->data.block[i]));
++				//dev_info(dbgxi2c, "handle_slave_mode:
++				//I2C_SLAVE_READ_REQUESTED: D[%X]\n",
++				//msg->data.block[i]);
++			}
++		} else {
++			dev_err(dbgxi2c, "unknown protocol (%d)"
++			"received in handle_slave_mode\n", msg->protocol);
++		}
++		i2c_slave_event(slave,
++				I2C_SLAVE_READ_PROCESSED,
++				&temp);
++		//dev_info(dbgxi2c, "handle_slave_mode:
++		//I2C_SLAVE_READ_PROCESSED: D[%X]\n", temp);
++	}
++	//dev_info(dbgxi2c, "handle_slave_mode: I2C_SLAVE_STOP\n");
++	i2c_slave_event(slave, I2C_SLAVE_STOP, 0 /* unused */);
++	return 0;
++}
++#endif
++
++static s32 xlink_smbus_xfer(struct i2c_adapter *adap, u16 addr,
++				unsigned short flags, char read_write,
++				u8 command, int protocol,
++				union i2c_smbus_data *data)
++{
++	struct xlink_msg *msg;
++	u32 rc = 0;
++#if defined(CONFIG_XLINKI2C_ADAPTER)
++	enum xlink_error xerr;
++	struct xlink_handle *devH = NULL;
++#endif
++	struct xlink_adapter_data *adapt_data = i2c_get_adapdata(adap);
++
++	//dev_info(dbgxi2c, "%s was called with the following parameters:
++	//\n", __FUNCTION__);
++	//dev_info(dbgxi2c, "addr = %.4x\n", addr);
++	//dev_info(dbgxi2c, "flags = %.4x\n", flags);
++	//dev_info(dbgxi2c, "read_write = %s\n",
++		//read_write == I2C_SMBUS_WRITE ? "write" : "read");
++	//dev_info(dbgxi2c, "command = %d\n", command);
++	//dev_info(dbgxi2c, "protocol = %d\n", protocol);
++	//dev_info(dbgxi2c, "data = %p\n", data);
++	msg = kzalloc(sizeof(struct xlink_msg), GFP_KERNEL);
++	if (!msg)
++		return X_LINK_ERROR;
++#if defined(CONFIG_XLINKI2C_ADAPTER)
++	msg->addr = addr;
++	msg->flags = flags;
++	msg->read_write = read_write;
++	msg->command = command;
++	msg->protocol = protocol;
++	if (data)
++		msg->data = *data;
++	msg->status = 0;
++	devH = adapt_data->xhandle;
++	//dev_info(dbgxi2c, "devH = %d\n", devH->sw_device_id);
++	//dev_info(dbgxi2c, "xlink channel = %d\n", adapt_data->channel);
++	xerr = xlink_write_data(adapt_data->xhandle, adapt_data->channel,
++				(u8 *)msg,
++				sizeof(struct xlink_msg));
++	kfree(msg);
++	if (xerr != X_LINK_SUCCESS) {
++		dev_info(dbgxi2c, "xlink_write_data failed (%d)"
++			"dropping packet.\n",
++			xerr);
++		return xerr;
++	}
++	//dev_info(dbgxi2c, "xlink_write_data - success[%d]\n", xerr);
++/* TODO: handle timeout and return time out error code to the caller of xfer */
++#endif	/* CONFIG_XLINKI2C_ADAPTER */
++	wait_for_completion_interruptible(&adapt_data->work);
++	/* TODO: specify timeout */
++	//dev_info(dbgxi2c, "signal received\n");
++	msg = (list_first_entry(&adapt_data->head, struct xlink_msg, node));
++	list_del(&msg->node);
++	//dev_info(dbgxi2c, "list_get[%d]\n", msg.addr);
++	if (data)
++		*data = msg->data;
++	rc = msg->status;
++	kfree(msg);
++	return rc;
++}
++
++
++
++static int xlinki2c_receive_thread(void *param)
++{
++	enum xlink_error xerr;
++	struct i2c_adapter *adap;
++	struct xlink_adapter_data *adapt_data =
++				(struct xlink_adapter_data *)param;
++	u32 size;
++	struct xlink_msg *msg;
++
++	//dev_info(dbgxi2c, "xlinknet receive thread started [%p].\n",
++	//adapt_data);
++	//dev_info(dbgxi2c, "xlinknet adapt_data channel [%d].\n",
++	//adapt_data->channel);
++	//dev_info(dbgxi2c, "xlinknet adapt_data xhandle[%p].\n",
++	//adapt_data->xhandle);
++	while (!kthread_should_stop()) {
++		msg = kzalloc(sizeof(struct xlink_msg), GFP_KERNEL);
++		if (!msg)
++			return X_LINK_ERROR;
++		xerr = xlink_read_data_to_buffer(adapt_data->xhandle,
++						adapt_data->channel,
++						(uint8_t *)msg, &size);
++		if (xerr != X_LINK_SUCCESS) {
++			dev_warn(dbgxi2c, "xlink_read_data failed (%d)"
++			"dropping packet.\n",
++				xerr);
++			continue;
++		}
++		//dev_info(dbgxi2c, "xlink_read_data_to_buffer[%d][%d]\n",
++		//xerr, size);
++		xlink_release_data(adapt_data->xhandle, adapt_data->channel,
++		NULL);
++		//dev_info(dbgxi2c, "xlink_release_data\n");
++		adap = get_adapter_from_channel(adapt_data->channel);
++		if (adap) {
++				//dev_info(dbgxi2c, "i2c-%d parameters:\n",
++				//adap->nr);
++				//dev_info(dbgxi2c, "addr = %.4x\n",
++				//msg->addr);
++				//dev_info(dbgxi2c, "flags = %.4x\n",
++				//msg->flags);
++				//dev_info(dbgxi2c, "read_write = %s\n",
++				//msg.read_write == I2C_SMBUS_WRITE ?
++				//"write" : "read");
++				//dev_info(dbgxi2c, "command = %d\n",
++				//msg->command);
++				//dev_info(dbgxi2c, "protocol = %d\n",
++				//msg->protocol);
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++			if (adapt_data->slave != NULL) {
++				msg->status =
++				handle_slave_mode(adapt_data->slave, msg);
++			} else {
++#endif
++				/* this is a proxy for an existing adapter. */
++				msg->status = i2c_smbus_xfer(
++						adap,
++						msg->addr,
++						msg->flags,
++						msg->read_write,
++						msg->command,
++						msg->protocol,
++						&msg->data);
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++			}
++#endif
++	/* send back the complete message that carries status back to sender */
++			//dev_info(dbgxi2c, "xlink_write_data %d\n",
++			//msg.addr);
++			xlink_write_data(adapt_data->xhandle,
++			adapt_data->channel, (u8 *)msg,
++			sizeof(struct xlink_msg));
++			kfree(msg);
++		} else {
++			/* this is an adapter on its own. */
++	/* TODO: add this msg to the list in adapt_data. refer xlink-pcie for the usage of thread-safe list */
++			list_add_tail(&msg->node, &adapt_data->head);
++			//dev_info(dbgxi2c, "list_add[%d]\n", msg.addr);
++			complete(&adapt_data->work);
++			//dev_info(dbgxi2c, "signal completed\n");
++		}
++	}
++
++	return 0;
++}
++
++static u32 xlink_smbus_func(struct i2c_adapter *adapter)
++{
++	u32 func = I2C_FUNC_SMBUS_QUICK | I2C_FUNC_SMBUS_BYTE |
++		I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA |
++		I2C_FUNC_SMBUS_BLOCK_DATA;
++	//dev_info(dbgxi2c, "Reporting func %X\n", func);
++
++	return func;
++}
++
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++
++//this will be called when slave client driver
++//register itself to an adapter
++static int xlink_smbus_reg_slave(struct i2c_client *slave)
++{
++	struct xlink_adapter_data *adapt_data =
++				i2c_get_adapdata(slave->adapter);
++
++	adapt_data->slave = slave;
++
++	return 0;
++}
++
++static int xlink_smbus_unreg_slave(struct i2c_client *slave)
++{
++	struct xlink_adapter_data *adapt_data =
++				i2c_get_adapdata(slave->adapter);
++
++	adapt_data->slave = NULL;
++
++	return 0;
++}
++#endif
++
++static struct i2c_algorithm xlink_algorithm = {
++	.smbus_xfer     = xlink_smbus_xfer,
++	.functionality  = xlink_smbus_func,
++#if IS_ENABLED(CONFIG_I2C_SLAVE)
++	.reg_slave      = xlink_smbus_reg_slave,
++	.unreg_slave    = xlink_smbus_unreg_slave,
++#endif
++};
++
++static int xlink_i2c_probe(struct platform_device *pdev)
++{
++	struct xlink_adapter_data *adapt_data;
++	struct task_struct *task_recv;
++	uint32_t rc = 0;
++	struct kmb *hddl_device = pdev->dev.platform_data;
++	struct xlink_handle *devH = &hddl_device->devH;
++	struct i2c_adapter *adap = &hddl_device->adap[pdev->id & 0x3];
++
++	dev_info(dbgxi2c, "Registering xlink I2C adapter...\n");
++
++	//adap = kzalloc(sizeof(struct i2c_adapter), GFP_KERNEL);
++	adap->class = 0; //I2C_CLASS_HWMON;
++	adap->owner  = THIS_MODULE;
++	adap->algo   = &xlink_algorithm;
++	strcpy(&adap->name[0], "xlink adapter");
++	platform_set_drvdata(pdev, adap);
++
++	adapt_data = kzalloc(sizeof(struct xlink_adapter_data), GFP_KERNEL);
++
++	init_completion(&adapt_data->work);
++
++	INIT_LIST_HEAD(&adapt_data->head);
++	/* TODO: connect and assign channel number */
++	adapt_data->channel = hddl_device->xlink_i2c_ch[pdev->id & 0x3];
++	adapt_data->slave = NULL;
++	adapt_data->xhandle = devH;
++
++	rc = xlink_open_channel(devH,
++			adapt_data->channel,
++			RXB_TXB,  /* mode */
++			64*1024,
++			0   /* timeout */);
++	dev_info(dbgxi2c, "xlink_open_channel completed[%d][%d][%p]\n", rc,
++		adapt_data->channel,
++		adapt_data->xhandle);
++
++	i2c_set_adapdata(adap, adapt_data);
++
++	rc = i2c_add_adapter(adap);
++
++	dev_info(dbgxi2c, "xlink_smbus_adapter[%d] [%d]\n", rc, adap->nr);
++	/* create receiver thread */
++	task_recv = kthread_run(xlinki2c_receive_thread,
++			adapt_data,
++			"xlinki2c_receive_thread");
++	if (task_recv == NULL) {
++		printk("xlinki2c_receive_thread Thread creation failed");
++	}
++	return rc;
++}
++
++static int xlink_i2c_remove(struct platform_device *pdev)
++{
++	struct i2c_adapter *adap = platform_get_drvdata(pdev);
++
++	dev_info(dbgxi2c, "Removing xlink I2C adapter...\n");
++	/* TODO: close the channel and disconnect */
++	i2c_del_adapter(adap);
++
++	return 0;
++}
++
++static struct platform_driver xlink_i2c_driver = {
++	.probe = xlink_i2c_probe,
++	.remove = xlink_i2c_remove,
++	.driver = {
++		.name   = "i2c_xlink"
++	}
++};
++
++static void __exit xlink_adapter_exit(void)
++{
++	dev_info(dbgxi2c, "Unloading XLink I2C module...\n");
++	platform_driver_unregister(&xlink_i2c_driver);
++}
++
++static int __init xlink_adapter_init(void)
++{
++	dev_info(dbgxi2c, "Loading XLink I2C module...\n");
++	platform_driver_register(&xlink_i2c_driver);
++	return 0;
++
++}
++
++module_init(xlink_adapter_init);
++module_exit(xlink_adapter_exit);
++
++MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>");
++MODULE_AUTHOR("Thalaiappan, Rathina <rathina.thalaiappan@intel.com>");
++MODULE_DESCRIPTION("xlink i2c adapter");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+new file mode 100644
+index 000000000000..86bee18a78e2
+--- /dev/null
++++ b/include/linux/hddl_device.h
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Keembay HDDL module.
++ *
++ * Copyright (C) 2019-2020 Intel Corporation.
++ */
++
++#ifndef __HDDL_DEVICE_H
++#define __HDDL_DEVICE_H
++
++#define HDDL_MAGIC 'x'
++#define HDDL_WRITE_SW_ID        _IOW(HDDL_MAGIC, 'a', void*)
++#define HDDL_READ_SW_ID_DATA    _IOR(HDDL_MAGIC, 'b', void*)
++
++typedef struct hddl_device_kmb_st {
++	uint32_t board_id;
++	struct kmb {
++		uint32_t  id;
++		struct xlink_handle devH;
++		struct platform_device_info host_kmb_tj_info;
++		struct platform_device *host_kmb_tj_plt_dev;
++		uint32_t xlink_i2c_ch[2];
++		struct i2c_adapter adap[2];
++		struct platform_device *xlink_i2c_plt_dev[2];
++	} soc[3];
++} T_HDDL_DEVICE_KMB_NODE;
++
++typedef struct sw_id_hddl_data {
++	uint32_t board_id;
++	uint32_t soc_id;
++	uint32_t soc_adaptor_no[2];
++} T_SW_ID_HDDL_DATA;
++
++#endif /* __HDDL_DEVICE_H */
+diff --git a/scripts/hddl_device/Makefile b/scripts/hddl_device/Makefile
+new file mode 100644
+index 000000000000..c58adebbba63
+--- /dev/null
++++ b/scripts/hddl_device/Makefile
+@@ -0,0 +1,47 @@
++ifndef KERNELSRC
++	KERNELSRC=/lib/modules/$(shell uname -r)/build
++endif
++
++obj-y += ../../drivers/misc/xlink-core/
++obj-y += ../../drivers/misc/xlink-pcie/
++obj-y += ../../drivers/misc/hddl_device/
++obj-y += ../../drivers/misc/host_kmb_tj/
++obj-y += ../../drivers/misc/xlink-smbus/
++obj-y += ../../drivers/misc/lm75/
++
++
++subdir-ccflags-y += -I$(src)/include
++subdir-ccflags-y += -DCONFIG_XLINKI2C_ADAPTER
++
++ifdef DEBUG
++	subdir-ccflags-y += -DXLINK_PCIE_DEBUG
++endif
++
++PHONY: help
++help:
++	@echo ""
++	@echo "make remote_hddl -> builds remote hddl_device driver"
++	@echo "make clean -> delete build artifacts"
++	@echo ""
++	@echo "If needed the cross-compile environment should be set up first"
++	@echo "Set KERNELSRC if use other source tree, otherwise using the current running kernel"
++	@echo ""
++
++remote_hddl:
++	make -C $(KERNELSRC) M=$(PWD) modules CONFIG_HDDL_DEVICE=m  CONFIG_HDDL_LOCAL_HOST=n
++	cp ../../drivers/misc/hddl_device/hddl_device.ko .
++
++host_kmb_tj:
++	make -C $(KERNELSRC) M=$(PWD) modules CONFIG_HOST_KMB_TJ=m
++	cp ../../drivers/misc/host_kmb_tj/host_kmb_tj.ko .
++
++xlink_smbus:
++	make -C $(KERNELSRC) M=$(PWD) modules CONFIG_XLINK_SMBUS=m CONFIG_XLINKI2C_ADAPTER=y
++	cp ../../drivers/misc/xlink-smbus/xlink-smbus.ko .
++
++lm75:
++	make -C $(KERNELSRC) M=$(PWD) modules CONFIG_SENSORS_LM75=m
++	cp ../../drivers/misc/lm75/lm75.ko .
++
++clean:
++	make -C $(KERNELSRC) M=$(PWD) clean
+-- 
+2.17.1
+

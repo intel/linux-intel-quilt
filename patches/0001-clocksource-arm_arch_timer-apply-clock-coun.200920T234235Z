@@ -1,0 +1,85 @@
+From 4253684b9b55070a1c27ecfa039e947e9a3d5546 Mon Sep 17 00:00:00 2001
+From: Junxiao Chang <junxiao.chang@intel.com>
+Date: Mon, 3 Aug 2020 10:52:25 +0800
+Subject: [PATCH 01/13] clocksource/arm_arch_timer: apply clock counter wa
+
+ARM arch counter sometimes might go backward. Linux clock source
+should always going forward. This workaround is to read clock
+counter for three times. If current >= previous and next >=
+current, returns current counter. Or else there is backward,
+retrying.
+
+Signed-off-by: Junxiao Chang <junxiao.chang@intel.com>
+---
+ arch/arm64/include/asm/arch_timer.h  | 21 +++++++++++++++++++++
+ drivers/clocksource/arm_arch_timer.c | 14 ++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/arch/arm64/include/asm/arch_timer.h b/arch/arm64/include/asm/arch_timer.h
+index 9f0ec21d6327..c63efdead70e 100644
+--- a/arch/arm64/include/asm/arch_timer.h
++++ b/arch/arm64/include/asm/arch_timer.h
+@@ -224,6 +224,27 @@ static __always_inline u64 __arch_counter_get_cntvct(void)
+ 	return cnt;
+ }
+ 
++#ifdef CONFIG_ARCH_KEEMBAY
++static __always_inline u64 __arch_counter_get_cntvct_wa(void)
++{
++	u64 prev, cnt, next;
++	int retries = 30;
++
++	isb();
++	preempt_disable_notrace();
++	while (retries--) {
++		prev = read_sysreg(cntvct_el0);
++		cnt = read_sysreg(cntvct_el0);
++		next = read_sysreg(cntvct_el0);
++		if (cnt >= prev && next >= cnt)
++			break;
++	}
++	preempt_enable_notrace();
++	arch_counter_enforce_ordering(cnt);
++	return cnt;
++}
++#endif // CONFIG_ARCH_KEEMBAY
++
+ #undef arch_counter_enforce_ordering
+ 
+ static inline int arch_timer_arch_init(void)
+diff --git a/drivers/clocksource/arm_arch_timer.c b/drivers/clocksource/arm_arch_timer.c
+index 4be83b4de2a0..1bebde6c2ae4 100644
+--- a/drivers/clocksource/arm_arch_timer.c
++++ b/drivers/clocksource/arm_arch_timer.c
+@@ -166,6 +166,13 @@ static notrace u64 arch_counter_get_cntvct(void)
+ 	return __arch_counter_get_cntvct();
+ }
+ 
++#ifdef CONFIG_ARCH_KEEMBAY
++static notrace u64 arch_counter_get_cntvct_wa(void)
++{
++	return __arch_counter_get_cntvct_wa();
++}
++#endif // CONFIG_ARCH_KEEMBAY
++
+ /*
+  * Default to cp15 based access because arm64 uses this function for
+  * sched_clock() before DT is probed and the cp15 method is guaranteed
+@@ -981,7 +988,14 @@ static void __init arch_counter_register(unsigned type)
+ 			if (arch_timer_counter_has_wa())
+ 				rd = arch_counter_get_cntvct_stable;
+ 			else
++#ifdef CONFIG_ARCH_KEEMBAY
++			{
++				rd = arch_counter_get_cntvct_wa;
++				pr_info("Keembay applied clocksource workaround\n");
++			}
++#else
+ 				rd = arch_counter_get_cntvct;
++#endif // CONFIG_ARCH_KEEMBAY
+ 		} else {
+ 			if (arch_timer_counter_has_wa())
+ 				rd = arch_counter_get_cntpct_stable;
+-- 
+2.17.1
+

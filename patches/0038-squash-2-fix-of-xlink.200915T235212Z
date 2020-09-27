@@ -1,0 +1,339 @@
+From c74f9709d6bb837773b061f08cb4a301a90efed2 Mon Sep 17 00:00:00 2001
+From: "Raja Subramanian, Lakshmi Bai" <lakshmi.bai.raja.subramanian@intel.com>
+Date: Tue, 14 Jul 2020 22:57:31 +0530
+Subject: [PATCH 38/48] squash 2 fix of xlink
+
+1. Fixed the keembay-thermal to report as -255 when the valid bit is not
+set in the read temperature
+2. xlink i2c adapater - made the xlink channel
+with timeout property
+3. xlink i2c adapater - wait for event is enabled with timeout instead of
+blockin call. This way the wrte/read will timeout when the kmd device is down
+
+Signed-off-by: Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device.c | 56 +++++++++++---------------
+ drivers/misc/host_kmb_tj/host_kmb_tj.c | 11 +++--
+ drivers/misc/thermal/keembay_thermal.c | 10 ++---
+ drivers/misc/xlink-smbus/xlink-smbus.c | 26 ++++++------
+ include/linux/hddl_device.h            | 11 +++--
+ 5 files changed, 52 insertions(+), 62 deletions(-)
+
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+index 18a2f14aae21..705cc4d21b23 100644
+--- a/drivers/misc/hddl_device/hddl_device.c
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -71,12 +71,10 @@ static struct i2c_board_info kmb_i2c_devices[] = {
+ };
+ #endif
+ 
+-#define MAX_HDDL_DEVICES 8
+-T_HDDL_DEVICE_KMB_NODE kmb_hddls[MAX_HDDL_DEVICES] = {0};
++T_HDDL_DEVICE_KMB_NODE kmb_hddls[HDDL_MAX_DEVICE] = {0};
+ #define HDDL_NODE_XLINK_CHANNEL 1050
+ #define HDDL_I2C_XLINK_CHANNEL 1080
+ 
+-uint32_t one_dev;
+ #ifdef CONFIG_HDDL_LOCAL_HOST
+ 
+ uint32_t hddl_board_id;
+@@ -144,7 +142,6 @@ static int __init hddl_device_init(void)
+ 	printk(KERN_INFO "HDDL: GPIO KEEMBAY ID = %u\n", kmb_id);
+ 	if (kmb_id > 2) {
+ 		kmb_id = 0;
+-		one_dev = 1;
+ 		printk(KERN_INFO "HDDL: GPIO KEEMBAY ID > 2, ");
+ 		printk(KERN_INFO "Hence setting KEEMBAY ID = 0\n");
+ 	}
+@@ -187,8 +184,8 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		if (copy_from_user(&soft_reset,
+ 				(int32_t *)arg, sizeof(T_SW_ID_SOFT_RESET)))
+ 			return -EFAULT;
+-		for (i = 0; i < 8; i++) {
+-			for (j = 0; j < 3; j++) {
++		for (i = 0; i < HDDL_MAX_DEVICE; i++) {
++			for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 				if (kmb_hddls[i].soc[j].devH.sw_device_id
+ 						== soft_reset.sw_id) {
+ 					/* xlink-reset */
+@@ -214,8 +211,8 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		if (copy_from_user(&swid_data, (int32_t *)arg,
+ 			sizeof(T_SW_ID_HDDL_DATA)))
+ 			return -EFAULT;
+-		for (i = 0; i < 8; i++) {
+-			for (j = 0; j < 3; j++) {
++		for (i = 0; i < HDDL_MAX_DEVICE; i++) {
++			for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 				if (kmb_hddls[i].soc[j].devH.sw_device_id
+ 					== swid_data.sw_id) {
+ 					swid_data.board_id = kmb_hddls[i].board_id;
+@@ -250,8 +247,8 @@ void hddl_device_probe(uint32_t sw_device_id)
+ 	struct task_struct *task_recv;
+ 	printk(KERN_INFO "hddl_device_probe = %x\n", sw_device_id);
+ 
+-	for (i = 0; i < 8; i++) {
+-	for (j = 0; j < 3; j++) {
++	for (i = 0; i < HDDL_MAX_DEVICE; i++) {
++	for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 		if (kmb_hddls[i].soc[j].devH.sw_device_id == sw_device_id) {
+ 
+ 			printk("inside probe if-condition sw_device_id %x\n", kmb_hddls[i].soc[j].devH.sw_device_id);
+@@ -275,8 +272,8 @@ void hddl_device_remove(uint32_t sw_device_id)
+ 
+ 	printk(KERN_INFO "hddl_device_remove = %x\n", sw_device_id);
+ 
+-	for (i = 0; i < 8; i++) {
+-	for (j = 0; j < 3; j++) {
++	for (i = 0; i < HDDL_MAX_DEVICE; i++) {
++	for (j = 0; j < HDDL_MAX_BAY_DEVICE; j++) {
+ 		if (kmb_hddls[i].soc[j].devH.sw_device_id == sw_device_id) {
+ 
+ 			soc = &kmb_hddls[i].soc[j];
+@@ -330,7 +327,7 @@ int hddl_device_pcie_event_notify(uint32_t sw_device_id, enum _xlink_device_even
+ {
+ 	printk(KERN_INFO "HDDL:xlink pcie notify[%x]: [%d]\n", sw_device_id, event_type);
+ 	switch (event_type) {
+-	case _NOTIFY_INCOMING_DISCONNECTION:
++	/*case _NOTIFY_INCOMING_DISCONNECTION:*/
+ 	case _NOTIFY_DEVICE_DISCONNECTED:
+ 	case _ERROR_UNEXPECTED_DISCONNECTION:
+ 		hddl_device_remove(sw_device_id);
+@@ -451,7 +448,7 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 	ktime_get_real_ts64(&ts);
+ 	printk(KERN_INFO "S[%llx] NS[%lx]\n", ts.tv_sec, ts.tv_nsec);
+ 	rc = xlink_write_volatile(devH, chan_num, (uint8_t *) &ts, sizeof(struct timespec64));
+-	printk(KERN_INFO "HDDL: Size Transferred[%d] = %ld\n", 	rc, sizeof(struct timespec64));
++	printk(KERN_INFO "HDDL: Size Transferred[%d] = %ld\n",	rc, sizeof(struct timespec64));
+ 
+ 	printk(KERN_INFO "HDDL: xlink_read_data to start...\n");
+ 	size = sizeof(board_id_rcvd);
+@@ -480,16 +477,11 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 	);
+ 	#endif
+ 	soc = &kmb_hddls[board_id].soc[kmb_id];
+-	if (one_dev == 1) {
+-		j = 1;
+-	} else {
+-		j = 0;
+-	}
+-	for (; j < 2; ++j) {
++	for (j = 0; j < 2; ++j) {
+ 		xlink_i2c_info.name = "i2c_xlink";
+ 		xlink_i2c_info.id = board_id << 4 | kmb_id << 2 | j;
+ 		kmb_hddls[board_id].soc[kmb_id].xlink_i2c_ch[j] =
+-		HDDL_I2C_XLINK_CHANNEL + (kmb_id * 2) + j;
++					HDDL_I2C_XLINK_CHANNEL + j;
+ 		xlink_i2c_info.data = &kmb_hddls[board_id].soc[kmb_id];
+ 		xlink_i2c_info.size_data =
+ 				sizeof(kmb_hddls[board_id].soc[kmb_id]);
+@@ -539,23 +531,21 @@ int hddl_per_device_connect_thread(void *thread_param)
+ 			temp_host_i2c_device.addr);
+ 	}
+ 
+-	if (one_dev == 0) {
+-		soc->i2c_slaves_cnt = sizeof(soc_i2c_ext_devices)/sizeof(struct i2c_board_info);
++	soc->i2c_slaves_cnt = sizeof(soc_i2c_ext_devices)/sizeof(struct i2c_board_info);
+ 
+-		soc->i2c_slaves_ext = kzalloc(sizeof(struct i2c_client *) * (soc->i2c_slaves_cnt), GFP_KERNEL);
++	soc->i2c_slaves_ext = kzalloc(sizeof(struct i2c_client *) * (soc->i2c_slaves_cnt), GFP_KERNEL);
+ 
+-		mutex_lock(&my_mutex);
++	mutex_lock(&my_mutex);
+ 
+-		for (i = 0; i < soc->i2c_slaves_cnt; i++) {
+-			soc->i2c_slaves_ext[i] = i2c_new_client_device(
+-				i2c_get_adapter(soc->adap[0].nr),
+-				&soc_i2c_ext_devices[i]);
+-			printk("i2c_slaves_ext adapter %d", soc->i2c_slaves_ext[i]->adapter->nr);
++	for (i = 0; i < soc->i2c_slaves_cnt; i++) {
++		soc->i2c_slaves_ext[i] = i2c_new_client_device(
++			i2c_get_adapter(soc->adap[0].nr),
++			&soc_i2c_ext_devices[i]);
++		printk("i2c_slaves_ext adapter %d", soc->i2c_slaves_ext[i]->adapter->nr);
+ 
+-			ssleep(1);
+-		}
+-		mutex_unlock(&my_mutex);
++		ssleep(1);
+ 	}
++	mutex_unlock(&my_mutex);
+ 
+ 	#else
+ 	soc->soc_xlinki2c_cnt = sizeof(kmb_i2c_devices)/sizeof(struct i2c_board_info);
+diff --git a/drivers/misc/host_kmb_tj/host_kmb_tj.c b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+index 50a8ce6a4ae3..60cd641658ae 100644
+--- a/drivers/misc/host_kmb_tj/host_kmb_tj.c
++++ b/drivers/misc/host_kmb_tj/host_kmb_tj.c
+@@ -35,28 +35,28 @@ static int keembay_get_temp_host(struct thermal_zone_device *thermal,
+ 		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 8);
+ 		mdelay(100);
+ 		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 9);
+-		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		*temp = (short)(rx_buf[1] << (8) | rx_buf[0]);
+ 		break;
+ 
+ 	case KEEMBAY_SENSOR_CSS_HOST:
+ 		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 12);
+ 		mdelay(100);
+ 		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 13);
+-		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		*temp = (short)(rx_buf[1] << (8) | rx_buf[0]);
+ 		break;
+ 
+ 	case KEEMBAY_SENSOR_NCE_HOST:
+ 		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 4);
+ 		mdelay(100);
+ 		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 5);
+-		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		*temp = (short)(rx_buf[1] << (8) | rx_buf[0]);
+ 		break;
+ 
+ 	case KEEMBAY_SENSOR_SOC_HOST:
+ 		rx_buf[0] = i2c_smbus_read_byte_data(ktherm->i2c_c, 0);
+ 		mdelay(100);
+ 		rx_buf[1] = i2c_smbus_read_byte_data(ktherm->i2c_c, 1);
+-		*temp = (rx_buf[1] << (8) | rx_buf[0]);
++		*temp = (short)(rx_buf[1] << (8) | rx_buf[0]);
+ 		break;
+ 
+ 	default:
+@@ -194,9 +194,8 @@ int keembay_thermal_zone_unregister_host(
+ 	struct keembay_therm_info *ktherm = zone_trip_info->thermal_info;
+ 
+ 	spin_lock(&ktherm->lock);
+-	printk("inside unregister");
+ 	thermal_zone_device_unregister(zone_trip_info->tz);
+-	printk("exiting unregister");
++	dev_info(ktherm->dev, "thermal_zone_device_unregister %s\n", zone_trip_info->sensor_name);
+ 	spin_unlock(&ktherm->lock);
+ 	return 0;
+ }
+diff --git a/drivers/misc/thermal/keembay_thermal.c b/drivers/misc/thermal/keembay_thermal.c
+index 3c0f9ea9b8b6..40c90559279f 100644
+--- a/drivers/misc/thermal/keembay_thermal.c
++++ b/drivers/misc/thermal/keembay_thermal.c
+@@ -56,7 +56,7 @@ static int kmb_sensor_read_temp(void __iomem *regs_val,
+ 				*temp = Upper_Temp;
+ 		}
+ 	} else {
+-		*temp = 0;
++		*temp = -255;
+ 	}
+ 	return 0;
+ }
+@@ -78,7 +78,7 @@ static int keembay_get_temp(struct thermal_zone_device *thermal,
+ 					MSS_BIT_SHIFT,
+ 					temp);
+ 			ktherm->mss = *temp;
+-			kmb_tj_temp_list[2] = *temp;
++			kmb_tj_temp_list[2] = ktherm->mss;
+ 			break;
+ 
+ 	case KEEMBAY_SENSOR_CSS:
+@@ -89,7 +89,7 @@ static int keembay_get_temp(struct thermal_zone_device *thermal,
+ 					CSS_BIT_SHIFT,
+ 					temp);
+ 			ktherm->css = *temp;
+-			kmb_tj_temp_list[3] = *temp;
++			kmb_tj_temp_list[3] = ktherm->css;
+ 			break;
+ 
+ 	case KEEMBAY_SENSOR_NCE:
+@@ -450,7 +450,3 @@ MODULE_DESCRIPTION("KeemBay Thermal Driver");
+ MODULE_AUTHOR("Sandeep Singh <sandeep1.singh@intel.com>");
+ MODULE_AUTHOR("Raja Subramanian, Lakshmi Bai <lakshmi.bai.raja.subramanian@intel.com>");
+ MODULE_LICENSE("GPL v2");
+-
+-
+-
+-
+diff --git a/drivers/misc/xlink-smbus/xlink-smbus.c b/drivers/misc/xlink-smbus/xlink-smbus.c
+index 5a2cd132821c..4b98459780a0 100644
+--- a/drivers/misc/xlink-smbus/xlink-smbus.c
++++ b/drivers/misc/xlink-smbus/xlink-smbus.c
+@@ -79,7 +79,7 @@ static struct i2c_adapter *get_adapter_from_channel(u32 channel)
+ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ {
+ 	//the complete slave protocol is implemented in one shot here as
+-	//the whole chunk of data is transfered or received via xlink
++	//the whole chunk of data is transferred or received via xlink
+ 	//, not byte-by-byte
+ 	u8 temp;
+ 
+@@ -237,16 +237,16 @@ static s32 xlink_smbus_xfer(struct i2c_adapter *adap, u16 addr,
+ 	//dev_info(dbgxi2c, "xlink_write_data - success[%d]\n", xerr);
+ /* TODO: handle timeout and return time out error code to the caller of xfer */
+ #endif	/* CONFIG_XLINKI2C_ADAPTER */
+-	wait_for_completion_interruptible(&adapt_data->work);
+-	/* TODO: specify timeout */
+-	//dev_info(dbgxi2c, "signal received\n");
+-	msg = (list_first_entry(&adapt_data->head, struct xlink_msg, node));
+-	list_del(&msg->node);
+-	//dev_info(dbgxi2c, "list_get[%d]\n", msg.addr);
+-	if (data)
+-		*data = msg->data;
+-	rc = msg->status;
+-	kfree(msg);
++	if (wait_for_completion_interruptible_timeout(&adapt_data->work, 4*HZ) > 0) {
++		msg = (list_first_entry(&adapt_data->head, struct xlink_msg, node));
++		list_del(&msg->node);
++		if (data)
++			*data = msg->data;
++		rc = msg->status;
++		kfree(msg);
++	} else {
++		rc = -ETIMEDOUT;
++	}
+ 	return rc;
+ }
+ 
+@@ -422,7 +422,7 @@ static int xlink_i2c_probe(struct platform_device *pdev)
+ 			adapt_data->channel,
+ 			RXB_TXB,  /* mode */
+ 			64*1024,
+-			0   /* timeout */);
++			2000   /* timeout */);
+ 	dev_info(dev, "xlink_open_channel completed[%d][%d][%p]\n", rc,
+ 		adapt_data->channel,
+ 		adapt_data->xhandle);
+@@ -455,7 +455,7 @@ static int xlink_i2c_remove(struct platform_device *pdev)
+ 	/* close the channel and disconnect */
+ 	xlink_close_channel(adapt_data->xhandle, adapt_data->channel);
+ 	dev_info(dev, "close the channel...\n");
+-	i2c_del_adapter(adapt_data->adap); /* This will block the dynamic registeration */
++	//i2c_del_adapter(adapt_data->adap); /* This will block the dynamic registration */
+ 	kfree(adapt_data);
+ 	dev_info(dev, "delete the adapter...\n");
+ 
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+index fbbe402491de..c5c598514124 100644
+--- a/include/linux/hddl_device.h
++++ b/include/linux/hddl_device.h
+@@ -14,8 +14,13 @@
+ #include <linux/xlink.h>
+ 
+ #define HDDL_MAGIC 'x'
+-#define HDDL_READ_SW_ID_DATA    _IOW(HDDL_MAGIC, 'a', void*)
+-#define HDDL_SOFT_RESET		      _IOW(HDDL_MAGIC, 'b', void*)
++
++#define HDDL_READ_SW_ID_DATA    _IOW(HDDL_MAGIC,  'a', void*)
++#define HDDL_SOFT_RESET		      _IOW(HDDL_MAGIC,  'b', void*)
++
++#define HDDL_MAX_DEVICE 8
++#define HDDL_MAX_BAY_DEVICE 3
++
+ 
+ typedef struct hddl_device_kmb_st {
+ 	uint32_t board_id;
+@@ -32,7 +37,7 @@ typedef struct hddl_device_kmb_st {
+ 		struct platform_device *xlink_i2c_plt_dev[2];
+ 		uint32_t i2c_slaves_cnt;
+ 		uint32_t soc_xlinki2c_cnt;
+-	} soc[3];
++	} soc[HDDL_MAX_BAY_DEVICE];
+ } T_HDDL_DEVICE_KMB_NODE;
+ 
+ typedef struct sw_id_hddl_data {
+-- 
+2.17.1
+

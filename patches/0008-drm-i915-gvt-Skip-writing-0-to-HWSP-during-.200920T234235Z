@@ -1,0 +1,97 @@
+From 2344a044c970ff521d6d0d5945a3f1e02157ca4b Mon Sep 17 00:00:00 2001
+From: Colin Xu <colin.xu@intel.com>
+Date: Tue, 11 Aug 2020 11:56:31 +0800
+Subject: [PATCH 08/13] drm/i915/gvt: Skip writing 0 to HWSP during D3 resume
+
+For some GEN9 revision, guest driver may reset HWSP to 0 as init value.
+The sequence is:
+- DMLR during resume.
+- Set engine HWSP to 0.
+- Set engine ring mode to 0.
+- Set engine HWSP to correct value.
+- Set engine ring mode to correct value.
+Ring mode is masked register so set 0 won't take effect.
+However HWPS addr 0 is considered as invalid GGTT address which will
+report error like:
+gvt: vgpu 1: write invalid HWSP address, reg:0x2080, value:0x0
+
+During vGPU in D3, per-engine HWSP gpa remains valid so we can skip
+update HWSP in this case.
+Check both pv_notified and previous engine HWSP gpa, if pv already
+notified and previous HWSP gpa is valid, we skip this HWSP init and
+let later HWSP write update the correct value. We also need zero out
+per-engine HWSP gpa on engine reset to make sure hws_pga is valid.
+
+Signed-off-by: Colin Xu <colin.xu@intel.com>
+(cherry picked from commit 4a5522cf243ce5de7d4c3f7bb76c7ae8ed852ae1)
+---
+ drivers/gpu/drm/i915/gvt/handlers.c | 20 +++++++++++++++-----
+ drivers/gpu/drm/i915/gvt/vgpu.c     |  7 +++++++
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/handlers.c b/drivers/gpu/drm/i915/gvt/handlers.c
+index 08b92064a2a6..c50240c4d3e9 100644
+--- a/drivers/gpu/drm/i915/gvt/handlers.c
++++ b/drivers/gpu/drm/i915/gvt/handlers.c
+@@ -2080,11 +2080,6 @@ static int hws_pga_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 	u32 value = *(u32 *)p_data;
+ 	int ring_id = intel_gvt_render_mmio_to_ring_id(vgpu->gvt, offset);
+ 
+-	if (!intel_gvt_ggtt_validate_range(vgpu, value, I915_GTT_PAGE_SIZE)) {
+-		gvt_vgpu_err("write invalid HWSP address, reg:0x%x, value:0x%x\n",
+-			      offset, value);
+-		return -EINVAL;
+-	}
+ 	/*
+ 	 * Need to emulate all the HWSP register write to ensure host can
+ 	 * update the VM CSB status correctly. Here listed registers can
+@@ -2095,6 +2090,21 @@ static int hws_pga_write(struct intel_vgpu *vgpu, unsigned int offset,
+ 			     offset);
+ 		return -EINVAL;
+ 	}
++
++	if (!intel_gvt_ggtt_validate_range(vgpu, value, I915_GTT_PAGE_SIZE)) {
++		if (vgpu->pv_notified &&
++		    intel_gvt_ggtt_validate_range(vgpu, vgpu->hws_pga[ring_id],
++						  I915_GTT_PAGE_SIZE)) {
++			gvt_dbg_mmio("Skip zero out HWSP address, reg:0x%x, "
++				      "value:0x%x\n", offset, value);
++			return 0;
++		} else {
++			gvt_vgpu_err("write invalid HWSP address, reg:0x%x, "
++				      "value:0x%x\n", offset, value);
++			return -EINVAL;
++		}
++	}
++
+ 	vgpu->hws_pga[ring_id] = value;
+ 	gvt_dbg_mmio("VM(%d) write: 0x%x to HWSP: 0x%x\n",
+ 		     vgpu->id, value, offset);
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 88a81c5e9910..7537c923a636 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -597,6 +597,9 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 	intel_vgpu_reset_submission(vgpu, resetting_eng);
+ 	/* full GPU reset or device model level reset */
+ 	if (engine_mask == ALL_ENGINES || dmlr) {
++		struct intel_engine_cs *engine;
++		intel_engine_mask_t tmp;
++
+ 		intel_vgpu_select_submission_ops(vgpu, ALL_ENGINES, 0);
+ 		if (engine_mask == ALL_ENGINES)
+ 			intel_vgpu_invalidate_ppgtt(vgpu);
+@@ -627,6 +630,10 @@ void intel_gvt_reset_vgpu_locked(struct intel_vgpu *vgpu, bool dmlr,
+ 			else
+ 				vgpu->pv_notified = false;
+ 		}
++
++		for_each_engine_masked(engine, &gvt->dev_priv->gt, engine_mask, tmp) {
++			vgpu->hws_pga[engine->id] = 0;
++		}
+ 	}
+ 
+ 	vgpu->resetting_eng = 0;
+-- 
+2.17.1
+
