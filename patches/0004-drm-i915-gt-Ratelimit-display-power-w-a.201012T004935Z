@@ -1,0 +1,40 @@
+From bf0a24789e700ebfbdcdd2f2d537448c4864ecad Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 18 Dec 2019 09:35:04 +0000
+Subject: [PATCH 4/5] drm/i915/gt: Ratelimit display power w/a
+
+For very light workloads that frequently park, acquiring the display
+power well (required to prevent the dmc from trashing the system) takes
+longer than the execution. A good example is the igt_coherency selftest,
+which is slowed down by an order of magnitude in the worst case with
+powerwell cycling. To prevent frequent cycling, while keeping our fast
+soft-rc6, use a timer to delay release of the display powerwell.
+
+Fixes: 311770173fac ("drm/i915/gt: Schedule request retirement when timeline idles")
+References: https://gitlab.freedesktop.org/drm/intel/issues/848
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191218093504.3477048-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index 154f76432384..ab9977b64c17 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -86,8 +86,9 @@ static int __gt_park(struct intel_wakeref *wf)
+ 	/* Everything switched off, flush any residual interrupt just in case */
+ 	intel_synchronize_irq(i915);
+ 
++	/* Defer dropping the display power well for 100ms, it's slow! */
+ 	GEM_BUG_ON(!wakeref);
+-	intel_display_power_put(i915, POWER_DOMAIN_GT_IRQ, wakeref);
++	intel_display_power_put_async(i915, POWER_DOMAIN_GT_IRQ, wakeref);
+ 
+ 	i915_globals_park();
+ 
+-- 
+2.17.1
+
