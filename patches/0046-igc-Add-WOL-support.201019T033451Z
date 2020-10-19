@@ -1,0 +1,147 @@
+From 580abdc8a32c71c5572191050808215419f2fcf4 Mon Sep 17 00:00:00 2001
+From: Sasha Neftin <sasha.neftin@intel.com>
+Date: Mon, 3 Feb 2020 09:55:20 +0200
+Subject: [PATCH 046/177] igc: Add WOL support
+
+This patch adds a define and WOL support for an i225 parts.
+
+Signed-off-by: Sasha Neftin <sasha.neftin@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igc/igc.h         |  1 +
+ drivers/net/ethernet/intel/igc/igc_defines.h |  3 +
+ drivers/net/ethernet/intel/igc/igc_ethtool.c | 61 ++++++++++++++++++++
+ drivers/net/ethernet/intel/igc/igc_main.c    | 10 ++++
+ 4 files changed, 75 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc.h b/drivers/net/ethernet/intel/igc/igc.h
+index 5e9c2dd8b8e4..8d9ed4f0b69d 100644
+--- a/drivers/net/ethernet/intel/igc/igc.h
++++ b/drivers/net/ethernet/intel/igc/igc.h
+@@ -61,6 +61,7 @@ extern char igc_driver_version[];
+ #define IGC_FLAG_QUEUE_PAIRS		BIT(3)
+ #define IGC_FLAG_DMAC			BIT(4)
+ #define IGC_FLAG_PTP			BIT(8)
++#define IGC_FLAG_WOL_SUPPORTED		BIT(8)
+ #define IGC_FLAG_NEED_LINK_UPDATE	BIT(9)
+ #define IGC_FLAG_MEDIA_RESET		BIT(10)
+ #define IGC_FLAG_MAS_ENABLE		BIT(12)
+diff --git a/drivers/net/ethernet/intel/igc/igc_defines.h b/drivers/net/ethernet/intel/igc/igc_defines.h
+index 3c03962bde5e..4ddccccf42cc 100644
+--- a/drivers/net/ethernet/intel/igc/igc_defines.h
++++ b/drivers/net/ethernet/intel/igc/igc_defines.h
+@@ -16,7 +16,10 @@
+ 
+ /* Wake Up Filter Control */
+ #define IGC_WUFC_LNKC	0x00000001 /* Link Status Change Wakeup Enable */
++#define IGC_WUFC_MAG	0x00000002 /* Magic Packet Wakeup Enable */
++#define IGC_WUFC_EX	0x00000004 /* Directed Exact Wakeup Enable */
+ #define IGC_WUFC_MC	0x00000008 /* Directed Multicast Wakeup Enable */
++#define IGC_WUFC_BC	0x00000010 /* Broadcast Wakeup Enable */
+ 
+ #define IGC_CTRL_ADVD3WUC	0x00100000  /* D3 WUC */
+ 
+diff --git a/drivers/net/ethernet/intel/igc/igc_ethtool.c b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+index 3aa2c66cb94e..9e576f646e4a 100644
+--- a/drivers/net/ethernet/intel/igc/igc_ethtool.c
++++ b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+@@ -308,6 +308,65 @@ static void igc_get_regs(struct net_device *netdev,
+ 		regs_buff[168 + i] = rd32(IGC_TXDCTL(i));
+ }
+ 
++static void igc_get_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
++{
++	struct igc_adapter *adapter = netdev_priv(netdev);
++
++	wol->wolopts = 0;
++
++	if (!(adapter->flags & IGC_FLAG_WOL_SUPPORTED))
++		return;
++
++	wol->supported = WAKE_UCAST | WAKE_MCAST |
++			 WAKE_BCAST | WAKE_MAGIC |
++			 WAKE_PHY;
++
++	/* apply any specific unsupported masks here */
++	switch (adapter->hw.device_id) {
++	default:
++		break;
++	}
++
++	if (adapter->wol & IGC_WUFC_EX)
++		wol->wolopts |= WAKE_UCAST;
++	if (adapter->wol & IGC_WUFC_MC)
++		wol->wolopts |= WAKE_MCAST;
++	if (adapter->wol & IGC_WUFC_BC)
++		wol->wolopts |= WAKE_BCAST;
++	if (adapter->wol & IGC_WUFC_MAG)
++		wol->wolopts |= WAKE_MAGIC;
++	if (adapter->wol & IGC_WUFC_LNKC)
++		wol->wolopts |= WAKE_PHY;
++}
++
++static int igc_set_wol(struct net_device *netdev, struct ethtool_wolinfo *wol)
++{
++	struct igc_adapter *adapter = netdev_priv(netdev);
++
++	if (wol->wolopts & (WAKE_ARP | WAKE_MAGICSECURE | WAKE_FILTER))
++		return -EOPNOTSUPP;
++
++	if (!(adapter->flags & IGC_FLAG_WOL_SUPPORTED))
++		return wol->wolopts ? -EOPNOTSUPP : 0;
++
++	/* these settings will always override what we currently have */
++	adapter->wol = 0;
++
++	if (wol->wolopts & WAKE_UCAST)
++		adapter->wol |= IGC_WUFC_EX;
++	if (wol->wolopts & WAKE_MCAST)
++		adapter->wol |= IGC_WUFC_MC;
++	if (wol->wolopts & WAKE_BCAST)
++		adapter->wol |= IGC_WUFC_BC;
++	if (wol->wolopts & WAKE_MAGIC)
++		adapter->wol |= IGC_WUFC_MAG;
++	if (wol->wolopts & WAKE_PHY)
++		adapter->wol |= IGC_WUFC_LNKC;
++	device_set_wakeup_enable(&adapter->pdev->dev, adapter->wol);
++
++	return 0;
++}
++
+ static u32 igc_get_msglevel(struct net_device *netdev)
+ {
+ 	struct igc_adapter *adapter = netdev_priv(netdev);
+@@ -1859,6 +1918,8 @@ static const struct ethtool_ops igc_ethtool_ops = {
+ 	.get_drvinfo		= igc_get_drvinfo,
+ 	.get_regs_len		= igc_get_regs_len,
+ 	.get_regs		= igc_get_regs,
++	.get_wol		= igc_get_wol,
++	.set_wol		= igc_set_wol,
+ 	.get_msglevel		= igc_get_msglevel,
+ 	.set_msglevel		= igc_set_msglevel,
+ 	.nway_reset		= igc_nway_reset,
+diff --git a/drivers/net/ethernet/intel/igc/igc_main.c b/drivers/net/ethernet/intel/igc/igc_main.c
+index e982b5f54dc9..69fa1ce1f927 100644
+--- a/drivers/net/ethernet/intel/igc/igc_main.c
++++ b/drivers/net/ethernet/intel/igc/igc_main.c
+@@ -4789,6 +4789,16 @@ static int igc_probe(struct pci_dev *pdev,
+ 	hw->fc.requested_mode = igc_fc_default;
+ 	hw->fc.current_mode = igc_fc_default;
+ 
++	/* By default, support wake on port A */
++	adapter->flags |= IGC_FLAG_WOL_SUPPORTED;
++
++	/* initialize the wol settings based on the eeprom settings */
++	if (adapter->flags & IGC_FLAG_WOL_SUPPORTED)
++		adapter->wol |= IGC_WUFC_MAG;
++
++	device_set_wakeup_enable(&adapter->pdev->dev,
++				 adapter->flags & IGC_FLAG_WOL_SUPPORTED);
++
+ 	/* reset the hardware with the new settings */
+ 	igc_reset(adapter);
+ 
+-- 
+2.17.1
+

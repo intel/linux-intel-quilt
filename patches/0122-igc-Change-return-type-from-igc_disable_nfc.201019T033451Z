@@ -1,0 +1,115 @@
+From d3693d7da35b7d4df55e0721176bc5470cf745ca Mon Sep 17 00:00:00 2001
+From: Andre Guedes <andre.guedes@intel.com>
+Date: Fri, 24 Apr 2020 13:16:21 -0700
+Subject: [PATCH 122/177] igc: Change return type from igc_disable_nfc_rule()
+
+None of igc_disable_nfc_rule() callers actually check its returning
+value. A closer look at why this function would fail shows that the
+only situation is when we try to delete an Ethertype or MAC filter that
+doesn't exist.
+
+That situation is very unlikely so we can change igc_del_etype_filter()
+and igc_del_mac_filter() logic to "if the filter doesn't exist, we are
+done", and keep the logic in igc_disable_nfc_rule() callers simple.
+
+Signed-off-by: Andre Guedes <andre.guedes@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igc/igc_main.c | 26 ++++++++---------------
+ 1 file changed, 9 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_main.c b/drivers/net/ethernet/intel/igc/igc_main.c
+index 0a6f880e3538..9338209cedf2 100644
+--- a/drivers/net/ethernet/intel/igc/igc_main.c
++++ b/drivers/net/ethernet/intel/igc/igc_main.c
+@@ -2259,18 +2259,16 @@ static int igc_add_mac_filter(struct igc_adapter *adapter,
+  * @adapter: Pointer to adapter where the filter should be deleted from
+  * @type: MAC address filter type (source or destination)
+  * @addr: MAC address
+- *
+- * Return: 0 in case of success, negative errno code otherwise.
+  */
+-static int igc_del_mac_filter(struct igc_adapter *adapter,
+-			      enum igc_mac_filter_type type, const u8 *addr)
++static void igc_del_mac_filter(struct igc_adapter *adapter,
++			       enum igc_mac_filter_type type, const u8 *addr)
+ {
+ 	struct net_device *dev = adapter->netdev;
+ 	int index;
+ 
+ 	index = igc_find_mac_filter(adapter, type, addr);
+ 	if (index < 0)
+-		return -ENOENT;
++		return;
+ 
+ 	if (index == 0) {
+ 		/* If this is the default filter, we don't actually delete it.
+@@ -2288,8 +2286,6 @@ static int igc_del_mac_filter(struct igc_adapter *adapter,
+ 
+ 		igc_clear_mac_filter_hw(adapter, index);
+ 	}
+-
+-	return 0;
+ }
+ 
+ /**
+@@ -2420,23 +2416,20 @@ static int igc_find_etype_filter(struct igc_adapter *adapter, u16 etype)
+  * igc_del_etype_filter() - Delete ethertype filter
+  * @adapter: Pointer to adapter where the filter should be deleted from
+  * @etype: Ethertype value
+- *
+- * Return: 0 in case of success, negative errno code otherwise.
+  */
+-static int igc_del_etype_filter(struct igc_adapter *adapter, u16 etype)
++static void igc_del_etype_filter(struct igc_adapter *adapter, u16 etype)
+ {
+ 	struct igc_hw *hw = &adapter->hw;
+ 	int index;
+ 
+ 	index = igc_find_etype_filter(adapter, etype);
+ 	if (index < 0)
+-		return -ENOENT;
++		return;
+ 
+ 	wr32(IGC_ETQF(index), 0);
+ 
+ 	netdev_dbg(adapter->netdev, "Delete ethertype filter: etype %04x\n",
+ 		   etype);
+-	return 0;
+ }
+ 
+ static int igc_enable_nfc_rule(struct igc_adapter *adapter,
+@@ -2477,8 +2470,8 @@ static int igc_enable_nfc_rule(struct igc_adapter *adapter,
+ 	return 0;
+ }
+ 
+-static int igc_disable_nfc_rule(struct igc_adapter *adapter,
+-				const struct igc_nfc_rule *rule)
++static void igc_disable_nfc_rule(struct igc_adapter *adapter,
++				 const struct igc_nfc_rule *rule)
+ {
+ 	if (rule->filter.match_flags & IGC_FILTER_FLAG_ETHER_TYPE)
+ 		igc_del_etype_filter(adapter, rule->filter.etype);
+@@ -2497,8 +2490,6 @@ static int igc_disable_nfc_rule(struct igc_adapter *adapter,
+ 	if (rule->filter.match_flags & IGC_FILTER_FLAG_DST_MAC_ADDR)
+ 		igc_del_mac_filter(adapter, IGC_MAC_FILTER_TYPE_DST,
+ 				   rule->filter.dst_addr);
+-
+-	return 0;
+ }
+ 
+ /**
+@@ -2623,7 +2614,8 @@ static int igc_uc_unsync(struct net_device *netdev, const unsigned char *addr)
+ {
+ 	struct igc_adapter *adapter = netdev_priv(netdev);
+ 
+-	return igc_del_mac_filter(adapter, IGC_MAC_FILTER_TYPE_DST, addr);
++	igc_del_mac_filter(adapter, IGC_MAC_FILTER_TYPE_DST, addr);
++	return 0;
+ }
+ 
+ /**
+-- 
+2.17.1
+
