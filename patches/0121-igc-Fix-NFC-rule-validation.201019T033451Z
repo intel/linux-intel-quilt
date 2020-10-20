@@ -1,0 +1,54 @@
+From 1e58ebeef96937f26c1edc5a0fdccb62abe490af Mon Sep 17 00:00:00 2001
+From: Andre Guedes <andre.guedes@intel.com>
+Date: Fri, 24 Apr 2020 13:16:20 -0700
+Subject: [PATCH 121/177] igc: Fix NFC rule validation
+
+If we try to overwrite an existing rule with the same filter but
+different action, we get EEXIST error as shown below.
+
+$ ethtool -N eth0 flow-type ether dst <MACADDR> action 1 loc 10
+$ ethtool -N eth0 flow-type ether dst <MACADDR> action 2 loc 10
+rmgr: Cannot insert RX class rule: File exists
+
+The second command is expected to overwrite the previous rule in location
+10 and succeed.
+
+This patch fixes igc_ethtool_check_nfc_rule() so it also checks the
+rules location. In case they match, the rule under evaluation should not
+be considered invalid.
+
+Signed-off-by: Andre Guedes <andre.guedes@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igc/igc_ethtool.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ethtool.c b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+index 7442d9b12307..3eb9fcc7db23 100644
+--- a/drivers/net/ethernet/intel/igc/igc_ethtool.c
++++ b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+@@ -1225,8 +1225,8 @@ static void igc_ethtool_init_nfc_rule(struct igc_nfc_rule *rule,
+  * Rules with both destination and source MAC addresses are considered invalid
+  * since the driver doesn't support them.
+  *
+- * Also, if there is already another rule with the same filter, @rule is
+- * considered invalid.
++ * Also, if there is already another rule with the same filter in a different
++ * location, @rule is considered invalid.
+  *
+  * Context: Expects adapter->nfc_rule_lock to be held by caller.
+  *
+@@ -1252,7 +1252,8 @@ static int igc_ethtool_check_nfc_rule(struct igc_adapter *adapter,
+ 
+ 	list_for_each_entry(tmp, &adapter->nfc_rule_list, list) {
+ 		if (!memcmp(&rule->filter, &tmp->filter,
+-			    sizeof(rule->filter))) {
++			    sizeof(rule->filter)) &&
++		    tmp->location != rule->location) {
+ 			netdev_dbg(dev, "Rule already exists\n");
+ 			return -EEXIST;
+ 		}
+-- 
+2.17.1
+

@@ -1,0 +1,58 @@
+From 6280c8ccdd59db38374a6dfa7f4e17daf48e9171 Mon Sep 17 00:00:00 2001
+From: Vinicius Costa Gomes <vinicius.gomes@intel.com>
+Date: Tue, 18 Aug 2020 09:19:55 -0700
+Subject: [PATCH 165/177] igc: Fix not considering the TX delay for timestamps
+
+When timestamping a packet there's a delay between the start of the
+packet and the point where the hardware actually captures the
+timestamp. This difference needs to be considered if we want accurate
+timestamps.
+
+This was done on the RX side, but not on the TX side.
+
+Fixes: 2c344ae24501 ("igc: Add support for TX timestamping")
+Signed-off-by: Vinicius Costa Gomes <vinicius.gomes@intel.com>
+---
+ drivers/net/ethernet/intel/igc/igc_ptp.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ptp.c b/drivers/net/ethernet/intel/igc/igc_ptp.c
+index f78e9acb801f..a841ac1088aa 100644
+--- a/drivers/net/ethernet/intel/igc/igc_ptp.c
++++ b/drivers/net/ethernet/intel/igc/igc_ptp.c
+@@ -366,6 +366,7 @@ static void igc_ptp_tx_hwtstamp(struct igc_adapter *adapter)
+ 	struct sk_buff *skb = adapter->ptp_tx_skb;
+ 	struct skb_shared_hwtstamps shhwtstamps;
+ 	struct igc_hw *hw = &adapter->hw;
++	int adjust = 0;
+ 	u64 regval;
+ 
+ 	if (WARN_ON_ONCE(!skb))
+@@ -375,6 +376,24 @@ static void igc_ptp_tx_hwtstamp(struct igc_adapter *adapter)
+ 	regval |= (u64)rd32(IGC_TXSTMPH) << 32;
+ 	igc_ptp_systim_to_hwtstamp(adapter, &shhwtstamps, regval);
+ 
++	switch (adapter->link_speed) {
++	case SPEED_10:
++		adjust = IGC_I225_TX_LATENCY_10;
++		break;
++	case SPEED_100:
++		adjust = IGC_I225_TX_LATENCY_100;
++		break;
++	case SPEED_1000:
++		adjust = IGC_I225_TX_LATENCY_1000;
++		break;
++	case SPEED_2500:
++		adjust = IGC_I225_TX_LATENCY_2500;
++		break;
++	}
++
++	shhwtstamps.hwtstamp =
++		ktime_add_ns(shhwtstamps.hwtstamp, adjust);
++
+ 	/* Clear the lock early before calling skb_tstamp_tx so that
+ 	 * applications are not woken up before the lock bit is clear. We use
+ 	 * a copy of the skb pointer to ensure other threads can't change it
+-- 
+2.17.1
+

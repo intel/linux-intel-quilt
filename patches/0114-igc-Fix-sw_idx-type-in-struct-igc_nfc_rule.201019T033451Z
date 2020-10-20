@@ -1,0 +1,104 @@
+From 706056b86f3452b7184d8efaca3a642b0a83304e Mon Sep 17 00:00:00 2001
+From: Andre Guedes <andre.guedes@intel.com>
+Date: Fri, 24 Apr 2020 13:16:13 -0700
+Subject: [PATCH 114/177] igc: Fix 'sw_idx' type in struct igc_nfc_rule
+
+The 'sw_idx' field from 'struct igc_nfc_rule' is u16 type but it is
+assigned an u32 value in igc_ethtool_init_nfc_rule(). This patch changes
+'sw_idx' type to u32 so they match. Also, it makes more sense to call
+this field 'location' since it holds the NFC rule location.
+
+Signed-off-by: Andre Guedes <andre.guedes@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igc/igc.h         |  2 +-
+ drivers/net/ethernet/intel/igc/igc_ethtool.c | 16 ++++++++--------
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc.h b/drivers/net/ethernet/intel/igc/igc.h
+index fcc6261d7f67..ae7d48070ee2 100644
+--- a/drivers/net/ethernet/intel/igc/igc.h
++++ b/drivers/net/ethernet/intel/igc/igc.h
+@@ -463,7 +463,7 @@ struct igc_nfc_filter {
+ struct igc_nfc_rule {
+ 	struct hlist_node nfc_node;
+ 	struct igc_nfc_filter filter;
+-	u16 sw_idx;
++	u32 location;
+ 	u16 action;
+ };
+ 
+diff --git a/drivers/net/ethernet/intel/igc/igc_ethtool.c b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+index c240335ed4bf..4ae990cd0332 100644
+--- a/drivers/net/ethernet/intel/igc/igc_ethtool.c
++++ b/drivers/net/ethernet/intel/igc/igc_ethtool.c
+@@ -940,11 +940,11 @@ static int igc_ethtool_get_nfc_rule(struct igc_adapter *adapter,
+ 	cmd->data = IGC_MAX_RXNFC_RULES;
+ 
+ 	hlist_for_each_entry(rule, &adapter->nfc_rule_list, nfc_node) {
+-		if (fsp->location <= rule->sw_idx)
++		if (fsp->location <= rule->location)
+ 			break;
+ 	}
+ 
+-	if (!rule || fsp->location != rule->sw_idx)
++	if (!rule || fsp->location != rule->location)
+ 		return -EINVAL;
+ 
+ 	if (!rule->filter.match_flags)
+@@ -991,7 +991,7 @@ static int igc_ethtool_get_nfc_rules(struct igc_adapter *adapter,
+ 	hlist_for_each_entry(rule, &adapter->nfc_rule_list, nfc_node) {
+ 		if (cnt == cmd->rule_cnt)
+ 			return -EMSGSIZE;
+-		rule_locs[cnt] = rule->sw_idx;
++		rule_locs[cnt] = rule->location;
+ 		cnt++;
+ 	}
+ 
+@@ -1240,7 +1240,7 @@ int igc_disable_nfc_rule(struct igc_adapter *adapter,
+ 
+ static int igc_ethtool_update_nfc_rule(struct igc_adapter *adapter,
+ 				       struct igc_nfc_rule *input,
+-				       u16 sw_idx)
++				       u32 location)
+ {
+ 	struct igc_nfc_rule *rule, *parent;
+ 	int err = -EINVAL;
+@@ -1250,13 +1250,13 @@ static int igc_ethtool_update_nfc_rule(struct igc_adapter *adapter,
+ 
+ 	hlist_for_each_entry(rule, &adapter->nfc_rule_list, nfc_node) {
+ 		/* hash found, or no matching entry */
+-		if (rule->sw_idx >= sw_idx)
++		if (rule->location >= location)
+ 			break;
+ 		parent = rule;
+ 	}
+ 
+ 	/* if there is an old rule occupying our place remove it */
+-	if (rule && rule->sw_idx == sw_idx) {
++	if (rule && rule->location == location) {
+ 		if (!input)
+ 			err = igc_disable_nfc_rule(adapter, rule);
+ 
+@@ -1289,7 +1289,7 @@ static void igc_ethtool_init_nfc_rule(struct igc_nfc_rule *rule,
+ 	INIT_HLIST_NODE(&rule->nfc_node);
+ 
+ 	rule->action = fsp->ring_cookie;
+-	rule->sw_idx = fsp->location;
++	rule->location = fsp->location;
+ 
+ 	if ((fsp->flow_type & FLOW_EXT) && fsp->m_ext.vlan_tci) {
+ 		rule->filter.vlan_tci = ntohs(fsp->h_ext.vlan_tci);
+@@ -1412,7 +1412,7 @@ static int igc_ethtool_add_nfc_rule(struct igc_adapter *adapter,
+ 	if (err)
+ 		goto err;
+ 
+-	igc_ethtool_update_nfc_rule(adapter, rule, rule->sw_idx);
++	igc_ethtool_update_nfc_rule(adapter, rule, rule->location);
+ 
+ 	spin_unlock(&adapter->nfc_rule_lock);
+ 	return 0;
+-- 
+2.17.1
+
