@@ -1,0 +1,92 @@
+From c4cbaca63a5bd1e2622f0af6603aa8e08edf5f9a Mon Sep 17 00:00:00 2001
+From: Ira Weiny <ira.weiny@intel.com>
+Date: Thu, 30 Jul 2020 16:43:46 -0700
+Subject: [PATCH 80/96] crypto/ux500: Fix kmap() bug
+
+Once the crypto hash walk is started by crypto_hash_walk_first()
+returning non-zero, crypto_hash_walk_done() must be called to unmap any
+memory which was mapped by *_walk_first().
+
+Ensure crypto_hash_walk_done() is called properly by:
+
+	1) Re-arranging the check for device data to be prior to calling
+	   *_walk_first()
+	2) on error call crypto_hash_walk_done() with an error code to
+	   allow the hash walk code to clean up.
+
+While we are at it clean up the 'out' label to be more meaningful.
+
+Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+---
+ drivers/crypto/ux500/hash/hash_core.c | 30 ++++++++++++++++-----------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/crypto/ux500/hash/hash_core.c b/drivers/crypto/ux500/hash/hash_core.c
+index a5ee8c2fb4e0..f29293404d16 100644
+--- a/drivers/crypto/ux500/hash/hash_core.c
++++ b/drivers/crypto/ux500/hash/hash_core.c
+@@ -1071,27 +1071,32 @@ int hash_hw_update(struct ahash_request *req)
+ 	struct hash_ctx *ctx = crypto_ahash_ctx(tfm);
+ 	struct hash_req_ctx *req_ctx = ahash_request_ctx(req);
+ 	struct crypto_hash_walk walk;
+-	int msg_length = crypto_hash_walk_first(req, &walk);
+-
+-	/* Empty message ("") is correct indata */
+-	if (msg_length == 0)
+-		return ret;
++	int msg_length;
+ 
+ 	index = req_ctx->state.index;
+ 	buffer = (u8 *)req_ctx->state.buffer;
+ 
++	ret = hash_get_device_data(ctx, &device_data);
++	if (ret)
++		return ret;
++
++	msg_length = crypto_hash_walk_first(req, &walk);
++
++	/* Empty message ("") is correct indata */
++	if (msg_length == 0) {
++		ret = 0;
++		goto release_dev;
++	}
++
+ 	/* Check if ctx->state.length + msg_length
+ 	   overflows */
+ 	if (msg_length > (req_ctx->state.length.low_word + msg_length) &&
+ 	    HASH_HIGH_WORD_MAX_VAL == req_ctx->state.length.high_word) {
+ 		pr_err("%s: HASH_MSG_LENGTH_OVERFLOW!\n", __func__);
+-		return -EPERM;
++		ret = crypto_hash_walk_done(&walk, -EPERM);
++		goto release_dev;
+ 	}
+ 
+-	ret = hash_get_device_data(ctx, &device_data);
+-	if (ret)
+-		return ret;
+-
+ 	/* Main loop */
+ 	while (0 != msg_length) {
+ 		data_buffer = walk.data;
+@@ -1101,7 +1106,8 @@ int hash_hw_update(struct ahash_request *req)
+ 		if (ret) {
+ 			dev_err(device_data->dev, "%s: hash_internal_hw_update() failed!\n",
+ 				__func__);
+-			goto out;
++			crypto_hash_walk_done(&walk, ret);
++			goto release_dev;
+ 		}
+ 
+ 		msg_length = crypto_hash_walk_done(&walk, 0);
+@@ -1111,7 +1117,7 @@ int hash_hw_update(struct ahash_request *req)
+ 	dev_dbg(device_data->dev, "%s: indata length=%d, bin=%d\n",
+ 		__func__, req_ctx->state.index, req_ctx->state.bit_index);
+ 
+-out:
++release_dev:
+ 	release_hash_device(device_data);
+ 
+ 	return ret;
+-- 
+2.27.0
+

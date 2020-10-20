@@ -1,4 +1,4 @@
-From de08a5a11bd9a069d84c6da5faa0deccbbd3b734 Mon Sep 17 00:00:00 2001
+From aee248b901d9db750d2ea0e25bff08370f5bfa31 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 5 Jan 2017 13:48:31 -0800
 Subject: [PATCH 21/43] x86/cet/shstk: Handle signals for shadow stack
@@ -18,6 +18,9 @@ that into sc_ext now to keep the struct stable in case the IBT series is
 applied later.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+
+v13:
+- Check restore token pointing to a valid address.
 
 v10:
 - Combine with WRUSS instruction patch, since it is used only here.
@@ -90,7 +93,7 @@ index 81cf22398cd1..cec9cf0a00cf 100644
  				     math_size) < 0)
  		return (void __user *) -1L;
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index 967765c35969..391bd56a3b4e 100644
+index 5750fbcbb952..73435856ce54 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
 @@ -6,6 +6,8 @@
@@ -119,14 +122,14 @@ index 967765c35969..391bd56a3b4e 100644
  
  #endif /* __ASSEMBLY__ */
 diff --git a/arch/x86/include/asm/fpu/internal.h b/arch/x86/include/asm/fpu/internal.h
-index 0a460f2a3f90..cd4249b37f45 100644
+index 0a460f2a3f90..ec900a7a4786 100644
 --- a/arch/x86/include/asm/fpu/internal.h
 +++ b/arch/x86/include/asm/fpu/internal.h
 @@ -442,6 +442,16 @@ static inline void copy_kernel_to_fpregs(union fpregs_state *fpstate)
  	__copy_kernel_to_fpregs(fpstate, -1);
  }
  
-+#ifdef CONFIG_X86_INTEL_CET
++#ifdef CONFIG_X86_CET
 +extern int save_cet_to_sigframe(int ia32, void __user *fp,
 +				unsigned long restorer);
 +#else
@@ -140,14 +143,14 @@ index 0a460f2a3f90..cd4249b37f45 100644
  
  /*
 diff --git a/arch/x86/include/asm/special_insns.h b/arch/x86/include/asm/special_insns.h
-index 59a3e13204c3..21c42cef12a9 100644
+index 59a3e13204c3..ee86c19da532 100644
 --- a/arch/x86/include/asm/special_insns.h
 +++ b/arch/x86/include/asm/special_insns.h
 @@ -232,6 +232,38 @@ static inline void clwb(volatile void *__p)
  		: [pax] "a" (p));
  }
  
-+#ifdef CONFIG_X86_INTEL_CET
++#ifdef CONFIG_X86_CET
 +#if defined(CONFIG_IA32_EMULATION) || defined(CONFIG_X86_X32)
 +static inline int write_user_shstk_32(unsigned long addr, unsigned int val)
 +{
@@ -177,7 +180,7 @@ index 59a3e13204c3..21c42cef12a9 100644
 +fail:
 +	return -EPERM;
 +}
-+#endif /* CONFIG_X86_INTEL_CET */
++#endif /* CONFIG_X86_CET */
 +
  #define nop() asm volatile ("nop")
  
@@ -203,7 +206,7 @@ index 844d60eb1882..cf2d55db3be4 100644
   * The 32-bit signal frame:
   */
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index f8b0a077594f..51ddd17aee8f 100644
+index f8b0a077594f..728d9baceb74 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
 @@ -19,6 +19,8 @@
@@ -259,7 +262,7 @@ index f8b0a077594f..51ddd17aee8f 100644
 +	/*
 +	 * Token was placed properly?
 +	 */
-+	if ((ALIGN_DOWN(token, 8) - 8) != ssp)
++	if (((ALIGN_DOWN(token, 8) - 8) != ssp) || (token >= TASK_SIZE_MAX))
 +		return -EINVAL;
 +
 +	*new_ssp = token;
@@ -377,14 +380,14 @@ index f8b0a077594f..51ddd17aee8f 100644
 +	return 0;
 +}
 diff --git a/arch/x86/kernel/fpu/signal.c b/arch/x86/kernel/fpu/signal.c
-index a4ec65317a7f..d02ea8c11128 100644
+index a4ec65317a7f..c0c2141cb4b3 100644
 --- a/arch/x86/kernel/fpu/signal.c
 +++ b/arch/x86/kernel/fpu/signal.c
 @@ -52,6 +52,74 @@ static inline int check_for_xstate(struct fxregs_state __user *buf,
  	return 0;
  }
  
-+#ifdef CONFIG_X86_INTEL_CET
++#ifdef CONFIG_X86_CET
 +int save_cet_to_sigframe(int ia32, void __user *fp, unsigned long restorer)
 +{
 +	int err = 0;
@@ -496,7 +499,7 @@ index a4ec65317a7f..d02ea8c11128 100644
  	return __fpu__restore_sig(buf, buf_fx, size);
  }
  
-+#ifdef CONFIG_X86_INTEL_CET
++#ifdef CONFIG_X86_CET
 +static unsigned long fpu__alloc_sigcontext_ext(unsigned long sp)
 +{
 +	struct cet_status *cet = &current->thread.cet;

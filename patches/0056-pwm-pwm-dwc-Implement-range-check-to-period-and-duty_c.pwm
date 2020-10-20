@@ -1,0 +1,76 @@
+From 0dc15f92d4eef61e74414b4ba70385a61ca42374 Mon Sep 17 00:00:00 2001
+From: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+Date: Fri, 28 Aug 2020 15:40:39 +0300
+Subject: [PATCH 56/58] pwm: pwm-dwc: Implement range check to period and
+ duty_cycle
+
+Check does calculated low and high period widths are within HW limits
+instead of silently writing bogus values into registers.
+
+Signed-off-by: Jarkko Nikula <jarkko.nikula@linux.intel.com>
+---
+ drivers/pwm/pwm-dwc.c | 29 ++++++++++++++++++++++-------
+ 1 file changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/pwm/pwm-dwc.c b/drivers/pwm/pwm-dwc.c
+index 48c4c36f388d..5d50b4eef1bc 100644
+--- a/drivers/pwm/pwm-dwc.c
++++ b/drivers/pwm/pwm-dwc.c
+@@ -81,17 +81,30 @@ static void __dwc_pwm_set_enable(struct dwc_pwm *dwc, int pwm, int enabled)
+ 	dwc_pwm_writel(dwc, reg, DWC_TIM_CTRL(pwm));
+ }
+ 
+-static void __dwc_pwm_configure_timer(struct dwc_pwm *dwc,
+-				      struct pwm_device *pwm,
+-				      const struct pwm_state *state)
++static int __dwc_pwm_configure_timer(struct dwc_pwm *dwc,
++				     struct pwm_device *pwm,
++				     const struct pwm_state *state)
+ {
++	u64 tmp;
+ 	u32 ctrl;
+ 	u32 high;
+ 	u32 low;
+ 
+-	low = DIV_ROUND_CLOSEST_ULL(state->duty_cycle, DWC_CLK_PERIOD_NS) - 1;
+-	high = DIV_ROUND_CLOSEST_ULL(state->period - state->duty_cycle,
+-				     DWC_CLK_PERIOD_NS) - 1;
++	/*
++	 * Calculate width of low and high period in terms of input clock
++	 * periods and check are the result within HW limits between 1 and
++	 * 2^32 periods.
++	 */
++	tmp = DIV_ROUND_CLOSEST_ULL(state->duty_cycle, DWC_CLK_PERIOD_NS);
++	if (tmp < 1 || tmp > (1ULL << 32))
++		return -ERANGE;
++	low = tmp - 1;
++
++	tmp = DIV_ROUND_CLOSEST_ULL(state->period - state->duty_cycle,
++				    DWC_CLK_PERIOD_NS);
++	if (tmp < 1 || tmp > (1ULL << 32))
++		return -ERANGE;
++	high = tmp - 1;
+ 
+ 	/*
+ 	  * Specification says timer usage flow is to disable timer, then
+@@ -124,6 +137,8 @@ static void __dwc_pwm_configure_timer(struct dwc_pwm *dwc,
+ 	 * Enable timer. Output starts from low period.
+ 	 */
+ 	__dwc_pwm_set_enable(dwc, pwm->hwpwm, state->enabled);
++
++	return 0;
+ }
+ 
+ static int dwc_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+@@ -137,7 +152,7 @@ static int dwc_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	if (state->enabled) {
+ 		if (!pwm->state.enabled)
+ 			pm_runtime_get_sync(chip->dev);
+-		__dwc_pwm_configure_timer(dwc, pwm, state);
++		return __dwc_pwm_configure_timer(dwc, pwm, state);
+ 	} else {
+ 		if (pwm->state.enabled) {
+ 			__dwc_pwm_set_enable(dwc, pwm->hwpwm, false);
+-- 
+2.27.0
+

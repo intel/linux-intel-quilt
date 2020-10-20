@@ -1,0 +1,131 @@
+From 1a2317167e7ddc456a754328b36c530abf5c33b2 Mon Sep 17 00:00:00 2001
+From: Ira Weiny <ira.weiny@intel.com>
+Date: Thu, 30 Jul 2020 17:12:44 -0700
+Subject: [PATCH 81/96] crypto: Remove unused async iterators
+
+Revert "crypto: hash - Add real ahash walk interface"
+This reverts commit 75ecb231ff45b54afa9f4ec9137965c3c00868f4.
+
+The callers of the functions in this commit were removed in ab8085c130ed
+
+Remove these unused calls.
+
+Fixes: ab8085c130ed ("crypto: x86 - remove SHA multibuffer routines and mcryptd")
+Cc: Ard Biesheuvel <ard.biesheuvel@linaro.org>
+Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+---
+ crypto/ahash.c                 | 41 ++++------------------------------
+ include/crypto/internal/hash.h | 13 -----------
+ 2 files changed, 4 insertions(+), 50 deletions(-)
+
+diff --git a/crypto/ahash.c b/crypto/ahash.c
+index d9d65d1cc669..d84ad925dfc9 100644
+--- a/crypto/ahash.c
++++ b/crypto/ahash.c
+@@ -10,7 +10,6 @@
+ 
+ #include <crypto/internal/hash.h>
+ #include <crypto/scatterwalk.h>
+-#include <linux/bug.h>
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+@@ -46,10 +45,7 @@ static int hash_walk_next(struct crypto_hash_walk *walk)
+ 	unsigned int nbytes = min(walk->entrylen,
+ 				  ((unsigned int)(PAGE_SIZE)) - offset);
+ 
+-	if (walk->flags & CRYPTO_ALG_ASYNC)
+-		walk->data = kmap(walk->pg);
+-	else
+-		walk->data = kmap_atomic(walk->pg);
++	walk->data = kmap_atomic(walk->pg);
+ 	walk->data += offset;
+ 
+ 	if (offset & alignmask) {
+@@ -99,16 +95,8 @@ int crypto_hash_walk_done(struct crypto_hash_walk *walk, int err)
+ 		}
+ 	}
+ 
+-	if (walk->flags & CRYPTO_ALG_ASYNC)
+-		kunmap(walk->pg);
+-	else {
+-		kunmap_atomic(walk->data);
+-		/*
+-		 * The may sleep test only makes sense for sync users.
+-		 * Async users don't need to sleep here anyway.
+-		 */
+-		crypto_yield(walk->flags);
+-	}
++	kunmap_atomic(walk->data);
++	crypto_yield(walk->flags);
+ 
+ 	if (err)
+ 		return err;
+@@ -140,33 +128,12 @@ int crypto_hash_walk_first(struct ahash_request *req,
+ 
+ 	walk->alignmask = crypto_ahash_alignmask(crypto_ahash_reqtfm(req));
+ 	walk->sg = req->src;
+-	walk->flags = req->base.flags & CRYPTO_TFM_REQ_MASK;
++	walk->flags = req->base.flags;
+ 
+ 	return hash_walk_new_entry(walk);
+ }
+ EXPORT_SYMBOL_GPL(crypto_hash_walk_first);
+ 
+-int crypto_ahash_walk_first(struct ahash_request *req,
+-			    struct crypto_hash_walk *walk)
+-{
+-	walk->total = req->nbytes;
+-
+-	if (!walk->total) {
+-		walk->entrylen = 0;
+-		return 0;
+-	}
+-
+-	walk->alignmask = crypto_ahash_alignmask(crypto_ahash_reqtfm(req));
+-	walk->sg = req->src;
+-	walk->flags = req->base.flags & CRYPTO_TFM_REQ_MASK;
+-	walk->flags |= CRYPTO_ALG_ASYNC;
+-
+-	BUILD_BUG_ON(CRYPTO_TFM_REQ_MASK & CRYPTO_ALG_ASYNC);
+-
+-	return hash_walk_new_entry(walk);
+-}
+-EXPORT_SYMBOL_GPL(crypto_ahash_walk_first);
+-
+ static int ahash_setkey_unaligned(struct crypto_ahash *tfm, const u8 *key,
+ 				unsigned int keylen)
+ {
+diff --git a/include/crypto/internal/hash.h b/include/crypto/internal/hash.h
+index 89f6f46ab2b8..6d3ad5ac4d28 100644
+--- a/include/crypto/internal/hash.h
++++ b/include/crypto/internal/hash.h
+@@ -62,25 +62,12 @@ struct crypto_shash_spawn {
+ int crypto_hash_walk_done(struct crypto_hash_walk *walk, int err);
+ int crypto_hash_walk_first(struct ahash_request *req,
+ 			   struct crypto_hash_walk *walk);
+-int crypto_ahash_walk_first(struct ahash_request *req,
+-			   struct crypto_hash_walk *walk);
+-
+-static inline int crypto_ahash_walk_done(struct crypto_hash_walk *walk,
+-					 int err)
+-{
+-	return crypto_hash_walk_done(walk, err);
+-}
+ 
+ static inline int crypto_hash_walk_last(struct crypto_hash_walk *walk)
+ {
+ 	return !(walk->entrylen | walk->total);
+ }
+ 
+-static inline int crypto_ahash_walk_last(struct crypto_hash_walk *walk)
+-{
+-	return crypto_hash_walk_last(walk);
+-}
+-
+ int crypto_register_ahash(struct ahash_alg *alg);
+ void crypto_unregister_ahash(struct ahash_alg *alg);
+ int crypto_register_ahashes(struct ahash_alg *algs, int count);
+-- 
+2.27.0
+

@@ -1,0 +1,123 @@
+From e6e309f6654a033454b57bd55f17094f3cb42840 Mon Sep 17 00:00:00 2001
+From: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+Date: Wed, 12 Aug 2020 17:46:31 +0800
+Subject: [PATCH 21/21] ASoC: codec: tlv3204: Moving GPIO reset and add ADC
+ reset
+
+Moving GPIO reset to a later stage and before clock registration to
+ensure that the host system and codec clocks are in sync. If the host
+register clock values prior to gpio reset, the last configured codec clock
+is registered to the host. The codec then gets gpio resetted setting the
+codec clocks to their default value, causing a mismatch. Host system will
+skip clock setting thinking the codec clocks are already at the requested
+rate.
+
+ADC reset is added to ensure the next audio capture does not have
+undesired artifacts. It is probably related to the original code
+where the probe function resets the ADC prior to 1st record.
+
+Signed-off-by: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+Reviewed-by: Sia Jee Heng <jee.heng.sia@intel.com>
+Reviewed-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Link: https://lore.kernel.org/r/20200812094631.4698-4-michael.wei.hong.sit@intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ sound/soc/codecs/tlv320aic32x4.c | 47 ++++++++++++++++++++++++--------
+ 1 file changed, 35 insertions(+), 12 deletions(-)
+
+diff --git a/sound/soc/codecs/tlv320aic32x4.c b/sound/soc/codecs/tlv320aic32x4.c
+index 6c2338ea5d8d..8dcea566b375 100644
+--- a/sound/soc/codecs/tlv320aic32x4.c
++++ b/sound/soc/codecs/tlv320aic32x4.c
+@@ -50,6 +50,28 @@ struct aic32x4_priv {
+ 	struct device *dev;
+ };
+ 
++static int aic32x4_reset_adc(struct snd_soc_dapm_widget *w,
++			     struct snd_kcontrol *kcontrol, int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	u32 adc_reg;
++
++	/*
++	 * Workaround: the datasheet does not mention a required programming
++	 * sequence but experiments show the ADC needs to be reset after each
++	 * capture to avoid audible artifacts.
++	 */
++	switch (event) {
++	case SND_SOC_DAPM_POST_PMD:
++		adc_reg = snd_soc_component_read(component, AIC32X4_ADCSETUP);
++		snd_soc_component_write(component, AIC32X4_ADCSETUP, adc_reg |
++					AIC32X4_LADC_EN | AIC32X4_RADC_EN);
++		snd_soc_component_write(component, AIC32X4_ADCSETUP, adc_reg);
++		break;
++	}
++	return 0;
++};
++
+ static int mic_bias_event(struct snd_soc_dapm_widget *w,
+ 	struct snd_kcontrol *kcontrol, int event)
+ {
+@@ -434,6 +456,7 @@ static const struct snd_soc_dapm_widget aic32x4_dapm_widgets[] = {
+ 	SND_SOC_DAPM_SUPPLY("Mic Bias", AIC32X4_MICBIAS, 6, 0, mic_bias_event,
+ 			SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+ 
++	SND_SOC_DAPM_POST("ADC Reset", aic32x4_reset_adc),
+ 
+ 	SND_SOC_DAPM_OUTPUT("HPL"),
+ 	SND_SOC_DAPM_OUTPUT("HPR"),
+@@ -665,8 +688,8 @@ static int aic32x4_set_processing_blocks(struct snd_soc_component *component,
+ }
+ 
+ static int aic32x4_setup_clocks(struct snd_soc_component *component,
+-			unsigned int sample_rate, unsigned int channel,
+-			unsigned int bit_depth)
++				unsigned int sample_rate, unsigned int channel,
++				unsigned int bit_depth)
+ {
+ 	u8 aosr;
+ 	u16 dosr;
+@@ -958,12 +981,6 @@ static int aic32x4_component_probe(struct snd_soc_component *component)
+ 	if (ret)
+ 		return ret;
+ 
+-	if (gpio_is_valid(aic32x4->rstn_gpio)) {
+-		ndelay(10);
+-		gpio_set_value(aic32x4->rstn_gpio, 1);
+-		mdelay(1);
+-	}
+-
+ 	snd_soc_component_write(component, AIC32X4_RESET, 0x01);
+ 
+ 	if (aic32x4->setup)
+@@ -1196,10 +1213,6 @@ int aic32x4_probe(struct device *dev, struct regmap *regmap)
+ 		aic32x4->mclk_name = "mclk";
+ 	}
+ 
+-	ret = aic32x4_register_clocks(dev, aic32x4->mclk_name);
+-	if (ret)
+-		return ret;
+-
+ 	if (gpio_is_valid(aic32x4->rstn_gpio)) {
+ 		ret = devm_gpio_request_one(dev, aic32x4->rstn_gpio,
+ 				GPIOF_OUT_INIT_LOW, "tlv320aic32x4 rstn");
+@@ -1221,6 +1234,16 @@ int aic32x4_probe(struct device *dev, struct regmap *regmap)
+ 		return ret;
+ 	}
+ 
++	if (gpio_is_valid(aic32x4->rstn_gpio)) {
++		ndelay(10);
++		gpio_set_value_cansleep(aic32x4->rstn_gpio, 1);
++		mdelay(1);
++	}
++
++	ret = aic32x4_register_clocks(dev, aic32x4->mclk_name);
++	if (ret)
++		return ret;
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(aic32x4_probe);
+-- 
+2.27.0
+
