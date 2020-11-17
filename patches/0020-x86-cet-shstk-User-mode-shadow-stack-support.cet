@@ -1,52 +1,22 @@
-From 4d711e7567fef1926fbc389df14efc2d73002efb Mon Sep 17 00:00:00 2001
+From d7db7c63eb43c90b18ed20a83d21090341174b32 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 22 Aug 2019 10:06:11 -0700
-Subject: [PATCH 20/43] x86/cet/shstk: User-mode shadow stack support
+Subject: [PATCH 20/37] x86/cet/shstk: User-mode shadow stack support
 
 This patch adds basic shadow stack enabling/disabling routines.  A task's
 shadow stack is allocated from memory with VM_SHSTK flag and has a fixed
 size of min(RLIMIT_STACK, 4GB).
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
-
-v12:
-- Split cet_disable_free_shstk() into disable and free parts, because
-  only the disable shadow stack arch_prctl() needs the disable part.
-  Other cases need only the free part.  In an exit syscall, there is
-  no need to write CET MSRs.
-
-v11:
-- Modify alloc_shstk() to take flags and pass to do_mmap().
-  This is to be used by an arch_prctl() introduced later.
-
-v10:
-- Change no_cet_shstk to no_user_shstk.
-- Limit shadow stack size to 4 GB, and round_up to PAGE_SIZE.
-- Replace checking shstk_enabled with shstk_size being zero.
-- WARN_ON_ONCE() when vm_munmap() fails.
-
-v9:
-- Change cpu_feature_enabled() to static_cpu_has().
-- Merge cet_disable_shstk to cet_disable_free_shstk.
-- Remove the empty slot at the top of the shadow stack, as it is not
-  needed.
-- Move do_mmap_locked() to alloc_shstk(), which is a static function.
-
-v6:
-- Create a function do_mmap_locked() for shadow stack allocation.
-
-v2:
-- Change noshstk to no_cet_shstk.
 ---
- arch/x86/include/asm/cet.h                    |  28 ++++
- arch/x86/include/asm/disabled-features.h      |   8 +-
- arch/x86/include/asm/processor.h              |   5 +
- arch/x86/kernel/Makefile                      |   2 +
- arch/x86/kernel/cet.c                         | 147 ++++++++++++++++++
- arch/x86/kernel/cpu/common.c                  |  28 ++++
- arch/x86/kernel/process.c                     |   1 +
- .../arch/x86/include/asm/disabled-features.h  |   8 +-
- 8 files changed, 225 insertions(+), 2 deletions(-)
+ arch/x86/include/asm/cet.h               |  28 +++++
+ arch/x86/include/asm/disabled-features.h |   8 +-
+ arch/x86/include/asm/processor.h         |   5 +
+ arch/x86/kernel/Makefile                 |   2 +
+ arch/x86/kernel/cet.c                    | 147 +++++++++++++++++++++++
+ arch/x86/kernel/cpu/common.c             |  28 +++++
+ arch/x86/kernel/process.c                |   1 +
+ 7 files changed, 218 insertions(+), 1 deletion(-)
  create mode 100644 arch/x86/include/asm/cet.h
  create mode 100644 arch/x86/kernel/cet.c
 
@@ -85,33 +55,33 @@ index 000000000000..5750fbcbb952
 +
 +#endif /* _ASM_X86_CET_H */
 diff --git a/arch/x86/include/asm/disabled-features.h b/arch/x86/include/asm/disabled-features.h
-index 4ea8584682f9..edac76ed75e7 100644
+index 5861d34f9771..6a9fb7f9bc01 100644
 --- a/arch/x86/include/asm/disabled-features.h
 +++ b/arch/x86/include/asm/disabled-features.h
-@@ -56,6 +56,12 @@
- # define DISABLE_PTI		(1 << (X86_FEATURE_PTI & 31))
+@@ -62,6 +62,12 @@
+ # define DISABLE_ENQCMD (1 << (X86_FEATURE_ENQCMD & 31))
  #endif
  
 +#ifdef CONFIG_X86_SHADOW_STACK_USER
 +#define DISABLE_SHSTK	0
 +#else
-+#define DISABLE_SHSTK	(1<<(X86_FEATURE_SHSTK & 31))
++#define DISABLE_SHSTK	(1 << (X86_FEATURE_SHSTK & 31))
 +#endif
 +
  /*
   * Make sure to add features to the correct mask
   */
-@@ -75,7 +81,7 @@
- #define DISABLED_MASK13	0
+@@ -82,7 +88,7 @@
  #define DISABLED_MASK14	0
  #define DISABLED_MASK15	0
--#define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP)
-+#define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP|DISABLE_SHSTK)
+ #define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP| \
+-			 DISABLE_ENQCMD)
++			 DISABLE_ENQCMD|DISABLE_SHSTK)
  #define DISABLED_MASK17	0
  #define DISABLED_MASK18	0
  #define DISABLED_MASK_CHECK BUILD_BUG_ON_ZERO(NCAPINTS != 19)
 diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
-index 01acbd63cad8..139cb99c7076 100644
+index 82a08b585818..2e0d9286f6cf 100644
 --- a/arch/x86/include/asm/processor.h
 +++ b/arch/x86/include/asm/processor.h
 @@ -27,6 +27,7 @@ struct vm86;
@@ -122,7 +92,7 @@ index 01acbd63cad8..139cb99c7076 100644
  
  #include <linux/personality.h>
  #include <linux/cache.h>
-@@ -542,6 +543,10 @@ struct thread_struct {
+@@ -536,6 +537,10 @@ struct thread_struct {
  
  	unsigned int		sig_on_uaccess_err:1;
  
@@ -134,13 +104,13 @@ index 01acbd63cad8..139cb99c7076 100644
  	struct fpu		fpu;
  	/*
 diff --git a/arch/x86/kernel/Makefile b/arch/x86/kernel/Makefile
-index e77261db2391..1fb85595afa7 100644
+index 68608bd892c0..4a89d0f3792e 100644
 --- a/arch/x86/kernel/Makefile
 +++ b/arch/x86/kernel/Makefile
-@@ -145,6 +145,8 @@ obj-$(CONFIG_UNWINDER_ORC)		+= unwind_orc.o
- obj-$(CONFIG_UNWINDER_FRAME_POINTER)	+= unwind_frame.o
+@@ -151,6 +151,8 @@ obj-$(CONFIG_UNWINDER_FRAME_POINTER)	+= unwind_frame.o
  obj-$(CONFIG_UNWINDER_GUESS)		+= unwind_guess.o
  
+ obj-$(CONFIG_AMD_MEM_ENCRYPT)		+= sev-es.o
 +obj-$(CONFIG_X86_CET)			+= cet.o
 +
  ###
@@ -300,10 +270,10 @@ index 000000000000..f8b0a077594f
 +	cet->shstk_size = 0;
 +}
 diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
-index c5d6f17d9b9d..084480f975aa 100644
+index 35ad8480c464..3d38ae02d9d3 100644
 --- a/arch/x86/kernel/cpu/common.c
 +++ b/arch/x86/kernel/cpu/common.c
-@@ -56,6 +56,7 @@
+@@ -57,6 +57,7 @@
  #include <asm/microcode_intel.h>
  #include <asm/intel-family.h>
  #include <asm/cpu_device_id.h>
@@ -311,7 +281,7 @@ index c5d6f17d9b9d..084480f975aa 100644
  #include <asm/uv/uv.h>
  
  #include "cpu.h"
-@@ -509,6 +510,32 @@ static __init int setup_disable_pku(char *arg)
+@@ -510,6 +511,32 @@ static __init int setup_disable_pku(char *arg)
  __setup("nopku", setup_disable_pku);
  #endif /* CONFIG_X86_64 */
  
@@ -344,7 +314,7 @@ index c5d6f17d9b9d..084480f975aa 100644
  /*
   * Some CPU features depend on higher CPUID levels, which may not always
   * be available due to CPUID level capping or broken virtualization
-@@ -1544,6 +1571,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
+@@ -1591,6 +1618,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
  
  	x86_init_rdrand(c);
  	setup_pku(c);
@@ -364,32 +334,6 @@ index ba4593a913fa..ff3b44d6740b 100644
  
  #include "process.h"
  
-diff --git a/tools/arch/x86/include/asm/disabled-features.h b/tools/arch/x86/include/asm/disabled-features.h
-index 4ea8584682f9..edac76ed75e7 100644
---- a/tools/arch/x86/include/asm/disabled-features.h
-+++ b/tools/arch/x86/include/asm/disabled-features.h
-@@ -56,6 +56,12 @@
- # define DISABLE_PTI		(1 << (X86_FEATURE_PTI & 31))
- #endif
- 
-+#ifdef CONFIG_X86_SHADOW_STACK_USER
-+#define DISABLE_SHSTK	0
-+#else
-+#define DISABLE_SHSTK	(1<<(X86_FEATURE_SHSTK & 31))
-+#endif
-+
- /*
-  * Make sure to add features to the correct mask
-  */
-@@ -75,7 +81,7 @@
- #define DISABLED_MASK13	0
- #define DISABLED_MASK14	0
- #define DISABLED_MASK15	0
--#define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP)
-+#define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP|DISABLE_SHSTK)
- #define DISABLED_MASK17	0
- #define DISABLED_MASK18	0
- #define DISABLED_MASK_CHECK BUILD_BUG_ON_ZERO(NCAPINTS != 19)
 -- 
 2.27.0
 

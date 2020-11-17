@@ -1,0 +1,59 @@
+From 8ed7ca890f9beb1513798c91a599a873f1a20c4c Mon Sep 17 00:00:00 2001
+From: Gabriel Krisman Bertazi <krisman@collabora.com>
+Date: Sat, 3 Oct 2020 23:25:32 -0400
+Subject: [PATCH 66/99] x86/elf: Use e_machine to select start_thread for x32
+
+Since TIF_X32 is going away, avoid using it to find the ELF type in
+compat_start_thread.
+
+According to SysV AMD64 ABI Draft, an AMD64 ELF object using ILP32 must
+have ELFCLASS32 with (E_MACHINE == EM_X86_64), so use that ELF field to
+differentiate a x32 object from a IA32 object when executing start_thread()
+in compat mode.
+
+Signed-off-by: Gabriel Krisman Bertazi <krisman@collabora.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Andy Lutomirski <luto@kernel.org>
+Link: https://lore.kernel.org/r/20201004032536.1229030-7-krisman@collabora.com
+---
+ arch/x86/include/asm/elf.h   | 5 +++--
+ arch/x86/kernel/process_64.c | 5 ++---
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/include/asm/elf.h b/arch/x86/include/asm/elf.h
+index 9220efc65d78..109697a19eb1 100644
+--- a/arch/x86/include/asm/elf.h
++++ b/arch/x86/include/asm/elf.h
+@@ -186,8 +186,9 @@ static inline void elf_common_init(struct thread_struct *t,
+ #define	COMPAT_ELF_PLAT_INIT(regs, load_addr)		\
+ 	elf_common_init(&current->thread, regs, __USER_DS)
+ 
+-void compat_start_thread(struct pt_regs *regs, u32 new_ip, u32 new_sp);
+-#define compat_start_thread compat_start_thread
++void compat_start_thread(struct pt_regs *regs, u32 new_ip, u32 new_sp, bool x32);
++#define COMPAT_START_THREAD(ex, regs, new_ip, new_sp)	\
++	compat_start_thread(regs, new_ip, new_sp, ex->e_machine == EM_X86_64)
+ 
+ void set_personality_ia32(bool);
+ #define COMPAT_SET_PERSONALITY(ex)			\
+diff --git a/arch/x86/kernel/process_64.c b/arch/x86/kernel/process_64.c
+index df342bedea88..5fb4103101f5 100644
+--- a/arch/x86/kernel/process_64.c
++++ b/arch/x86/kernel/process_64.c
+@@ -511,11 +511,10 @@ start_thread(struct pt_regs *regs, unsigned long new_ip, unsigned long new_sp)
+ EXPORT_SYMBOL_GPL(start_thread);
+ 
+ #ifdef CONFIG_COMPAT
+-void compat_start_thread(struct pt_regs *regs, u32 new_ip, u32 new_sp)
++void compat_start_thread(struct pt_regs *regs, u32 new_ip, u32 new_sp, bool x32)
+ {
+ 	start_thread_common(regs, new_ip, new_sp,
+-			    test_thread_flag(TIF_X32)
+-			    ? __USER_CS : __USER32_CS,
++			    x32 ? __USER_CS : __USER32_CS,
+ 			    __USER_DS, __USER_DS);
+ }
+ #endif
+-- 
+2.27.0
+

@@ -1,7 +1,7 @@
-From aee248b901d9db750d2ea0e25bff08370f5bfa31 Mon Sep 17 00:00:00 2001
+From 679bf61d413569245b7a55a68db967a7759f0146 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 5 Jan 2017 13:48:31 -0800
-Subject: [PATCH 21/43] x86/cet/shstk: Handle signals for shadow stack
+Subject: [PATCH 21/37] x86/cet/shstk: Handle signals for shadow stack
 
 To deliver a signal, create a shadow stack restore token and put a restore
 token and the signal restorer address on the shadow stack.  For sigreturn,
@@ -18,25 +18,6 @@ that into sc_ext now to keep the struct stable in case the IBT series is
 applied later.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
-
-v13:
-- Check restore token pointing to a valid address.
-
-v10:
-- Combine with WRUSS instruction patch, since it is used only here.
-- Revise signal restore code to the latest supervisor states handling.
-  Move shadow stack restore token checking out of the fast path.
-
-v9:
-- Update CET MSR access according to XSAVES supervisor state changes.
-- Add 'wait_endbr' to struct 'sc_ext'.
-- Update and simplify signal frame allocation, setup, and restoration.
-- Update commit log text.
-
-v2:
-- Move CET status from sigcontext to a separate struct sc_ext, which is
-  located above the fpstate on the signal frame.
-- Add a restore token for sigreturn address.
 ---
  arch/x86/ia32/ia32_signal.c            |  17 +++
  arch/x86/include/asm/cet.h             |   8 ++
@@ -122,10 +103,10 @@ index 5750fbcbb952..73435856ce54 100644
  
  #endif /* __ASSEMBLY__ */
 diff --git a/arch/x86/include/asm/fpu/internal.h b/arch/x86/include/asm/fpu/internal.h
-index 0a460f2a3f90..ec900a7a4786 100644
+index 8d33ad80704f..c1dedec2281b 100644
 --- a/arch/x86/include/asm/fpu/internal.h
 +++ b/arch/x86/include/asm/fpu/internal.h
-@@ -442,6 +442,16 @@ static inline void copy_kernel_to_fpregs(union fpregs_state *fpstate)
+@@ -443,6 +443,16 @@ static inline void copy_kernel_to_fpregs(union fpregs_state *fpstate)
  	__copy_kernel_to_fpregs(fpstate, -1);
  }
  
@@ -143,10 +124,10 @@ index 0a460f2a3f90..ec900a7a4786 100644
  
  /*
 diff --git a/arch/x86/include/asm/special_insns.h b/arch/x86/include/asm/special_insns.h
-index 59a3e13204c3..ee86c19da532 100644
+index cc177b4431ae..d979d0deb3ae 100644
 --- a/arch/x86/include/asm/special_insns.h
 +++ b/arch/x86/include/asm/special_insns.h
-@@ -232,6 +232,38 @@ static inline void clwb(volatile void *__p)
+@@ -234,6 +234,38 @@ static inline void clwb(volatile void *__p)
  		: [pax] "a" (p));
  }
  
@@ -184,7 +165,7 @@ index 59a3e13204c3..ee86c19da532 100644
 +
  #define nop() asm volatile ("nop")
  
- #endif /* __KERNEL__ */
+ static inline void serialize(void)
 diff --git a/arch/x86/include/uapi/asm/sigcontext.h b/arch/x86/include/uapi/asm/sigcontext.h
 index 844d60eb1882..cf2d55db3be4 100644
 --- a/arch/x86/include/uapi/asm/sigcontext.h
@@ -206,7 +187,7 @@ index 844d60eb1882..cf2d55db3be4 100644
   * The 32-bit signal frame:
   */
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index f8b0a077594f..728d9baceb74 100644
+index f8b0a077594f..c3da4f59bd17 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
 @@ -19,6 +19,8 @@
@@ -224,8 +205,8 @@ index f8b0a077594f..728d9baceb74 100644
  
 +#define TOKEN_MODE_MASK	3UL
 +#define TOKEN_MODE_64	1UL
-+#define IS_TOKEN_64(token) ((token & TOKEN_MODE_MASK) == TOKEN_MODE_64)
-+#define IS_TOKEN_32(token) ((token & TOKEN_MODE_MASK) == 0)
++#define IS_TOKEN_64(token) (((token) & TOKEN_MODE_MASK) == TOKEN_MODE_64)
++#define IS_TOKEN_32(token) (((token) & TOKEN_MODE_MASK) == 0)
 +
 +/*
 + * Verify the restore token at the address of 'ssp' is

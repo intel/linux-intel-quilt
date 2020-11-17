@@ -1,7 +1,7 @@
-From 4f34f680311dfc58aa4590e5487444ee591ac8d6 Mon Sep 17 00:00:00 2001
+From 545d06e59b193c9767e92ed4217ab20df8302d2c Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Wed, 24 Jan 2018 10:27:13 -0800
-Subject: [PATCH 08/43] x86/mm: Introduce _PAGE_COW
+Subject: [PATCH 08/37] x86/mm: Introduce _PAGE_COW
 
 There is essentially no room left in the x86 hardware PTEs on some OSes
 (not Linux).  That left the hardware architects looking for a way to
@@ -42,34 +42,16 @@ There are no more free bits in the 32-bit PTE (except for PAE) and shadow
 stack is not implemented for the 32-bit kernel.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
-Reviewed-by: Kees Cook <keescook@chromium.org>
-
-v10:
-- Change _PAGE_BIT_DIRTY_SW to _PAGE_BIT_COW, as it is used for copy-on-
-  write PTEs.
-- Update pte_write() and treat shadow stack as writable.
-- Change *_mkdirty_shstk() to *_mkwrite_shstk() as these make shadow stack
-  pages writable.
-- Use bit test & shift to move _PAGE_BIT_DIRTY_HW to _PAGE_BIT_COW.
-- Change static_cpu_has() to cpu_feature_enabled().
-- Revise commit log.
-
-v9:
-- Remove pte_move_flags() etc. and put the logic directly in
-  pte_wrprotect()/pte_mkwrite() etc.
-- Change compile-time conditionals to run-time checks.
-- Split out pte_modify()/pmd_modify() to a new patch.
-- Update comments.
 ---
  arch/x86/include/asm/pgtable.h       | 120 ++++++++++++++++++++++++---
  arch/x86/include/asm/pgtable_types.h |  41 ++++++++-
  2 files changed, 150 insertions(+), 11 deletions(-)
 
 diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index 86b7acd221c1..ac4ed814be96 100644
+index b23697658b28..c88c7ccf0318 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
-@@ -122,9 +122,9 @@ extern pmdval_t early_pmd_flags;
+@@ -121,9 +121,9 @@ extern pmdval_t early_pmd_flags;
   * The following only work if pte_present() is true.
   * Undefined behaviour if not..
   */
@@ -81,7 +63,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
  
-@@ -161,9 +161,9 @@ static inline int pte_young(pte_t pte)
+@@ -160,9 +160,9 @@ static inline int pte_young(pte_t pte)
  	return pte_flags(pte) & _PAGE_ACCESSED;
  }
  
@@ -93,7 +75,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
  static inline int pmd_young(pmd_t pmd)
-@@ -171,9 +171,9 @@ static inline int pmd_young(pmd_t pmd)
+@@ -170,9 +170,9 @@ static inline int pmd_young(pmd_t pmd)
  	return pmd_flags(pmd) & _PAGE_ACCESSED;
  }
  
@@ -105,7 +87,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
  static inline int pud_young(pud_t pud)
-@@ -183,6 +183,12 @@ static inline int pud_young(pud_t pud)
+@@ -182,6 +182,12 @@ static inline int pud_young(pud_t pud)
  
  static inline int pte_write(pte_t pte)
  {
@@ -118,7 +100,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pte_flags(pte) & _PAGE_RW;
  }
  
-@@ -334,7 +340,7 @@ static inline pte_t pte_clear_uffd_wp(pte_t pte)
+@@ -333,7 +339,7 @@ static inline pte_t pte_clear_uffd_wp(pte_t pte)
  
  static inline pte_t pte_mkclean(pte_t pte)
  {
@@ -127,7 +109,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
  static inline pte_t pte_mkold(pte_t pte)
-@@ -344,6 +350,17 @@ static inline pte_t pte_mkold(pte_t pte)
+@@ -343,6 +349,17 @@ static inline pte_t pte_mkold(pte_t pte)
  
  static inline pte_t pte_wrprotect(pte_t pte)
  {
@@ -145,7 +127,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pte_clear_flags(pte, _PAGE_RW);
  }
  
-@@ -354,6 +371,18 @@ static inline pte_t pte_mkexec(pte_t pte)
+@@ -353,6 +370,18 @@ static inline pte_t pte_mkexec(pte_t pte)
  
  static inline pte_t pte_mkdirty(pte_t pte)
  {
@@ -164,7 +146,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pte_set_flags(pte, _PAGE_DIRTY_HW | _PAGE_SOFT_DIRTY);
  }
  
-@@ -364,6 +393,13 @@ static inline pte_t pte_mkyoung(pte_t pte)
+@@ -363,6 +392,13 @@ static inline pte_t pte_mkyoung(pte_t pte)
  
  static inline pte_t pte_mkwrite(pte_t pte)
  {
@@ -178,7 +160,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pte_set_flags(pte, _PAGE_RW);
  }
  
-@@ -435,16 +471,41 @@ static inline pmd_t pmd_mkold(pmd_t pmd)
+@@ -434,16 +470,41 @@ static inline pmd_t pmd_mkold(pmd_t pmd)
  
  static inline pmd_t pmd_mkclean(pmd_t pmd)
  {
@@ -221,7 +203,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pmd_set_flags(pmd, _PAGE_DIRTY_HW | _PAGE_SOFT_DIRTY);
  }
  
-@@ -465,6 +526,13 @@ static inline pmd_t pmd_mkyoung(pmd_t pmd)
+@@ -464,6 +525,13 @@ static inline pmd_t pmd_mkyoung(pmd_t pmd)
  
  static inline pmd_t pmd_mkwrite(pmd_t pmd)
  {
@@ -235,7 +217,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pmd_set_flags(pmd, _PAGE_RW);
  }
  
-@@ -489,17 +557,36 @@ static inline pud_t pud_mkold(pud_t pud)
+@@ -488,17 +556,36 @@ static inline pud_t pud_mkold(pud_t pud)
  
  static inline pud_t pud_mkclean(pud_t pud)
  {
@@ -274,7 +256,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
  static inline pud_t pud_mkdevmap(pud_t pud)
-@@ -519,6 +606,13 @@ static inline pud_t pud_mkyoung(pud_t pud)
+@@ -518,6 +605,13 @@ static inline pud_t pud_mkyoung(pud_t pud)
  
  static inline pud_t pud_mkwrite(pud_t pud)
  {
@@ -288,7 +270,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  	return pud_set_flags(pud, _PAGE_RW);
  }
  
-@@ -1132,6 +1226,12 @@ extern int pmdp_clear_flush_young(struct vm_area_struct *vma,
+@@ -1131,6 +1225,12 @@ extern int pmdp_clear_flush_young(struct vm_area_struct *vma,
  #define pmd_write pmd_write
  static inline int pmd_write(pmd_t pmd)
  {
@@ -302,7 +284,7 @@ index 86b7acd221c1..ac4ed814be96 100644
  }
  
 diff --git a/arch/x86/include/asm/pgtable_types.h b/arch/x86/include/asm/pgtable_types.h
-index 5f31f1c407b9..75362df8b226 100644
+index 7462a574fc93..5f764d8d9bae 100644
 --- a/arch/x86/include/asm/pgtable_types.h
 +++ b/arch/x86/include/asm/pgtable_types.h
 @@ -23,7 +23,8 @@

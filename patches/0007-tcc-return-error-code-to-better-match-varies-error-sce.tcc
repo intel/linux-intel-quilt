@@ -1,4 +1,4 @@
-From fb883fa952c194a658980ed053bda9e13faca5e8 Mon Sep 17 00:00:00 2001
+From 40252634caae0e04e57f836cf4d31749f4f7fac6 Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Sat, 8 Aug 2020 18:02:04 +0800
 Subject: [PATCH 7/9] tcc: return error code to better match varies error

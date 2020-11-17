@@ -1,0 +1,172 @@
+From 0c455ceac0ec9a205a6e75d0a929c6c3b05b1e2f Mon Sep 17 00:00:00 2001
+From: Balbir Singh <sblbir@amazon.com>
+Date: Wed, 29 Jul 2020 10:11:02 +1000
+Subject: [PATCH 51/99] prctl: Hook L1D flushing in via prctl
+
+Use the existing PR_GET/SET_SPECULATION_CTRL API to expose the L1D
+flush capability. For L1D flushing PR_SPEC_FORCE_DISABLE and
+PR_SPEC_DISABLE_NOEXEC are not supported.
+
+There is also no seccomp integration for the feature.
+
+Signed-off-by: Balbir Singh <sblbir@amazon.com>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Link: https://lore.kernel.org/r/20200729001103.6450-5-sblbir@amazon.com
+---
+ arch/x86/kernel/cpu/bugs.c | 54 ++++++++++++++++++++++++++++++++++++++
+ arch/x86/mm/tlb.c          | 25 +++++++++++++++++-
+ include/uapi/linux/prctl.h |  1 +
+ 3 files changed, 79 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/cpu/bugs.c b/arch/x86/kernel/cpu/bugs.c
+index 581fb7223ad0..dece79e4d1e9 100644
+--- a/arch/x86/kernel/cpu/bugs.c
++++ b/arch/x86/kernel/cpu/bugs.c
+@@ -296,6 +296,13 @@ enum taa_mitigations {
+ 	TAA_MITIGATION_TSX_DISABLED,
+ };
+ 
++enum l1d_flush_out_mitigations {
++	L1D_FLUSH_OUT_OFF,
++	L1D_FLUSH_OUT_ON,
++};
++
++static enum l1d_flush_out_mitigations l1d_flush_out_mitigation __ro_after_init = L1D_FLUSH_OUT_ON;
++
+ /* Default mitigation for TAA-affected CPUs */
+ static enum taa_mitigations taa_mitigation __ro_after_init = TAA_MITIGATION_VERW;
+ static bool taa_nosmt __ro_after_init;
+@@ -379,6 +386,18 @@ static void __init taa_select_mitigation(void)
+ 	pr_info("%s\n", taa_strings[taa_mitigation]);
+ }
+ 
++static int __init l1d_flush_out_parse_cmdline(char *str)
++{
++	if (!boot_cpu_has_bug(X86_BUG_L1TF))
++		return 0;
++
++	if (!strcmp(str, "off"))
++		l1d_flush_out_mitigation = L1D_FLUSH_OUT_OFF;
++
++	return 0;
++}
++early_param("l1d_flush_out", l1d_flush_out_parse_cmdline);
++
+ static int __init tsx_async_abort_parse_cmdline(char *str)
+ {
+ 	if (!boot_cpu_has_bug(X86_BUG_TAA))
+@@ -1215,6 +1234,23 @@ static void task_update_spec_tif(struct task_struct *tsk)
+ 		speculation_ctrl_update_current();
+ }
+ 
++static int l1d_flush_out_prctl_set(struct task_struct *task, unsigned long ctrl)
++{
++
++	if (l1d_flush_out_mitigation == L1D_FLUSH_OUT_OFF)
++		return -EPERM;
++
++	switch (ctrl) {
++	case PR_SPEC_ENABLE:
++		return enable_l1d_flush_for_task(task);
++	case PR_SPEC_DISABLE:
++		return disable_l1d_flush_for_task(task);
++	default:
++		return -ERANGE;
++	}
++	return 0;
++}
++
+ static int ssb_prctl_set(struct task_struct *task, unsigned long ctrl)
+ {
+ 	if (ssb_mode != SPEC_STORE_BYPASS_PRCTL &&
+@@ -1324,6 +1360,8 @@ int arch_prctl_spec_ctrl_set(struct task_struct *task, unsigned long which,
+ 		return ssb_prctl_set(task, ctrl);
+ 	case PR_SPEC_INDIRECT_BRANCH:
+ 		return ib_prctl_set(task, ctrl);
++	case PR_SPEC_L1D_FLUSH_OUT:
++		return l1d_flush_out_prctl_set(task, ctrl);
+ 	default:
+ 		return -ENODEV;
+ 	}
+@@ -1340,6 +1378,20 @@ void arch_seccomp_spec_mitigate(struct task_struct *task)
+ }
+ #endif
+ 
++static int l1d_flush_out_prctl_get(struct task_struct *task)
++{
++	int ret;
++
++	if (l1d_flush_out_mitigation == L1D_FLUSH_OUT_OFF)
++		return PR_SPEC_FORCE_DISABLE;
++
++	ret = test_ti_thread_flag(&task->thread_info, TIF_SPEC_L1D_FLUSH);
++	if (ret)
++		return PR_SPEC_PRCTL | PR_SPEC_ENABLE;
++	else
++		return PR_SPEC_PRCTL | PR_SPEC_DISABLE;
++}
++
+ static int ssb_prctl_get(struct task_struct *task)
+ {
+ 	switch (ssb_mode) {
+@@ -1390,6 +1442,8 @@ int arch_prctl_spec_ctrl_get(struct task_struct *task, unsigned long which)
+ 		return ssb_prctl_get(task);
+ 	case PR_SPEC_INDIRECT_BRANCH:
+ 		return ib_prctl_get(task);
++	case PR_SPEC_L1D_FLUSH_OUT:
++		return l1d_flush_out_prctl_get(task);
+ 	default:
+ 		return -ENODEV;
+ 	}
+diff --git a/arch/x86/mm/tlb.c b/arch/x86/mm/tlb.c
+index 1531d98396a0..88e9ad5142e4 100644
+--- a/arch/x86/mm/tlb.c
++++ b/arch/x86/mm/tlb.c
+@@ -315,8 +315,31 @@ EXPORT_SYMBOL_GPL(leave_mm);
+ 
+ int enable_l1d_flush_for_task(struct task_struct *tsk)
+ {
++	int cpu, ret = 0, i;
++
++	/*
++	 * Do not enable L1D_FLUSH_OUT if
++	 * b. The CPU is not affected by the L1TF bug
++	 * c. The CPU does not have L1D FLUSH feature support
++	 * c. The task's affinity is on cores with SMT on.
++	 */
++
++	if (!boot_cpu_has_bug(X86_BUG_L1TF) ||
++			!static_cpu_has(X86_FEATURE_FLUSH_L1D))
++		return -EINVAL;
++
++	cpu = get_cpu();
++
++	for_each_cpu(i, &tsk->cpus_mask) {
++		if (cpu_data(i).smt_active == true) {
++			put_cpu();
++			return -EINVAL;
++		}
++	}
++
+ 	set_ti_thread_flag(&tsk->thread_info, TIF_SPEC_L1D_FLUSH);
+-	return 0;
++	put_cpu();
++	return ret;
+ }
+ 
+ int disable_l1d_flush_for_task(struct task_struct *tsk)
+diff --git a/include/uapi/linux/prctl.h b/include/uapi/linux/prctl.h
+index 7f0827705c9a..c334e6a02e5f 100644
+--- a/include/uapi/linux/prctl.h
++++ b/include/uapi/linux/prctl.h
+@@ -213,6 +213,7 @@ struct prctl_mm_map {
+ /* Speculation control variants */
+ # define PR_SPEC_STORE_BYPASS		0
+ # define PR_SPEC_INDIRECT_BRANCH	1
++# define PR_SPEC_L1D_FLUSH_OUT		2
+ /* Return and control values for PR_SET/GET_SPECULATION_CTRL */
+ # define PR_SPEC_NOT_AFFECTED		0
+ # define PR_SPEC_PRCTL			(1UL << 0)
+-- 
+2.27.0
+

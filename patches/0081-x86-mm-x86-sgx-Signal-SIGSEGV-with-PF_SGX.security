@@ -1,0 +1,75 @@
+From bcd7281736fd3b4f2682c0f1bcf48c1af9313da2 Mon Sep 17 00:00:00 2001
+From: Sean Christopherson <sean.j.christopherson@intel.com>
+Date: Thu, 1 Nov 2018 18:21:46 -0700
+Subject: [PATCH 81/99] x86/mm: x86/sgx: Signal SIGSEGV with PF_SGX
+
+The x86 architecture has a set of page fault error codes.  These indicate
+things like whether the fault occurred from a write, or whether it
+originated in userspace.
+
+The SGX hardware architecture has its own per-page memory management
+metadata (EPCM) [*] and hardware which is separate from the normal x86 MMU.
+The architecture has a new page fault error code: PF_SGX.  This new error
+code bit is set whenever a page fault occurs as the result of the SGX MMU.
+
+These faults occur for a variety of reasons.  For instance, an access
+attempt to enclave memory from outside the enclave causes a PF_SGX fault.
+PF_SGX would also be set for permission conflicts, such as if a write to an
+enclave page occurs and the page is marked read-write in the x86 page
+tables but is read-only in the EPCM.
+
+These faults do not always indicate errors, though.  SGX pages are
+encrypted with a key that is destroyed at hardware reset, including
+suspend. Throwing a SIGSEGV allows user space software to react and recover
+when these events occur.
+
+Include PF_SGX in the PF error codes list and throw SIGSEGV when it is
+encountered.
+
+[*] Intel SDM: 36.5.1 Enclave Page Cache Map (EPCM)
+
+Acked-by: Jethro Beekman <jethro@fortanix.com>
+Reviewed-by: Darren Kenny <darren.kenny@oracle.com>
+Reviewed-by: Borislav Petkov <bp@suse.de>
+Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+Signed-off-by: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>
+---
+ arch/x86/include/asm/trap_pf.h |  1 +
+ arch/x86/mm/fault.c            | 12 ++++++++++++
+ 2 files changed, 13 insertions(+)
+
+Index: kernel-staging/arch/x86/include/asm/trap_pf.h
+===================================================================
+--- kernel-staging.orig/arch/x86/include/asm/trap_pf.h
++++ kernel-staging/arch/x86/include/asm/trap_pf.h
+@@ -21,6 +21,7 @@ enum x86_pf_error_code {
+ 	X86_PF_INSTR	=		1 << 4,
+ 	X86_PF_PK	=		1 << 5,
+ 	X86_PF_SHSTK	=		1 << 6,
++	X86_PF_SGX	=		1 << 15,
+ };
+ 
+ #endif /* _ASM_X86_TRAP_PF_H */
+Index: kernel-staging/arch/x86/mm/fault.c
+===================================================================
+--- kernel-staging.orig/arch/x86/mm/fault.c
++++ kernel-staging/arch/x86/mm/fault.c
+@@ -1102,6 +1102,18 @@ access_error(unsigned long error_code, s
+ 		return 1;
+ 
+ 	/*
++	 * SGX hardware blocked the access.  This usually happens
++	 * when the enclave memory contents have been destroyed, like
++	 * after a suspend/resume cycle. In any case, the kernel can't
++	 * fix the cause of the fault.  Handle the fault as an access
++	 * error even in cases where no actual access violation
++	 * occurred.  This allows userspace to rebuild the enclave in
++	 * response to the signal.
++	 */
++	if (unlikely(error_code & X86_PF_SGX))
++		return 1;
++
++	/*
+ 	 * Make sure to check the VMA so that we do not perform
+ 	 * faults just to hit a X86_PF_PK as soon as we fill in a
+ 	 * page.

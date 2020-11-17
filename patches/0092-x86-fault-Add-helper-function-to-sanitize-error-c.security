@@ -1,0 +1,97 @@
+From e97d2d74cbc20e527a45e69017e2d4f09978d1b9 Mon Sep 17 00:00:00 2001
+From: Sean Christopherson <sean.j.christopherson@intel.com>
+Date: Fri, 15 Mar 2019 10:42:28 -0700
+Subject: [PATCH 92/99] x86/fault: Add helper function to sanitize error code
+
+vDSO exception fixup is a replacement for signals in limited situations.
+Signals and vDSO exception fixup need to provide similar information to
+userspace, including the hardware error code.
+
+That hardware error code needs to be sanitized.  For instance, if userspace
+accesses a kernel address, the error code could indicate to userspace
+whether the address had a Present=1 PTE.  That can leak information about
+the kernel layout to userspace, which is bad.
+
+The existing signal code does this sanitization, but fairly late in the
+signal process.  The vDSO exception code runs before the sanitization
+happens.
+
+Move error code sanitization out of the signal code and into a helper.
+Call the helper in the signal code.
+
+Acked-by: Jethro Beekman <jethro@fortanix.com>
+Signed-off-by: Sean Christopherson <sean.j.christopherson@intel.com>
+Signed-off-by: Jarkko Sakkinen <jarkko.sakkinen@linux.intel.com>
+---
+ arch/x86/mm/fault.c | 26 ++++++++++++++------------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 9339fee83784..0161d4acf3ad 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -602,11 +602,9 @@ pgtable_bad(struct pt_regs *regs, unsigned long error_code,
+ 	oops_end(flags, regs, sig);
+ }
+ 
+-static void set_signal_archinfo(unsigned long address,
+-				unsigned long error_code)
++static void sanitize_error_code(unsigned long address,
++				unsigned long *error_code)
+ {
+-	struct task_struct *tsk = current;
+-
+ 	/*
+ 	 * To avoid leaking information about the kernel page
+ 	 * table layout, pretend that user-mode accesses to
+@@ -617,7 +615,13 @@ static void set_signal_archinfo(unsigned long address,
+ 	 * information and does not appear to cause any problems.
+ 	 */
+ 	if (address >= TASK_SIZE_MAX)
+-		error_code |= X86_PF_PROT;
++		*error_code |= X86_PF_PROT;
++}
++
++static void set_signal_archinfo(unsigned long address,
++				unsigned long error_code)
++{
++	struct task_struct *tsk = current;
+ 
+ 	tsk->thread.trap_nr = X86_TRAP_PF;
+ 	tsk->thread.error_code = error_code | X86_PF_USER;
+@@ -658,6 +662,8 @@ no_context(struct pt_regs *regs, unsigned long error_code,
+ 		 * faulting through the emulate_vsyscall() logic.
+ 		 */
+ 		if (current->thread.sig_on_uaccess_err && signal) {
++			sanitize_error_code(address, &error_code);
++
+ 			set_signal_archinfo(address, error_code);
+ 
+ 			/* XXX: hwpoison faults will set the wrong code. */
+@@ -806,13 +812,7 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
+ 		if (is_errata100(regs, address))
+ 			return;
+ 
+-		/*
+-		 * To avoid leaking information about the kernel page table
+-		 * layout, pretend that user-mode accesses to kernel addresses
+-		 * are always protection faults.
+-		 */
+-		if (address >= TASK_SIZE_MAX)
+-			error_code |= X86_PF_PROT;
++		sanitize_error_code(address, &error_code);
+ 
+ 		if (likely(show_unhandled_signals))
+ 			show_signal_msg(regs, error_code, address, tsk);
+@@ -931,6 +931,8 @@ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
+ 	if (is_prefetch(regs, error_code, address))
+ 		return;
+ 
++	sanitize_error_code(address, &error_code);
++
+ 	set_signal_archinfo(address, error_code);
+ 
+ #ifdef CONFIG_MEMORY_FAILURE
+-- 
+2.27.0
+

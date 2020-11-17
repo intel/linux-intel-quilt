@@ -1,0 +1,77 @@
+From 659f096a92355b52197bca167e7a6b157c4b8386 Mon Sep 17 00:00:00 2001
+From: Mario Alejandro Posso Escobar <mario.posso.escobar@intel.com>
+Date: Thu, 29 Oct 2020 13:50:33 -0700
+Subject: [PATCH 21/21] i2c: ismt: Adding support for I2C_SMBUS_BLOCK_PROC_CALL
+
+Expand the driver to support I2C_SMBUS_BLOCK_PROC_CALL since
+HW supports it already.
+
+Co-developed-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: Mario Alejandro Posso Escobar <mario.posso.escobar@intel.com>
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+---
+ drivers/i2c/busses/i2c-ismt.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/i2c/busses/i2c-ismt.c b/drivers/i2c/busses/i2c-ismt.c
+index a35a27c320e7..a6187cbec2c9 100644
+--- a/drivers/i2c/busses/i2c-ismt.c
++++ b/drivers/i2c/busses/i2c-ismt.c
+@@ -53,7 +53,7 @@
+  *  Features supported by this driver:
+  *  Hardware PEC                     yes
+  *  Block buffer                     yes
+- *  Block process call transaction   no
++ *  Block process call transaction   yes
+  *  Slave mode                       no
+  */
+ 
+@@ -332,7 +332,8 @@ static int ismt_process_desc(const struct ismt_desc *desc,
+ 
+ 	if (desc->status & ISMT_DESC_SCS) {
+ 		if (read_write == I2C_SMBUS_WRITE &&
+-		    size != I2C_SMBUS_PROC_CALL)
++		    size != I2C_SMBUS_PROC_CALL &&
++		    size != I2C_SMBUS_BLOCK_PROC_CALL)
+ 			return 0;
+ 
+ 		switch (size) {
+@@ -345,6 +346,7 @@ static int ismt_process_desc(const struct ismt_desc *desc,
+ 			data->word = dma_buffer[0] | (dma_buffer[1] << 8);
+ 			break;
+ 		case I2C_SMBUS_BLOCK_DATA:
++		case I2C_SMBUS_BLOCK_PROC_CALL:
+ 			if (desc->rxbytes != dma_buffer[0] + 1)
+ 				return -EMSGSIZE;
+ 
+@@ -518,6 +520,18 @@ static int ismt_access(struct i2c_adapter *adap, u16 addr,
+ 		}
+ 		break;
+ 
++	case I2C_SMBUS_BLOCK_PROC_CALL:
++		dev_dbg(dev, "I2C_SMBUS_BLOCK_PROC_CALL\n");
++		dma_size = I2C_SMBUS_BLOCK_MAX;
++		desc->tgtaddr_rw = ISMT_DESC_ADDR_RW(addr, 1);
++		desc->wr_len_cmd = data->block[0] + 1;
++		desc->rd_len = dma_size;
++		desc->control |= ISMT_DESC_BLK;
++		dma_direction = DMA_BIDIRECTIONAL;
++		dma_buffer[0] = command;
++		memcpy(&dma_buffer[1], &data->block[1], data->block[0]);
++		break;
++
+ 	case I2C_SMBUS_I2C_BLOCK_DATA:
+ 		/* Make sure the length is valid */
+ 		if (data->block[0] < 1)
+@@ -624,6 +638,7 @@ static u32 ismt_func(struct i2c_adapter *adap)
+ 	       I2C_FUNC_SMBUS_BYTE_DATA		|
+ 	       I2C_FUNC_SMBUS_WORD_DATA		|
+ 	       I2C_FUNC_SMBUS_PROC_CALL		|
++	       I2C_FUNC_SMBUS_BLOCK_PROC_CALL	|
+ 	       I2C_FUNC_SMBUS_BLOCK_DATA	|
+ 	       I2C_FUNC_SMBUS_I2C_BLOCK		|
+ 	       I2C_FUNC_SMBUS_PEC;
+-- 
+2.27.0
+
