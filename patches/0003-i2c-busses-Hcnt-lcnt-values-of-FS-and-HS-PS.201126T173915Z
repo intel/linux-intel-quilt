@@ -1,0 +1,86 @@
+From 279242d159817e6f436d824f92ce4dd94b870814 Mon Sep 17 00:00:00 2001
+From: "D, Lakshmi Sowjanya" <lakshmi.sowjanya.d@intel.com>
+Date: Tue, 24 Nov 2020 15:45:05 +0530
+Subject: [PATCH 03/11] i2c: busses: Hcnt, lcnt values of FS and HS PSE I2C
+ mode and DMA runtime PM changes
+
+i2c: busses: High Speed and Fast Speed hcnt, lcnt values
+        Frequency observed is 1.02MHz
+
+dmaengine: dw: Enable runtime PM
+
+When consumer requests channel power on the DMA controller device
+and otherwise on the freeing channel resources.
+
+Note, in some cases consumer acquires channel at the ->probe() stage and
+releases it at the ->remove() stage. It will mean that DMA controller
+device
+will be powered during all this time if there is no assist from hardware
+to idle it. The above mentioned cases should be investigated separately
+and individually.
+
+Signed-off-by: Andy Shevchenko <andriy.shevchenko@linux.intel.com>
+Signed-off-by: D, Lakshmi Sowjanya <lakshmi.sowjanya.d@intel.com>
+---
+ drivers/dma/dw/core.c                      | 6 ++++++
+ drivers/i2c/busses/i2c-designware-pcidrv.c | 8 ++++----
+ 2 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/dma/dw/core.c b/drivers/dma/dw/core.c
+index 5e7fdc0b6e3d..972f48fb7595 100644
+--- a/drivers/dma/dw/core.c
++++ b/drivers/dma/dw/core.c
+@@ -977,8 +977,11 @@ static int dwc_alloc_chan_resources(struct dma_chan *chan)
+ 
+ 	dev_vdbg(chan2dev(chan), "%s\n", __func__);
+ 
++	pm_runtime_get_sync(dw->dma.dev);
++
+ 	/* ASSERT:  channel is idle */
+ 	if (dma_readl(dw, CH_EN) & dwc->mask) {
++		pm_runtime_put_sync_suspend(dw->dma.dev);
+ 		dev_dbg(chan2dev(chan), "DMA channel not idle?\n");
+ 		return -EIO;
+ 	}
+@@ -995,6 +998,7 @@ static int dwc_alloc_chan_resources(struct dma_chan *chan)
+ 	 * We need controller-specific data to set up slave transfers.
+ 	 */
+ 	if (chan->private && !dw_dma_filter(chan, chan->private)) {
++		pm_runtime_put_sync_suspend(dw->dma.dev);
+ 		dev_warn(chan2dev(chan), "Wrong controller-specific data\n");
+ 		return -EINVAL;
+ 	}
+@@ -1038,6 +1042,8 @@ static void dwc_free_chan_resources(struct dma_chan *chan)
+ 	if (!dw->in_use)
+ 		do_dw_dma_off(dw);
+ 
++	pm_runtime_put_sync_suspend(dw->dma.dev);
++
+ 	dev_vdbg(chan2dev(chan), "%s: done\n", __func__);
+ }
+ 
+diff --git a/drivers/i2c/busses/i2c-designware-pcidrv.c b/drivers/i2c/busses/i2c-designware-pcidrv.c
+index 97bdc139c42b..8aa03a015439 100644
+--- a/drivers/i2c/busses/i2c-designware-pcidrv.c
++++ b/drivers/i2c/busses/i2c-designware-pcidrv.c
+@@ -93,13 +93,13 @@ static struct dw_scl_sda_cfg hsw_config = {
+ /* Elkhartlake HCNT/LCNT/SDA hold time */
+ static struct dw_scl_sda_cfg ehl_config = {
+ 	.ss_hcnt = 0x190,
+-	.fs_hcnt = 0x3C,
++	.fs_hcnt = 0x4E,
+ 	.fp_hcnt = 0x1A,
+-	.hs_hcnt = 0xB,
++	.hs_hcnt = 0x1F,
+ 	.ss_lcnt = 0x1d6,
+-	.fs_lcnt = 0x82,
++	.fs_lcnt = 0x96,
+ 	.fp_lcnt = 0x32,
+-	.hs_lcnt = 0xE,
++	.hs_lcnt = 0x36,
+ 	.sda_hold = 0x1E,
+ };
+ 
+-- 
+2.17.1
+
