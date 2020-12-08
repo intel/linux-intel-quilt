@@ -1,0 +1,170 @@
+From cf0c911ef0aacff119064cabcb3dc8c36b054d91 Mon Sep 17 00:00:00 2001
+From: "Yang, Dong" <dong.yang@intel.com>
+Date: Wed, 23 Oct 2019 18:55:24 +0800
+Subject: [PATCH 1181/1214] optimize vtd WA
+
+the change include:
+1. fix a panic when i915 alloc buffer for error log
+2. export a sys file: vtd_wa, used to enable/disable vtd WA
+
+Change-Id: I15019df2aabbae3ac2d3e688a951cea201eb4e04
+Tracked-On: PKT-2785
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+---
+ drivers/gpu/drm/drm_drv.c             |  5 +++++
+ drivers/gpu/drm/i915/i915_gem_gtt.c   | 22 ++++++++++++++++++----
+ drivers/gpu/drm/i915/i915_gem_gtt.h   | 11 +++++++++++
+ drivers/gpu/drm/i915/i915_gpu_error.c |  4 ++--
+ include/drm/drm_drv.h                 |  2 ++
+ 5 files changed, 38 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
+index d8ae4ca..cdab6f7 100644
+--- a/drivers/gpu/drm/drm_drv.c
++++ b/drivers/gpu/drm/drm_drv.c
+@@ -50,6 +50,10 @@
+ unsigned int drm_debug = 0;
+ EXPORT_SYMBOL(drm_debug);
+ 
++/*drm_i915_wa*/
++int vtd_wa = 0;
++EXPORT_SYMBOL(vtd_wa);
++
+ MODULE_AUTHOR("Gareth Hughes, Leif Delgass, José Fonseca, Jon Smirl");
+ MODULE_DESCRIPTION("DRM shared core routines");
+ MODULE_LICENSE("GPL and additional rights");
+@@ -63,6 +67,7 @@ MODULE_PARM_DESC(debug, "Enable debug output, where each bit enables a debug cat
+ "\t\tBit 7 (0x80)  will enable LEASE messages (leasing code)\n"
+ "\t\tBit 8 (0x100) will enable DP messages (displayport code)");
+ module_param_named(debug, drm_debug, int, 0600);
++module_param(vtd_wa, int, 0644);
+ 
+ static DEFINE_SPINLOCK(drm_minor_lock);
+ static struct idr drm_minors_idr;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
+index a2e8ea9..a4d14d5 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.c
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.c
+@@ -2713,7 +2713,10 @@ static void bxt_vtd_ggtt_insert_page__BKL(struct i915_address_space *vm,
+ {
+ 	struct insert_page arg = { vm, addr, offset, level };
+ 
+-	stop_machine(bxt_vtd_ggtt_insert_page__cb, &arg, NULL);
++	if (vtd_wa)
++		stop_machine(bxt_vtd_ggtt_insert_page__cb, &arg, NULL);
++	else
++		gen8_ggtt_insert_page( vm, addr, offset, level, unused );
+ }
+ 
+ struct insert_entries {
+@@ -2740,7 +2743,10 @@ static void bxt_vtd_ggtt_insert_entries__BKL(struct i915_address_space *vm,
+ {
+ 	struct insert_entries arg = { vm, vma, level, flags };
+ 
+-	stop_machine(bxt_vtd_ggtt_insert_entries__cb, &arg, NULL);
++	if (vtd_wa)
++		stop_machine(bxt_vtd_ggtt_insert_entries__cb, &arg, NULL);
++	else
++		gen8_ggtt_insert_entries( vm, vma, level, flags );
+ }
+ 
+ struct clear_range {
+@@ -2765,7 +2771,10 @@ static void bxt_vtd_ggtt_clear_range__BKL(struct i915_address_space *vm,
+ {
+ 	struct clear_range arg = { vm, start, length };
+ 
+-	stop_machine(bxt_vtd_ggtt_clear_range__cb, &arg, NULL);
++	if (vtd_wa)
++		stop_machine(bxt_vtd_ggtt_clear_range__cb, &arg, NULL);
++	else
++		gen8_ggtt_clear_range(vm, start, length);
+ }
+ 
+ static void gen6_ggtt_clear_range(struct i915_address_space *vm,
+@@ -3510,11 +3519,16 @@ static int gen8_gmch_probe(struct i915_ggtt *ggtt)
+ 	ggtt->vm.total = (size / sizeof(gen8_pte_t)) << PAGE_SHIFT;
+ 	ggtt->vm.cleanup = gen6_gmch_remove;
+ 	ggtt->vm.insert_page = gen8_ggtt_insert_page;
++	ggtt->vm.insert_page_fast = gen8_ggtt_insert_page;
+ 	ggtt->vm.clear_range = nop_clear_range;
+-	if (!USES_FULL_PPGTT(dev_priv) || intel_scanout_needs_vtd_wa(dev_priv))
++	ggtt->vm.clear_range_fast = gen8_ggtt_clear_range;
++	if (!USES_FULL_PPGTT(dev_priv) || intel_scanout_needs_vtd_wa(dev_priv)) {
+ 		ggtt->vm.clear_range = gen8_ggtt_clear_range;
++		ggtt->vm.clear_range_fast = gen8_ggtt_clear_range;
++	}
+ 
+ 	ggtt->vm.insert_entries = gen8_ggtt_insert_entries;
++	ggtt->vm.insert_entries_fast = gen8_ggtt_insert_entries;
+ 
+ 	/* Serialize GTT updates with aperture access on BXT if VT-d is on. */
+ 	if (intel_ggtt_update_needs_vtd_wa(dev_priv)) {
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index 680e0dc..5c6ac3f 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -350,15 +350,26 @@ struct i915_address_space {
+ 				 u64 start, u64 length);
+ 	void (*clear_range)(struct i915_address_space *vm,
+ 			    u64 start, u64 length);
++	void (*clear_range_fast)(struct i915_address_space *vm,
++			    u64 start, u64 length);
+ 	void (*insert_page)(struct i915_address_space *vm,
+ 			    dma_addr_t addr,
+ 			    u64 offset,
+ 			    enum i915_cache_level cache_level,
+ 			    u32 flags);
++	void (*insert_page_fast)(struct i915_address_space *vm,
++			    dma_addr_t addr,
++			    u64 offset,
++			    enum i915_cache_level cache_level,
++			    u32 flags);
+ 	void (*insert_entries)(struct i915_address_space *vm,
+ 			       struct i915_vma *vma,
+ 			       enum i915_cache_level cache_level,
+ 			       u32 flags);
++	void (*insert_entries_fast)(struct i915_address_space *vm,
++			       struct i915_vma *vma,
++			       enum i915_cache_level cache_level,
++			       u32 flags);
+ 	void (*cleanup)(struct i915_address_space *vm);
+ 
+ 	struct i915_vma_ops vma_ops;
+diff --git a/drivers/gpu/drm/i915/i915_gpu_error.c b/drivers/gpu/drm/i915/i915_gpu_error.c
+index a803449..6543b76 100644
+--- a/drivers/gpu/drm/i915/i915_gpu_error.c
++++ b/drivers/gpu/drm/i915/i915_gpu_error.c
+@@ -1005,7 +1005,7 @@ i915_error_object_create(struct drm_i915_private *i915,
+ 	for_each_sgt_dma(dma, iter, vma->pages) {
+ 		void __iomem *s;
+ 
+-		ggtt->vm.insert_page(&ggtt->vm, dma, slot, I915_CACHE_NONE, 0);
++		ggtt->vm.insert_page_fast(&ggtt->vm, dma, slot, I915_CACHE_NONE, 0);
+ 
+ 		s = io_mapping_map_atomic_wc(&ggtt->iomap, slot);
+ 		ret = compress_page(&compress, (void  __force *)s, dst);
+@@ -1022,7 +1022,7 @@ i915_error_object_create(struct drm_i915_private *i915,
+ 	}
+ 
+ 	compress_fini(&compress, dst);
+-	ggtt->vm.clear_range(&ggtt->vm, slot, PAGE_SIZE);
++	ggtt->vm.clear_range_fast(&ggtt->vm, slot, PAGE_SIZE);
+ 	return dst;
+ }
+ 
+diff --git a/include/drm/drm_drv.h b/include/drm/drm_drv.h
+index 12c76a5b..401a246 100644
+--- a/include/drm/drm_drv.h
++++ b/include/drm/drm_drv.h
+@@ -619,6 +619,8 @@ struct drm_driver {
+ };
+ 
+ extern unsigned int drm_debug;
++extern int vtd_wa;
++
+ 
+ int drm_dev_init(struct drm_device *dev,
+ 		 struct drm_driver *driver,
+-- 
+2.7.4
+

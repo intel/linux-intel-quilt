@@ -1,0 +1,155 @@
+From 0b8a0697eac8269c54c2e6c3a4629bd4e9ecfa89 Mon Sep 17 00:00:00 2001
+From: "Yang, Dong" <dong.yang@intel.com>
+Date: Thu, 18 Oct 2018 16:35:21 +0800
+Subject: [PATCH 0835/1214] kthread i915_driver_load for boot-up time saving
+
+due to i915 initial time is too long, and async probe can not help to
+avoid PCI bus locking. (PCI bus is locked by driver/base/dd.c)
+
+PCI bus locking will block other driver probe, thus slow down kernel
+initial.
+
+put i915_driver_load into a kthread, and probe function returned
+imediently. and PCI bus will be unlocked, other driver can probe parallelly
+
+but due to cdev is created before i915 initial finished, very early access
+will crash kernel, so add wait queue for synchronize.
+
+v2: KW fix for potential dereferenced, by:
+Mustamin B Mustaffa <mustamin.b.mustaffa@intel.com>
+
+Change-Id: Ie436d5d499a33663270f13057c1a4e26182a1283
+Tracked-On: OAM-71501
+Signed-off-by: xichen12 <xi.a.chen@intel.com>
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+---
+ drivers/gpu/drm/i915/Kconfig    |  7 +++++++
+ drivers/gpu/drm/i915/i915_drv.c | 39 +++++++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_drv.h |  2 ++
+ drivers/gpu/drm/i915/i915_pci.c |  7 ++++++-
+ 4 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/Kconfig b/drivers/gpu/drm/i915/Kconfig
+index 3d25ace..004da3e 100644
+--- a/drivers/gpu/drm/i915/Kconfig
++++ b/drivers/gpu/drm/i915/Kconfig
+@@ -147,6 +147,13 @@ config DRM_I915_GVT_ACRN_GVT
+           Choose this option if you want to enable ACRN_GVT support for
+           Intel GVT-g under ACRN hypervisor environment.
+ 
++config DRM_I915_LOAD_ASYNC_SUPPORT
++       bool "Async i915_driver_load support"
++       default n
++       depends on DRM_I915
++       help
++         Choose this option to support async i915_driver_load for boot-up time saving
++
+ menu "drm/i915 Debugging"
+ depends on DRM_I915
+ depends on EXPERT
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 7a91c1e..45615ce 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -1331,6 +1331,41 @@ static void i915_driver_unregister(struct drm_i915_private *dev_priv)
+ 	i915_gem_shrinker_unregister(dev_priv);
+ }
+ 
++#ifdef CONFIG_DRM_I915_LOAD_ASYNC_SUPPORT
++
++static int i915_load_finished;
++static DECLARE_WAIT_QUEUE_HEAD(i915_load_queue);
++
++#include <linux/kthread.h>
++struct drm_i915_load_para {
++	struct pci_dev *dev;
++	const struct pci_device_id *ent;
++};
++
++static int drm_i915_load_fn(void *arg)
++{
++	struct drm_i915_load_para *para = (struct drm_i915_load_para *)arg;
++	struct pci_dev *dev = para->dev;
++	const struct pci_device_id *ent = para->ent;
++	int ret = i915_driver_load(dev, ent);
++	i915_load_finished = 1;
++	wake_up(&i915_load_queue);
++	return ret;
++}
++
++int i915_driver_load_async(struct pci_dev *pdev, const struct pci_device_id *ent)
++{
++	struct drm_i915_load_para *para;
++	para = (struct drm_i915_load_para *)kmalloc(sizeof(struct drm_i915_load_para), GFP_KERNEL);
++	if (para == NULL)
++		return -ENOMEM;
++	para->dev = pdev;
++	para->ent = ent;
++	kthread_run(drm_i915_load_fn, (void *)para, "drm_i915_load_thread");
++	return 0;
++}
++#endif
++
+ static void i915_welcome_messages(struct drm_i915_private *dev_priv)
+ {
+ 	if (drm_debug & DRM_UT_DRIVER) {
+@@ -1529,6 +1564,10 @@ static int i915_driver_open(struct drm_device *dev, struct drm_file *file)
+ 	struct drm_i915_private *i915 = to_i915(dev);
+ 	int ret;
+ 
++#ifdef CONFIG_DRM_I915_LOAD_ASYNC_SUPPORT
++	wait_event_interruptible(i915_load_queue, i915_load_finished == 1);
++#endif
++
+ 	ret = i915_gem_open(i915, file);
+ 	if (ret)
+ 		return ret;
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 53459d5..153f2b9 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2753,6 +2753,8 @@ extern const struct dev_pm_ops i915_pm_ops;
+ 
+ extern int i915_driver_load(struct pci_dev *pdev,
+ 			    const struct pci_device_id *ent);
++extern int i915_driver_load_async(struct pci_dev *pdev,
++			    const struct pci_device_id *ent);
+ extern void i915_driver_unload(struct drm_device *dev);
+ extern int intel_gpu_reset(struct drm_i915_private *dev_priv, u32 engine_mask);
+ extern bool intel_has_gpu_reset(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_pci.c b/drivers/gpu/drm/i915/i915_pci.c
+index 1df3ce1..57a1804 100644
+--- a/drivers/gpu/drm/i915/i915_pci.c
++++ b/drivers/gpu/drm/i915/i915_pci.c
+@@ -689,7 +689,9 @@ static int i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ {
+ 	struct intel_device_info *intel_info =
+ 		(struct intel_device_info *) ent->driver_data;
++#ifndef CONFIG_DRM_I915_LOAD_ASYNC_SUPPORT
+ 	int err;
++#endif
+ 
+ 	if (IS_ALPHA_SUPPORT(intel_info) && !i915_modparams.alpha_support) {
+ 		DRM_INFO("The driver support for your hardware in this kernel version is alpha quality\n"
+@@ -713,6 +715,9 @@ static int i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (vga_switcheroo_client_probe_defer(pdev))
+ 		return -EPROBE_DEFER;
+ 
++#ifdef CONFIG_DRM_I915_LOAD_ASYNC_SUPPORT
++	i915_driver_load_async(pdev, ent);
++#else
+ 	err = i915_driver_load(pdev, ent);
+ 	if (err)
+ 		return err;
+@@ -727,7 +732,7 @@ static int i915_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 		i915_pci_remove(pdev);
+ 		return err > 0 ? -ENOTTY : err;
+ 	}
+-
++#endif
+ 	return 0;
+ }
+ 
+-- 
+2.7.4
+

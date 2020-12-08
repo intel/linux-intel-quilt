@@ -1,0 +1,62 @@
+From 2640f8ccfb1179e373da55b828700f4857184654 Mon Sep 17 00:00:00 2001
+From: "Pan, Kris" <kris.pan@intel.com>
+Date: Fri, 30 Aug 2019 17:38:26 +0800
+Subject: [PATCH 1162/1214] drm: fix mutex lock issues in drm module
+
+When ctrc->primary is NULL in some cases, mutex lock is not
+unlocked and function exits with mutex in locked state, it might
+introduce deadlock issue. This change is to unlock the mutex
+in this corner case.
+
+Tracked-On: PKT-2605
+
+Signed-off-by: Pan, Kris <kris.pan@intel.com>
+Signed-off-by: Junxiao Chang <junxiao.chang@intel.com>
+---
+ drivers/gpu/drm/drm_crtc.c      | 6 +++---
+ drivers/gpu/drm/drm_fb_helper.c | 4 +++-
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_crtc.c b/drivers/gpu/drm/drm_crtc.c
+index dcfa240..2556b0c 100644
+--- a/drivers/gpu/drm/drm_crtc.c
++++ b/drivers/gpu/drm/drm_crtc.c
+@@ -603,6 +603,9 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
+ 	}
+ 	DRM_DEBUG_KMS("[CRTC:%d:%s]\n", crtc->base.id, crtc->name);
+ 
++	if (!crtc->primary)
++		return -EINVAL;
++
+ 	plane = crtc->primary;
+ 
+ 	/* allow disabling with the primary plane leased */
+@@ -620,9 +623,6 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
+ 	if (ret)
+ 		goto out;
+ 
+-	if (!crtc->primary)
+-		return -EINVAL;
+-
+ 	if (crtc_req->mode_valid) {
+ 		/* If we have a mode we need a framebuffer. */
+ 		/* If we pass -1, set the mode with the currently bound fb */
+diff --git a/drivers/gpu/drm/drm_fb_helper.c b/drivers/gpu/drm/drm_fb_helper.c
+index a1f3e28..addd85f 100644
+--- a/drivers/gpu/drm/drm_fb_helper.c
++++ b/drivers/gpu/drm/drm_fb_helper.c
+@@ -571,8 +571,10 @@ static bool drm_fb_helper_is_bound(struct drm_fb_helper *fb_helper)
+ 
+ 	drm_for_each_crtc(crtc, dev) {
+ 		drm_modeset_lock(&crtc->mutex, NULL);
+-		if (!crtc->primary)
++		if (!crtc->primary) {
++			drm_modeset_unlock(&crtc->mutex);
+ 			continue;
++		}
+ 		if (crtc->primary->fb)
+ 			crtcs_bound++;
+ 		if (crtc->primary->fb == fb_helper->fb)
+-- 
+2.7.4
+

@@ -1,0 +1,198 @@
+From 7cb28bf70aff65d6116995e3f56a2ccf7758368d Mon Sep 17 00:00:00 2001
+From: Fei Yang <fei.yang@intel.com>
+Date: Wed, 14 Nov 2018 18:05:28 -0800
+Subject: [PATCH 0841/1214] Revert "MUST_REBASE [IOTG]: drm/i915: Allow late
+ GuC/HuC loading"
+
+This reverts commit 95b167475a272abfd321b1e7cb47e58a08eba8ae.
+
+Tracked-On: OAM-71547
+Signed-off-by: Badiuzzaman Iskhandar <badiuzzaman.azzarfan.bin.iskhandar@intel.com>
+---
+ drivers/gpu/drm/i915/i915_drv.h         |  3 ---
+ drivers/gpu/drm/i915/i915_gem.c         | 48 ++++++---------------------------
+ drivers/gpu/drm/i915/i915_gem_context.c | 44 +++++-------------------------
+ drivers/gpu/drm/i915/intel_wopcm.c      |  7 -----
+ 4 files changed, 14 insertions(+), 88 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 153f2b9..2648093 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -2146,8 +2146,6 @@ struct drm_i915_private {
+ 
+ 	struct i915_pmu pmu;
+ 
+-    bool contexts_ready; /* for deferred initialization */
+-
+ 	/*
+ 	 * NOTE: This is the dri1/ums dungeon, don't add stuff here. Your patch
+ 	 * will be rejected. Instead look for a better place.
+@@ -3210,7 +3208,6 @@ void i915_gem_reset_engine(struct intel_engine_cs *engine,
+ void i915_gem_init_mmio(struct drm_i915_private *i915);
+ int __must_check i915_gem_init(struct drm_i915_private *dev_priv);
+ int __must_check i915_gem_init_hw(struct drm_i915_private *dev_priv);
+-int __must_check i915_gem_init_hw_late(struct drm_i915_private *dev_priv);
+ void i915_gem_init_swizzling(struct drm_i915_private *dev_priv);
+ void i915_gem_fini(struct drm_i915_private *dev_priv);
+ void i915_gem_cleanup_engines(struct drm_i915_private *dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index e9aad26..402db0d 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -6198,28 +6198,6 @@ static int __i915_gem_restart_engines(void *data)
+ 	return 0;
+ }
+ 
+-int i915_gem_init_hw_late(struct drm_i915_private *dev_priv)
+-{
+-	int ret;
+-
+-	/*
+-	 * Place for things that can be delayed until the first context
+-	 * is open. For example, fw loading in android.
+-	 */
+-
+-	/* fetch firmware */
+-	intel_uc_init_misc(dev_priv);
+-
+-	/* Load fw. We can't enable contexts until all firmware is loaded */
+-	ret = intel_uc_init_hw(dev_priv);
+-	if (ret) {
+-		DRM_ERROR("Late init: enabling uc failed (%d)\n", ret);
+-		return ret;
+-	}
+-
+-	return 0;
+-}
+-
+ int i915_gem_init_hw(struct drm_i915_private *dev_priv)
+ {
+ 	int ret;
+@@ -6278,17 +6256,11 @@ int i915_gem_init_hw(struct drm_i915_private *dev_priv)
+ 		goto out;
+ 	}
+ 
+-	/*
+-	 * Don't call i915_gem_init_hw_late() the very first time (during
+-	 * driver load); it will get called during first open instead.
+-	 * It should only be called on subsequent (re-initialization) passes.
+-	 */
+-	if (dev_priv->contexts_ready) {
+-		ret = i915_gem_init_hw_late(dev_priv);
+-		if (ret)
+-			goto out;
+-	} else {
+-		DRM_DEBUG_DRIVER("Deferring late initialization\n");
++	/* We can't enable contexts until all firmware is loaded */
++	ret = intel_uc_init_hw(dev_priv);
++	if (ret) {
++		DRM_ERROR("Enabling uc failed (%d)\n", ret);
++		goto out;
+ 	}
+ 
+ 	intel_mocs_init_l3cc_table(dev_priv);
+@@ -6452,13 +6424,9 @@ int i915_gem_init(struct drm_i915_private *dev_priv)
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * ANDROID: fetch fw during drm_open instead
+-	 * due to filesystem is not up yet during driver init
+-	 * ret = intel_uc_init_misc(dev_priv);
+-	 * if (ret)
+-	 * 	return ret;
+-	 */
++	ret = intel_uc_init_misc(dev_priv);
++	if (ret)
++		return ret;
+ 
+ 	ret = intel_wopcm_init(&dev_priv->wopcm);
+ 	if (ret)
+diff --git a/drivers/gpu/drm/i915/i915_gem_context.c b/drivers/gpu/drm/i915/i915_gem_context.c
+index 29cd228..7491797 100644
+--- a/drivers/gpu/drm/i915/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/i915_gem_context.c
+@@ -567,55 +567,23 @@ static int context_idr_cleanup(int id, void *p, void *data)
+ 	return 0;
+ }
+ 
+-int i915_gem_context_first_open(struct drm_i915_private *dev_priv)
+-{
+-	int ret;
+-
+-	lockdep_assert_held(&dev_priv->drm.struct_mutex);
+-
+-	DRM_DEBUG_DRIVER("Late initialization starting\n");
+-
+-	intel_runtime_pm_get(dev_priv);
+-	intel_uncore_forcewake_get(dev_priv, FORCEWAKE_ALL);
+-
+-	ret = i915_gem_init_hw_late(dev_priv);
+-	if (ret == 0)
+-		dev_priv->contexts_ready = true;
+-	else
+-		DRM_ERROR("Late initialization failed: %d\n", ret);
+-
+-	intel_uncore_forcewake_put(dev_priv, FORCEWAKE_ALL);
+-	intel_runtime_pm_put(dev_priv);
+-
+-	return ret;
+-}
+-
+ int i915_gem_context_open(struct drm_i915_private *i915,
+ 			  struct drm_file *file)
+ {
+ 	struct drm_i915_file_private *file_priv = file->driver_priv;
+ 	struct i915_gem_context *ctx;
+-	int ret = 0;
+ 
+ 	idr_init(&file_priv->context_idr);
+ 
+ 	mutex_lock(&i915->drm.struct_mutex);
+-
+-	if (!(i915->contexts_ready))
+-		ret = i915_gem_context_first_open(i915);
+-
+-	if (ret == 0) {
+-		ctx = i915_gem_create_context(i915, file_priv);
+-		if (IS_ERR(ctx))
+-			ret = PTR_ERR(ctx);
+-
+-		GEM_BUG_ON(i915_gem_context_is_kernel(ctx));
+-	}
+-
++	ctx = i915_gem_create_context(i915, file_priv);
+ 	mutex_unlock(&i915->drm.struct_mutex);
+-
+-	if (ret)
++	if (IS_ERR(ctx)) {
+ 		idr_destroy(&file_priv->context_idr);
++		return PTR_ERR(ctx);
++	}
++
++	GEM_BUG_ON(i915_gem_context_is_kernel(ctx));
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_wopcm.c b/drivers/gpu/drm/i915/intel_wopcm.c
+index 5ff877e..74bf76f 100644
+--- a/drivers/gpu/drm/i915/intel_wopcm.c
++++ b/drivers/gpu/drm/i915/intel_wopcm.c
+@@ -207,13 +207,6 @@ int intel_wopcm_init(struct intel_wopcm *wopcm)
+ 	wopcm->guc.base = guc_wopcm_base;
+ 	wopcm->guc.size = guc_wopcm_size;
+ 
+-	/*
+-	 * In deferred fw loading, we defer the intel_guc_init which will
+-	 * initialize the guc.ggtt_pin_bias. As it relies on wopcm size,
+-	 * set the ggtt_pin_bias after wopcm initialization
+-	 */
+-	i915->guc.ggtt_pin_bias = i915->wopcm.size - i915->wopcm.guc.base;
+-
+ 	return 0;
+ }
+ 
+-- 
+2.7.4
+

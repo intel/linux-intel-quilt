@@ -1,0 +1,151 @@
+From 2dca3aa01ad7f96ecf286f1d5d47a435836a134a Mon Sep 17 00:00:00 2001
+From: "[Ramesh Krishnan N]" <rameshx.krishnan.n@intel.com>
+Date: Wed, 27 May 2020 15:20:53 +0530
+Subject: [PATCH 1190/1214] xhci: Handle halted endpoint even if ring appears
+ empty
+
+xHC caches TRBs and may complete a trb with a STALL completion, halting
+the ring, even if the driver has cancelled the TD and endpoint appears
+empty.
+
+The host side of the endpoint needs to be reset, and dequeue pointer
+should be moved in order to clear the cached TRBs and resetart the endpoint.
+
+Small adjustments in finding the new dequeue pointer are needed to
+support the case of stall on an empty ring and unknown current TD.
+
+Change-Id: Ic986c8cdfca79751f3f7bd65f68089110400f246
+Tracked-On: OAM-91144
+Signed-off-by: Mathias Nyman <mathias.nyman@linux.intel.com>
+Signed-off-by: [Ramesh Krishnan N] <rameshx.krishnan.n@intel.com>
+Signed-off-by: [DINESH KUMAR MIRCHE] <dinesh.mirche@intel.com>
+---
+ drivers/usb/host/xhci-ring.c | 30 ++++++++++++++++++++++++++++--
+ drivers/usb/host/xhci.c      | 10 +++++-----
+ drivers/usb/host/xhci.h      |  5 +++--
+ 3 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
+index 2a19d9a..cb32a2c 100644
+--- a/drivers/usb/host/xhci-ring.c
++++ b/drivers/usb/host/xhci-ring.c
+@@ -534,6 +534,23 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
+ 				stream_id);
+ 		return;
+ 	}
++	/*
++	 * A cancelled TD can complete with a stall if hw had the trb cached.
++         * In this case driver can't find cur_td, but if ring is empty we can
++         * move the dequeue to current enqueue position.
++         */
++        if (!cur_td) {
++		if (list_empty(&ep_ring->td_list)) {
++			state->new_deq_seg = ep_ring->enq_seg;
++			state->new_deq_ptr = ep_ring->enqueue;
++			state->new_cycle_state = ep_ring->cycle_state;
++			goto done;
++		} else {
++			xhci_warn(xhci, "Can't find new dequeue state, missing cur_td\n");
++			return;
++		}
++	}
++
+ 	/* Dig out the cycle state saved by the xHC during the stop ep cmd */
+ 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
+ 			"Finding endpoint context");
+@@ -578,7 +595,7 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
+ 
+ 	state->new_deq_seg = new_seg;
+ 	state->new_deq_ptr = new_deq;
+-
++done:
+ 	/* Don't update the ring cycle state for the producer (us). */
+ 	xhci_dbg_trace(xhci, trace_xhci_dbg_cancel_urb,
+ 			"Cycle state = 0x%x", state->new_cycle_state);
+@@ -1815,7 +1832,7 @@ static void xhci_cleanup_halted_endpoint(struct xhci_hcd *xhci,
+ 
+ 	if (reset_type == EP_HARD_RESET) {
+ 		ep->ep_state |= EP_HARD_CLEAR_TOGGLE;
+-		xhci_cleanup_stalled_ring(xhci, ep_index, stream_id, td);
++		xhci_cleanup_stalled_ring(xhci, slot_id, ep_index, stream_id, td);
+ 	}
+ 	xhci_ring_cmd_db(xhci);
+ }
+@@ -2478,6 +2495,15 @@ static int handle_tx_event(struct xhci_hcd *xhci,
+ 				xhci_dbg(xhci, "td_list is empty while skip flag set. Clear skip flag for slot %u ep %u.\n",
+ 					 slot_id, ep_index);
+ 			}
++			if (trb_comp_code == COMP_STALL_ERROR || 
++		            xhci_requires_manual_halt_cleanup(xhci, ep_ctx,
++							      trb_comp_code)) {
++				xhci_warn(xhci, "Handing stall on empty ring\n");
++				xhci_cleanup_halted_endpoint(xhci, slot_id,
++						             ep_index,
++							     ep_ring->stream_id,
++							     NULL, EP_SOFT_RESET);
++			}
+ 			goto cleanup;
+ 		}
+ 
+diff --git a/drivers/usb/host/xhci.c b/drivers/usb/host/xhci.c
+index 9b9e451..6f30221 100644
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -3003,17 +3003,17 @@ static void xhci_setup_input_ctx_for_quirk(struct xhci_hcd *xhci,
+ }
+ 
+ void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int ep_index,
+-			       unsigned int stream_id, struct xhci_td *td)
++		               unsigned int slot_id, unsigned int stream_id, 
++			       struct xhci_td *td)
+ {
+ 	struct xhci_dequeue_state deq_state;
+-	struct usb_device *udev = td->urb->dev;
+ 
+ 	xhci_dbg_trace(xhci, trace_xhci_dbg_reset_ep,
+ 			"Cleaning up stalled endpoint ring");
+ 	/* We need to move the HW's dequeue pointer past this TD,
+ 	 * or it will attempt to resend it on the next doorbell ring.
+ 	 */
+-	xhci_find_new_dequeue_state(xhci, udev->slot_id,
++	xhci_find_new_dequeue_state(xhci, slot_id,
+ 			ep_index, stream_id, td, &deq_state);
+ 
+ 	if (!deq_state.new_deq_ptr || !deq_state.new_deq_seg)
+@@ -3025,7 +3025,7 @@ void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int ep_index,
+ 	if (!(xhci->quirks & XHCI_RESET_EP_QUIRK)) {
+ 		xhci_dbg_trace(xhci, trace_xhci_dbg_reset_ep,
+ 				"Queueing new dequeue state");
+-		xhci_queue_new_dequeue_state(xhci, udev->slot_id,
++		xhci_queue_new_dequeue_state(xhci, slot_id,
+ 				ep_index, &deq_state);
+ 	} else {
+ 		/* Better hope no one uses the input context between now and the
+@@ -3036,7 +3036,7 @@ void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int ep_index,
+ 		xhci_dbg_trace(xhci, trace_xhci_dbg_quirks,
+ 				"Setting up input context for "
+ 				"configure endpoint command");
+-		xhci_setup_input_ctx_for_quirk(xhci, udev->slot_id,
++		xhci_setup_input_ctx_for_quirk(xhci, slot_id,
+ 				ep_index, &deq_state);
+ 	}
+ }
+diff --git a/drivers/usb/host/xhci.h b/drivers/usb/host/xhci.h
+index d7542dd..a02f8d6 100644
+--- a/drivers/usb/host/xhci.h
++++ b/drivers/usb/host/xhci.h
+@@ -2130,8 +2130,9 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
+ void xhci_queue_new_dequeue_state(struct xhci_hcd *xhci,
+ 		unsigned int slot_id, unsigned int ep_index,
+ 		struct xhci_dequeue_state *deq_state);
+-void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int ep_index,
+-		unsigned int stream_id, struct xhci_td *td);
++void xhci_cleanup_stalled_ring(struct xhci_hcd *xhci, unsigned int slot_id,
++		unsigned int ep_index,unsigned int stream_id, 
++		struct xhci_td *td);
+ void xhci_stop_endpoint_command_watchdog(struct timer_list *t);
+ void xhci_handle_command_timeout(struct work_struct *work);
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,127 @@
+From 6576802fdfa2ffbacffefcf5bd32c4b0c904edf2 Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Mon, 21 Jan 2019 13:08:44 +0200
+Subject: [PATCH 1141/1214] usb: dwc3: gadget: remove
+ DWC3_EP_END_TRANSFER_PENDING
+
+Now that we modified the code to fix a race condition, it's clear that
+DWC3_EP_END_TRANSFER_PENDING is unnecessary, considering that
+DWC3_EP_TRANSFER_STARTED will remain set until End Transfer completes.
+
+Change-Id: I9c4f9b7754cde4e60871254b144de961104a014d
+Tested-by: Thinh Nguyen <thinhn@synopsys.com>
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Tracked-On: PKT-2349
+---
+ drivers/usb/dwc3/core.h   |  1 -
+ drivers/usb/dwc3/gadget.c | 17 ++++++-----------
+ drivers/usb/dwc3/trace.h  |  3 +--
+ 3 files changed, 7 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/usb/dwc3/core.h b/drivers/usb/dwc3/core.h
+index f09b181..363da05 100644
+--- a/drivers/usb/dwc3/core.h
++++ b/drivers/usb/dwc3/core.h
+@@ -682,7 +682,6 @@ struct dwc3_ep {
+ #define DWC3_EP_WEDGE		BIT(2)
+ #define DWC3_EP_TRANSFER_STARTED BIT(3)
+ #define DWC3_EP_PENDING_REQUEST	BIT(5)
+-#define DWC3_EP_END_TRANSFER_PENDING	BIT(7)
+ 
+ 	/* This last one is specific to EP0 */
+ #define DWC3_EP0_DIR_IN		BIT(31)
+diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
+index c9e7d9a..0967cd2 100644
+--- a/drivers/usb/dwc3/gadget.c
++++ b/drivers/usb/dwc3/gadget.c
+@@ -633,7 +633,6 @@ static int __dwc3_gadget_ep_enable(struct dwc3_ep *dep, unsigned int action)
+ 
+ 		dep->type = usb_endpoint_type(desc);
+ 		dep->flags |= DWC3_EP_ENABLED;
+-		dep->flags &= ~DWC3_EP_END_TRANSFER_PENDING;
+ 
+ 		reg = dwc3_readl(dwc->regs, DWC3_DALEPENA);
+ 		reg |= DWC3_DALEPENA_EP(dep->number);
+@@ -746,7 +745,7 @@ static int __dwc3_gadget_ep_disable(struct dwc3_ep *dep)
+ 
+ 	dep->stream_capable = false;
+ 	dep->type = 0;
+-	dep->flags &= DWC3_EP_END_TRANSFER_PENDING;
++	dep->flags = 0;
+ 
+ 	/* Clear out the ep descriptors for non-ep0 */
+ 	if (dep->number > 1) {
+@@ -1327,7 +1326,7 @@ static int __dwc3_gadget_kick_transfer(struct dwc3_ep *dep)
+ 			dwc3_gadget_move_cancelled_request(req);
+ 
+ 		/* If ep isn't started, then there's no end transfer pending */
+-		if (!(dep->flags & DWC3_EP_END_TRANSFER_PENDING))
++		if (!(dep->flags & DWC3_EP_TRANSFER_STARTED))
+ 			dwc3_gadget_ep_cleanup_cancelled_requests(dep);
+ 
+ 		return ret;
+@@ -2535,7 +2534,7 @@ static void dwc3_endpoint_interrupt(struct dwc3 *dwc,
+ 	dep = dwc->eps[epnum];
+ 
+ 	if (!(dep->flags & DWC3_EP_ENABLED)) {
+-		if (!(dep->flags & DWC3_EP_END_TRANSFER_PENDING))
++		if (!(dep->flags & DWC3_EP_TRANSFER_STARTED))
+ 			return;
+ 
+ 		/* Handle only EPCMDCMPLT when EP disabled */
+@@ -2559,8 +2558,7 @@ static void dwc3_endpoint_interrupt(struct dwc3 *dwc,
+ 		cmd = DEPEVT_PARAMETER_CMD(event->parameters);
+ 
+ 		if (cmd == DWC3_DEPCMD_ENDTRANSFER) {
+-			dep->flags &= ~(DWC3_EP_END_TRANSFER_PENDING |
+-					DWC3_EP_TRANSFER_STARTED);
++			dep->flags &= ~DWC3_EP_TRANSFER_STARTED;
+ 			dwc3_gadget_ep_cleanup_cancelled_requests(dep);
+ 		}
+ 		break;
+@@ -2618,8 +2616,7 @@ static void dwc3_stop_active_transfer(struct dwc3_ep *dep, bool force,
+ 	u32 cmd;
+ 	int ret;
+ 
+-	if ((dep->flags & DWC3_EP_END_TRANSFER_PENDING)
+-		|| !(dep->flags & DWC3_EP_TRANSFER_STARTED))
++	if (!(dep->flags & DWC3_EP_TRANSFER_STARTED))
+ 		return;
+ 
+ 	/*
+@@ -2662,10 +2659,8 @@ static void dwc3_stop_active_transfer(struct dwc3_ep *dep, bool force,
+ 	WARN_ON_ONCE(ret);
+ 	dep->resource_index = 0;
+ 
+-	if (dwc3_is_usb31(dwc) || dwc->revision < DWC3_REVISION_310A) {
+-		dep->flags |= DWC3_EP_END_TRANSFER_PENDING;
++	if (dwc3_is_usb31(dwc) || dwc->revision < DWC3_REVISION_310A)
+ 		udelay(100);
+-	}
+ }
+ 
+ static void dwc3_clear_stall_all_ep(struct dwc3 *dwc)
+diff --git a/drivers/usb/dwc3/trace.h b/drivers/usb/dwc3/trace.h
+index f27c5cb..b5ef3fd 100644
+--- a/drivers/usb/dwc3/trace.h
++++ b/drivers/usb/dwc3/trace.h
+@@ -305,7 +305,7 @@ DECLARE_EVENT_CLASS(dwc3_log_ep,
+ 		__entry->trb_enqueue = dep->trb_enqueue;
+ 		__entry->trb_dequeue = dep->trb_dequeue;
+ 	),
+-	TP_printk("%s: mps %d/%d streams %d burst %d ring %d/%d flags %c:%c%c%c%c:%c:%c",
++	TP_printk("%s: mps %d/%d streams %d burst %d ring %d/%d flags %c:%c%c%c%c:%c",
+ 		__get_str(name), __entry->maxpacket,
+ 		__entry->maxpacket_limit, __entry->max_streams,
+ 		__entry->maxburst, __entry->trb_enqueue,
+@@ -315,7 +315,6 @@ DECLARE_EVENT_CLASS(dwc3_log_ep,
+ 		__entry->flags & DWC3_EP_WEDGE ? 'W' : 'w',
+ 		__entry->flags & DWC3_EP_TRANSFER_STARTED ? 'B' : 'b',
+ 		__entry->flags & DWC3_EP_PENDING_REQUEST ? 'P' : 'p',
+-		__entry->flags & DWC3_EP_END_TRANSFER_PENDING ? 'E' : 'e',
+ 		__entry->direction ? '<' : '>'
+ 	)
+ );
+-- 
+2.7.4
+

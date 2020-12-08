@@ -1,0 +1,273 @@
+From 497717907029a85896592702ff464130b7527ca1 Mon Sep 17 00:00:00 2001
+From: Piotr Maziarz <piotrx.maziarz@linux.intel.com>
+Date: Mon, 9 Mar 2020 08:14:20 -0400
+Subject: [PATCH 1186/1214] ASoC: Intel: Skylake: Move DONE bit handling to top
+ half
+
+DONE bit handling is fast so there is no need to do it in bottom half.
+Doing it in hard IRQ makes communication faster and decreases a chance
+of hanging in bottom half due to system overload.
+
+Tracked-On: PKT-3258,OAM-90492
+Signed-off-by: Piotr Maziarz <piotrx.maziarz@linux.intel.com>
+Signed-off-by: Maciej Bach <maciejx.bach@intel.com>
+---
+ sound/soc/intel/skylake/cnl-sst-dsp.c | 27 +++++++++++++++++-----
+ sound/soc/intel/skylake/cnl-sst.c     | 36 +++++++----------------------
+ sound/soc/intel/skylake/skl-sst-dsp.c | 34 ++++++++++++++++++---------
+ sound/soc/intel/skylake/skl-sst-ipc.c | 43 +++++++++++------------------------
+ 4 files changed, 65 insertions(+), 75 deletions(-)
+
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.c b/sound/soc/intel/skylake/cnl-sst-dsp.c
+index 2d9c86d..ac313e8 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.c
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.c
+@@ -192,7 +192,7 @@ int cnl_dsp_disable_core(struct sst_dsp *ctx, unsigned int core_mask)
+ irqreturn_t cnl_dsp_sst_interrupt(int irq, void *dev_id)
+ {
+ 	struct sst_dsp *ctx = dev_id;
+-	u32 val;
++	u32 val, hipcida, hipctdr;
+ 	irqreturn_t ret = IRQ_NONE;
+ 
+ 	spin_lock(&ctx->spinlock);
+@@ -200,18 +200,33 @@ irqreturn_t cnl_dsp_sst_interrupt(int irq, void *dev_id)
+ 	val = sst_dsp_shim_read_unlocked(ctx, CNL_ADSP_REG_ADSPIS);
+ 	ctx->intr_status = val;
+ 
+-	if (val == 0xffffffff) {
+-		spin_unlock(&ctx->spinlock);
+-		return IRQ_NONE;
++	if (val == 0xffffffff || !(val & CNL_ADSPIS_IPC))
++		goto end;
++
++	hipcida = sst_dsp_shim_read_unlocked(ctx, CNL_ADSP_REG_HIPCIDA);
++	hipctdr = sst_dsp_shim_read_unlocked(ctx, CNL_ADSP_REG_HIPCTDR);
++
++	if (hipcida & CNL_ADSP_REG_HIPCIDA_DONE) {
++		sst_dsp_shim_update_bits_unlocked(ctx, CNL_ADSP_REG_HIPCCTL,
++			CNL_ADSP_REG_HIPCCTL_DONE, 0);
++
++		/* clear done bit - tell dsp operation is complete */
++		sst_dsp_shim_update_bits_forced_unlocked(ctx, CNL_ADSP_REG_HIPCIDA,
++			CNL_ADSP_REG_HIPCIDA_DONE, CNL_ADSP_REG_HIPCIDA_DONE);
++
++		/* unmask done interrupt */
++		sst_dsp_shim_update_bits_unlocked(ctx, CNL_ADSP_REG_HIPCCTL,
++			CNL_ADSP_REG_HIPCCTL_DONE, CNL_ADSP_REG_HIPCCTL_DONE);
++		ret = IRQ_HANDLED;
+ 	}
+ 
+-	if (val & CNL_ADSPIS_IPC) {
++	if (hipctdr & CNL_ADSP_REG_HIPCTDR_BUSY) {
+ 		cnl_ipc_int_disable(ctx);
+ 		ret = IRQ_WAKE_THREAD;
+ 	}
+ 
++end:
+ 	spin_unlock(&ctx->spinlock);
+-
+ 	return ret;
+ }
+ 
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index 5b98261..19e0a4f 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -436,33 +436,15 @@ static irqreturn_t cnl_dsp_irq_thread_handler(int irq, void *context)
+ 	struct skl_sst *cnl = sst_dsp_get_thread_context(dsp);
+ 	struct sst_generic_ipc *ipc = &cnl->ipc;
+ 	struct skl_ipc_header header = {0};
+-	u32 hipcida, hipctdr, hipctdd;
+-	int ipc_irq = 0;
++	u32 hipctdr, hipctdd;
+ 
+ 	/* here we handle ipc interrupts only */
+ 	if (!(dsp->intr_status & CNL_ADSPIS_IPC))
+ 		return IRQ_NONE;
+ 
+-	hipcida = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCIDA);
+ 	hipctdr = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDR);
+ 	hipctdd = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDD);
+ 
+-	/* reply message from dsp */
+-	if (hipcida & CNL_ADSP_REG_HIPCIDA_DONE) {
+-		sst_dsp_shim_update_bits(dsp, CNL_ADSP_REG_HIPCCTL,
+-			CNL_ADSP_REG_HIPCCTL_DONE, 0);
+-
+-		/* clear done bit - tell dsp operation is complete */
+-		sst_dsp_shim_update_bits_forced(dsp, CNL_ADSP_REG_HIPCIDA,
+-			CNL_ADSP_REG_HIPCIDA_DONE, CNL_ADSP_REG_HIPCIDA_DONE);
+-
+-		ipc_irq = 1;
+-
+-		/* unmask done interrupt */
+-		sst_dsp_shim_update_bits(dsp, CNL_ADSP_REG_HIPCCTL,
+-			CNL_ADSP_REG_HIPCCTL_DONE, CNL_ADSP_REG_HIPCCTL_DONE);
+-	}
+-
+ 	/* new message from dsp */
+ 	if (hipctdr & CNL_ADSP_REG_HIPCTDR_BUSY) {
+ 		header.primary = hipctdr;
+@@ -486,18 +468,16 @@ static irqreturn_t cnl_dsp_irq_thread_handler(int irq, void *context)
+ 		/* set done bit to ack dsp */
+ 		sst_dsp_shim_update_bits_forced(dsp, CNL_ADSP_REG_HIPCTDA,
+ 			CNL_ADSP_REG_HIPCTDA_DONE, CNL_ADSP_REG_HIPCTDA_DONE);
+-		ipc_irq = 1;
+-	}
+-
+-	if (ipc_irq == 0)
+-		return IRQ_NONE;
+ 
+-	cnl_ipc_int_enable(dsp);
++		cnl_ipc_int_enable(dsp);
+ 
+-	/* continue to send any remaining messages */
+-	schedule_work(&ipc->kwork);
++		/* continue to send any remaining messages */
++		schedule_work(&ipc->kwork);
+ 
+-	return IRQ_HANDLED;
++		return IRQ_HANDLED;
++	}
++	
++	return IRQ_NONE;
+ }
+ 
+ static struct sst_dsp_device cnl_dev = {
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.c b/sound/soc/intel/skylake/skl-sst-dsp.c
+index 891438d..a0a9513 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.c
++++ b/sound/soc/intel/skylake/skl-sst-dsp.c
+@@ -343,7 +343,7 @@ int skl_dsp_boot(struct sst_dsp *ctx)
+ irqreturn_t skl_dsp_sst_interrupt(int irq, void *dev_id)
+ {
+ 	struct sst_dsp *ctx = dev_id;
+-	u32 val;
++	u32 val, hipcie, hipct;
+ 	irqreturn_t result = IRQ_NONE;
+ 
+ 	spin_lock(&ctx->spinlock);
+@@ -351,23 +351,35 @@ irqreturn_t skl_dsp_sst_interrupt(int irq, void *dev_id)
+ 	val = sst_dsp_shim_read_unlocked(ctx, SKL_ADSP_REG_ADSPIS);
+ 	ctx->intr_status = val;
+ 
+-	if (val == 0xffffffff) {
+-		spin_unlock(&ctx->spinlock);
+-		return IRQ_NONE;
+-	}
++	if (!(val & SKL_ADSPIS_IPC))
++		goto end;
+ 
+-	if (val & SKL_ADSPIS_IPC) {
+-		skl_ipc_int_disable(ctx);
+-		result = IRQ_WAKE_THREAD;
++	hipcie = sst_dsp_shim_read_unlocked(ctx, SKL_ADSP_REG_HIPCIE);
++	hipct = sst_dsp_shim_read_unlocked(ctx, SKL_ADSP_REG_HIPCT);
++
++	if (hipcie & SKL_ADSP_REG_HIPCIE_DONE) {
++		sst_dsp_shim_update_bits_unlocked(ctx, SKL_ADSP_REG_HIPCCTL,
++			SKL_ADSP_REG_HIPCCTL_DONE, 0);
++
++		/* clear DONE bit - tell DSP we have completed the operation */
++		sst_dsp_shim_update_bits_forced_unlocked(ctx,
++			SKL_ADSP_REG_HIPCIE, SKL_ADSP_REG_HIPCIE_DONE,
++			SKL_ADSP_REG_HIPCIE_DONE);
++
++		/* unmask Done interrupt */
++		sst_dsp_shim_update_bits_unlocked(ctx, SKL_ADSP_REG_HIPCCTL,
++			SKL_ADSP_REG_HIPCCTL_DONE, SKL_ADSP_REG_HIPCCTL_DONE);
++		if (result != IRQ_WAKE_THREAD)
++			result = IRQ_HANDLED;
+ 	}
+ 
+-	if (val & SKL_ADSPIS_CL_DMA) {
+-		skl_cldma_int_disable(ctx);
++	if (hipct & SKL_ADSP_REG_HIPCT_BUSY) {
++		skl_ipc_int_disable(ctx);
+ 		result = IRQ_WAKE_THREAD;
+ 	}
+ 
++end:
+ 	spin_unlock(&ctx->spinlock);
+-
+ 	return result;
+ }
+ /*
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 293b0b0..ee15c05 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -773,36 +773,21 @@ irqreturn_t skl_dsp_irq_thread_handler(int irq, void *context)
+ 	struct skl_sst *skl = sst_dsp_get_thread_context(dsp);
+ 	struct sst_generic_ipc *ipc = &skl->ipc;
+ 	struct skl_ipc_header header = {0};
+-	u32 hipcie, hipct, hipcte;
+-	int ipc_irq = 0;
++	u32 hipct, hipcte;
++	int ret = IRQ_NONE;
+ 
+-	if (dsp->intr_status & SKL_ADSPIS_CL_DMA)
++	if (dsp->intr_status & SKL_ADSPIS_CL_DMA) {
+ 		skl_cldma_process_intr(dsp);
++		ret = IRQ_HANDLED;
++	}
+ 
+ 	/* Here we handle IPC interrupts only */
+ 	if (!(dsp->intr_status & SKL_ADSPIS_IPC))
+-		return IRQ_NONE;
++		return ret;
+ 
+-	hipcie = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCIE);
+ 	hipct = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCT);
+ 	hipcte = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCTE);
+ 
+-	/* reply message from DSP */
+-	if (hipcie & SKL_ADSP_REG_HIPCIE_DONE) {
+-		sst_dsp_shim_update_bits(dsp, SKL_ADSP_REG_HIPCCTL,
+-			SKL_ADSP_REG_HIPCCTL_DONE, 0);
+-
+-		/* clear DONE bit - tell DSP we have completed the operation */
+-		sst_dsp_shim_update_bits_forced(dsp, SKL_ADSP_REG_HIPCIE,
+-			SKL_ADSP_REG_HIPCIE_DONE, SKL_ADSP_REG_HIPCIE_DONE);
+-
+-		ipc_irq = 1;
+-
+-		/* unmask Done interrupt */
+-		sst_dsp_shim_update_bits(dsp, SKL_ADSP_REG_HIPCCTL,
+-			SKL_ADSP_REG_HIPCCTL_DONE, SKL_ADSP_REG_HIPCCTL_DONE);
+-	}
+-
+ 	/* New message from DSP */
+ 	if (hipct & SKL_ADSP_REG_HIPCT_BUSY) {
+ 		header.primary = hipct;
+@@ -822,19 +807,17 @@ irqreturn_t skl_dsp_irq_thread_handler(int irq, void *context)
+ 		/* clear  busy interrupt */
+ 		sst_dsp_shim_update_bits_forced(dsp, SKL_ADSP_REG_HIPCT,
+ 			SKL_ADSP_REG_HIPCT_BUSY, SKL_ADSP_REG_HIPCT_BUSY);
+-		ipc_irq = 1;
+-	}
+ 
+-	if (ipc_irq == 0)
+-		return IRQ_NONE;
++		skl_ipc_int_enable(dsp);
+ 
+-	skl_ipc_int_enable(dsp);
++		/* continue to send any remaining messages... */
++		if (!list_empty(&ipc->tx_list))
++			queue_work(system_highpri_wq, &ipc->kwork);
+ 
+-	/* continue to send any remaining messages... */
+-	if (!list_empty(&ipc->tx_list))
+-		queue_work(system_highpri_wq, &ipc->kwork);
++		ret = IRQ_HANDLED;
++	}
+ 
+-	return IRQ_HANDLED;
++	return ret;
+ }
+ 
+ void skl_ipc_int_enable(struct sst_dsp *ctx)
+-- 
+2.7.4
+

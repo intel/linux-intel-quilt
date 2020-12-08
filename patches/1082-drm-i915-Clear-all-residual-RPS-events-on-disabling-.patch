@@ -1,0 +1,74 @@
+From 1b4cb7b6d4a90cf2e5e9a801b6ef59a3acb047e7 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 2 Aug 2018 11:06:30 +0100
+Subject: [PATCH 1082/1214] drm/i915: Clear all residual RPS events on
+ disabling interrupts
+
+Make sure that the RPS IIR is completely clear on disabling so we should
+not get any more interrupts after idling. Since the IIR is shared with
+the guc, we have to be careful to only clobber RPS events.
+
+Change-Id: I55b4695278f0848d3a7521354ee85f1c146aef14
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Tracked-On: OAM-77673
+Link: https://patchwork.freedesktop.org/patch/msgid/20180802100631.31305-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_irq.c | 8 +++++---
+ drivers/gpu/drm/i915/i915_reg.h | 6 ++++--
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 7e95846..564f738 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -493,7 +493,7 @@ void gen11_reset_rps_interrupts(struct drm_i915_private *dev_priv)
+ void gen6_reset_rps_interrupts(struct drm_i915_private *dev_priv)
+ {
+ 	spin_lock_irq(&dev_priv->irq_lock);
+-	gen6_reset_pm_iir(dev_priv, dev_priv->pm_rps_events);
++	gen6_reset_pm_iir(dev_priv, GEN6_PM_RPS_EVENTS);
+ 	dev_priv->gt_pm.rps.pm_iir = 0;
+ 	spin_unlock_irq(&dev_priv->irq_lock);
+ }
+@@ -531,7 +531,7 @@ void gen6_disable_rps_interrupts(struct drm_i915_private *dev_priv)
+ 
+ 	I915_WRITE(GEN6_PMINTRMSK, gen6_sanitize_rps_pm_mask(dev_priv, ~0u));
+ 
+-	gen6_disable_pm_irq(dev_priv, dev_priv->pm_rps_events);
++	gen6_disable_pm_irq(dev_priv, GEN6_PM_RPS_EVENTS);
+ 
+ 	spin_unlock_irq(&dev_priv->irq_lock);
+ 	synchronize_irq(dev_priv->drm.irq);
+@@ -4824,7 +4824,9 @@ void intel_irq_init(struct drm_i915_private *dev_priv)
+ 		/* WaGsvRC0ResidencyMethod:vlv */
+ 		dev_priv->pm_rps_events = GEN6_PM_RP_UP_EI_EXPIRED;
+ 	else
+-		dev_priv->pm_rps_events = GEN6_PM_RPS_EVENTS;
++		dev_priv->pm_rps_events = (GEN6_PM_RP_UP_THRESHOLD |
++					   GEN6_PM_RP_DOWN_THRESHOLD |
++					   GEN6_PM_RP_DOWN_TIMEOUT);
+ 
+ 	rps->pm_intrmsk_mbz = 0;
+ 
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 32bcdb9..3adb59c 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -8516,8 +8516,10 @@ enum {
+ #define  GEN6_PM_RP_DOWN_THRESHOLD		(1 << 4)
+ #define  GEN6_PM_RP_UP_EI_EXPIRED		(1 << 2)
+ #define  GEN6_PM_RP_DOWN_EI_EXPIRED		(1 << 1)
+-#define  GEN6_PM_RPS_EVENTS			(GEN6_PM_RP_UP_THRESHOLD | \
+-						 GEN6_PM_RP_DOWN_THRESHOLD | \
++#define  GEN6_PM_RPS_EVENTS			(GEN6_PM_RP_UP_EI_EXPIRED   | \
++						 GEN6_PM_RP_UP_THRESHOLD    | \
++						 GEN6_PM_RP_DOWN_EI_EXPIRED | \
++						 GEN6_PM_RP_DOWN_THRESHOLD  | \
+ 						 GEN6_PM_RP_DOWN_TIMEOUT)
+ 
+ #define GEN7_GT_SCRATCH(i)			_MMIO(0x4F100 + (i) * 4)
+-- 
+2.7.4
+

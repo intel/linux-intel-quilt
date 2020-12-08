@@ -1,0 +1,282 @@
+From 4e3396c9dbf81654ea79fe651988a9eedff02332 Mon Sep 17 00:00:00 2001
+From: Piotr Maziarz <piotrx.maziarz@linux.intel.com>
+Date: Wed, 20 May 2020 13:32:04 +0200
+Subject: [PATCH 1196/1214] ASoC: Intel: Refactor IPC state machine
+
+Since there is only one message at a time, some fields can be moved from
+ipc_message to sst_generic_ipc.
+Also race condition when waiting for response was fixed.
+
+Change-Id: I32f767970206cd1ce573c87ba3615187de7e1bca
+Tracked-On: PKT-3636, OAM-91517
+Signed-off-by: Piotr Maziarz <piotrx.maziarz@linux.intel.com>
+---
+ sound/soc/intel/common/sst-dsp-priv.h     |  7 -----
+ sound/soc/intel/common/sst-ipc.c          | 44 +++++++++++++++++--------------
+ sound/soc/intel/common/sst-ipc.h          |  5 ++--
+ sound/soc/intel/haswell/sst-haswell-ipc.c |  3 +--
+ sound/soc/intel/skylake/cnl-sst-dsp.c     |  4 ---
+ sound/soc/intel/skylake/cnl-sst.c         |  4 +--
+ sound/soc/intel/skylake/skl-sst-dsp.c     |  4 ---
+ sound/soc/intel/skylake/skl-sst-ipc.c     | 16 ++++++-----
+ 8 files changed, 39 insertions(+), 48 deletions(-)
+
+diff --git a/sound/soc/intel/common/sst-dsp-priv.h b/sound/soc/intel/common/sst-dsp-priv.h
+index fd02fc3..196bb7d 100644
+--- a/sound/soc/intel/common/sst-dsp-priv.h
++++ b/sound/soc/intel/common/sst-dsp-priv.h
+@@ -294,12 +294,6 @@ struct sst_mem_block {
+ 	struct list_head list;		/* Map list of free/used blocks */
+ };
+ 
+-enum ipc_state {
+-	IPC_STATE_RESET = 0,
+-	IPC_STATE_RECEIVED,
+-	IPC_STATE_DEFERRED,
+-};
+-
+ /*
+  * Generic SST Shim Interface.
+  */
+@@ -316,7 +310,6 @@ struct sst_dsp {
+ 	void *thread_context;
+ 	int irq;
+ 	u32 id;
+-	enum ipc_state ipc_state;
+ 
+ 	/* operations */
+ 	struct sst_ops *ops;
+diff --git a/sound/soc/intel/common/sst-ipc.c b/sound/soc/intel/common/sst-ipc.c
+index 48cedd4..d962049 100644
+--- a/sound/soc/intel/common/sst-ipc.c
++++ b/sound/soc/intel/common/sst-ipc.c
+@@ -66,26 +66,31 @@ static int tx_wait_done(struct sst_generic_ipc *ipc,
+ 
+ again:
+ 	/* wait for DSP completion (in all cases atm inc pending) */
+-	ret = wait_event_timeout(ipc->msg->waitq, ipc->msg->complete,
+-		msecs_to_jiffies(IPC_TIMEOUT_MSECS));
+-
+-	if (ipc->dsp->ipc_state == IPC_STATE_RECEIVED) {
+-		/* fw did its job, now wait until it's processed */
+-		if (!ret) {
+-			wait_event(ipc->msg->waitq, ipc->msg->complete);
+-			ret = 1;
+-		}
++	ret = wait_for_completion_timeout(&ipc->complete,
++					  msecs_to_jiffies(IPC_TIMEOUT_MSECS));
++
++	if (!ret) {
++		if (ipc->ops.is_dsp_busy && !ipc->ops.is_dsp_busy(ipc->dsp))
++			/* real timeout */
++			goto end;
++		/*
++		 * fw did its job, either notification or reply
++		 * has been received - now wait until it's processed
++		 */
++		wait_for_completion_killable(&ipc->complete);
++		ret = 1;
+ 	}
+ 
+-	if (ipc->dsp->ipc_state == IPC_STATE_DEFERRED) {
++	spin_lock_irqsave(&ipc->dsp->spinlock, flags);
++	if (!ipc->response_processed) {
+ 		/* reply delayed due to nofitication */
+-		if (!ret)
+-			wait_event(ipc->msg->waitq, ipc->msg->complete);
+-		ipc->msg->complete = false;
+-		ipc->dsp->ipc_state = IPC_STATE_RESET;
++		reinit_completion(&ipc->complete);
++		spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
+ 		goto again;
+ 	}
++	spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
+ 
++end:
+ 	spin_lock_irqsave(&ipc->dsp->spinlock, flags);
+ 	if (ret == 0) {
+ 		if (ipc->ops.shim_dbg != NULL)
+@@ -142,9 +147,9 @@ static int ipc_tx_message(struct sst_generic_ipc *ipc, u64 header,
+ 
+ 	msg->wait = wait;
+ 	msg->errno = 0;
+-	msg->pending = false;
+-	msg->complete = false;
+-	ipc->dsp->ipc_state = IPC_STATE_RESET;
++	ipc->pending = false;
++	ipc->response_processed = false;
++	reinit_completion(&ipc->complete);
+ 
+ 	if ((tx_bytes) && (ipc->ops.tx_data_copy != NULL))
+ 		ipc->ops.tx_data_copy(msg, tx_data, tx_bytes);
+@@ -229,10 +234,8 @@ EXPORT_SYMBOL_GPL(sst_ipc_reply_find_msg);
+ void sst_ipc_tx_msg_reply_complete(struct sst_generic_ipc *ipc,
+ 	struct ipc_message *msg)
+ {
+-	msg->complete = true;
+-
+ 	if (msg->wait)
+-		wake_up(&msg->waitq);
++		complete(&ipc->complete);
+ }
+ EXPORT_SYMBOL_GPL(sst_ipc_tx_msg_reply_complete);
+ 
+@@ -240,6 +243,7 @@ int sst_ipc_init(struct sst_generic_ipc *ipc)
+ {
+ 	init_waitqueue_head(&ipc->wait_txq);
+ 	mutex_init(&ipc->mutex);
++	init_completion(&ipc->complete);
+ 
+ 	return msg_init(ipc);
+ }
+diff --git a/sound/soc/intel/common/sst-ipc.h b/sound/soc/intel/common/sst-ipc.h
+index 4b96495..46ee8a5 100644
+--- a/sound/soc/intel/common/sst-ipc.h
++++ b/sound/soc/intel/common/sst-ipc.h
+@@ -35,9 +35,6 @@ struct ipc_message {
+ 	char *rx_data;
+ 	size_t rx_size;
+ 
+-	wait_queue_head_t waitq;
+-	bool pending;
+-	bool complete;
+ 	bool wait;
+ 	int errno;
+ };
+@@ -60,6 +57,8 @@ struct sst_generic_ipc {
+ 
+ 	/* IPC messaging */
+ 	struct mutex mutex;
++	struct completion complete;
++	bool response_processed;
+ 	wait_queue_head_t wait_txq;
+ 	struct task_struct *tx_thread;
+ 	bool pending;
+diff --git a/sound/soc/intel/haswell/sst-haswell-ipc.c b/sound/soc/intel/haswell/sst-haswell-ipc.c
+index d87062a..b40745a 100644
+--- a/sound/soc/intel/haswell/sst-haswell-ipc.c
++++ b/sound/soc/intel/haswell/sst-haswell-ipc.c
+@@ -569,11 +569,10 @@ static int hsw_process_reply(struct sst_hsw *hsw, u32 header)
+ 	switch (reply) {
+ 	case IPC_GLB_REPLY_PENDING:
+ 		trace_ipc_pending_reply("received", header);
+-		msg->pending = true;
+ 		hsw->ipc.pending = true;
+ 		return 1;
+ 	case IPC_GLB_REPLY_SUCCESS:
+-		if (msg->pending) {
++		if (hsw->ipc.pending) {
+ 			trace_ipc_pending_reply("completed", header);
+ 			sst_dsp_inbox_read(hsw->dsp, msg->rx_data,
+ 				msg->rx_size);
+diff --git a/sound/soc/intel/skylake/cnl-sst-dsp.c b/sound/soc/intel/skylake/cnl-sst-dsp.c
+index 5122824..ac313e8 100644
+--- a/sound/soc/intel/skylake/cnl-sst-dsp.c
++++ b/sound/soc/intel/skylake/cnl-sst-dsp.c
+@@ -221,10 +221,6 @@ irqreturn_t cnl_dsp_sst_interrupt(int irq, void *dev_id)
+ 	}
+ 
+ 	if (hipctdr & CNL_ADSP_REG_HIPCTDR_BUSY) {
+-		if (CNL_IPC_GLB_NOTIFY_RSP_TYPE(hipctdr))
+-			ctx->ipc_state = IPC_STATE_RECEIVED;
+-		else if (ctx->ipc_state != IPC_STATE_RECEIVED)
+-			ctx->ipc_state = IPC_STATE_DEFERRED;
+ 		cnl_ipc_int_disable(ctx);
+ 		ret = IRQ_WAKE_THREAD;
+ 	}
+diff --git a/sound/soc/intel/skylake/cnl-sst.c b/sound/soc/intel/skylake/cnl-sst.c
+index cc727da..72c8ef0 100644
+--- a/sound/soc/intel/skylake/cnl-sst.c
++++ b/sound/soc/intel/skylake/cnl-sst.c
+@@ -493,9 +493,9 @@ static bool cnl_ipc_is_dsp_busy(struct sst_dsp *dsp)
+ {
+ 	u32 hipcidr;
+ 
+-	hipcidr = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCIDR);
++	hipcidr = sst_dsp_shim_read_unlocked(dsp, CNL_ADSP_REG_HIPCTDR);
+ 
+-	return (hipcidr & CNL_ADSP_REG_HIPCIDR_BUSY);
++	return (hipcidr & CNL_ADSP_REG_HIPCTDR_BUSY);
+ }
+ 
+ static int cnl_ipc_init(struct device *dev, struct skl_sst *cnl)
+diff --git a/sound/soc/intel/skylake/skl-sst-dsp.c b/sound/soc/intel/skylake/skl-sst-dsp.c
+index e7a2766..a0a9513 100644
+--- a/sound/soc/intel/skylake/skl-sst-dsp.c
++++ b/sound/soc/intel/skylake/skl-sst-dsp.c
+@@ -374,10 +374,6 @@ irqreturn_t skl_dsp_sst_interrupt(int irq, void *dev_id)
+ 	}
+ 
+ 	if (hipct & SKL_ADSP_REG_HIPCT_BUSY) {
+-		if (IPC_GLB_NOTIFY_RSP_TYPE(hipct))
+-			ctx->ipc_state = IPC_STATE_RECEIVED;
+-		else if (ctx->ipc_state != IPC_STATE_RECEIVED)
+-			ctx->ipc_state = IPC_STATE_DEFERRED;
+ 		skl_ipc_int_disable(ctx);
+ 		result = IRQ_WAKE_THREAD;
+ 	}
+diff --git a/sound/soc/intel/skylake/skl-sst-ipc.c b/sound/soc/intel/skylake/skl-sst-ipc.c
+index 43f0278..3e9c43a 100644
+--- a/sound/soc/intel/skylake/skl-sst-ipc.c
++++ b/sound/soc/intel/skylake/skl-sst-ipc.c
+@@ -332,8 +332,8 @@ static bool skl_ipc_is_dsp_busy(struct sst_dsp *dsp)
+ {
+ 	u32 hipci;
+ 
+-	hipci = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCI);
+-	return (hipci & SKL_ADSP_REG_HIPCI_BUSY);
++	hipci = sst_dsp_shim_read_unlocked(dsp, SKL_ADSP_REG_HIPCT);
++	return (hipci & SKL_ADSP_REG_HIPCT_BUSY);
+ }
+ 
+ /* Lock to be held by caller */
+@@ -570,7 +570,8 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 		struct skl_ipc_header header)
+ {
+ 	struct skl_sst *skl = container_of(ipc, struct skl_sst, ipc);
+-	int ret;
++	unsigned long flags;
++	int ret = 0;
+ 
+ 	if (IPC_GLB_NOTIFY_MSG_TYPE(header.primary)) {
+ 		switch (IPC_GLB_NOTIFY_TYPE(header.primary)) {
+@@ -622,7 +623,6 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 			if (ret < 0) {
+ 				dev_err(ipc->dev,
+ 					"dsp crash dump read fail:%d\n", ret);
+-				return ret;
+ 			}
+ 			break;
+ 
+@@ -631,7 +631,6 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 			if (ret < 0) {
+ 				dev_err(ipc->dev,
+ 				"Module Notification read fail:%d\n", ret);
+-				return ret;
+ 			}
+ 			break;
+ 
+@@ -642,7 +641,11 @@ int skl_ipc_process_notification(struct sst_generic_ipc *ipc,
+ 		}
+ 	}
+ 
+-	return 0;
++	spin_lock_irqsave(&ipc->dsp->spinlock, flags);
++	sst_ipc_tx_msg_reply_complete(ipc, ipc->msg);
++	spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
++
++	return ret;
+ }
+ 
+ static int skl_ipc_set_reply_error_code(u32 reply)
+@@ -716,6 +719,7 @@ void skl_ipc_process_reply(struct sst_generic_ipc *ipc,
+ 		}
+ 	}
+ 	spin_lock_irqsave(&ipc->dsp->spinlock, flags);
++	ipc->response_processed = true;
+ 	sst_ipc_tx_msg_reply_complete(ipc, msg);
+ 	spin_unlock_irqrestore(&ipc->dsp->spinlock, flags);
+ }
+-- 
+2.7.4
+

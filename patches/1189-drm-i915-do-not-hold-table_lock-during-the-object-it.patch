@@ -1,0 +1,78 @@
+From 1c82ab13b85707d5e442a53ef5e5e2cf3ace5468 Mon Sep 17 00:00:00 2001
+From: "Leong, Ren Zhi" <ren.zhi.leong@intel.com>
+Date: Thu, 26 Mar 2020 10:38:04 +0800
+Subject: [PATCH 1189/1214] drm/i915: do not hold table_lock during the object
+ iteration
+
+The __i915_gem_get_obj_info() function interates on all the PID
+objects protecting the iteration via the table_lock spinlock. This is
+causing the preemption to be disabled for a long time (more than 26 ms
+for 16318 objects). Having the preemption disabled for so long is
+unacceptable on a production system as it creates some latency issue
+for real-time threads.
+
+This patch uses the idr_get_next() function to perform the iteration
+manually instead of using the idr_for_each() helper function. It
+allows to reduce the critical section to:
+1. Get the next object using the last object ID
+2. Increase the reference counter of this object to prevent the object
+   to be freed while its size is being computed outside of the
+   critical section.
+
+Tracked-On: PKT-3458
+Signed-off-by: Lee, Shea Qi <shea.qi.lee@intel.com>
+Signed-off-by: Mirche, DInesh <dinesh.mirche@intel.com>
+---
+ drivers/gpu/drm/i915/i915_gem.c | 29 +++++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 3dcfb12..c4e4a72 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -796,6 +796,8 @@ __i915_gem_get_obj_info(struct drm_i915_error_state_buf *m,
+ 	list_for_each_entry(file, &dev->filelist, lhead) {
+ 		struct drm_i915_file_private *file_priv = file->driver_priv;
+ 		struct get_obj_stats_buf obj_stat_buf;
++		struct drm_i915_gem_object *obj;
++		int id;
+ 
+ 		obj_stat_buf.entry = &pid_entry;
+ 		obj_stat_buf.m = m;
+@@ -804,10 +806,29 @@ __i915_gem_get_obj_info(struct drm_i915_error_state_buf *m,
+ 			continue;
+ 
+ 		file_priv_reqd = file_priv;
+-		spin_lock(&file->table_lock);
+-		ret = idr_for_each(&file->object_idr,
+-				&i915_drm_gem_obj_info, &obj_stat_buf);
+-		spin_unlock(&file->table_lock);
++		/*
++		 * We do not use the idr_for_each() helper function
++		 * because the number of object can be large and we do
++		 * not want to keep the preemption disabled for too
++		 * long.
++		 */
++		for (id = 0 ;; ++id) {
++			/* Acquire an object. */
++			spin_lock(&file->table_lock);
++			obj = idr_get_next(&file->object_idr, &id);
++			if (obj)
++			i915_gem_object_get(obj);
++			spin_unlock(&file->table_lock);
++			if (!obj)
++				break;
++
++			/* Compute the object size. */
++			ret = i915_drm_gem_obj_info(id, obj, &obj_stat_buf);
++			i915_gem_object_put(obj);
++			if (ret)
++				break;
++		}
++
+ 		if (ret)
+ 			break;
+ 	}
+-- 
+2.7.4
+

@@ -1,0 +1,216 @@
+From 44209b3120195fad18022bdb8a89e5b2f1044d96 Mon Sep 17 00:00:00 2001
+From: "Yang, Dong" <dong.yang@intel.com>
+Date: Tue, 19 Feb 2019 09:21:24 +0800
+Subject: [PATCH 1083/1214] By pass frameinfo and audio check during early init
+ stage
+
+If the audio and frameinfo not filled by BIOS properly,
+it will trigger a modeset. By pass check audio and frameinfo
+during init stage, and init them separately.
+
+Tracked-On: OAM-79459
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+---
+ drivers/gpu/drm/i915/Kconfig         |  8 ++++
+ drivers/gpu/drm/i915/intel_ddi.c     |  8 ++++
+ drivers/gpu/drm/i915/intel_display.c | 91 ++++++++++++++++++++++++++++++++++--
+ drivers/gpu/drm/i915/intel_drv.h     | 12 +++++
+ 4 files changed, 115 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/Kconfig b/drivers/gpu/drm/i915/Kconfig
+index 004da3e..09c6442 100644
+--- a/drivers/gpu/drm/i915/Kconfig
++++ b/drivers/gpu/drm/i915/Kconfig
+@@ -154,6 +154,14 @@ config DRM_I915_LOAD_ASYNC_SUPPORT
+        help
+          Choose this option to support async i915_driver_load for boot-up time saving
+ 
++config DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++       bool "no check audio and infoframe during init"
++       default n
++       depends on DRM_I915
++       help
++         Choose this option to by pass audio and infoframe check during bootup
++         invoid trigger modeset, and these config will set separately.
++
+ menu "drm/i915 Debugging"
+ depends on DRM_I915
+ depends on EXPERT
+diff --git a/drivers/gpu/drm/i915/intel_ddi.c b/drivers/gpu/drm/i915/intel_ddi.c
+index 897ad63..8a1433d 100644
+--- a/drivers/gpu/drm/i915/intel_ddi.c
++++ b/drivers/gpu/drm/i915/intel_ddi.c
+@@ -2745,6 +2745,11 @@ static void intel_ddi_pre_enable_hdmi(struct intel_encoder *encoder,
+ 	intel_dig_port->set_infoframes(&encoder->base,
+ 				       crtc_state->has_infoframe,
+ 				       crtc_state, conn_state);
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	if (crtc_state->need_update_infoframe_audio == INFOFRAME_AUDIO_UPDATE)
++		if (crtc_state->has_audio)
++			intel_audio_codec_enable(encoder, crtc_state, conn_state);
++#endif
+ }
+ 
+ static void intel_ddi_pre_enable(struct intel_encoder *encoder,
+@@ -3155,6 +3160,9 @@ void intel_ddi_get_config(struct intel_encoder *encoder,
+ 		flags |= DRM_MODE_FLAG_NVSYNC;
+ 
+ 	pipe_config->base.adjusted_mode.flags |= flags;
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	pipe_config->need_update_infoframe_audio = INFOFRAME_AUDIO_INIT;
++#endif
+ 
+ 	switch (temp & TRANS_DDI_BPC_MASK) {
+ 	case TRANS_DDI_BPC_6:
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index ef05540..66281ff 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -11376,6 +11376,70 @@ pipe_config_err(bool adjust, const char *name, const char *format, ...)
+ 	va_end(args);
+ }
+ 
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++#define PIPE_CONF_CHECK_BOOL(name) do { \
++	if (current_config->name != pipe_config->name) { \
++		pipe_config_err(adjust, __stringify(name), \
++			  "(expected %s, found %s)\n", \
++			  yesno(current_config->name), \
++			  yesno(pipe_config->name)); \
++		ret = false; \
++	} \
++} while (0)
++
++
++/*
++ * Checks state where we only read out the enabling, but not the entire
++ * state itself (like full infoframes or ELD for audio). These states
++ * require a full modeset on bootup to fix up.
++ */
++#define PIPE_CONF_CHECK_BOOL_INCOMPLETE(name) do { \
++	if (!fixup_inherited || (!current_config->name && !pipe_config->name)) { \
++		PIPE_CONF_CHECK_BOOL(name); \
++	} else { \
++		pipe_config_err(adjust, __stringify(name), \
++			  "unable to verify whether state matches exactly, forcing modeset (expected %s, found %s)\n", \
++			  yesno(current_config->name), \
++			  yesno(pipe_config->name)); \
++		ret = false; \
++	} \
++} while (0)
++
++static bool
++intel_pipe_config_compare_audio(struct drm_i915_private *dev_priv,
++			  struct intel_crtc_state *current_config,
++			  struct intel_crtc_state *pipe_config,
++			  bool adjust)
++{
++	bool ret = true;
++	bool fixup_inherited = adjust &&
++		(current_config->base.mode.private_flags & I915_MODE_FLAG_INHERITED) &&
++		!(pipe_config->base.mode.private_flags & I915_MODE_FLAG_INHERITED);
++
++	PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_audio);
++
++	return ret;
++}
++
++static bool
++intel_pipe_config_compare_infoframe(struct drm_i915_private *dev_priv,
++			  struct intel_crtc_state *current_config,
++			  struct intel_crtc_state *pipe_config,
++			  bool adjust)
++{
++	bool ret = true;
++	bool fixup_inherited = adjust &&
++		(current_config->base.mode.private_flags & I915_MODE_FLAG_INHERITED) &&
++		!(pipe_config->base.mode.private_flags & I915_MODE_FLAG_INHERITED);
++
++	PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_infoframe);
++
++	return ret;
++}
++#undef PIPE_CONF_CHECK_BOOL
++#undef PIPE_CONF_CHECK_BOOL_INCOMPLETE
++#endif
++
+ static bool
+ intel_pipe_config_compare(struct drm_i915_private *dev_priv,
+ 			  struct intel_crtc_state *current_config,
+@@ -11563,11 +11627,22 @@ intel_pipe_config_compare(struct drm_i915_private *dev_priv,
+ 
+ 	PIPE_CONF_CHECK_BOOL(hdmi_scrambling);
+ 	PIPE_CONF_CHECK_BOOL(hdmi_high_tmds_clock_ratio);
+-	PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_infoframe);
+ 	PIPE_CONF_CHECK_BOOL(ycbcr420);
+-
+-	PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_audio);
+-
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	if (pipe_config->need_update_infoframe_audio == INFOFRAME_AUDIO_INIT) {
++		if (!intel_pipe_config_compare_audio(dev_priv, current_config, pipe_config, adjust)
++			||!intel_pipe_config_compare_infoframe(dev_priv, current_config, pipe_config, adjust))
++			pipe_config->need_update_infoframe_audio = INFOFRAME_AUDIO_UPDATE;
++		else
++			pipe_config->need_update_infoframe_audio = INFOFRAME_AUDIO_UPDATE_DONE;
++		}
++	else {
++#endif
++		PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_infoframe);
++		PIPE_CONF_CHECK_BOOL_INCOMPLETE(has_audio);
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	}
++#endif
+ 	PIPE_CONF_CHECK_FLAGS(base.adjusted_mode.flags,
+ 			      DRM_MODE_FLAG_INTERLACE);
+ 
+@@ -12489,8 +12564,16 @@ static void intel_update_crtc(struct drm_crtc *crtc,
+ 	} else {
+ 		intel_pre_plane_update(to_intel_crtc_state(old_crtc_state),
+ 				       pipe_config);
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++		if (pipe_config->need_update_infoframe_audio == INFOFRAME_AUDIO_UPDATE) {
++			intel_encoders_pre_enable(crtc, pipe_config, state);
++		}
++#endif
+ 	}
+ 
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	pipe_config->need_update_infoframe_audio = INFOFRAME_AUDIO_UPDATE_DONE;
++#endif
+ 	if (new_plane_state)
+ 		intel_fbc_enable(intel_crtc, pipe_config, new_plane_state);
+ 
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index 98a1472..229c253 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -729,6 +729,15 @@ struct intel_crtc_wm_state {
+ 	bool need_postvbl_update;
+ };
+ 
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++enum update_infoframe_audio_once {
++	INFOFRAME_AUDIO_INIT = 0,
++	INFOFRAME_AUDIO_UPDATE,
++	INFOFRAME_AUDIO_UPDATE_DONE,
++	INFOFRAME_AUDIO_MAX
++};
++#endif
++
+ struct intel_crtc_state {
+ 	struct drm_crtc_state base;
+ 
+@@ -767,6 +776,9 @@ struct intel_crtc_state {
+ 
+ 	/* Are we sending infoframes on the attached port */
+ 	bool has_infoframe;
++#ifdef CONFIG_DRM_I915_NO_AUDIO_INFOFRAME_CHECK
++	enum update_infoframe_audio_once need_update_infoframe_audio;
++#endif
+ 
+ 	/* CPU Transcoder for the pipe. Currently this can only differ from the
+ 	 * pipe on Haswell and later (where we have a special eDP transcoder)
+-- 
+2.7.4
+

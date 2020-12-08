@@ -1,0 +1,95 @@
+From 794790459f30d89343afda58e012182cfe27ab4a Mon Sep 17 00:00:00 2001
+From: Felipe Balbi <felipe.balbi@linux.intel.com>
+Date: Fri, 11 Jan 2019 12:57:09 +0200
+Subject: [PATCH 1137/1214] usb: dwc3: gadget: add dwc3_request status tracking
+
+This patch starts tracking dwc3_request status. A following patch will
+build on top of this to prevent a request from being queued twice.
+
+Change-Id: Ib7f2faa874cb4f3d7151ced6fb3fcb4484b6d71d
+Signed-off-by: Felipe Balbi <felipe.balbi@linux.intel.com>
+Tracked-On: PKT-2349
+---
+ drivers/usb/dwc3/core.h   | 9 +++++++++
+ drivers/usb/dwc3/gadget.c | 3 +++
+ drivers/usb/dwc3/gadget.h | 2 ++
+ 3 files changed, 14 insertions(+)
+
+diff --git a/drivers/usb/dwc3/core.h b/drivers/usb/dwc3/core.h
+index d6968b9..3fbae36 100644
+--- a/drivers/usb/dwc3/core.h
++++ b/drivers/usb/dwc3/core.h
+@@ -848,6 +848,7 @@ struct dwc3_hwparams {
+  * @num_pending_sgs: counter to pending sgs
+  * @num_queued_sgs: counter to the number of sgs which already got queued
+  * @remaining: amount of data remaining
++ * @status: internal dwc3 request status tracking
+  * @epnum: endpoint number to which this request refers
+  * @trb: pointer to struct dwc3_trb
+  * @trb_dma: DMA address of @trb
+@@ -868,6 +869,14 @@ struct dwc3_request {
+ 	unsigned		num_pending_sgs;
+ 	unsigned int		num_queued_sgs;
+ 	unsigned		remaining;
++
++	unsigned int		status;
++#define DWC3_REQUEST_STATUS_QUEUED	0
++#define DWC3_REQUEST_STATUS_STARTED	1
++#define DWC3_REQUEST_STATUS_CANCELLED	2
++#define DWC3_REQUEST_STATUS_COMPLETED	3
++#define DWC3_REQUEST_STATUS_UNKNOWN	-1
++
+ 	u8			epnum;
+ 	struct dwc3_trb		*trb;
+ 	dma_addr_t		trb_dma;
+diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
+index 8c968621..b6c1fb7 100644
+--- a/drivers/usb/dwc3/gadget.c
++++ b/drivers/usb/dwc3/gadget.c
+@@ -210,6 +210,7 @@ void dwc3_gadget_giveback(struct dwc3_ep *dep, struct dwc3_request *req,
+ 	struct dwc3			*dwc = dep->dwc;
+ 
+ 	dwc3_gadget_del_and_unmap_request(dep, req, status);
++	req->status = DWC3_REQUEST_STATUS_COMPLETED;
+ 
+ 	spin_unlock(&dwc->lock);
+ 	usb_gadget_giveback_request(&dep->endpoint, &req->request);
+@@ -845,6 +846,7 @@ static struct usb_request *dwc3_gadget_ep_alloc_request(struct usb_ep *ep,
+ 	req->direction	= dep->direction;
+ 	req->epnum	= dep->number;
+ 	req->dep	= dep;
++	req->status	= DWC3_REQUEST_STATUS_UNKNOWN;
+ 
+ 	trace_dwc3_alloc_request(req);
+ 
+@@ -1378,6 +1380,7 @@ static int __dwc3_gadget_ep_queue(struct dwc3_ep *dep, struct dwc3_request *req)
+ 	trace_dwc3_ep_queue(req);
+ 
+ 	list_add_tail(&req->list, &dep->pending_list);
++	req->status = DWC3_REQUEST_STATUS_QUEUED;
+ 
+ 	/*
+ 	 * NOTICE: Isochronous endpoints should NEVER be prestarted. We must
+diff --git a/drivers/usb/dwc3/gadget.h b/drivers/usb/dwc3/gadget.h
+index 023a473..6aebe8c 100644
+--- a/drivers/usb/dwc3/gadget.h
++++ b/drivers/usb/dwc3/gadget.h
+@@ -76,6 +76,7 @@ static inline void dwc3_gadget_move_started_request(struct dwc3_request *req)
+ 	struct dwc3_ep		*dep = req->dep;
+ 
+ 	req->started = true;
++	req->status = DWC3_REQUEST_STATUS_STARTED;
+ 	list_move_tail(&req->list, &dep->started_list);
+ }
+ 
+@@ -91,6 +92,7 @@ static inline void dwc3_gadget_move_cancelled_request(struct dwc3_request *req)
+ 	struct dwc3_ep		*dep = req->dep;
+ 
+ 	req->started = false;
++	req->status = DWC3_REQUEST_STATUS_CANCELLED;
+ 	list_move_tail(&req->list, &dep->cancelled_list);
+ }
+ 
+-- 
+2.7.4
+
