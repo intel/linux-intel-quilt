@@ -1,0 +1,50 @@
+From aabde3c668a16c4936b0a9e7b7d9855d736a1003 Mon Sep 17 00:00:00 2001
+From: Raymond Tan <raymond.tan@intel.com>
+Date: Tue, 28 Apr 2020 13:33:40 +0800
+Subject: [PATCH 17/19] spi: spi-dw-pci: Ensure spi_set_clk is called for every
+ transfer_one
+
+In Sx states, it's observed that BAUDR is not being restored,
+while the chip->speed_hz is still keeping its last value.
+
+Thus, original conditional check of both transfer->speed_hz and
+chip->speed_hz assume the BAUDR is kept through the Sx transition,
+and this cause failure of SPI transfer after Sx.
+
+Instead of fixing by saving and restoring the BAUDR register, it's
+cleaner to reprogrammed the BAUDR in every transfer through spi_set_clk.
+
+Signed-off-by: Raymond Tan <raymond.tan@intel.com>
+---
+ drivers/spi/spi-dw.c | 14 ++++++--------
+ 1 file changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/spi/spi-dw.c b/drivers/spi/spi-dw.c
+index 349d97890a75..3bdfc6847fc7 100644
+--- a/drivers/spi/spi-dw.c
++++ b/drivers/spi/spi-dw.c
+@@ -436,15 +436,13 @@ static int dw_spi_transfer_one(struct spi_controller *master,
+ 	spi_enable_chip(dws, 0);
+ 
+ 	/* Handle per transfer options for bpw and speed */
+-	if (transfer->speed_hz != dws->current_freq) {
+-		if (transfer->speed_hz != chip->speed_hz) {
+-			/* clk_div doesn't support odd number */
+-			chip->clk_div = (DIV_ROUND_UP(dws->max_freq, transfer->speed_hz) + 1) & 0xfffe;
+-			chip->speed_hz = transfer->speed_hz;
+-		}
+-		dws->current_freq = transfer->speed_hz;
+-		spi_set_clk(dws, chip->clk_div);
++	if (transfer->speed_hz != chip->speed_hz) {
++		/* clk_div doesn't support odd number */
++		chip->clk_div = (DIV_ROUND_UP(dws->max_freq, transfer->speed_hz) + 1) & 0xfffe;
++		chip->speed_hz = transfer->speed_hz;
+ 	}
++	dws->current_freq = transfer->speed_hz;
++	spi_set_clk(dws, chip->clk_div);
+ 
+ 	dws->n_bytes = DIV_ROUND_UP(transfer->bits_per_word, BITS_PER_BYTE);
+ 	dws->dma_width = DIV_ROUND_UP(transfer->bits_per_word, BITS_PER_BYTE);
+-- 
+2.17.1
+
