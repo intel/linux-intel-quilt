@@ -51,10 +51,10 @@ Signed-off-by: Casey Schaufler <casey@schaufler-ca.com>
  16 files changed, 635 insertions(+), 86 deletions(-)
  create mode 100644 security/stacking.c
 
-diff --git a/include/linux/lsm_hooks.h b/include/linux/lsm_hooks.h
-index ed8205866789..16b20c35adcf 100644
---- a/include/linux/lsm_hooks.h
-+++ b/include/linux/lsm_hooks.h
+Index: kernel-lts-staging/include/linux/lsm_hooks.h
+===================================================================
+--- kernel-lts-staging.orig/include/linux/lsm_hooks.h
++++ kernel-lts-staging/include/linux/lsm_hooks.h
 @@ -28,6 +28,7 @@
  #include <linux/security.h>
  #include <linux/init.h>
@@ -63,7 +63,7 @@ index ed8205866789..16b20c35adcf 100644
  
  /**
   * union security_list_options - Linux Security Module hook function list
-@@ -2109,4 +2110,11 @@ void lsm_early_task(struct task_struct *task);
+@@ -2111,4 +2112,11 @@ void lsm_early_task(struct task_struct *
  void lsm_early_inode(struct inode *inode);
  #endif
  
@@ -75,19 +75,19 @@ index ed8205866789..16b20c35adcf 100644
 +#endif /* CONFIG_NETLABEL */
 +
  #endif /* ! __LINUX_LSM_HOOKS_H */
-diff --git a/include/linux/security.h b/include/linux/security.h
-index ca55adcc94ec..01703e2708f2 100644
---- a/include/linux/security.h
-+++ b/include/linux/security.h
+Index: kernel-lts-staging/include/linux/security.h
+===================================================================
+--- kernel-lts-staging.orig/include/linux/security.h
++++ kernel-lts-staging/include/linux/security.h
 @@ -53,6 +53,7 @@ struct msg_msg;
  struct xattr;
  struct xfrm_sec_ctx;
  struct mm_struct;
 +struct sk_buff;
  
- /* If capable should audit the security request */
- #define SECURITY_CAP_NOAUDIT 0
-@@ -70,6 +71,33 @@ enum lsm_event {
+ /* Default (no) options for the capable function */
+ #define CAP_OPT_NONE 0x0
+@@ -73,6 +74,33 @@ enum lsm_event {
  	LSM_POLICY_CHANGE,
  };
  
@@ -121,7 +121,7 @@ index ca55adcc94ec..01703e2708f2 100644
  struct secids {
  	union {
  		u32 common;
-@@ -84,6 +112,8 @@ static inline bool secid_valid(const struct secids *secids)
+@@ -87,6 +115,8 @@ static inline bool secid_valid(const str
  	return secids->common != 0;
  }
  
@@ -130,7 +130,7 @@ index ca55adcc94ec..01703e2708f2 100644
  static inline void secid_init(struct secids *secid)
  {
  	memset(secid, 0, sizeof(*secid));
-@@ -120,7 +150,6 @@ extern int cap_task_setnice(struct task_struct *p, int nice);
+@@ -123,7 +153,6 @@ extern int cap_task_setnice(struct task_
  extern int cap_vm_enough_memory(struct mm_struct *mm, long pages);
  
  struct msghdr;
@@ -138,7 +138,7 @@ index ca55adcc94ec..01703e2708f2 100644
  struct sock;
  struct sockaddr;
  struct socket;
-@@ -828,17 +857,23 @@ static inline int security_inode_killpriv(struct dentry *dentry)
+@@ -828,17 +857,23 @@ static inline int security_inode_killpri
  	return cap_inode_killpriv(dentry);
  }
  
@@ -147,7 +147,7 @@ index ca55adcc94ec..01703e2708f2 100644
 +					     const char *name, void **buffer,
 +					     bool alloc)
  {
- 	return -EOPNOTSUPP;
+ 	return cap_inode_getsecurity(inode, name, buffer, alloc);
  }
  
 -static inline int security_inode_setsecurity(struct inode *inode, const char *name, const void *value, size_t size, int flags)
@@ -165,7 +165,7 @@ index ca55adcc94ec..01703e2708f2 100644
  {
  	return 0;
  }
-@@ -1080,7 +1115,8 @@ static inline int security_task_prctl(int option, unsigned long arg2,
+@@ -1080,7 +1115,8 @@ static inline int security_task_prctl(in
  	return cap_task_prctl(option, arg2, arg3, arg4, arg5);
  }
  
@@ -175,11 +175,11 @@ index ca55adcc94ec..01703e2708f2 100644
  { }
  
  static inline int security_ipc_permission(struct kern_ipc_perm *ipcp,
-diff --git a/include/net/netlabel.h b/include/net/netlabel.h
-index 51dacbb88886..5c7e19498a81 100644
---- a/include/net/netlabel.h
-+++ b/include/net/netlabel.h
-@@ -472,6 +472,8 @@ int netlbl_catmap_setlong(struct netlbl_lsm_catmap **catmap,
+Index: kernel-lts-staging/include/net/netlabel.h
+===================================================================
+--- kernel-lts-staging.orig/include/net/netlabel.h
++++ kernel-lts-staging/include/net/netlabel.h
+@@ -472,6 +472,8 @@ int netlbl_catmap_setlong(struct netlbl_
  			  u32 offset,
  			  unsigned long bitmap,
  			  gfp_t flags);
@@ -188,7 +188,7 @@ index 51dacbb88886..5c7e19498a81 100644
  
  /* Bitmap functions
   */
-@@ -623,6 +625,12 @@ static inline int netlbl_catmap_setlong(struct netlbl_lsm_catmap **catmap,
+@@ -623,6 +625,12 @@ static inline int netlbl_catmap_setlong(
  {
  	return 0;
  }
@@ -201,11 +201,11 @@ index 51dacbb88886..5c7e19498a81 100644
  static inline int netlbl_enabled(void)
  {
  	return 0;
-diff --git a/include/uapi/linux/prctl.h b/include/uapi/linux/prctl.h
-index c0d7ea0bf5b6..db72f2e38311 100644
---- a/include/uapi/linux/prctl.h
-+++ b/include/uapi/linux/prctl.h
-@@ -219,4 +219,8 @@ struct prctl_mm_map {
+Index: kernel-lts-staging/include/uapi/linux/prctl.h
+===================================================================
+--- kernel-lts-staging.orig/include/uapi/linux/prctl.h
++++ kernel-lts-staging/include/uapi/linux/prctl.h
+@@ -220,4 +220,8 @@ struct prctl_mm_map {
  # define PR_SPEC_DISABLE		(1UL << 2)
  # define PR_SPEC_FORCE_DISABLE		(1UL << 3)
  
@@ -214,11 +214,11 @@ index c0d7ea0bf5b6..db72f2e38311 100644
 +#define	PR_SET_DISPLAY_LSM	53
 +
  #endif /* _LINUX_PRCTL_H */
-diff --git a/kernel/fork.c b/kernel/fork.c
-index f0b58479534f..048e42d6ac45 100644
---- a/kernel/fork.c
-+++ b/kernel/fork.c
-@@ -1834,6 +1834,9 @@ static __latent_entropy struct task_struct *copy_process(
+Index: kernel-lts-staging/kernel/fork.c
+===================================================================
+--- kernel-lts-staging.orig/kernel/fork.c
++++ kernel-lts-staging/kernel/fork.c
+@@ -1881,6 +1881,9 @@ static __latent_entropy struct task_stru
  	p->sequential_io	= 0;
  	p->sequential_io_avg	= 0;
  #endif
@@ -228,10 +228,10 @@ index f0b58479534f..048e42d6ac45 100644
  
  	/* Perform scheduler related setup. Assign this task to a CPU. */
  	retval = sched_fork(clone_flags, p);
-diff --git a/net/ipv4/cipso_ipv4.c b/net/ipv4/cipso_ipv4.c
-index e17896a5a947..b3e267ca7c19 100644
---- a/net/ipv4/cipso_ipv4.c
-+++ b/net/ipv4/cipso_ipv4.c
+Index: kernel-lts-staging/net/ipv4/cipso_ipv4.c
+===================================================================
+--- kernel-lts-staging.orig/net/ipv4/cipso_ipv4.c
++++ kernel-lts-staging/net/ipv4/cipso_ipv4.c
 @@ -43,6 +43,7 @@
  #include <linux/string.h>
  #include <linux/jhash.h>
@@ -269,7 +269,7 @@ index e17896a5a947..b3e267ca7c19 100644
  
  /*
   * Helper Functions
-@@ -1480,7 +1493,7 @@ static int cipso_v4_gentag_loc(const struct cipso_v4_doi *doi_def,
+@@ -1483,7 +1496,7 @@ static int cipso_v4_gentag_loc(const str
  
  	buffer[0] = CIPSO_V4_TAG_LOCAL;
  	buffer[1] = CIPSO_V4_TAG_LOC_BLEN;
@@ -278,7 +278,7 @@ index e17896a5a947..b3e267ca7c19 100644
  
  	return CIPSO_V4_TAG_LOC_BLEN;
  }
-@@ -1500,7 +1513,7 @@ static int cipso_v4_parsetag_loc(const struct cipso_v4_doi *doi_def,
+@@ -1503,7 +1516,7 @@ static int cipso_v4_parsetag_loc(const s
  				 const unsigned char *tag,
  				 struct netlbl_lsm_secattr *secattr)
  {
@@ -287,11 +287,11 @@ index e17896a5a947..b3e267ca7c19 100644
  	secattr->flags |= NETLBL_SECATTR_SECID;
  
  	return 0;
-diff --git a/net/netfilter/xt_SECMARK.c b/net/netfilter/xt_SECMARK.c
-index afc61be750ef..6af1f4fc837d 100644
---- a/net/netfilter/xt_SECMARK.c
-+++ b/net/netfilter/xt_SECMARK.c
-@@ -59,7 +59,7 @@ static int checkentry_lsm(struct xt_secmark_target_info *info)
+Index: kernel-lts-staging/net/netfilter/xt_SECMARK.c
+===================================================================
+--- kernel-lts-staging.orig/net/netfilter/xt_SECMARK.c
++++ kernel-lts-staging/net/netfilter/xt_SECMARK.c
+@@ -59,7 +59,7 @@ static int checkentry_lsm(struct xt_secm
  
  	err = security_secctx_to_secid(info->secctx, strlen(info->secctx),
  				       &secid);
@@ -300,11 +300,11 @@ index afc61be750ef..6af1f4fc837d 100644
  
  	if (err) {
  		if (err == -EINVAL)
-diff --git a/net/netlabel/netlabel_kapi.c b/net/netlabel/netlabel_kapi.c
-index cb8a2c790081..e23bad01a149 100644
---- a/net/netlabel/netlabel_kapi.c
-+++ b/net/netlabel/netlabel_kapi.c
-@@ -1461,6 +1461,56 @@ int netlbl_cache_add(const struct sk_buff *skb, u16 family,
+Index: kernel-lts-staging/net/netlabel/netlabel_kapi.c
+===================================================================
+--- kernel-lts-staging.orig/net/netlabel/netlabel_kapi.c
++++ kernel-lts-staging/net/netlabel/netlabel_kapi.c
+@@ -1468,6 +1468,56 @@ int netlbl_cache_add(const struct sk_buf
  	return -ENOMSG;
  }
  
@@ -361,11 +361,11 @@ index cb8a2c790081..e23bad01a149 100644
  /*
   * Protocol Engine Functions
   */
-diff --git a/net/unix/af_unix.c b/net/unix/af_unix.c
-index 8b18af28d69d..b6b3f4033729 100644
---- a/net/unix/af_unix.c
-+++ b/net/unix/af_unix.c
-@@ -142,11 +142,18 @@ static struct hlist_head *unix_sockets_unbound(void *addr)
+Index: kernel-lts-staging/net/unix/af_unix.c
+===================================================================
+--- kernel-lts-staging.orig/net/unix/af_unix.c
++++ kernel-lts-staging/net/unix/af_unix.c
+@@ -142,11 +142,18 @@ static struct hlist_head *unix_sockets_u
  static void unix_get_secdata(struct scm_cookie *scm, struct sk_buff *skb)
  {
  	UNIXCB(skb).secid = scm->secid.common;
@@ -384,10 +384,10 @@ index 8b18af28d69d..b6b3f4033729 100644
  }
  
  static inline bool unix_secdata_eq(struct scm_cookie *scm, struct sk_buff *skb)
-diff --git a/security/Kconfig b/security/Kconfig
-index b187bf5f7cf3..19a3e4424c05 100644
---- a/security/Kconfig
-+++ b/security/Kconfig
+Index: kernel-lts-staging/security/Kconfig
+===================================================================
+--- kernel-lts-staging.orig/security/Kconfig
++++ kernel-lts-staging/security/Kconfig
 @@ -317,18 +317,8 @@ endmenu
  menu "Security Module Stack"
  	visible if SECURITY_STACKING
@@ -434,10 +434,10 @@ index b187bf5f7cf3..19a3e4424c05 100644
  config SECURITY_TOMOYO_STACKED
  	bool "TOMOYO support is enabled by default"
  	depends on SECURITY_TOMOYO && SECURITY_STACKING
-diff --git a/security/Makefile b/security/Makefile
-index 4d2d3782ddef..9b2b87710de8 100644
---- a/security/Makefile
-+++ b/security/Makefile
+Index: kernel-lts-staging/security/Makefile
+===================================================================
+--- kernel-lts-staging.orig/security/Makefile
++++ kernel-lts-staging/security/Makefile
 @@ -17,6 +17,7 @@ obj-$(CONFIG_MMU)			+= min_addr.o
  
  # Object file lists
@@ -446,10 +446,10 @@ index 4d2d3782ddef..9b2b87710de8 100644
  obj-$(CONFIG_SECURITYFS)		+= inode.o
  obj-$(CONFIG_SECURITY_SELINUX)		+= selinux/
  obj-$(CONFIG_SECURITY_SMACK)		+= smack/
-diff --git a/security/security.c b/security/security.c
-index e565996faab8..65e4b103bd17 100644
---- a/security/security.c
-+++ b/security/security.c
+Index: kernel-lts-staging/security/security.c
+===================================================================
+--- kernel-lts-staging.orig/security/security.c
++++ kernel-lts-staging/security/security.c
 @@ -29,12 +29,18 @@
  #include <linux/backing-dev.h>
  #include <linux/string.h>
@@ -470,7 +470,7 @@ index e565996faab8..65e4b103bd17 100644
  
  /* Maximum number of letters for an LSM name string */
  #define SECURITY_NAME_MAX	10
-@@ -47,7 +53,16 @@ static struct kmem_cache *lsm_file_cache;
+@@ -47,7 +53,16 @@ static struct kmem_cache *lsm_file_cache
  static struct kmem_cache *lsm_inode_cache;
  
  char *lsm_names;
@@ -488,7 +488,7 @@ index e565996faab8..65e4b103bd17 100644
  
  /* Boot-time LSM user choice */
  static __initdata char chosen_lsm[SECURITY_NAME_MAX + 1] =
-@@ -336,6 +351,14 @@ void __init security_add_blobs(struct lsm_blob_sizes *needed)
+@@ -336,6 +351,14 @@ void __init security_add_blobs(struct ls
  	lsm_set_size(&needed->lbs_key, &blob_sizes.lbs_key);
  #endif
  	lsm_set_size(&needed->lbs_msg_msg, &blob_sizes.lbs_msg_msg);
@@ -503,7 +503,7 @@ index e565996faab8..65e4b103bd17 100644
  	lsm_set_size(&needed->lbs_sock, &blob_sizes.lbs_sock);
  	lsm_set_size(&needed->lbs_superblock, &blob_sizes.lbs_superblock);
  	lsm_set_size(&needed->lbs_task, &blob_sizes.lbs_task);
-@@ -557,6 +580,25 @@ int lsm_superblock_alloc(struct super_block *sb)
+@@ -557,6 +580,25 @@ int lsm_superblock_alloc(struct super_bl
  	return 0;
  }
  
@@ -529,7 +529,7 @@ index e565996faab8..65e4b103bd17 100644
  /*
   * Hook list operation macros.
   *
-@@ -879,8 +921,12 @@ int security_inode_init_security(struct inode *inode, struct inode *dir,
+@@ -875,8 +917,12 @@ int security_inode_init_security(struct
  				 const initxattrs initxattrs, void *fs_data)
  {
  	struct xattr new_xattrs[MAX_LSM_EVM_XATTR + 1];
@@ -544,7 +544,7 @@ index e565996faab8..65e4b103bd17 100644
  
  	if (unlikely(IS_PRIVATE(inode)))
  		return 0;
-@@ -888,23 +934,41 @@ int security_inode_init_security(struct inode *inode, struct inode *dir,
+@@ -884,23 +930,41 @@ int security_inode_init_security(struct
  	if (!initxattrs)
  		return call_int_hook(inode_init_security, -EOPNOTSUPP, inode,
  				     dir, qstr, NULL, NULL, NULL);
@@ -600,7 +600,7 @@ index e565996faab8..65e4b103bd17 100644
  	return (ret == -EOPNOTSUPP) ? 0 : ret;
  }
  EXPORT_SYMBOL(security_inode_init_security);
-@@ -1133,18 +1197,22 @@ int security_inode_getattr(const struct path *path)
+@@ -1129,18 +1193,22 @@ int security_inode_getattr(const struct
  int security_inode_setxattr(struct dentry *dentry, const char *name,
  			    const void *value, size_t size, int flags)
  {
@@ -631,7 +631,7 @@ index e565996faab8..65e4b103bd17 100644
  		ret = cap_inode_setxattr(dentry, name, value, size, flags);
  	if (ret)
  		return ret;
-@@ -1601,12 +1669,65 @@ int security_task_kill(struct task_struct *p, struct siginfo *info,
+@@ -1604,12 +1672,65 @@ int security_task_kill(struct task_struc
  	return call_int_hook(task_kill, 0, p, info, sig, cred);
  }
  
@@ -697,7 +697,7 @@ index e565996faab8..65e4b103bd17 100644
  
  	hlist_for_each_entry(hp, &security_hook_heads.task_prctl, list) {
  		thisrc = hp->hook.task_prctl(option, arg2, arg3, arg4, arg5);
-@@ -1776,9 +1897,17 @@ int security_getprocattr(struct task_struct *p, const char *lsm, char *name,
+@@ -1779,9 +1900,17 @@ int security_getprocattr(struct task_str
  				char **value)
  {
  	struct security_hook_list *hp;
@@ -716,7 +716,7 @@ index e565996faab8..65e4b103bd17 100644
  			continue;
  		return hp->hook.getprocattr(p, name, value);
  	}
-@@ -1789,9 +1918,17 @@ int security_setprocattr(const char *lsm, const char *name, void *value,
+@@ -1792,9 +1921,17 @@ int security_setprocattr(const char *lsm
  			 size_t size)
  {
  	struct security_hook_list *hp;
@@ -735,7 +735,7 @@ index e565996faab8..65e4b103bd17 100644
  			continue;
  		return hp->hook.setprocattr(name, value, size);
  	}
-@@ -1811,22 +1948,60 @@ EXPORT_SYMBOL(security_ismaclabel);
+@@ -1814,22 +1951,60 @@ EXPORT_SYMBOL(security_ismaclabel);
  
  int security_secid_to_secctx(struct secids *secid, char **secdata, u32 *seclen)
  {
@@ -796,7 +796,7 @@ index e565996faab8..65e4b103bd17 100644
  }
  EXPORT_SYMBOL(security_release_secctx);
  
-@@ -1844,13 +2019,80 @@ EXPORT_SYMBOL(security_inode_notifysecctx);
+@@ -1847,13 +2022,80 @@ EXPORT_SYMBOL(security_inode_notifysecct
  
  int security_inode_setsecctx(struct dentry *dentry, void *ctx, u32 ctxlen)
  {
@@ -877,7 +877,7 @@ index e565996faab8..65e4b103bd17 100644
  }
  EXPORT_SYMBOL(security_inode_getsecctx);
  
-@@ -1951,12 +2193,31 @@ EXPORT_SYMBOL(security_sock_rcv_skb);
+@@ -1954,12 +2196,31 @@ EXPORT_SYMBOL(security_sock_rcv_skb);
  int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
  				      int __user *optlen, unsigned len)
  {
@@ -912,7 +912,7 @@ index e565996faab8..65e4b103bd17 100644
  	if (rc == 0) {
  		tlen = strlen(tval) + 1;
  		if (put_user(tlen, optlen))
-@@ -1971,8 +2232,20 @@ int security_socket_getpeersec_stream(struct socket *sock, char __user *optval,
+@@ -1974,8 +2235,20 @@ int security_socket_getpeersec_stream(st
  int security_socket_getpeersec_dgram(struct socket *sock, struct sk_buff *skb,
  				     struct secids *secid)
  {
@@ -933,7 +933,7 @@ index e565996faab8..65e4b103bd17 100644
  }
  EXPORT_SYMBOL(security_socket_getpeersec_dgram);
  
-@@ -2041,7 +2314,18 @@ EXPORT_SYMBOL(security_inet_conn_established);
+@@ -2044,7 +2317,18 @@ EXPORT_SYMBOL(security_inet_conn_establi
  
  int security_secmark_relabel_packet(struct secids *secid)
  {
@@ -952,11 +952,11 @@ index e565996faab8..65e4b103bd17 100644
  }
  EXPORT_SYMBOL(security_secmark_relabel_packet);
  
-diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index ee20ce56a806..f3cbec93c332 100644
---- a/security/selinux/hooks.c
-+++ b/security/selinux/hooks.c
-@@ -3205,13 +3205,12 @@ static int selinux_inode_setxattr(struct dentry *dentry, const char *name,
+Index: kernel-lts-staging/security/selinux/hooks.c
+===================================================================
+--- kernel-lts-staging.orig/security/selinux/hooks.c
++++ kernel-lts-staging/security/selinux/hooks.c
+@@ -3248,13 +3248,12 @@ static int selinux_inode_setxattr(struct
  	int rc = 0;
  
  	if (strcmp(name, XATTR_NAME_SELINUX)) {
@@ -973,12 +973,12 @@ index ee20ce56a806..f3cbec93c332 100644
 +		return -ENOSYS;
  	}
  
- 	sbsec = selinux_superblock(inode->i_sb);
-diff --git a/security/selinux/netlabel.c b/security/selinux/netlabel.c
-index efc87a76af72..3c31653d9a25 100644
---- a/security/selinux/netlabel.c
-+++ b/security/selinux/netlabel.c
-@@ -417,6 +417,14 @@ int selinux_netlbl_socket_post_create(struct sock *sk, u16 family)
+ 	if (!selinux_state.initialized)
+Index: kernel-lts-staging/security/selinux/netlabel.c
+===================================================================
+--- kernel-lts-staging.orig/security/selinux/netlabel.c
++++ kernel-lts-staging/security/selinux/netlabel.c
+@@ -413,6 +413,14 @@ int selinux_netlbl_socket_post_create(st
  	secattr = selinux_netlbl_sock_genattr(sk);
  	if (secattr == NULL)
  		return -ENOMEM;
@@ -993,11 +993,11 @@ index efc87a76af72..3c31653d9a25 100644
  	rc = netlbl_sock_setattr(sk, family, secattr);
  	switch (rc) {
  	case 0:
-diff --git a/security/smack/smack_lsm.c b/security/smack/smack_lsm.c
-index 26d98d33b794..67140c835a18 100644
---- a/security/smack/smack_lsm.c
-+++ b/security/smack/smack_lsm.c
-@@ -1231,9 +1231,9 @@ static int smack_inode_setxattr(struct dentry *dentry, const char *name,
+Index: kernel-lts-staging/security/smack/smack_lsm.c
+===================================================================
+--- kernel-lts-staging.orig/security/smack/smack_lsm.c
++++ kernel-lts-staging/security/smack/smack_lsm.c
+@@ -1234,9 +1234,9 @@ static int smack_inode_setxattr(struct d
  {
  	struct smk_audit_info ad;
  	struct smack_known *skp;
@@ -1010,7 +1010,7 @@ index 26d98d33b794..67140c835a18 100644
  	int rc = 0;
  
  	/*
-@@ -1242,20 +1242,20 @@ static int smack_inode_setxattr(struct dentry *dentry, const char *name,
+@@ -1245,20 +1245,20 @@ static int smack_inode_setxattr(struct d
  	if (strcmp(name, XATTR_NAME_SMACK) == 0 ||
  	    strcmp(name, XATTR_NAME_SMACKIPIN) == 0 ||
  	    strcmp(name, XATTR_NAME_SMACKIPOUT) == 0) {
@@ -1038,7 +1038,7 @@ index 26d98d33b794..67140c835a18 100644
  
  	if (check_priv && !smack_privileged(CAP_MAC_ADMIN))
  		rc = -EPERM;
-@@ -1269,11 +1269,11 @@ static int smack_inode_setxattr(struct dentry *dentry, const char *name,
+@@ -1272,11 +1272,11 @@ static int smack_inode_setxattr(struct d
  			rc = -EINVAL;
  	}
  
@@ -1054,7 +1054,7 @@ index 26d98d33b794..67140c835a18 100644
  		rc = smk_bu_inode(d_backing_inode(dentry), MAY_WRITE, rc);
  	}
  
-@@ -2392,13 +2392,32 @@ static int smack_netlabel(struct sock *sk, int labeled)
+@@ -2400,13 +2400,32 @@ static int smack_netlabel(struct sock *s
  	bh_lock_sock_nested(sk);
  
  	if (ssp->smk_out == smack_net_ambient ||
@@ -1089,7 +1089,7 @@ index 26d98d33b794..67140c835a18 100644
  	bh_unlock_sock(sk);
  	local_bh_enable();
  
-@@ -3833,7 +3852,7 @@ static int smack_socket_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
+@@ -3841,7 +3860,7 @@ static int smack_socket_sock_rcv_skb(str
  		netlbl_secattr_init(&secattr);
  
  		rc = netlbl_skbuff_getattr(skb, family, &secattr);
@@ -1098,7 +1098,7 @@ index 26d98d33b794..67140c835a18 100644
  			skp = smack_from_secattr(&secattr, ssp);
  		else
  			skp = smack_net_ambient;
-@@ -4427,11 +4446,15 @@ static int smack_secctx_to_secid(const char *secdata, u32 seclen,
+@@ -4443,11 +4462,15 @@ static int smack_secctx_to_secid(const c
  	return 0;
  }
  
@@ -1117,7 +1117,7 @@ index 26d98d33b794..67140c835a18 100644
  
  static int smack_inode_notifysecctx(struct inode *inode, void *ctx, u32 ctxlen)
  {
-@@ -4669,6 +4692,9 @@ static struct security_hook_list smack_hooks[] __lsm_ro_after_init = {
+@@ -4685,6 +4708,9 @@ static struct security_hook_list smack_h
  	LSM_HOOK_INIT(ismaclabel, smack_ismaclabel),
  	LSM_HOOK_INIT(secid_to_secctx, smack_secid_to_secctx),
  	LSM_HOOK_INIT(secctx_to_secid, smack_secctx_to_secid),
@@ -1127,11 +1127,10 @@ index 26d98d33b794..67140c835a18 100644
  	LSM_HOOK_INIT(inode_notifysecctx, smack_inode_notifysecctx),
  	LSM_HOOK_INIT(inode_setsecctx, smack_inode_setsecctx),
  	LSM_HOOK_INIT(inode_getsecctx, smack_inode_getsecctx),
-diff --git a/security/stacking.c b/security/stacking.c
-new file mode 100644
-index 000000000000..7c9643323a1e
+Index: kernel-lts-staging/security/stacking.c
+===================================================================
 --- /dev/null
-+++ b/security/stacking.c
++++ kernel-lts-staging/security/stacking.c
 @@ -0,0 +1,119 @@
 +/*
 + * Security secid functions
@@ -1252,6 +1251,3 @@ index 000000000000..7c9643323a1e
 +	return rc;
 +}
 +#endif /* CONFIG_NETLABEL */
--- 
-2.19.1
-
