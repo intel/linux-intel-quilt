@@ -1,0 +1,286 @@
+From 4541b62447f9a65c9192597304d5f6cd11664386 Mon Sep 17 00:00:00 2001
+From: Boris Brezillon <bbrezillon@kernel.org>
+Date: Fri, 13 Mar 2020 19:42:36 +0000
+Subject: [PATCH 01/13] mtd: spi-nor: Prepare core / manufacturer code split
+
+Move all SPI NOR controller drivers to a controllers/ sub-directory
+so that we only have SPI NOR related source files under
+drivers/mtd/spi-nor/.
+
+Rename spi-nor.c into core.c, we are about to split this file in multiple
+source files (one per manufacturer, plus one for the SFDP parsing logic).
+
+Signed-off-by: Boris Brezillon <bbrezillon@kernel.org>
+Signed-off-by: Tudor Ambarus <tudor.ambarus@microchip.com>
+Signed-off-by: A, JyothiX <jyothix.a@intel.com>
+Reviewed-by: Vignesh Raghavendra <vigneshr@ti.com>
+---
+ drivers/mtd/spi-nor/Kconfig                   | 75 +------------------
+ drivers/mtd/spi-nor/Makefile                  |  9 +--
+ drivers/mtd/spi-nor/controllers/Kconfig       | 75 +++++++++++++++++++
+ drivers/mtd/spi-nor/controllers/Makefile      |  8 ++
+ .../spi-nor/{ => controllers}/aspeed-smc.c    |  0
+ .../{ => controllers}/cadence-quadspi.c       |  0
+ .../mtd/spi-nor/{ => controllers}/hisi-sfc.c  |  0
+ .../spi-nor/{ => controllers}/intel-spi-pci.c |  0
+ .../{ => controllers}/intel-spi-platform.c    |  0
+ .../mtd/spi-nor/{ => controllers}/intel-spi.c |  0
+ .../mtd/spi-nor/{ => controllers}/intel-spi.h |  0
+ .../mtd/spi-nor/{ => controllers}/nxp-spifi.c |  0
+ drivers/mtd/spi-nor/{spi-nor.c => core.c}     |  0
+ 13 files changed, 86 insertions(+), 81 deletions(-)
+ create mode 100644 drivers/mtd/spi-nor/controllers/Kconfig
+ create mode 100644 drivers/mtd/spi-nor/controllers/Makefile
+ rename drivers/mtd/spi-nor/{ => controllers}/aspeed-smc.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/cadence-quadspi.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/hisi-sfc.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/intel-spi-pci.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/intel-spi-platform.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/intel-spi.c (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/intel-spi.h (100%)
+ rename drivers/mtd/spi-nor/{ => controllers}/nxp-spifi.c (100%)
+ rename drivers/mtd/spi-nor/{spi-nor.c => core.c} (100%)
+
+diff --git a/drivers/mtd/spi-nor/Kconfig b/drivers/mtd/spi-nor/Kconfig
+index f237fcdf7f86..0713270a1178 100644
+--- a/drivers/mtd/spi-nor/Kconfig
++++ b/drivers/mtd/spi-nor/Kconfig
+@@ -24,34 +24,6 @@ config MTD_SPI_NOR_USE_4K_SECTORS
+ 	  Please note that some tools/drivers/filesystems may not work with
+ 	  4096 B erase size (e.g. UBIFS requires 15 KiB as a minimum).
+ 
+-config SPI_ASPEED_SMC
+-	tristate "Aspeed flash controllers in SPI mode"
+-	depends on ARCH_ASPEED || COMPILE_TEST
+-	depends on HAS_IOMEM && OF
+-	help
+-	  This enables support for the Firmware Memory controller (FMC)
+-	  in the Aspeed AST2500/AST2400 SoCs when attached to SPI NOR chips,
+-	  and support for the SPI flash memory controller (SPI) for
+-	  the host firmware. The implementation only supports SPI NOR.
+-
+-config SPI_CADENCE_QUADSPI
+-	tristate "Cadence Quad SPI controller"
+-	depends on OF && (ARM || ARM64 || COMPILE_TEST)
+-	help
+-	  Enable support for the Cadence Quad SPI Flash controller.
+-
+-	  Cadence QSPI is a specialized controller for connecting an SPI
+-	  Flash over 1/2/4-bit wide bus. Enable this option if you have a
+-	  device with a Cadence QSPI controller and want to access the
+-	  Flash as an MTD device.
+-
+-config SPI_HISI_SFC
+-	tristate "Hisilicon SPI-NOR Flash Controller(SFC)"
+-	depends on ARCH_HISI || COMPILE_TEST
+-	depends on HAS_IOMEM
+-	help
+-	  This enables support for hisilicon SPI-NOR flash controller.
+-
+ config SPI_MTK_QUADSPI
+ 	tristate "MediaTek Quad SPI controller"
+ 	depends on HAS_IOMEM
+@@ -60,51 +32,6 @@ config SPI_MTK_QUADSPI
+ 	  This controller does not support generic SPI. It only supports
+ 	  SPI NOR.
+ 
+-config SPI_NXP_SPIFI
+-	tristate "NXP SPI Flash Interface (SPIFI)"
+-	depends on OF && (ARCH_LPC18XX || COMPILE_TEST)
+-	depends on HAS_IOMEM
+-	help
+-	  Enable support for the NXP LPC SPI Flash Interface controller.
+-
+-	  SPIFI is a specialized controller for connecting serial SPI
+-	  Flash. Enable this option if you have a device with a SPIFI
+-	  controller and want to access the Flash as a mtd device.
+-
+-config SPI_INTEL_SPI
+-	tristate
+-
+-config SPI_INTEL_SPI_PCI
+-	tristate "Intel PCH/PCU SPI flash PCI driver (DANGEROUS)"
+-	depends on X86 && PCI
+-	select SPI_INTEL_SPI
+-	help
+-	  This enables PCI support for the Intel PCH/PCU SPI controller in
+-	  master mode. This controller is present in modern Intel hardware
+-	  and is used to hold BIOS and other persistent settings. Using
+-	  this driver it is possible to upgrade BIOS directly from Linux.
+-
+-	  Say N here unless you know what you are doing. Overwriting the
+-	  SPI flash may render the system unbootable.
+-
+-	  To compile this driver as a module, choose M here: the module
+-	  will be called intel-spi-pci.
+-
+-config SPI_INTEL_SPI_PLATFORM
+-	tristate "Intel PCH/PCU SPI flash platform driver (DANGEROUS)"
+-	depends on X86
+-	select SPI_INTEL_SPI
+-	help
+-	  This enables platform support for the Intel PCH/PCU SPI
+-	  controller in master mode. This controller is present in modern
+-	  Intel hardware and is used to hold BIOS and other persistent
+-	  settings. Using this driver it is possible to upgrade BIOS
+-	  directly from Linux.
+-
+-	  Say N here unless you know what you are doing. Overwriting the
+-	  SPI flash may render the system unbootable.
+-
+-	  To compile this driver as a module, choose M here: the module
+-	  will be called intel-spi-platform.
++source "drivers/mtd/spi-nor/controllers/Kconfig"
+ 
+ endif # MTD_SPI_NOR
+diff --git a/drivers/mtd/spi-nor/Makefile b/drivers/mtd/spi-nor/Makefile
+index 9c5ed03cdc19..5ff60fd50433 100644
+--- a/drivers/mtd/spi-nor/Makefile
++++ b/drivers/mtd/spi-nor/Makefile
+@@ -1,10 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
++
++spi-nor-objs			:= core.o
+ obj-$(CONFIG_MTD_SPI_NOR)	+= spi-nor.o
+-obj-$(CONFIG_SPI_ASPEED_SMC)	+= aspeed-smc.o
+-obj-$(CONFIG_SPI_CADENCE_QUADSPI)	+= cadence-quadspi.o
+-obj-$(CONFIG_SPI_HISI_SFC)	+= hisi-sfc.o
+ obj-$(CONFIG_SPI_MTK_QUADSPI)    += mtk-quadspi.o
+-obj-$(CONFIG_SPI_NXP_SPIFI)	+= nxp-spifi.o
+-obj-$(CONFIG_SPI_INTEL_SPI)	+= intel-spi.o
+-obj-$(CONFIG_SPI_INTEL_SPI_PCI)	+= intel-spi-pci.o
+-obj-$(CONFIG_SPI_INTEL_SPI_PLATFORM)	+= intel-spi-platform.o
+diff --git a/drivers/mtd/spi-nor/controllers/Kconfig b/drivers/mtd/spi-nor/controllers/Kconfig
+new file mode 100644
+index 000000000000..10b86660b821
+--- /dev/null
++++ b/drivers/mtd/spi-nor/controllers/Kconfig
+@@ -0,0 +1,75 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config SPI_ASPEED_SMC
++	tristate "Aspeed flash controllers in SPI mode"
++	depends on ARCH_ASPEED || COMPILE_TEST
++	depends on HAS_IOMEM && OF
++	help
++	  This enables support for the Firmware Memory controller (FMC)
++	  in the Aspeed AST2500/AST2400 SoCs when attached to SPI NOR chips,
++	  and support for the SPI flash memory controller (SPI) for
++	  the host firmware. The implementation only supports SPI NOR.
++
++config SPI_CADENCE_QUADSPI
++	tristate "Cadence Quad SPI controller"
++	depends on OF && (ARM || ARM64 || COMPILE_TEST)
++	help
++	  Enable support for the Cadence Quad SPI Flash controller.
++
++	  Cadence QSPI is a specialized controller for connecting an SPI
++	  Flash over 1/2/4-bit wide bus. Enable this option if you have a
++	  device with a Cadence QSPI controller and want to access the
++	  Flash as an MTD device.
++
++config SPI_HISI_SFC
++	tristate "Hisilicon FMC SPI-NOR Flash Controller(SFC)"
++	depends on ARCH_HISI || COMPILE_TEST
++	depends on HAS_IOMEM
++	help
++	  This enables support for HiSilicon FMC SPI-NOR flash controller.
++
++config SPI_NXP_SPIFI
++	tristate "NXP SPI Flash Interface (SPIFI)"
++	depends on OF && (ARCH_LPC18XX || COMPILE_TEST)
++	depends on HAS_IOMEM
++	help
++	  Enable support for the NXP LPC SPI Flash Interface controller.
++
++	  SPIFI is a specialized controller for connecting serial SPI
++	  Flash. Enable this option if you have a device with a SPIFI
++	  controller and want to access the Flash as a mtd device.
++
++config SPI_INTEL_SPI
++	tristate
++
++config SPI_INTEL_SPI_PCI
++	tristate "Intel PCH/PCU SPI flash PCI driver (DANGEROUS)"
++	depends on X86 && PCI
++	select SPI_INTEL_SPI
++	help
++	  This enables PCI support for the Intel PCH/PCU SPI controller in
++	  master mode. This controller is present in modern Intel hardware
++	  and is used to hold BIOS and other persistent settings. Using
++	  this driver it is possible to upgrade BIOS directly from Linux.
++
++	  Say N here unless you know what you are doing. Overwriting the
++	  SPI flash may render the system unbootable.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called intel-spi-pci.
++
++config SPI_INTEL_SPI_PLATFORM
++	tristate "Intel PCH/PCU SPI flash platform driver (DANGEROUS)"
++	depends on X86
++	select SPI_INTEL_SPI
++	help
++	  This enables platform support for the Intel PCH/PCU SPI
++	  controller in master mode. This controller is present in modern
++	  Intel hardware and is used to hold BIOS and other persistent
++	  settings. Using this driver it is possible to upgrade BIOS
++	  directly from Linux.
++
++	  Say N here unless you know what you are doing. Overwriting the
++	  SPI flash may render the system unbootable.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called intel-spi-platform.
+diff --git a/drivers/mtd/spi-nor/controllers/Makefile b/drivers/mtd/spi-nor/controllers/Makefile
+new file mode 100644
+index 000000000000..46e6fbe586e3
+--- /dev/null
++++ b/drivers/mtd/spi-nor/controllers/Makefile
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_SPI_ASPEED_SMC)	+= aspeed-smc.o
++obj-$(CONFIG_SPI_CADENCE_QUADSPI)	+= cadence-quadspi.o
++obj-$(CONFIG_SPI_HISI_SFC)	+= hisi-sfc.o
++obj-$(CONFIG_SPI_NXP_SPIFI)	+= nxp-spifi.o
++obj-$(CONFIG_SPI_INTEL_SPI)	+= intel-spi.o
++obj-$(CONFIG_SPI_INTEL_SPI_PCI)	+= intel-spi-pci.o
++obj-$(CONFIG_SPI_INTEL_SPI_PLATFORM)	+= intel-spi-platform.o
+diff --git a/drivers/mtd/spi-nor/aspeed-smc.c b/drivers/mtd/spi-nor/controllers/aspeed-smc.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/aspeed-smc.c
+rename to drivers/mtd/spi-nor/controllers/aspeed-smc.c
+diff --git a/drivers/mtd/spi-nor/cadence-quadspi.c b/drivers/mtd/spi-nor/controllers/cadence-quadspi.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/cadence-quadspi.c
+rename to drivers/mtd/spi-nor/controllers/cadence-quadspi.c
+diff --git a/drivers/mtd/spi-nor/hisi-sfc.c b/drivers/mtd/spi-nor/controllers/hisi-sfc.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/hisi-sfc.c
+rename to drivers/mtd/spi-nor/controllers/hisi-sfc.c
+diff --git a/drivers/mtd/spi-nor/intel-spi-pci.c b/drivers/mtd/spi-nor/controllers/intel-spi-pci.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/intel-spi-pci.c
+rename to drivers/mtd/spi-nor/controllers/intel-spi-pci.c
+diff --git a/drivers/mtd/spi-nor/intel-spi-platform.c b/drivers/mtd/spi-nor/controllers/intel-spi-platform.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/intel-spi-platform.c
+rename to drivers/mtd/spi-nor/controllers/intel-spi-platform.c
+diff --git a/drivers/mtd/spi-nor/intel-spi.c b/drivers/mtd/spi-nor/controllers/intel-spi.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/intel-spi.c
+rename to drivers/mtd/spi-nor/controllers/intel-spi.c
+diff --git a/drivers/mtd/spi-nor/intel-spi.h b/drivers/mtd/spi-nor/controllers/intel-spi.h
+similarity index 100%
+rename from drivers/mtd/spi-nor/intel-spi.h
+rename to drivers/mtd/spi-nor/controllers/intel-spi.h
+diff --git a/drivers/mtd/spi-nor/nxp-spifi.c b/drivers/mtd/spi-nor/controllers/nxp-spifi.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/nxp-spifi.c
+rename to drivers/mtd/spi-nor/controllers/nxp-spifi.c
+diff --git a/drivers/mtd/spi-nor/spi-nor.c b/drivers/mtd/spi-nor/core.c
+similarity index 100%
+rename from drivers/mtd/spi-nor/spi-nor.c
+rename to drivers/mtd/spi-nor/core.c
+-- 
+2.17.1
+
