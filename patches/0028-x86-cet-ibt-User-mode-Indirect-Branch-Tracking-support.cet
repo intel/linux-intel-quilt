@@ -1,21 +1,19 @@
-From bc90e44a7c62e5805b7a59b2073e33ce7aecaa3e Mon Sep 17 00:00:00 2001
+From 8c28defe98877124ec05534a2c864a9945394b45 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 3 May 2018 13:30:56 -0700
 Subject: [PATCH 28/37] x86/cet/ibt: User-mode Indirect Branch Tracking support
 
-Introduce user-mode Indirect Branch Tracking (IBT) support.  Update setup
-routines to include IBT.
+Introduce user-mode Indirect Branch Tracking (IBT) support.  Add routines
+for the setup/disable of IBT.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 ---
- arch/x86/include/asm/cet.h               |  3 +++
- arch/x86/include/asm/disabled-features.h |  8 +++++-
- arch/x86/kernel/cet.c                    | 33 ++++++++++++++++++++++++
- arch/x86/kernel/cpu/common.c             | 17 ++++++++++++
- 4 files changed, 60 insertions(+), 1 deletion(-)
+ arch/x86/include/asm/cet.h |  3 +++
+ arch/x86/kernel/cet.c      | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+)
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index 16870e5bc8eb..3a1cba579cb2 100644
+index 5e44605ae9c5..7ee1e712463a 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
 @@ -15,6 +15,7 @@ struct cet_status {
@@ -25,7 +23,7 @@ index 16870e5bc8eb..3a1cba579cb2 100644
 +	unsigned int	ibt_enabled:1;
  };
  
- #ifdef CONFIG_X86_CET
+ #ifdef CONFIG_X86_CET_USER
 @@ -26,6 +27,8 @@ void cet_free_shstk(struct task_struct *p);
  int cet_verify_rstor_token(bool ia32, unsigned long ssp, unsigned long *new_ssp);
  void cet_restore_signal(struct sc_ext *sc);
@@ -35,34 +33,8 @@ index 16870e5bc8eb..3a1cba579cb2 100644
  #else
  static inline int prctl_cet(int option, u64 arg2) { return -EINVAL; }
  static inline int cet_setup_thread_shstk(struct task_struct *p,
-diff --git a/arch/x86/include/asm/disabled-features.h b/arch/x86/include/asm/disabled-features.h
-index 6a9fb7f9bc01..e634a03fee14 100644
---- a/arch/x86/include/asm/disabled-features.h
-+++ b/arch/x86/include/asm/disabled-features.h
-@@ -68,6 +68,12 @@
- #define DISABLE_SHSTK	(1 << (X86_FEATURE_SHSTK & 31))
- #endif
- 
-+#ifdef CONFIG_X86_BRANCH_TRACKING_USER
-+#define DISABLE_IBT	0
-+#else
-+#define DISABLE_IBT	(1<<(X86_FEATURE_IBT & 31))
-+#endif
-+
- /*
-  * Make sure to add features to the correct mask
-  */
-@@ -90,7 +96,7 @@
- #define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP| \
- 			 DISABLE_ENQCMD|DISABLE_SHSTK)
- #define DISABLED_MASK17	0
--#define DISABLED_MASK18	0
-+#define DISABLED_MASK18	(DISABLE_IBT)
- #define DISABLED_MASK_CHECK BUILD_BUG_ON_ZERO(NCAPINTS != 19)
- 
- #endif /* _ASM_X86_DISABLED_FEATURES_H */
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index 038419f06fc9..46524d3f5df3 100644
+index feb466dc2ea8..fff0b35ed0d9 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
 @@ -13,6 +13,8 @@
@@ -104,39 +76,11 @@ index 038419f06fc9..46524d3f5df3 100644
 +
 +	start_update_msrs();
 +	rdmsrl(MSR_IA32_U_CET, msr_val);
-+	msr_val &= CET_SHSTK_EN;
++	msr_val &= ~CET_ENDBR_EN;
 +	wrmsrl(MSR_IA32_U_CET, msr_val);
 +	end_update_msrs();
 +	current->thread.cet.ibt_enabled = 0;
 +}
-diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
-index 3d38ae02d9d3..496d25e1c0a1 100644
---- a/arch/x86/kernel/cpu/common.c
-+++ b/arch/x86/kernel/cpu/common.c
-@@ -537,6 +537,23 @@ static __init int setup_disable_shstk(char *s)
- __setup("no_user_shstk", setup_disable_shstk);
- #endif
- 
-+#ifdef CONFIG_X86_BRANCH_TRACKING_USER
-+static __init int setup_disable_ibt(char *s)
-+{
-+	/* require an exact match without trailing characters */
-+	if (s[0] != '\0')
-+		return 0;
-+
-+	if (!boot_cpu_has(X86_FEATURE_IBT))
-+		return 1;
-+
-+	setup_clear_cpu_cap(X86_FEATURE_IBT);
-+	pr_info("x86: 'no_user_ibt' specified, disabling user Branch Tracking\n");
-+	return 1;
-+}
-+__setup("no_user_ibt", setup_disable_ibt);
-+#endif
-+
- /*
-  * Some CPU features depend on higher CPUID levels, which may not always
-  * be available due to CPUID level capping or broken virtualization
 -- 
 2.27.0
 

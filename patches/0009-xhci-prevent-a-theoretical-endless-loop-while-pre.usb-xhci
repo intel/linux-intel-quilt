@@ -1,0 +1,50 @@
+From c7802ab75424e476e4c4af8e286f67c45db4e176 Mon Sep 17 00:00:00 2001
+From: Mathias Nyman <mathias.nyman@linux.intel.com>
+Date: Mon, 28 Dec 2020 12:23:43 +0200
+Subject: [PATCH 09/11] xhci: prevent a theoretical endless loop while
+ preparing rings.
+
+xhci driver links together segments in a ring buffer by turning the last
+TRB of a segment into a link TRB, pointing to the beginning of
+the next segment.
+
+If the first TRB of every segment for some unknown reason is a link TRB
+pointing to the next segment, then prepare_ring() loops indefinitely.
+This isn't something the xhci driver would do.
+xHC hardware has access to these rings, it sholdn't be writing link
+TRBs either, but with broken xHC hardware this could in theory be
+possible.
+
+Signed-off-by: Mathias Nyman <mathias.nyman@linux.intel.com>
+---
+ drivers/usb/host/xhci-ring.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
+index cd83e72b513a..461da3253a6e 100644
+--- a/drivers/usb/host/xhci-ring.c
++++ b/drivers/usb/host/xhci-ring.c
+@@ -2950,6 +2950,7 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
+ 		u32 ep_state, unsigned int num_trbs, gfp_t mem_flags)
+ {
+ 	unsigned int num_trbs_needed;
++	unsigned int link_trb_count = 0;
+ 
+ 	/* Make sure the endpoint has been added to xHC schedule */
+ 	switch (ep_state) {
+@@ -3021,6 +3022,12 @@ static int prepare_ring(struct xhci_hcd *xhci, struct xhci_ring *ep_ring,
+ 
+ 		ep_ring->enq_seg = ep_ring->enq_seg->next;
+ 		ep_ring->enqueue = ep_ring->enq_seg->trbs;
++
++		/* prevent infinite loop if all first trbs are link trbs */
++		if (link_trb_count++ > ep_ring->num_segs) {
++			xhci_warn(xhci, "Ring is an endless link TRB loop\n");
++			return -EINVAL;
++		}
+ 	}
+ 	return 0;
+ }
+-- 
+2.27.0
+

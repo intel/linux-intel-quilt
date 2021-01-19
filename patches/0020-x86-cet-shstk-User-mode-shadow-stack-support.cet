@@ -1,28 +1,25 @@
-From 40042734dc7208687c1c14623d7930f9a2b69d8a Mon Sep 17 00:00:00 2001
+From 02d37ae59563cf5690cfae69692e3e4c7881a012 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 22 Aug 2019 10:06:11 -0700
 Subject: [PATCH 20/37] x86/cet/shstk: User-mode shadow stack support
 
-This patch adds basic shadow stack enabling/disabling routines.  A task's
-shadow stack is allocated from memory with VM_SHSTK flag and has a fixed
-size of min(RLIMIT_STACK, 4GB).
+Introduce basic shadow stack enabling/disabling/allocation routines.
+A task's shadow stack is allocated from memory with VM_SHSTK flag and has
+a fixed size of min(RLIMIT_STACK, 4GB).
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 ---
- arch/x86/include/asm/cet.h               |  28 +++++
- arch/x86/include/asm/disabled-features.h |   8 +-
- arch/x86/include/asm/processor.h         |   5 +
- arch/x86/kernel/Makefile                 |   2 +
- arch/x86/kernel/cet.c                    | 147 +++++++++++++++++++++++
- arch/x86/kernel/cpu/common.c             |  28 +++++
- arch/x86/kernel/process.c                |   1 +
- 7 files changed, 218 insertions(+), 1 deletion(-)
+ arch/x86/include/asm/cet.h       |  28 ++++++
+ arch/x86/include/asm/processor.h |   5 ++
+ arch/x86/kernel/Makefile         |   2 +
+ arch/x86/kernel/cet.c            | 147 +++++++++++++++++++++++++++++++
+ 4 files changed, 182 insertions(+)
  create mode 100644 arch/x86/include/asm/cet.h
  create mode 100644 arch/x86/kernel/cet.c
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
 new file mode 100644
-index 000000000000..5750fbcbb952
+index 000000000000..6d0df5c26c22
 --- /dev/null
 +++ b/arch/x86/include/asm/cet.h
 @@ -0,0 +1,28 @@
@@ -42,7 +39,7 @@ index 000000000000..5750fbcbb952
 +	unsigned long	shstk_size;
 +};
 +
-+#ifdef CONFIG_X86_CET
++#ifdef CONFIG_X86_CET_USER
 +int cet_setup_shstk(void);
 +void cet_disable_shstk(void);
 +void cet_free_shstk(struct task_struct *p);
@@ -54,34 +51,8 @@ index 000000000000..5750fbcbb952
 +#endif /* __ASSEMBLY__ */
 +
 +#endif /* _ASM_X86_CET_H */
-diff --git a/arch/x86/include/asm/disabled-features.h b/arch/x86/include/asm/disabled-features.h
-index 5861d34f9771..6a9fb7f9bc01 100644
---- a/arch/x86/include/asm/disabled-features.h
-+++ b/arch/x86/include/asm/disabled-features.h
-@@ -62,6 +62,12 @@
- # define DISABLE_ENQCMD (1 << (X86_FEATURE_ENQCMD & 31))
- #endif
- 
-+#ifdef CONFIG_X86_SHADOW_STACK_USER
-+#define DISABLE_SHSTK	0
-+#else
-+#define DISABLE_SHSTK	(1 << (X86_FEATURE_SHSTK & 31))
-+#endif
-+
- /*
-  * Make sure to add features to the correct mask
-  */
-@@ -82,7 +88,7 @@
- #define DISABLED_MASK14	0
- #define DISABLED_MASK15	0
- #define DISABLED_MASK16	(DISABLE_PKU|DISABLE_OSPKE|DISABLE_LA57|DISABLE_UMIP| \
--			 DISABLE_ENQCMD)
-+			 DISABLE_ENQCMD|DISABLE_SHSTK)
- #define DISABLED_MASK17	0
- #define DISABLED_MASK18	0
- #define DISABLED_MASK_CHECK BUILD_BUG_ON_ZERO(NCAPINTS != 19)
 diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
-index 82a08b585818..2e0d9286f6cf 100644
+index c20a52b5534b..2b8202f35fde 100644
 --- a/arch/x86/include/asm/processor.h
 +++ b/arch/x86/include/asm/processor.h
 @@ -27,6 +27,7 @@ struct vm86;
@@ -96,7 +67,7 @@ index 82a08b585818..2e0d9286f6cf 100644
  
  	unsigned int		sig_on_uaccess_err:1;
  
-+#ifdef CONFIG_X86_CET
++#ifdef CONFIG_X86_CET_USER
 +	struct cet_status	cet;
 +#endif
 +
@@ -104,14 +75,14 @@ index 82a08b585818..2e0d9286f6cf 100644
  	struct fpu		fpu;
  	/*
 diff --git a/arch/x86/kernel/Makefile b/arch/x86/kernel/Makefile
-index 68608bd892c0..4a89d0f3792e 100644
+index 5eeb808eb024..07cee6125a3c 100644
 --- a/arch/x86/kernel/Makefile
 +++ b/arch/x86/kernel/Makefile
 @@ -151,6 +151,8 @@ obj-$(CONFIG_UNWINDER_FRAME_POINTER)	+= unwind_frame.o
  obj-$(CONFIG_UNWINDER_GUESS)		+= unwind_guess.o
  
  obj-$(CONFIG_AMD_MEM_ENCRYPT)		+= sev-es.o
-+obj-$(CONFIG_X86_CET)			+= cet.o
++obj-$(CONFIG_X86_CET_USER)		+= cet.o
 +
  ###
  # 64 bit specific files
@@ -269,71 +240,6 @@ index 000000000000..f8b0a077594f
 +	cet->shstk_base = 0;
 +	cet->shstk_size = 0;
 +}
-diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
-index 35ad8480c464..3d38ae02d9d3 100644
---- a/arch/x86/kernel/cpu/common.c
-+++ b/arch/x86/kernel/cpu/common.c
-@@ -57,6 +57,7 @@
- #include <asm/microcode_intel.h>
- #include <asm/intel-family.h>
- #include <asm/cpu_device_id.h>
-+#include <asm/cet.h>
- #include <asm/uv/uv.h>
- 
- #include "cpu.h"
-@@ -510,6 +511,32 @@ static __init int setup_disable_pku(char *arg)
- __setup("nopku", setup_disable_pku);
- #endif /* CONFIG_X86_64 */
- 
-+static __always_inline void setup_cet(struct cpuinfo_x86 *c)
-+{
-+	if (!cpu_feature_enabled(X86_FEATURE_SHSTK) &&
-+	    !cpu_feature_enabled(X86_FEATURE_IBT))
-+		return;
-+
-+	cr4_set_bits(X86_CR4_CET);
-+}
-+
-+#ifdef CONFIG_X86_SHADOW_STACK_USER
-+static __init int setup_disable_shstk(char *s)
-+{
-+	/* require an exact match without trailing characters */
-+	if (s[0] != '\0')
-+		return 0;
-+
-+	if (!boot_cpu_has(X86_FEATURE_SHSTK))
-+		return 1;
-+
-+	setup_clear_cpu_cap(X86_FEATURE_SHSTK);
-+	pr_info("x86: 'no_user_shstk' specified, disabling user Shadow Stack\n");
-+	return 1;
-+}
-+__setup("no_user_shstk", setup_disable_shstk);
-+#endif
-+
- /*
-  * Some CPU features depend on higher CPUID levels, which may not always
-  * be available due to CPUID level capping or broken virtualization
-@@ -1591,6 +1618,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
- 
- 	x86_init_rdrand(c);
- 	setup_pku(c);
-+	setup_cet(c);
- 
- 	/*
- 	 * Clear/Set all flags overridden by options, need do it
-diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index 145a7ac0c19a..9a14fc958c4a 100644
---- a/arch/x86/kernel/process.c
-+++ b/arch/x86/kernel/process.c
-@@ -43,6 +43,7 @@
- #include <asm/io_bitmap.h>
- #include <asm/proto.h>
- #include <asm/frame.h>
-+#include <asm/cet.h>
- 
- #include "process.h"
- 
 -- 
 2.27.0
 

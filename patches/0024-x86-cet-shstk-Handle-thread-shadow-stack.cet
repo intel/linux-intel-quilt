@@ -1,4 +1,4 @@
-From f248df0d4c17de8bc33dbc4b626e32cae960b1a7 Mon Sep 17 00:00:00 2001
+From 480bfe66749d16f1e849d2cadb70ea7545cb3ef5 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 3 May 2018 12:40:57 -0700
 Subject: [PATCH 24/37] x86/cet/shstk: Handle thread shadow stack
@@ -22,16 +22,16 @@ Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
  arch/x86/include/asm/cet.h         |  3 ++
  arch/x86/include/asm/mmu_context.h |  3 ++
  arch/x86/kernel/cet.c              | 44 ++++++++++++++++++++++++++++++
- arch/x86/kernel/process.c          |  7 +++++
- 4 files changed, 57 insertions(+)
+ arch/x86/kernel/process.c          |  8 ++++++
+ 4 files changed, 58 insertions(+)
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
-index 73435856ce54..ec4b5e62d0ce 100644
+index 9576550c1f2c..4b222aa1e18e 100644
 --- a/arch/x86/include/asm/cet.h
 +++ b/arch/x86/include/asm/cet.h
 @@ -18,12 +18,15 @@ struct cet_status {
  
- #ifdef CONFIG_X86_CET
+ #ifdef CONFIG_X86_CET_USER
  int cet_setup_shstk(void);
 +int cet_setup_thread_shstk(struct task_struct *p, unsigned long clone_flags);
  void cet_disable_shstk(void);
@@ -46,7 +46,7 @@ index 73435856ce54..ec4b5e62d0ce 100644
  static inline void cet_free_shstk(struct task_struct *p) {}
  static inline void cet_restore_signal(struct sc_ext *sc) { return; }
 diff --git a/arch/x86/include/asm/mmu_context.h b/arch/x86/include/asm/mmu_context.h
-index d98016b83755..ceb593e405e1 100644
+index 27516046117a..e90bd2ee8498 100644
 --- a/arch/x86/include/asm/mmu_context.h
 +++ b/arch/x86/include/asm/mmu_context.h
 @@ -11,6 +11,7 @@
@@ -57,7 +57,7 @@ index d98016b83755..ceb593e405e1 100644
  #include <asm/debugreg.h>
  
  extern atomic64_t last_mm_ctx_id;
-@@ -142,6 +143,8 @@ do {						\
+@@ -146,6 +147,8 @@ do {						\
  #else
  #define deactivate_mm(tsk, mm)			\
  do {						\
@@ -67,7 +67,7 @@ index d98016b83755..ceb593e405e1 100644
  	loadsegment(fs, 0);			\
  } while (0)
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
-index c3da4f59bd17..038419f06fc9 100644
+index c3da4f59bd17..feb466dc2ea8 100644
 --- a/arch/x86/kernel/cet.c
 +++ b/arch/x86/kernel/cet.c
 @@ -172,6 +172,50 @@ int cet_setup_shstk(void)
@@ -98,7 +98,7 @@ index c3da4f59bd17..038419f06fc9 100644
 +	/*
 +	 * Compat-mode pthreads share a limited address space.
 +	 * If each function call takes an average of four slots
-+	 * stack space, we need 1/4 of stack size for shadow stack.
++	 * stack space, allocate 1/4 of stack size for shadow stack.
 +	 */
 +	if (in_compat_syscall())
 +		size /= 4;
@@ -122,10 +122,18 @@ index c3da4f59bd17..038419f06fc9 100644
  {
  	struct cet_status *cet = &current->thread.cet;
 diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
-index 9a14fc958c4a..3af6b36e1a5c 100644
+index 145a7ac0c19a..3af6b36e1a5c 100644
 --- a/arch/x86/kernel/process.c
 +++ b/arch/x86/kernel/process.c
-@@ -110,6 +110,7 @@ void exit_thread(struct task_struct *tsk)
+@@ -43,6 +43,7 @@
+ #include <asm/io_bitmap.h>
+ #include <asm/proto.h>
+ #include <asm/frame.h>
++#include <asm/cet.h>
+ 
+ #include "process.h"
+ 
+@@ -109,6 +110,7 @@ void exit_thread(struct task_struct *tsk)
  
  	free_vm86(t);
  
@@ -133,7 +141,7 @@ index 9a14fc958c4a..3af6b36e1a5c 100644
  	fpu__drop(fpu);
  }
  
-@@ -182,6 +183,12 @@ int copy_thread(unsigned long clone_flags, unsigned long sp, unsigned long arg,
+@@ -181,6 +183,12 @@ int copy_thread(unsigned long clone_flags, unsigned long sp, unsigned long arg,
  	if (clone_flags & CLONE_SETTLS)
  		ret = set_new_tls(p, tls);
  

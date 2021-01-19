@@ -1,4 +1,4 @@
-From 7c1881e123c0ba6f4b9ee840e705c6fa17428080 Mon Sep 17 00:00:00 2001
+From 4d766ea916d5909d6cbb7a4be799330af5ef8efa Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Tue, 28 Nov 2017 13:01:18 -0800
 Subject: [PATCH 13/37] x86/mm: Shadow Stack page fault error checking
@@ -21,8 +21,8 @@ mapping.
 In handling a shadow stack page fault, verify it occurs within a shadow
 stack mapping.  It is always an error otherwise.  For valid shadow stack
 accesses, set FAULT_FLAG_WRITE to effect copy-on-write.  Because clearing
-_PAGE_DIRTY_HW (vs. _PAGE_RW) is used to trigger the fault, shadow stack
-read fault and shadow stack write fault are not differentiated and both are
+_PAGE_DIRTY (vs. _PAGE_RW) is used to trigger the fault, shadow stack read
+fault and shadow stack write fault are not differentiated and both are
 handled as a write access.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
@@ -33,7 +33,7 @@ Reviewed-by: Kees Cook <keescook@chromium.org>
  2 files changed, 21 insertions(+)
 
 diff --git a/arch/x86/include/asm/trap_pf.h b/arch/x86/include/asm/trap_pf.h
-index 305bc1214aef..205766c438b3 100644
+index 10b1de500ab1..afa524325e55 100644
 --- a/arch/x86/include/asm/trap_pf.h
 +++ b/arch/x86/include/asm/trap_pf.h
 @@ -11,6 +11,7 @@
@@ -41,22 +41,22 @@ index 305bc1214aef..205766c438b3 100644
   *   bit 4 ==				1: fault was an instruction fetch
   *   bit 5 ==				1: protection keys block access
 + *   bit 6 ==				1: shadow stack access fault
+  *   bit 15 ==				1: SGX MMU page-fault
   */
  enum x86_pf_error_code {
- 	X86_PF_PROT	=		1 << 0,
-@@ -19,6 +20,7 @@ enum x86_pf_error_code {
+@@ -20,6 +21,7 @@ enum x86_pf_error_code {
  	X86_PF_RSVD	=		1 << 3,
  	X86_PF_INSTR	=		1 << 4,
  	X86_PF_PK	=		1 << 5,
 +	X86_PF_SHSTK	=		1 << 6,
+ 	X86_PF_SGX	=		1 << 15,
  };
  
- #endif /* _ASM_X86_TRAP_PF_H */
 diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
-index 82bf37a5c9ec..941f55ee7c75 100644
+index f1f1b5a0956a..4cfb8c474a82 100644
 --- a/arch/x86/mm/fault.c
 +++ b/arch/x86/mm/fault.c
-@@ -1110,6 +1110,17 @@ access_error(unsigned long error_code, struct vm_area_struct *vma)
+@@ -1131,6 +1131,17 @@ access_error(unsigned long error_code, struct vm_area_struct *vma)
  				       (error_code & X86_PF_INSTR), foreign))
  		return 1;
  
@@ -74,12 +74,12 @@ index 82bf37a5c9ec..941f55ee7c75 100644
  	if (error_code & X86_PF_WRITE) {
  		/* write, present and write, not present: */
  		if (unlikely(!(vma->vm_flags & VM_WRITE)))
-@@ -1275,6 +1286,14 @@ void do_user_addr_fault(struct pt_regs *regs,
+@@ -1296,6 +1307,14 @@ void do_user_addr_fault(struct pt_regs *regs,
  
  	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
  
 +	/*
-+	 * Clearing _PAGE_DIRTY_HW is used to detect shadow stack access.
++	 * Clearing _PAGE_DIRTY is used to detect shadow stack access.
 +	 * This method cannot distinguish shadow stack read vs. write.
 +	 * For valid shadow stack accesses, set FAULT_FLAG_WRITE to effect
 +	 * copy-on-write.

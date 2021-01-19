@@ -1,13 +1,19 @@
-From c82951136fa7b5f8a7deef167f21b841a1e7f978 Mon Sep 17 00:00:00 2001
+From 8e86068df102a8b9b0e691906df24956ee3e6862 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 29 Aug 2019 09:24:13 -0700
 Subject: [PATCH 10/37] x86/mm: Update pte_modify for _PAGE_COW
 
-Pte_modify() changes a PTE to 'newprot'.  It doesn't use the pte_*()
-helpers that a previous patch fixed up, so we need a new site.
+The read-only and Dirty PTE has been used to indicate copy-on-write pages.
+However, newer x86 processors also regard a read-only and Dirty PTE as a
+shadow stack page.  In order to separate the two, the software-defined
+_PAGE_COW is created to replace _PAGE_DIRTY for the copy-on-write case, and
+pte_*() are updated.
 
-Introduce fixup_dirty_pte() to set the dirty bits based on _PAGE_RW, and
-apply the same changes to pmd_modify().
+Pte_modify() changes a PTE to 'newprot', but it doesn't use the pte_*().
+Introduce fixup_dirty_pte(), which sets a dirty PTE, based on _PAGE_RW,
+to either _PAGE_DIRTY or _PAGE_COW.
+
+Apply the same changes to pmd_modify().
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 ---
@@ -15,10 +21,10 @@ Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
  1 file changed, 33 insertions(+)
 
 diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index c88c7ccf0318..07a08e763bce 100644
+index 61e4d3b17d87..666c25ab9564 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
-@@ -726,6 +726,21 @@ static inline pmd_t pmd_mkinvalid(pmd_t pmd)
+@@ -723,6 +723,21 @@ static inline pmd_t pmd_mkinvalid(pmd_t pmd)
  
  static inline u64 flip_protnone_guard(u64 oldval, u64 val, u64 mask);
  
@@ -30,7 +36,7 @@ index c88c7ccf0318..07a08e763bce 100644
 +		pte = pte_mkclean(pte);
 +
 +		if (pte_flags(pte) & _PAGE_RW)
-+			pte = pte_set_flags(pte, _PAGE_DIRTY_HW);
++			pte = pte_set_flags(pte, _PAGE_DIRTY);
 +		else
 +			pte = pte_set_flags(pte, _PAGE_COW);
 +	}
@@ -40,7 +46,7 @@ index c88c7ccf0318..07a08e763bce 100644
  static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  {
  	pteval_t val = pte_val(pte), oldval = val;
-@@ -736,16 +751,34 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
+@@ -733,16 +748,34 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  	 */
  	val &= _PAGE_CHG_MASK;
  	val |= check_pgprot(newprot) & ~_PAGE_CHG_MASK;
@@ -58,7 +64,7 @@ index c88c7ccf0318..07a08e763bce 100644
 +		pmd = pmd_mkclean(pmd);
 +
 +		if (pmd_flags(pmd) & _PAGE_RW)
-+			pmd = pmd_set_flags(pmd, _PAGE_DIRTY_HW);
++			pmd = pmd_set_flags(pmd, _PAGE_DIRTY);
 +		else
 +			pmd = pmd_set_flags(pmd, _PAGE_COW);
 +	}

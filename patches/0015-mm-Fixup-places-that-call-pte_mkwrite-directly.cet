@@ -1,12 +1,16 @@
-From 91d4a2e5cb0fc29021c749be8a785f0bb2d189f1 Mon Sep 17 00:00:00 2001
+From 1b157867202f00300edbbeb9910b4aa431c75ba1 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Mon, 13 Apr 2020 13:21:22 -0700
 Subject: [PATCH 15/37] mm: Fixup places that call pte_mkwrite() directly
 
-A shadow stack page is made writable by pte_mkwrite_shstk(), which sets
-_PAGE_DIRTY_HW.  There are a few places that call pte_mkwrite() directly
-and miss the maybe_mkwrite() fixup in the previous patch.  Fix them with
-maybe_mkwrite():
+When serving a page fault, maybe_mkwrite() makes a PTE writable if it is in
+a writable vma.  A shadow stack vma is writable, but its PTEs need
+_PAGE_DIRTY to be set to become writable.  For this reason, maybe_mkwrite()
+has been updated.
+
+There are a few places that call pte_mkwrite() directly, but effect the
+same result as from maybe_mkwrite().  These sites need to be updated for
+shadow stack as well.  Thus, change them to maybe_mkwrite():
 
 - do_anonymous_page() and migrate_vma_insert_page() check VM_WRITE directly
   and call pte_mkwrite(), which is the same as maybe_mkwrite().  Change
@@ -18,6 +22,9 @@ maybe_mkwrite():
 - In change_pte_range(), pte_mkwrite() is called directly.  Replace it with
   maybe_mkwrite().
 
+  A shadow stack vma is writable but has different vma
+flags, and handled accordingly in maybe_mkwrite().
+
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 ---
  mm/memory.c   | 5 ++---
@@ -26,10 +33,10 @@ Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
  3 files changed, 4 insertions(+), 6 deletions(-)
 
 diff --git a/mm/memory.c b/mm/memory.c
-index c48f8df6e502..65c56a5de418 100644
+index feff48e1465a..1de649c61013 100644
 --- a/mm/memory.c
 +++ b/mm/memory.c
-@@ -3536,8 +3536,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+@@ -3549,8 +3549,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
  
  	entry = mk_pte(page, vma->vm_page_prot);
  	entry = pte_sw_mkyoung(entry);
@@ -39,7 +46,7 @@ index c48f8df6e502..65c56a5de418 100644
  
  	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
  			&vmf->ptl);
-@@ -4192,7 +4191,7 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
+@@ -4205,7 +4204,7 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
  	pte = pte_modify(old_pte, vma->vm_page_prot);
  	pte = pte_mkyoung(pte);
  	if (was_writable)
@@ -49,10 +56,10 @@ index c48f8df6e502..65c56a5de418 100644
  	update_mmu_cache(vma, vmf->address, vmf->pte);
  
 diff --git a/mm/migrate.c b/mm/migrate.c
-index 5795cb82e27c..885f05dd78ed 100644
+index ee5e612b4cd8..2ff6c60a7423 100644
 --- a/mm/migrate.c
 +++ b/mm/migrate.c
-@@ -2918,8 +2918,7 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
+@@ -2963,8 +2963,7 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
  		}
  	} else {
  		entry = mk_pte(page, vma->vm_page_prot);
@@ -63,7 +70,7 @@ index 5795cb82e27c..885f05dd78ed 100644
  
  	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
 diff --git a/mm/mprotect.c b/mm/mprotect.c
-index 56c02beb6041..7235b2409422 100644
+index ab709023e9aa..ed26e675c423 100644
 --- a/mm/mprotect.c
 +++ b/mm/mprotect.c
 @@ -135,7 +135,7 @@ static unsigned long change_pte_range(struct vm_area_struct *vma, pmd_t *pmd,

@@ -1,0 +1,90 @@
+From 7d904bbea142feb1dc7da9e02c6333353b9a95a2 Mon Sep 17 00:00:00 2001
+From: Mathias Nyman <mathias.nyman@linux.intel.com>
+Date: Wed, 16 Dec 2020 17:23:16 +0200
+Subject: [PATCH 02/11] xhci: get isochronous ring directly from endpoint
+ structure
+
+isochronous endpoints do not support streams, meaning that
+there is only one ring per endpoint.
+
+Avoid double-fetching the transfer event DMA to get the
+ring. Also makes passing the event to skip_isoc_td() uncecessary.
+
+Signed-off-by: Mathias Nyman <mathias.nyman@linux.intel.com>
+---
+ drivers/usb/host/xhci-ring.c | 17 ++++++-----------
+ 1 file changed, 6 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
+index 33f08ddab6be..e58adccdbf6f 100644
+--- a/drivers/usb/host/xhci-ring.c
++++ b/drivers/usb/host/xhci-ring.c
+@@ -2134,7 +2134,6 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+ 	union xhci_trb *ep_trb, struct xhci_transfer_event *event,
+ 	struct xhci_virt_ep *ep, int *status)
+ {
+-	struct xhci_ring *ep_ring;
+ 	struct urb_priv *urb_priv;
+ 	int idx;
+ 	struct usb_iso_packet_descriptor *frame;
+@@ -2143,7 +2142,6 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+ 	u32 remaining, requested, ep_trb_len;
+ 	int short_framestatus;
+ 
+-	ep_ring = xhci_dma_to_transfer_ring(ep, le64_to_cpu(event->buffer));
+ 	trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->transfer_len));
+ 	urb_priv = td->urb->hcpriv;
+ 	idx = urb_priv->num_tds_done;
+@@ -2204,7 +2202,7 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+ 	}
+ 
+ 	if (sum_trbs_for_length)
+-		frame->actual_length = sum_trb_lengths(xhci, ep_ring, ep_trb) +
++		frame->actual_length = sum_trb_lengths(xhci, ep->ring, ep_trb) +
+ 			ep_trb_len - remaining;
+ 	else
+ 		frame->actual_length = requested;
+@@ -2215,15 +2213,12 @@ static int process_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+ }
+ 
+ static int skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+-			struct xhci_transfer_event *event,
+ 			struct xhci_virt_ep *ep, int *status)
+ {
+-	struct xhci_ring *ep_ring;
+ 	struct urb_priv *urb_priv;
+ 	struct usb_iso_packet_descriptor *frame;
+ 	int idx;
+ 
+-	ep_ring = xhci_dma_to_transfer_ring(ep, le64_to_cpu(event->buffer));
+ 	urb_priv = td->urb->hcpriv;
+ 	idx = urb_priv->num_tds_done;
+ 	frame = &td->urb->iso_frame_desc[idx];
+@@ -2235,11 +2230,11 @@ static int skip_isoc_td(struct xhci_hcd *xhci, struct xhci_td *td,
+ 	frame->actual_length = 0;
+ 
+ 	/* Update ring dequeue pointer */
+-	while (ep_ring->dequeue != td->last_trb)
+-		inc_deq(xhci, ep_ring);
+-	inc_deq(xhci, ep_ring);
++	while (ep->ring->dequeue != td->last_trb)
++		inc_deq(xhci, ep->ring);
++	inc_deq(xhci, ep->ring);
+ 
+-	return xhci_td_cleanup(xhci, td, ep_ring, status);
++	return xhci_td_cleanup(xhci, td, ep->ring, status);
+ }
+ 
+ /*
+@@ -2619,7 +2614,7 @@ static int handle_tx_event(struct xhci_hcd *xhci,
+ 				return -ESHUTDOWN;
+ 			}
+ 
+-			skip_isoc_td(xhci, td, event, ep, &status);
++			skip_isoc_td(xhci, td, ep, &status);
+ 			goto cleanup;
+ 		}
+ 		if (trb_comp_code == COMP_SHORT_PACKET)
+-- 
+2.27.0
+

@@ -1,4 +1,4 @@
-From 6efcc50e756948ab2ed248c5d20dd15c3061a0c0 Mon Sep 17 00:00:00 2001
+From 6d12d211e35b6fe3e8ff4151eef620ff1bb9f7fa Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Fri, 10 Jul 2020 17:48:35 +0800
 Subject: [PATCH 6/9] tcc: tcc drvier should not exit even if no psram entry.

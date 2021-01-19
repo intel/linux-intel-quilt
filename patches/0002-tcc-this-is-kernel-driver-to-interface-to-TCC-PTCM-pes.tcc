@@ -1,4 +1,4 @@
-From baaf958a8e17fe7ad4ce60dc1f2e04ab832f476c Mon Sep 17 00:00:00 2001
+From e4df69b1723c48e10d9415244c6b3115f6eec3de Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Fri, 16 Oct 2020 15:17:44 +0800
 Subject: [PATCH 2/9] tcc: this is kernel driver to interface to TCC PTCM
@@ -32,10 +32,10 @@ index dcecc9f6e33f..156372465f34 100644
 +source "drivers/tcc/Kconfig"
  endmenu
 diff --git a/drivers/Makefile b/drivers/Makefile
-index 576228037718..3aa6a22c3a65 100644
+index fd11b9ac4cc3..2204ec6c4d69 100644
 --- a/drivers/Makefile
 +++ b/drivers/Makefile
-@@ -189,3 +189,4 @@ obj-$(CONFIG_GNSS)		+= gnss/
+@@ -187,3 +187,4 @@ obj-$(CONFIG_GNSS)		+= gnss/
  obj-$(CONFIG_INTERCONNECT)	+= interconnect/
  obj-$(CONFIG_COUNTER)		+= counter/
  obj-$(CONFIG_MOST)		+= most/
