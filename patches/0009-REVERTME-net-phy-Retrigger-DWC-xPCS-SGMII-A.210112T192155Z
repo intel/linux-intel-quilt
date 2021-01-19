@@ -1,0 +1,60 @@
+From 8d734d924d382bb1ab51e9ef0a58397844cfa1c2 Mon Sep 17 00:00:00 2001
+From: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+Date: Tue, 15 Dec 2020 13:57:38 +0800
+Subject: [PATCH 09/13] REVERTME: net: phy: Retrigger DWC xPCS SGMII AN
+
+Just in case PHY`s link is up but DWC xPCS`s link is still down,
+retrigger SGMII AN to recover the link.
+
+This is corner case. As of now, only observe using GPY PHY(FW 0x8764) when
+wake up from S3.
+
+Signed-off-by: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+---
+ drivers/net/phy/dwxpcs.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/phy/dwxpcs.c b/drivers/net/phy/dwxpcs.c
+index 493907bfbc1a..770c53fb15a6 100644
+--- a/drivers/net/phy/dwxpcs.c
++++ b/drivers/net/phy/dwxpcs.c
+@@ -62,8 +62,9 @@
+ #define AN_STAT_SGMII_AN_LNKSTS		BIT(4)	/* Link Status */
+ 
+ /* SR MII MMD Control defines */
+-#define AN_CL37_EN		BIT(12)	/* Enable Clause 37 auto-nego */
+ #define SGMII_SPEED_SS13	BIT(13)	/* SGMII speed along with SS6 */
++#define AN_CL37_EN		BIT(12)	/* Enable Clause 37 auto-nego */
++#define ANRS_CL37		BIT(9)	/* Restart Clause 37 auto-nego */
+ #define SGMII_SPEED_SS6		BIT(6)	/* SGMII speed along with SS13 */
+ 
+ /* VR MII EEE Control defines */
+@@ -219,6 +220,7 @@ static void dwxpcs_init(struct dwxpcs_priv *priv)
+ static int dwxpcs_read_status(struct phy_device *phydev)
+ {
+ 	struct dwxpcs_priv *priv = (struct dwxpcs_priv *)phydev->priv;
++	struct pcs_stats *pcs_stats = &priv->stats;
+ 	struct mii_bus *bus = priv->mdiodev->bus;
+ 	int xpcs_addr = priv->mdiodev->addr;
+ 	int pcs_mode = priv->pdata->mode;
+@@ -245,6 +247,17 @@ static int dwxpcs_read_status(struct phy_device *phydev)
+ 		phydata &= ~BMCR_FULLDPLX;
+ 		phydata |= phydev->duplex ? BMCR_FULLDPLX : 0;
+ 		xpcs_write(XPCS_MDIO_MII_MMD, MII_BMCR, phydata);
++	} else if (pcs_mode == DWXPCS_MODE_SGMII_AN) {
++		/* Just in case PHY`s link is up but xPCS`s link is still down,
++		 * try to retrigger xPCS SGMII AN to recover.
++		 */
++		if (phydev->link && !pcs_stats->link) {
++			phydata = xpcs_read(XPCS_MDIO_MII_MMD,
++					    MDIO_MII_MMD_CTRL);
++			phydata |= ANRS_CL37;
++			xpcs_write(XPCS_MDIO_MII_MMD, MDIO_MII_MMD_CTRL,
++				   phydata);
++		}
+ 	}
+ 
+ 	return 0;
+-- 
+2.17.1
+
