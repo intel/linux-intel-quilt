@@ -1228,7 +1228,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt.h
 ===================================================================
 --- kernel-lts-staging.orig/arch/x86/kernel/cpu/intel_rdt.h
 +++ /dev/null
-@@ -1,572 +0,0 @@
+@@ -1,570 +0,0 @@
 -/* SPDX-License-Identifier: GPL-2.0 */
 -#ifndef _ASM_X86_INTEL_RDT_H
 -#define _ASM_X86_INTEL_RDT_H
@@ -1482,7 +1482,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt.h
 - * struct mbm_state - status for each MBM counter in each domain
 - * @chunks:	Total data moved (multiply by rdt_group.mon_scale to get bytes)
 - * @prev_msr	Value of IA32_QM_CTR for this RMID last time we read it
-- * @chunks_bw	Total local data moved. Used for bandwidth calculation
 - * @prev_bw_msr:Value of previous IA32_QM_CTR for bandwidth counting
 - * @prev_bw	The most recent bandwidth in MBps
 - * @delta_bw	Difference between the current and previous bandwidth
@@ -1491,7 +1490,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt.h
 -struct mbm_state {
 -	u64	chunks;
 -	u64	prev_msr;
--	u64	chunks_bw;
 -	u64	prev_bw_msr;
 -	u32	prev_bw;
 -	u32	delta_bw;
@@ -2301,7 +2299,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_monitor.c
 ===================================================================
 --- kernel-lts-staging.orig/arch/x86/kernel/cpu/intel_rdt_monitor.c
 +++ /dev/null
-@@ -1,658 +0,0 @@
+@@ -1,655 +0,0 @@
 -/*
 - * Resource Director Technology(RDT)
 - * - Monitoring code
@@ -2594,8 +2592,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_monitor.c
 -		return;
 -
 -	chunks = mbm_overflow_count(m->prev_bw_msr, tval);
--	m->chunks_bw += chunks;
--	m->chunks = m->chunks_bw;
 -	cur_bw = (chunks * r->mon_scale) >> 20;
 -
 -	if (m->delta_comp)
@@ -2765,15 +2761,14 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_monitor.c
 -	}
 -	if (is_mbm_local_enabled()) {
 -		rr.evtid = QOS_L3_MBM_LOCAL_EVENT_ID;
+-		__mon_event_count(rmid, &rr);
 -
 -		/*
 -		 * Call the MBA software controller only for the
 -		 * control groups and when user has enabled
 -		 * the software controller explicitly.
 -		 */
--		if (!is_mba_sc(NULL))
--			__mon_event_count(rmid, &rr);
--		else
+-		if (is_mba_sc(NULL))
 -			mbm_bw_count(rmid, &rr);
 -	}
 -}
@@ -3012,7 +3007,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 ===================================================================
 --- kernel-lts-staging.orig/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 +++ /dev/null
-@@ -1,3087 +0,0 @@
+@@ -1,3074 +0,0 @@
 -/*
 - * User interface for Resource Alloction in Resource Director Technology(RDT)
 - *
@@ -3530,6 +3525,24 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	return ret ?: nbytes;
 -}
 -
+-/**
+- * rdtgroup_remove - the helper to remove resource group safely
+- * @rdtgrp: resource group to remove
+- *
+- * On resource group creation via a mkdir, an extra kernfs_node reference is
+- * taken to ensure that the rdtgroup structure remains accessible for the
+- * rdtgroup_kn_unlock() calls where it is removed.
+- *
+- * Drop the extra reference here, then free the rdtgroup structure.
+- *
+- * Return: void
+- */
+-static void rdtgroup_remove(struct rdtgroup *rdtgrp)
+-{
+-	kernfs_put(rdtgrp->kn);
+-	kfree(rdtgrp);
+-}
+-
 -struct task_move_callback {
 -	struct callback_head	work;
 -	struct rdtgroup		*rdtgrp;
@@ -3552,7 +3565,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	    (rdtgrp->flags & RDT_DELETED)) {
 -		current->closid = 0;
 -		current->rmid = 0;
--		kfree(rdtgrp);
+-		rdtgroup_remove(rdtgrp);
 -	}
 -
 -	preempt_disable();
@@ -4641,7 +4654,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	if (IS_ERR(kn_subdir))
 -		return PTR_ERR(kn_subdir);
 -
--	kernfs_get(kn_subdir);
 -	ret = rdtgroup_kn_set_ugid(kn_subdir);
 -	if (ret)
 -		return ret;
@@ -4664,7 +4676,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	kn_info = kernfs_create_dir(parent_kn, "info", parent_kn->mode, NULL);
 -	if (IS_ERR(kn_info))
 -		return PTR_ERR(kn_info);
--	kernfs_get(kn_info);
 -
 -	ret = rdtgroup_add_files(kn_info, RF_TOP_INFO);
 -	if (ret)
@@ -4684,12 +4695,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -		if (ret)
 -			goto out_destroy;
 -	}
--
--	/*
--	 * This extra ref will be put in kernfs_remove() and guarantees
--	 * that @rdtgrp->kn is always accessible.
--	 */
--	kernfs_get(kn_info);
 -
 -	ret = rdtgroup_kn_set_ugid(kn_info);
 -	if (ret)
@@ -4718,12 +4723,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -
 -	if (dest_kn)
 -		*dest_kn = kn;
--
--	/*
--	 * This extra ref will be put in kernfs_remove() and guarantees
--	 * that @rdtgrp->kn is always accessible.
--	 */
--	kernfs_get(kn);
 -
 -	ret = rdtgroup_kn_set_ugid(kn);
 -	if (ret)
@@ -4988,8 +4987,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
 -			rdtgroup_pseudo_lock_remove(rdtgrp);
 -		kernfs_unbreak_active_protection(kn);
--		kernfs_put(rdtgrp->kn);
--		kfree(rdtgrp);
+-		rdtgroup_remove(rdtgrp);
 -	} else {
 -		kernfs_unbreak_active_protection(kn);
 -	}
@@ -5040,7 +5038,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -			dentry = ERR_PTR(ret);
 -			goto out_info;
 -		}
--		kernfs_get(kn_mongrp);
 -
 -		ret = mkdir_mondata_all(rdtgroup_default.kn,
 -					&rdtgroup_default, &kn_mondata);
@@ -5048,7 +5045,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -			dentry = ERR_PTR(ret);
 -			goto out_mongrp;
 -		}
--		kernfs_get(kn_mondata);
 -		rdtgroup_default.mon.mon_data_kn = kn_mondata;
 -	}
 -
@@ -5200,7 +5196,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -		if (atomic_read(&sentry->waitcount) != 0)
 -			sentry->flags = RDT_DELETED;
 -		else
--			kfree(sentry);
+-			rdtgroup_remove(sentry);
 -	}
 -}
 -
@@ -5242,7 +5238,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -		if (atomic_read(&rdtgrp->waitcount) != 0)
 -			rdtgrp->flags = RDT_DELETED;
 -		else
--			kfree(rdtgrp);
+-			rdtgroup_remove(rdtgrp);
 -	}
 -	/* Notify online CPUs to update per cpu storage and PQR_ASSOC MSR */
 -	update_closid_rmid(cpu_online_mask, &rdtgroup_default);
@@ -5341,11 +5337,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	if (IS_ERR(kn))
 -		return PTR_ERR(kn);
 -
--	/*
--	 * This extra ref will be put in kernfs_remove() and guarantees
--	 * that kn is always accessible.
--	 */
--	kernfs_get(kn);
 -	ret = rdtgroup_kn_set_ugid(kn);
 -	if (ret)
 -		goto out_destroy;
@@ -5655,8 +5646,8 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	/*
 -	 * kernfs_remove() will drop the reference count on "kn" which
 -	 * will free it. But we still need it to stick around for the
--	 * rdtgroup_kn_unlock(kn} call below. Take one extra reference
--	 * here, which will be dropped inside rdtgroup_kn_unlock().
+-	 * rdtgroup_kn_unlock(kn) call. Take one extra reference here,
+-	 * which will be dropped by kernfs_put() in rdtgroup_remove().
 -	 */
 -	kernfs_get(kn);
 -
@@ -5697,6 +5688,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -out_idfree:
 -	free_rmid(rdtgrp->mon.rmid);
 -out_destroy:
+-	kernfs_put(rdtgrp->kn);
 -	kernfs_remove(rdtgrp->kn);
 -out_free_rgrp:
 -	kfree(rdtgrp);
@@ -5709,7 +5701,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -{
 -	kernfs_remove(rgrp->kn);
 -	free_rmid(rgrp->mon.rmid);
--	kfree(rgrp);
+-	rdtgroup_remove(rgrp);
 -}
 -
 -/*
@@ -5871,11 +5863,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	WARN_ON(list_empty(&prdtgrp->mon.crdtgrp_list));
 -	list_del(&rdtgrp->mon.crdtgrp_list);
 -
--	/*
--	 * one extra hold on this, will drop when we kfree(rdtgrp)
--	 * in rdtgroup_kn_unlock()
--	 */
--	kernfs_get(kn);
 -	kernfs_remove(rdtgrp->kn);
 -
 -	return 0;
@@ -5887,11 +5874,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/intel_rdt_rdtgroup.c
 -	rdtgrp->flags = RDT_DELETED;
 -	list_del(&rdtgrp->rdtgroup_list);
 -
--	/*
--	 * one extra hold on this, will drop when we kfree(rdtgrp)
--	 * in rdtgroup_kn_unlock()
--	 */
--	kernfs_get(kn);
 -	kernfs_remove(rdtgrp->kn);
 -	return 0;
 -}
@@ -7525,7 +7507,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/internal.h
 ===================================================================
 --- /dev/null
 +++ kernel-lts-staging/arch/x86/kernel/cpu/resctrl/internal.h
-@@ -0,0 +1,572 @@
+@@ -0,0 +1,570 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef _ASM_X86_RESCTRL_INTERNAL_H
 +#define _ASM_X86_RESCTRL_INTERNAL_H
@@ -7779,7 +7761,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/internal.h
 + * struct mbm_state - status for each MBM counter in each domain
 + * @chunks:	Total data moved (multiply by rdt_group.mon_scale to get bytes)
 + * @prev_msr	Value of IA32_QM_CTR for this RMID last time we read it
-+ * @chunks_bw	Total local data moved. Used for bandwidth calculation
 + * @prev_bw_msr:Value of previous IA32_QM_CTR for bandwidth counting
 + * @prev_bw	The most recent bandwidth in MBps
 + * @delta_bw	Difference between the current and previous bandwidth
@@ -7788,7 +7769,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/internal.h
 +struct mbm_state {
 +	u64	chunks;
 +	u64	prev_msr;
-+	u64	chunks_bw;
 +	u64	prev_bw_msr;
 +	u32	prev_bw;
 +	u32	delta_bw;
@@ -8102,7 +8082,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/monitor.c
 ===================================================================
 --- /dev/null
 +++ kernel-lts-staging/arch/x86/kernel/cpu/resctrl/monitor.c
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,655 @@
 +/*
 + * Resource Director Technology(RDT)
 + * - Monitoring code
@@ -8395,8 +8375,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/monitor.c
 +		return;
 +
 +	chunks = mbm_overflow_count(m->prev_bw_msr, tval);
-+	m->chunks_bw += chunks;
-+	m->chunks = m->chunks_bw;
 +	cur_bw = (chunks * r->mon_scale) >> 20;
 +
 +	if (m->delta_comp)
@@ -8566,15 +8544,14 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/monitor.c
 +	}
 +	if (is_mbm_local_enabled()) {
 +		rr.evtid = QOS_L3_MBM_LOCAL_EVENT_ID;
++		__mon_event_count(rmid, &rr);
 +
 +		/*
 +		 * Call the MBA software controller only for the
 +		 * control groups and when user has enabled
 +		 * the software controller explicitly.
 +		 */
-+		if (!is_mba_sc(NULL))
-+			__mon_event_count(rmid, &rr);
-+		else
++		if (is_mba_sc(NULL))
 +			mbm_bw_count(rmid, &rr);
 +	}
 +}
@@ -10417,7 +10394,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 ===================================================================
 --- /dev/null
 +++ kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
-@@ -0,0 +1,3087 @@
+@@ -0,0 +1,3073 @@
 +/*
 + * User interface for Resource Alloction in Resource Director Technology(RDT)
 + *
@@ -10934,6 +10911,23 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +
 +	return ret ?: nbytes;
 +}
++/**
++ * rdtgroup_remove - the helper to remove resource group safely
++ * @rdtgrp: resource group to remove
++ *
++ * On resource group creation via a mkdir, an extra kernfs_node reference is
++ * taken to ensure that the rdtgroup structure remains accessible for the
++ * rdtgroup_kn_unlock() calls where it is removed.
++ *
++ * Drop the extra reference here, then free the rdtgroup structure.
++ *
++ * Return: void
++ */
++static void rdtgroup_remove(struct rdtgroup *rdtgrp)
++{
++	kernfs_put(rdtgrp->kn);
++	kfree(rdtgrp);
++}
 +
 +struct task_move_callback {
 +	struct callback_head	work;
@@ -10957,7 +10951,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	    (rdtgrp->flags & RDT_DELETED)) {
 +		current->closid = 0;
 +		current->rmid = 0;
-+		kfree(rdtgrp);
++		rdtgroup_remove(rdtgrp);
 +	}
 +
 +	preempt_disable();
@@ -12046,7 +12040,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	if (IS_ERR(kn_subdir))
 +		return PTR_ERR(kn_subdir);
 +
-+	kernfs_get(kn_subdir);
 +	ret = rdtgroup_kn_set_ugid(kn_subdir);
 +	if (ret)
 +		return ret;
@@ -12069,7 +12062,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	kn_info = kernfs_create_dir(parent_kn, "info", parent_kn->mode, NULL);
 +	if (IS_ERR(kn_info))
 +		return PTR_ERR(kn_info);
-+	kernfs_get(kn_info);
 +
 +	ret = rdtgroup_add_files(kn_info, RF_TOP_INFO);
 +	if (ret)
@@ -12089,12 +12081,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +		if (ret)
 +			goto out_destroy;
 +	}
-+
-+	/*
-+	 * This extra ref will be put in kernfs_remove() and guarantees
-+	 * that @rdtgrp->kn is always accessible.
-+	 */
-+	kernfs_get(kn_info);
 +
 +	ret = rdtgroup_kn_set_ugid(kn_info);
 +	if (ret)
@@ -12123,12 +12109,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +
 +	if (dest_kn)
 +		*dest_kn = kn;
-+
-+	/*
-+	 * This extra ref will be put in kernfs_remove() and guarantees
-+	 * that @rdtgrp->kn is always accessible.
-+	 */
-+	kernfs_get(kn);
 +
 +	ret = rdtgroup_kn_set_ugid(kn);
 +	if (ret)
@@ -12393,8 +12373,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +		    rdtgrp->mode == RDT_MODE_PSEUDO_LOCKED)
 +			rdtgroup_pseudo_lock_remove(rdtgrp);
 +		kernfs_unbreak_active_protection(kn);
-+		kernfs_put(rdtgrp->kn);
-+		kfree(rdtgrp);
++		rdtgroup_remove(rdtgrp);
 +	} else {
 +		kernfs_unbreak_active_protection(kn);
 +	}
@@ -12445,7 +12424,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +			dentry = ERR_PTR(ret);
 +			goto out_info;
 +		}
-+		kernfs_get(kn_mongrp);
 +
 +		ret = mkdir_mondata_all(rdtgroup_default.kn,
 +					&rdtgroup_default, &kn_mondata);
@@ -12453,7 +12431,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +			dentry = ERR_PTR(ret);
 +			goto out_mongrp;
 +		}
-+		kernfs_get(kn_mondata);
 +		rdtgroup_default.mon.mon_data_kn = kn_mondata;
 +	}
 +
@@ -12605,7 +12582,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +		if (atomic_read(&sentry->waitcount) != 0)
 +			sentry->flags = RDT_DELETED;
 +		else
-+			kfree(sentry);
++			rdtgroup_remove(sentry);
 +	}
 +}
 +
@@ -12647,7 +12624,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +		if (atomic_read(&rdtgrp->waitcount) != 0)
 +			rdtgrp->flags = RDT_DELETED;
 +		else
-+			kfree(rdtgrp);
++			rdtgroup_remove(rdtgrp);
 +	}
 +	/* Notify online CPUs to update per cpu storage and PQR_ASSOC MSR */
 +	update_closid_rmid(cpu_online_mask, &rdtgroup_default);
@@ -12746,11 +12723,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	if (IS_ERR(kn))
 +		return PTR_ERR(kn);
 +
-+	/*
-+	 * This extra ref will be put in kernfs_remove() and guarantees
-+	 * that kn is always accessible.
-+	 */
-+	kernfs_get(kn);
 +	ret = rdtgroup_kn_set_ugid(kn);
 +	if (ret)
 +		goto out_destroy;
@@ -13060,8 +13032,8 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	/*
 +	 * kernfs_remove() will drop the reference count on "kn" which
 +	 * will free it. But we still need it to stick around for the
-+	 * rdtgroup_kn_unlock(kn} call below. Take one extra reference
-+	 * here, which will be dropped inside rdtgroup_kn_unlock().
++	 * rdtgroup_kn_unlock(kn) call. Take one extra reference here,
++	 * which will be dropped by kernfs_put() in rdtgroup_remove().
 +	 */
 +	kernfs_get(kn);
 +
@@ -13102,6 +13074,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +out_idfree:
 +	free_rmid(rdtgrp->mon.rmid);
 +out_destroy:
++	kernfs_put(rdtgrp->kn);
 +	kernfs_remove(rdtgrp->kn);
 +out_free_rgrp:
 +	kfree(rdtgrp);
@@ -13114,7 +13087,7 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +{
 +	kernfs_remove(rgrp->kn);
 +	free_rmid(rgrp->mon.rmid);
-+	kfree(rgrp);
++	rdtgroup_remove(rgrp);
 +}
 +
 +/*
@@ -13276,11 +13249,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	WARN_ON(list_empty(&prdtgrp->mon.crdtgrp_list));
 +	list_del(&rdtgrp->mon.crdtgrp_list);
 +
-+	/*
-+	 * one extra hold on this, will drop when we kfree(rdtgrp)
-+	 * in rdtgroup_kn_unlock()
-+	 */
-+	kernfs_get(kn);
 +	kernfs_remove(rdtgrp->kn);
 +
 +	return 0;
@@ -13292,11 +13260,6 @@ Index: kernel-lts-staging/arch/x86/kernel/cpu/resctrl/rdtgroup.c
 +	rdtgrp->flags = RDT_DELETED;
 +	list_del(&rdtgrp->rdtgroup_list);
 +
-+	/*
-+	 * one extra hold on this, will drop when we kfree(rdtgrp)
-+	 * in rdtgroup_kn_unlock()
-+	 */
-+	kernfs_get(kn);
 +	kernfs_remove(rdtgrp->kn);
 +	return 0;
 +}
