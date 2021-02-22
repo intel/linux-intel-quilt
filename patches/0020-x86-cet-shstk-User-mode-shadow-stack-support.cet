@@ -1,13 +1,14 @@
-From 0664917eacb80aa672fcc0a1692e2aeb8c040047 Mon Sep 17 00:00:00 2001
+From 7e5556c3596aee22b4c3503a79e3fd7c478dfa43 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 22 Aug 2019 10:06:11 -0700
-Subject: [PATCH 20/37] x86/cet/shstk: User-mode shadow stack support
+Subject: [PATCH 20/38] x86/cet/shstk: User-mode shadow stack support
 
 Introduce basic shadow stack enabling/disabling/allocation routines.
 A task's shadow stack is allocated from memory with VM_SHSTK flag and has
 a fixed size of min(RLIMIT_STACK, 4GB).
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
 ---
  arch/x86/include/asm/cet.h       |  28 ++++++
  arch/x86/include/asm/processor.h |   5 ++
@@ -19,7 +20,7 @@ Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 
 diff --git a/arch/x86/include/asm/cet.h b/arch/x86/include/asm/cet.h
 new file mode 100644
-index 000000000000..6d0df5c26c22
+index 000000000000..5750fbcbb952
 --- /dev/null
 +++ b/arch/x86/include/asm/cet.h
 @@ -0,0 +1,28 @@
@@ -39,7 +40,7 @@ index 000000000000..6d0df5c26c22
 +	unsigned long	shstk_size;
 +};
 +
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +int cet_setup_shstk(void);
 +void cet_disable_shstk(void);
 +void cet_free_shstk(struct task_struct *p);
@@ -52,7 +53,7 @@ index 000000000000..6d0df5c26c22
 +
 +#endif /* _ASM_X86_CET_H */
 diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
-index c20a52b5534b..2b8202f35fde 100644
+index c20a52b5534b..51158c6beb4f 100644
 --- a/arch/x86/include/asm/processor.h
 +++ b/arch/x86/include/asm/processor.h
 @@ -27,6 +27,7 @@ struct vm86;
@@ -67,7 +68,7 @@ index c20a52b5534b..2b8202f35fde 100644
  
  	unsigned int		sig_on_uaccess_err:1;
  
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +	struct cet_status	cet;
 +#endif
 +
@@ -75,21 +76,21 @@ index c20a52b5534b..2b8202f35fde 100644
  	struct fpu		fpu;
  	/*
 diff --git a/arch/x86/kernel/Makefile b/arch/x86/kernel/Makefile
-index 5eeb808eb024..07cee6125a3c 100644
+index 5eeb808eb024..4a9a7e7d00dc 100644
 --- a/arch/x86/kernel/Makefile
 +++ b/arch/x86/kernel/Makefile
 @@ -151,6 +151,8 @@ obj-$(CONFIG_UNWINDER_FRAME_POINTER)	+= unwind_frame.o
  obj-$(CONFIG_UNWINDER_GUESS)		+= unwind_guess.o
  
  obj-$(CONFIG_AMD_MEM_ENCRYPT)		+= sev-es.o
-+obj-$(CONFIG_X86_CET_USER)		+= cet.o
++obj-$(CONFIG_X86_CET)			+= cet.o
 +
  ###
  # 64 bit specific files
  ifeq ($(CONFIG_X86_64),y)
 diff --git a/arch/x86/kernel/cet.c b/arch/x86/kernel/cet.c
 new file mode 100644
-index 000000000000..f8b0a077594f
+index 000000000000..d25a03215984
 --- /dev/null
 +++ b/arch/x86/kernel/cet.c
 @@ -0,0 +1,147 @@
@@ -217,7 +218,7 @@ index 000000000000..f8b0a077594f
 +	    !cet->shstk_size || !cet->shstk_base)
 +		return;
 +
-+	if (!tsk->mm || (tsk->mm != current->mm))
++	if (!tsk->mm || tsk->mm != current->mm)
 +		return;
 +
 +	while (1) {

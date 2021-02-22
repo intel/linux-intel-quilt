@@ -1,4 +1,4 @@
-From aa620ea08196296c28a368df3b939adede0e6bff Mon Sep 17 00:00:00 2001
+From 996fe0e4ed1069f815986938622521046b837d52 Mon Sep 17 00:00:00 2001
 From: Mathias Nyman <mathias.nyman@linux.intel.com>
 Date: Wed, 16 Dec 2020 16:21:28 +0200
 Subject: [PATCH 01/11] xhci: Avoid parsing transfer events several times
@@ -35,10 +35,10 @@ index 3589b49b6c8b..d6e2ee1f8964 100644
  		INIT_LIST_HEAD(&dev->eps[i].cancelled_td_list);
  		INIT_LIST_HEAD(&dev->eps[i].bw_endpoint_list);
 diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
-index cf0c93a90200..cac79a3e3b1b 100644
+index 89c3be9917f6..2e8aed4f7434 100644
 --- a/drivers/usb/host/xhci-ring.c
 +++ b/drivers/usb/host/xhci-ring.c
-@@ -1861,7 +1861,7 @@ static void xhci_cleanup_halted_endpoint(struct xhci_hcd *xhci,
+@@ -1866,7 +1866,7 @@ static void xhci_cleanup_halted_endpoint(struct xhci_hcd *xhci,
  	 * Avoid resetting endpoint if link is inactive. Can cause host hang.
  	 * Device will be reset soon to recover the link so don't do anything
  	 */
@@ -47,7 +47,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  		return;
  
  	command = xhci_alloc_command(xhci, false, GFP_ATOMIC);
-@@ -1970,18 +1970,14 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -1975,18 +1975,14 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
  	struct xhci_transfer_event *event,
  	struct xhci_virt_ep *ep, int *status)
  {
@@ -67,7 +67,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  	trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->transfer_len));
  
  	if (trb_comp_code == COMP_STOPPED_LENGTH_INVALID ||
-@@ -2006,9 +2002,9 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -2011,9 +2007,9 @@ static int finish_td(struct xhci_hcd *xhci, struct xhci_td *td,
  		 * stall later. Hub TT buffer should only be cleared for FS/LS
  		 * devices behind HS hubs for functional stalls.
  		 */
@@ -79,7 +79,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  					ep_ring->stream_id, td, EP_HARD_RESET);
  	} else {
  		/* Update ring dequeue pointer */
-@@ -2042,19 +2038,13 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -2047,19 +2043,13 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
  	union xhci_trb *ep_trb, struct xhci_transfer_event *event,
  	struct xhci_virt_ep *ep, int *status)
  {
@@ -100,7 +100,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  	trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->transfer_len));
  	requested = td->urb->transfer_buffer_length;
  	remaining = EVENT_TRB_LEN(le32_to_cpu(event->transfer_len));
-@@ -2102,7 +2092,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -2107,7 +2097,7 @@ static int process_ctrl_td(struct xhci_hcd *xhci, struct xhci_td *td,
  						       ep_ctx, trb_comp_code))
  			break;
  		xhci_dbg(xhci, "TRB error %u, halted endpoint index = %u\n",
@@ -109,7 +109,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  		fallthrough;
  	case COMP_STALL_ERROR:
  		/* Did we transfer part of the data (middle) phase? */
-@@ -2264,11 +2254,9 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -2269,11 +2259,9 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
  	u32 trb_comp_code;
  	u32 remaining, requested, ep_trb_len;
  	unsigned int slot_id;
@@ -122,7 +122,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  	ep_ring = xhci_dma_to_transfer_ring(ep, le64_to_cpu(event->buffer));
  	trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->transfer_len));
  	remaining = EVENT_TRB_LEN(le32_to_cpu(event->transfer_len));
-@@ -2306,7 +2294,7 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
+@@ -2311,7 +2299,7 @@ static int process_bulk_intr_td(struct xhci_hcd *xhci, struct xhci_td *td,
  		    le32_to_cpu(slot_ctx->tt_info) & TT_SLOT)
  			break;
  		*status = 0;
@@ -132,7 +132,7 @@ index cf0c93a90200..cac79a3e3b1b 100644
  		return 0;
  	default:
 diff --git a/drivers/usb/host/xhci.h b/drivers/usb/host/xhci.h
-index 25e57bc9c3cc..c76381f341ff 100644
+index 07ff95016f11..bec4379fae74 100644
 --- a/drivers/usb/host/xhci.h
 +++ b/drivers/usb/host/xhci.h
 @@ -918,6 +918,8 @@ struct xhci_bw_info {

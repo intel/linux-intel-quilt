@@ -1,7 +1,7 @@
-From 24fa6009b321400cc610ebc766d8035a2980fb8c Mon Sep 17 00:00:00 2001
+From ed4f11247f0a9896c7813cd3142f39d1cb248dc4 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Wed, 24 Jan 2018 10:27:13 -0800
-Subject: [PATCH 08/37] x86/mm: Introduce _PAGE_COW
+Subject: [PATCH 08/38] x86/mm: Introduce _PAGE_COW
 
 There is essentially no room left in the x86 hardware PTEs on some OSes
 (not Linux).  That left the hardware architects looking for a way to
@@ -45,15 +45,15 @@ implemented for the 32-bit kernel.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
 ---
- arch/x86/include/asm/pgtable.h       | 117 ++++++++++++++++++++++++---
- arch/x86/include/asm/pgtable_types.h |  42 +++++++++-
- 2 files changed, 148 insertions(+), 11 deletions(-)
+ arch/x86/include/asm/pgtable.h       | 185 ++++++++++++++++++++++++---
+ arch/x86/include/asm/pgtable_types.h |  42 +++++-
+ 2 files changed, 206 insertions(+), 21 deletions(-)
 
 diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index a02c67291cfc..61e4d3b17d87 100644
+index a02c67291cfc..1a6c0784af0a 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
-@@ -121,9 +121,9 @@ extern pmdval_t early_pmd_flags;
+@@ -121,11 +121,21 @@ extern pmdval_t early_pmd_flags;
   * The following only work if pte_present() is true.
   * Undefined behaviour if not..
   */
@@ -61,11 +61,23 @@ index a02c67291cfc..61e4d3b17d87 100644
 +static inline bool pte_dirty(pte_t pte)
  {
 -	return pte_flags(pte) & _PAGE_DIRTY;
++	/*
++	 * A dirty PTE has Dirty=1 or Cow=1.
++	 */
 +	return pte_flags(pte) & _PAGE_DIRTY_BITS;
  }
  
++static inline bool pte_shstk(pte_t pte)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return false;
++
++	return (pte_flags(pte) & (_PAGE_RW | _PAGE_DIRTY)) == _PAGE_DIRTY;
++}
  
-@@ -160,9 +160,9 @@ static inline int pte_young(pte_t pte)
+ static inline u32 read_pkru(void)
+ {
+@@ -160,9 +170,20 @@ static inline int pte_young(pte_t pte)
  	return pte_flags(pte) & _PAGE_ACCESSED;
  }
  
@@ -73,11 +85,22 @@ index a02c67291cfc..61e4d3b17d87 100644
 +static inline bool pmd_dirty(pmd_t pmd)
  {
 -	return pmd_flags(pmd) & _PAGE_DIRTY;
++	/*
++	 * A dirty PMD has Dirty=1 or Cow=1.
++	 */
 +	return pmd_flags(pmd) & _PAGE_DIRTY_BITS;
++}
++
++static inline bool pmd_shstk(pmd_t pmd)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return false;
++
++	return (pmd_flags(pmd) & (_PAGE_RW | _PAGE_DIRTY)) == _PAGE_DIRTY;
  }
  
  static inline int pmd_young(pmd_t pmd)
-@@ -170,9 +170,9 @@ static inline int pmd_young(pmd_t pmd)
+@@ -170,9 +191,12 @@ static inline int pmd_young(pmd_t pmd)
  	return pmd_flags(pmd) & _PAGE_ACCESSED;
  }
  
@@ -85,24 +108,48 @@ index a02c67291cfc..61e4d3b17d87 100644
 +static inline bool pud_dirty(pud_t pud)
  {
 -	return pud_flags(pud) & _PAGE_DIRTY;
++	/*
++	 * A dirty PUD has Dirty=1 or Cow=1.
++	 */
 +	return pud_flags(pud) & _PAGE_DIRTY_BITS;
  }
  
  static inline int pud_young(pud_t pud)
-@@ -182,6 +182,12 @@ static inline int pud_young(pud_t pud)
+@@ -182,7 +206,7 @@ static inline int pud_young(pud_t pud)
  
  static inline int pte_write(pte_t pte)
  {
-+	/*
-+	 * If _PAGE_DIRTY is set, the PTE must either have _PAGE_RW or be
-+	 * a shadow stack PTE, which is logically writable.
-+	 */
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK))
-+		return pte_flags(pte) & (_PAGE_RW | _PAGE_DIRTY);
- 	return pte_flags(pte) & _PAGE_RW;
+-	return pte_flags(pte) & _PAGE_RW;
++	return (pte_flags(pte) & _PAGE_RW) || pte_shstk(pte);
  }
  
-@@ -333,7 +339,7 @@ static inline pte_t pte_clear_uffd_wp(pte_t pte)
+ static inline int pte_huge(pte_t pte)
+@@ -314,6 +338,24 @@ static inline pte_t pte_clear_flags(pte_t pte, pteval_t clear)
+ 	return native_make_pte(v & ~clear);
+ }
+ 
++static inline pte_t pte_make_cow(pte_t pte)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pte;
++
++	pte = pte_clear_flags(pte, _PAGE_DIRTY);
++	return pte_set_flags(pte, _PAGE_COW);
++}
++
++static inline pte_t pte_clear_cow(pte_t pte)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pte;
++
++	pte = pte_set_flags(pte, _PAGE_DIRTY);
++	return pte_clear_flags(pte, _PAGE_COW);
++}
++
+ #ifdef CONFIG_HAVE_ARCH_USERFAULTFD_WP
+ static inline int pte_uffd_wp(pte_t pte)
+ {
+@@ -333,7 +375,7 @@ static inline pte_t pte_clear_uffd_wp(pte_t pte)
  
  static inline pte_t pte_mkclean(pte_t pte)
  {
@@ -111,27 +158,29 @@ index a02c67291cfc..61e4d3b17d87 100644
  }
  
  static inline pte_t pte_mkold(pte_t pte)
-@@ -343,6 +349,16 @@ static inline pte_t pte_mkold(pte_t pte)
+@@ -343,7 +385,16 @@ static inline pte_t pte_mkold(pte_t pte)
  
  static inline pte_t pte_wrprotect(pte_t pte)
  {
+-	return pte_clear_flags(pte, _PAGE_RW);
++	pte = pte_clear_flags(pte, _PAGE_RW);
++
 +	/*
 +	 * Blindly clearing _PAGE_RW might accidentally create
 +	 * a shadow stack PTE (RW=0, Dirty=1).  Move the hardware
 +	 * dirty value to the software bit.
 +	 */
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		pte.pte |= (pte.pte & _PAGE_DIRTY) >> _PAGE_BIT_DIRTY << _PAGE_BIT_COW;
-+		pte = pte_clear_flags(pte, _PAGE_DIRTY);
-+	}
-+
- 	return pte_clear_flags(pte, _PAGE_RW);
++	if (pte_dirty(pte))
++		pte = pte_make_cow(pte);
++	return pte;
  }
  
-@@ -353,6 +369,18 @@ static inline pte_t pte_mkexec(pte_t pte)
+ static inline pte_t pte_mkexec(pte_t pte)
+@@ -353,7 +404,18 @@ static inline pte_t pte_mkexec(pte_t pte)
  
  static inline pte_t pte_mkdirty(pte_t pte)
  {
+-	return pte_set_flags(pte, _PAGE_DIRTY | _PAGE_SOFT_DIRTY);
 +	pteval_t dirty = _PAGE_DIRTY;
 +
 +	/* Avoid creating (HW)Dirty=1, Write=0 PTEs */
@@ -143,25 +192,50 @@ index a02c67291cfc..61e4d3b17d87 100644
 +
 +static inline pte_t pte_mkwrite_shstk(pte_t pte)
 +{
-+	pte = pte_clear_flags(pte, _PAGE_COW);
- 	return pte_set_flags(pte, _PAGE_DIRTY | _PAGE_SOFT_DIRTY);
++	return pte_clear_cow(pte);
  }
  
-@@ -363,6 +391,13 @@ static inline pte_t pte_mkyoung(pte_t pte)
+ static inline pte_t pte_mkyoung(pte_t pte)
+@@ -363,7 +425,12 @@ static inline pte_t pte_mkyoung(pte_t pte)
  
  static inline pte_t pte_mkwrite(pte_t pte)
  {
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		if (pte_flags(pte) & _PAGE_COW) {
-+			pte = pte_clear_flags(pte, _PAGE_COW);
-+			pte = pte_set_flags(pte, _PAGE_DIRTY);
-+		}
-+	}
+-	return pte_set_flags(pte, _PAGE_RW);
++	pte = pte_set_flags(pte, _PAGE_RW);
 +
- 	return pte_set_flags(pte, _PAGE_RW);
++	if (pte_dirty(pte))
++		pte = pte_clear_cow(pte);
++
++	return pte;
  }
  
-@@ -434,16 +469,40 @@ static inline pmd_t pmd_mkold(pmd_t pmd)
+ static inline pte_t pte_mkhuge(pte_t pte)
+@@ -410,6 +477,24 @@ static inline pmd_t pmd_clear_flags(pmd_t pmd, pmdval_t clear)
+ 	return native_make_pmd(v & ~clear);
+ }
+ 
++static inline pmd_t pmd_make_cow(pmd_t pmd)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pmd;
++
++	pmd = pmd_clear_flags(pmd, _PAGE_DIRTY);
++	return pmd_set_flags(pmd, _PAGE_COW);
++}
++
++static inline pmd_t pmd_clear_cow(pmd_t pmd)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pmd;
++
++	pmd = pmd_set_flags(pmd, _PAGE_DIRTY);
++	return pmd_clear_flags(pmd, _PAGE_COW);
++}
++
+ #ifdef CONFIG_HAVE_ARCH_USERFAULTFD_WP
+ static inline int pmd_uffd_wp(pmd_t pmd)
+ {
+@@ -434,17 +519,36 @@ static inline pmd_t pmd_mkold(pmd_t pmd)
  
  static inline pmd_t pmd_mkclean(pmd_t pmd)
  {
@@ -171,23 +245,21 @@ index a02c67291cfc..61e4d3b17d87 100644
  
  static inline pmd_t pmd_wrprotect(pmd_t pmd)
  {
+-	return pmd_clear_flags(pmd, _PAGE_RW);
++	pmd = pmd_clear_flags(pmd, _PAGE_RW);
 +	/*
 +	 * Blindly clearing _PAGE_RW might accidentally create
 +	 * a shadow stack PMD (RW=0, Dirty=1).  Move the hardware
 +	 * dirty value to the software bit.
 +	 */
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		pmdval_t v = native_pmd_val(pmd);
-+
-+		v |= (v & _PAGE_DIRTY) >> _PAGE_BIT_DIRTY << _PAGE_BIT_COW;
-+		pmd = pmd_clear_flags(__pmd(v), _PAGE_DIRTY);
-+	}
-+
- 	return pmd_clear_flags(pmd, _PAGE_RW);
++	if (pmd_dirty(pmd))
++		pmd = pmd_make_cow(pmd);
++	return pmd;
  }
  
  static inline pmd_t pmd_mkdirty(pmd_t pmd)
  {
+-	return pmd_set_flags(pmd, _PAGE_DIRTY | _PAGE_SOFT_DIRTY);
 +	pmdval_t dirty = _PAGE_DIRTY;
 +
 +	/* Avoid creating (HW)Dirty=1, Write=0 PMDs */
@@ -199,25 +271,49 @@ index a02c67291cfc..61e4d3b17d87 100644
 +
 +static inline pmd_t pmd_mkwrite_shstk(pmd_t pmd)
 +{
-+	pmd = pmd_clear_flags(pmd, _PAGE_COW);
- 	return pmd_set_flags(pmd, _PAGE_DIRTY | _PAGE_SOFT_DIRTY);
++	return pmd_clear_cow(pmd);
  }
  
-@@ -464,6 +523,13 @@ static inline pmd_t pmd_mkyoung(pmd_t pmd)
+ static inline pmd_t pmd_mkdevmap(pmd_t pmd)
+@@ -464,7 +568,11 @@ static inline pmd_t pmd_mkyoung(pmd_t pmd)
  
  static inline pmd_t pmd_mkwrite(pmd_t pmd)
  {
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		if (pmd_flags(pmd) & _PAGE_COW) {
-+			pmd = pmd_clear_flags(pmd, _PAGE_COW);
-+			pmd = pmd_set_flags(pmd, _PAGE_DIRTY);
-+		}
-+	}
+-	return pmd_set_flags(pmd, _PAGE_RW);
++	pmd = pmd_set_flags(pmd, _PAGE_RW);
 +
- 	return pmd_set_flags(pmd, _PAGE_RW);
++	if (pmd_dirty(pmd))
++		pmd = pmd_clear_cow(pmd);
++	return pmd;
  }
  
-@@ -488,17 +554,35 @@ static inline pud_t pud_mkold(pud_t pud)
+ static inline pud_t pud_set_flags(pud_t pud, pudval_t set)
+@@ -481,6 +589,24 @@ static inline pud_t pud_clear_flags(pud_t pud, pudval_t clear)
+ 	return native_make_pud(v & ~clear);
+ }
+ 
++static inline pud_t pud_make_cow(pud_t pud)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pud;
++
++	pud = pud_clear_flags(pud, _PAGE_DIRTY);
++	return pud_set_flags(pud, _PAGE_COW);
++}
++
++static inline pud_t pud_clear_cow(pud_t pud)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_SHSTK))
++		return pud;
++
++	pud = pud_set_flags(pud, _PAGE_DIRTY);
++	return pud_clear_flags(pud, _PAGE_COW);
++}
++
+ static inline pud_t pud_mkold(pud_t pud)
+ {
+ 	return pud_clear_flags(pud, _PAGE_ACCESSED);
+@@ -488,17 +614,32 @@ static inline pud_t pud_mkold(pud_t pud)
  
  static inline pud_t pud_mkclean(pud_t pud)
  {
@@ -227,19 +323,17 @@ index a02c67291cfc..61e4d3b17d87 100644
  
  static inline pud_t pud_wrprotect(pud_t pud)
  {
+-	return pud_clear_flags(pud, _PAGE_RW);
++	pud = pud_clear_flags(pud, _PAGE_RW);
++
 +	/*
 +	 * Blindly clearing _PAGE_RW might accidentally create
 +	 * a shadow stack PUD (RW=0, Dirty=1).  Move the hardware
 +	 * dirty value to the software bit.
 +	 */
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		pudval_t v = native_pud_val(pud);
-+
-+		v |= (v & _PAGE_DIRTY) >> _PAGE_BIT_DIRTY << _PAGE_BIT_COW;
-+		pud = pud_clear_flags(__pud(v), _PAGE_DIRTY);
-+	}
-+
- 	return pud_clear_flags(pud, _PAGE_RW);
++	if (pud_dirty(pud))
++		pud = pud_make_cow(pud);
++	return pud;
  }
  
  static inline pud_t pud_mkdirty(pud_t pud)
@@ -255,35 +349,30 @@ index a02c67291cfc..61e4d3b17d87 100644
  }
  
  static inline pud_t pud_mkdevmap(pud_t pud)
-@@ -518,6 +602,13 @@ static inline pud_t pud_mkyoung(pud_t pud)
+@@ -518,7 +659,11 @@ static inline pud_t pud_mkyoung(pud_t pud)
  
  static inline pud_t pud_mkwrite(pud_t pud)
  {
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
-+		if (pud_flags(pud) & _PAGE_COW) {
-+			pud = pud_clear_flags(pud, _PAGE_COW);
-+			pud = pud_set_flags(pud, _PAGE_DIRTY);
-+		}
-+	}
+-	return pud_set_flags(pud, _PAGE_RW);
++	pud = pud_set_flags(pud, _PAGE_RW);
 +
- 	return pud_set_flags(pud, _PAGE_RW);
++	if (pud_dirty(pud))
++		pud = pud_clear_cow(pud);
++	return pud;
  }
  
-@@ -1131,6 +1222,12 @@ extern int pmdp_clear_flush_young(struct vm_area_struct *vma,
+ #ifdef CONFIG_HAVE_ARCH_SOFT_DIRTY
+@@ -1131,7 +1276,7 @@ extern int pmdp_clear_flush_young(struct vm_area_struct *vma,
  #define pmd_write pmd_write
  static inline int pmd_write(pmd_t pmd)
  {
-+	/*
-+	 * If _PAGE_DIRTY is set, then the PMD must either have _PAGE_RW or
-+	 * be a shadow stack PMD, which is logically writable.
-+	 */
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK))
-+		return pmd_flags(pmd) & (_PAGE_RW | _PAGE_DIRTY);
- 	return pmd_flags(pmd) & _PAGE_RW;
+-	return pmd_flags(pmd) & _PAGE_RW;
++	return (pmd_flags(pmd) & _PAGE_RW) || pmd_shstk(pmd);
  }
  
+ #define __HAVE_ARCH_PMDP_HUGE_GET_AND_CLEAR
 diff --git a/arch/x86/include/asm/pgtable_types.h b/arch/x86/include/asm/pgtable_types.h
-index b8b79d618bbc..b02084a181c2 100644
+index b8b79d618bbc..437d7ff0ae80 100644
 --- a/arch/x86/include/asm/pgtable_types.h
 +++ b/arch/x86/include/asm/pgtable_types.h
 @@ -23,7 +23,8 @@
@@ -303,7 +392,7 @@ index b8b79d618bbc..b02084a181c2 100644
 +/*
 + * Indicates a copy-on-write page.
 + */
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +#define _PAGE_BIT_COW		_PAGE_BIT_SOFTW5 /* copy-on-write */
 +#else
 +#define _PAGE_BIT_COW		0
@@ -338,7 +427,7 @@ index b8b79d618bbc..b02084a181c2 100644
 + *     thread).  That's possible today, but will not happen on processors
 + *     that support shadow stack.
 + */
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +#define _PAGE_COW	(_AT(pteval_t, 1) << _PAGE_BIT_COW)
 +#else
 +#define _PAGE_COW	(_AT(pteval_t, 0))

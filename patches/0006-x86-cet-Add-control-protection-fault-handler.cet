@@ -1,7 +1,7 @@
-From a912b12bf7f13c90030cacd0bb6b52b5b0d8569b Mon Sep 17 00:00:00 2001
+From cafc2cf182488bc5ae059f9f3e4086af88244eed Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Mon, 15 Jun 2020 14:26:27 -0700
-Subject: [PATCH 06/37] x86/cet: Add control-protection fault handler
+Subject: [PATCH 06/38] x86/cet: Add control-protection fault handler
 
 A control-protection fault is triggered when a control-flow transfer
 attempt violates Shadow Stack or Indirect Branch Tracking constraints.
@@ -14,23 +14,25 @@ protection fault handler.  It provides the si_code SEGV_CPERR to the signal
 handler.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Reviewed-by: Kees Cook <keescook@chromium.org>
+Cc: Michael Kerrisk <mtk.manpages@gmail.com>
 ---
  arch/x86/include/asm/idtentry.h    |  4 ++
  arch/x86/kernel/idt.c              |  4 ++
  arch/x86/kernel/signal_compat.c    |  2 +-
- arch/x86/kernel/traps.c            | 59 ++++++++++++++++++++++++++++++
+ arch/x86/kernel/traps.c            | 63 ++++++++++++++++++++++++++++++
  include/uapi/asm-generic/siginfo.h |  3 +-
- 5 files changed, 70 insertions(+), 2 deletions(-)
+ 5 files changed, 74 insertions(+), 2 deletions(-)
 
 diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
-index f656aabd1545..32c25412eedf 100644
+index f656aabd1545..ff4b3bf634da 100644
 --- a/arch/x86/include/asm/idtentry.h
 +++ b/arch/x86/include/asm/idtentry.h
 @@ -574,6 +574,10 @@ DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_SS,	exc_stack_segment);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_GP,	exc_general_protection);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_AC,	exc_alignment_check);
  
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_CP, exc_control_protection);
 +#endif
 +
@@ -38,7 +40,7 @@ index f656aabd1545..32c25412eedf 100644
  DECLARE_IDTENTRY_RAW(X86_TRAP_UD,		exc_invalid_op);
  DECLARE_IDTENTRY_RAW(X86_TRAP_BP,		exc_int3);
 diff --git a/arch/x86/kernel/idt.c b/arch/x86/kernel/idt.c
-index ee1a283f8e96..463dcae55c3f 100644
+index ee1a283f8e96..e8166d9bbb10 100644
 --- a/arch/x86/kernel/idt.c
 +++ b/arch/x86/kernel/idt.c
 @@ -105,6 +105,10 @@ static const __initconst struct idt_data def_idts[] = {
@@ -46,7 +48,7 @@ index ee1a283f8e96..463dcae55c3f 100644
  	SYSG(IA32_SYSCALL_VECTOR,	entry_INT80_32),
  #endif
 +
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +	INTG(X86_TRAP_CP,		asm_exc_control_protection),
 +#endif
  };
@@ -66,14 +68,22 @@ index a5330ff498f0..dd92490b1e7f 100644
  	BUILD_BUG_ON(NSIGTRAP != 5);
  	BUILD_BUG_ON(NSIGCHLD != 6);
 diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
-index 7f5aec758f0e..b0a3e05f9950 100644
+index 7f5aec758f0e..8c7fa91a57c9 100644
 --- a/arch/x86/kernel/traps.c
 +++ b/arch/x86/kernel/traps.c
-@@ -606,6 +606,65 @@ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
+@@ -39,6 +39,7 @@
+ #include <linux/io.h>
+ #include <linux/hardirq.h>
+ #include <linux/atomic.h>
++#include <linux/nospec.h>
+ 
+ #include <asm/stacktrace.h>
+ #include <asm/processor.h>
+@@ -606,6 +607,68 @@ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
  	cond_local_irq_disable(regs);
  }
  
-+#ifdef CONFIG_X86_CET_USER
++#ifdef CONFIG_X86_CET
 +static const char * const control_protection_err[] = {
 +	"unknown",
 +	"near-ret",
@@ -81,22 +91,24 @@ index 7f5aec758f0e..b0a3e05f9950 100644
 +	"endbranch",
 +	"rstorssp",
 +	"setssbsy",
++	"unknown",
 +};
 +
 +/*
 + * When a control protection exception occurs, send a signal to the responsible
-+ * application.  Currently, control protection is only enabled for the user
-+ * mode.  This exception should not come from the kernel mode.
++ * application.  Currently, control protection is only enabled for user mode.
++ * This exception should not come from kernel mode.
 + */
 +DEFINE_IDTENTRY_ERRORCODE(exc_control_protection)
 +{
++	static DEFINE_RATELIMIT_STATE(rs, DEFAULT_RATELIMIT_INTERVAL,
++				      DEFAULT_RATELIMIT_BURST);
 +	struct task_struct *tsk;
 +
 +	if (!user_mode(regs)) {
-+		if (notify_die(DIE_TRAP, "control protection fault", regs,
-+			       error_code, X86_TRAP_CP, SIGSEGV) == NOTIFY_STOP)
-+			return;
-+		die("Upexpected/unsupported kernel control protection fault", regs, error_code);
++		pr_emerg("PANIC: unexpected kernel control protection fault\n");
++		die("kernel control protection fault", regs, error_code);
++		panic("Machine halted.");
 +	}
 +
 +	cond_local_irq_enable(regs);
@@ -108,20 +120,21 @@ index 7f5aec758f0e..b0a3e05f9950 100644
 +	tsk->thread.error_code = error_code;
 +	tsk->thread.trap_nr = X86_TRAP_CP;
 +
++	/*
++	 * Ratelimit to prevent log spamming.
++	 */
 +	if (show_unhandled_signals && unhandled_signal(tsk, SIGSEGV) &&
-+	    printk_ratelimit()) {
-+		unsigned int max_err;
++	    __ratelimit(&rs)) {
 +		unsigned long ssp;
++		int err;
 +
-+		max_err = ARRAY_SIZE(control_protection_err) - 1;
-+		if ((error_code < 0) || (error_code > max_err))
-+			error_code = 0;
++		err = array_index_nospec(error_code, ARRAY_SIZE(control_protection_err));
 +
 +		rdmsrl(MSR_IA32_PL3_SSP, ssp);
-+		pr_info("%s[%d] control protection ip:%lx sp:%lx ssp:%lx error:%lx(%s)",
-+			tsk->comm, task_pid_nr(tsk),
-+			regs->ip, regs->sp, ssp, error_code,
-+			control_protection_err[error_code]);
++		pr_emerg("%s[%d] control protection ip:%lx sp:%lx ssp:%lx error:%lx(%s)",
++			 tsk->comm, task_pid_nr(tsk),
++			 regs->ip, regs->sp, ssp, error_code,
++			 control_protection_err[err]);
 +		print_vma_addr(KERN_CONT " in ", regs->ip);
 +		pr_cont("\n");
 +	}
