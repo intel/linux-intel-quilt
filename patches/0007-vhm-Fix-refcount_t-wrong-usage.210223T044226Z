@@ -1,0 +1,75 @@
+From d08b7f0af5c5bd62f4e69a86a9680dffb41c1bdd Mon Sep 17 00:00:00 2001
+From: ppsun <peng.p.sun@intel.com>
+Date: Tue, 9 Feb 2021 05:43:24 +0000
+Subject: [PATCH 07/17] vhm: Fix refcount_t wrong usage
+
+Wrong useage of refcount_t on new kernel cause wrong value of
+vcpu_num. Need change to atomic_t to avoid this issue.
+
+Tracked-On: projectacrn/acrn-hypervisor#5731
+Signed-off-by: ppsun <peng.p.sun@intel.com>
+---
+ drivers/char/vhm/vhm_dev.c      | 3 ++-
+ drivers/vhm/vhm_ioreq.c         | 4 ++--
+ include/linux/vhm/vhm_vm_mngt.h | 2 +-
+ 3 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/char/vhm/vhm_dev.c b/drivers/char/vhm/vhm_dev.c
+index 17291d60a7b0..6f2dbe8c4dde 100644
+--- a/drivers/char/vhm/vhm_dev.c
++++ b/drivers/char/vhm/vhm_dev.c
+@@ -283,6 +283,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 		acrn_ioeventfd_init(vm->vmid);
+ 		acrn_irqfd_init(vm->vmid);
+ 		acrn_mempool_free(created_vm);
++		atomic_set(&vm->vcpu_num, 0);
+ 
+ 		pr_info("vhm: VM %ld created\n", vm->vmid);
+ 		break;
+@@ -344,7 +345,7 @@ static long vhm_dev_ioctl(struct file *filep,
+ 			acrn_mempool_free(cv);
+ 			return -EFAULT;
+ 		}
+-		refcount_inc(&vm->vcpu_num);
++		atomic_inc(&vm->vcpu_num);
+ 		acrn_mempool_free(cv);
+ 
+ 		return ret;
+diff --git a/drivers/vhm/vhm_ioreq.c b/drivers/vhm/vhm_ioreq.c
+index 9ab79ed4969b..d7b6c20f0a2d 100644
+--- a/drivers/vhm/vhm_ioreq.c
++++ b/drivers/vhm/vhm_ioreq.c
+@@ -964,7 +964,7 @@ int acrn_ioreq_distribute_request(struct vhm_vm *vm)
+ 	struct ioreq_client *client;
+ 	int i, vcpu_num;
+ 
+-	vcpu_num = refcount_read(&vm->vcpu_num);
++	vcpu_num = atomic_read(&vm->vcpu_num);
+ 	for (i = 0; i < vcpu_num; i++) {
+ 		req = vm->req_buf->req_queue + i;
+ 
+@@ -1017,7 +1017,7 @@ int acrn_ioreq_complete_request(int client_id, uint64_t vcpu,
+ 		return -EINVAL;
+ 	}
+ 
+-	if (vcpu >= refcount_read(&client->ref_vm->vcpu_num)) {
++	if (vcpu >= atomic_read(&client->ref_vm->vcpu_num)) {
+ 		pr_err("vhm-ioreq: vcpu %lld overflow\n", vcpu);
+ 		acrn_ioreq_put_client(client);
+ 		return -EINVAL;
+diff --git a/include/linux/vhm/vhm_vm_mngt.h b/include/linux/vhm/vhm_vm_mngt.h
+index 5cfaf2b23f35..e6199531ddc2 100644
+--- a/include/linux/vhm/vhm_vm_mngt.h
++++ b/include/linux/vhm/vhm_vm_mngt.h
+@@ -108,7 +108,7 @@ struct vhm_vm {
+ 	refcount_t refcnt;
+ 	struct mutex hugepage_lock;
+ 	struct hlist_head hugepage_hlist[HUGEPAGE_HLIST_ARRAY_SIZE];
+-	refcount_t vcpu_num;
++	atomic_t vcpu_num;
+ 	int max_gfn;
+ 	spinlock_t ioreq_client_lock;
+ 	struct list_head ioreq_client_list;
+-- 
+2.17.1
+
