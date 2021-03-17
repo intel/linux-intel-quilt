@@ -1,0 +1,113 @@
+From 9981013b1d944a1669b134f437e140bd025d76c1 Mon Sep 17 00:00:00 2001
+From: Fenghua Yu <fenghua.yu@intel.com>
+Date: Sun, 22 Sep 2019 19:31:40 +0000
+Subject: [PATCH 34/60] x86/pks: Enable Protection Keys Supervisor (PKS)
+
+Protection Keys for Supervisor pages (PKS) enables fast, hardware thread
+specific, manipulation of permission restrictions on supervisor page
+mappings.  It uses the same mechanism of Protection Keys as those on
+User mappings but applies that mechanism to supervisor mappings using a
+supervisor specific MSR.
+
+Kernel users can define 'domains' of page mappings which have an extra
+level of protection beyond those specified in the supervisor page table
+entries.
+
+Enable PKS on supported CPUS.  Remove the warning in the fault path
+because now Pkey faults can now happen on kernel mappings if PKS is
+enabled.
+
+Co-developed-by: Ira Weiny <ira.weiny@intel.com>
+Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+Signed-off-by: Fenghua Yu <fenghua.yu@intel.com>
+---
+ arch/x86/include/asm/disabled-features.h |  6 +++++-
+ arch/x86/kernel/cpu/common.c             | 19 +++++++++++++++++++
+ arch/x86/mm/fault.c                      |  9 +++++----
+ 3 files changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/include/asm/disabled-features.h b/arch/x86/include/asm/disabled-features.h
+index 3d5830f7bbfe..e9d40f2adb29 100644
+--- a/arch/x86/include/asm/disabled-features.h
++++ b/arch/x86/include/asm/disabled-features.h
+@@ -44,7 +44,11 @@
+ # define DISABLE_OSPKE		(1<<(X86_FEATURE_OSPKE & 31))
+ #endif /* CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS */
+ 
+-#define DISABLE_PKS           (1<<(X86_FEATURE_PKS & 31))
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++# define DISABLE_PKS		0
++#else
++# define DISABLE_PKS		(1<<(X86_FEATURE_PKS & 31))
++#endif
+ 
+ #ifdef CONFIG_X86_5LEVEL
+ # define DISABLE_LA57	0
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index ab640abe26b6..b78c218b9d45 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -58,6 +58,7 @@
+ #include <asm/intel-family.h>
+ #include <asm/cpu_device_id.h>
+ #include <asm/uv/uv.h>
++#include <linux/pkeys.h>
+ 
+ #include "cpu.h"
+ 
+@@ -1497,6 +1498,23 @@ static void validate_apic_and_package_id(struct cpuinfo_x86 *c)
+ #endif
+ }
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++/*
++ * PKS is independent of PKU and either or both may be supported on a CPU.
++ * Configure PKS if the CPU supports the feature.
++ */
++static void setup_pks(void)
++{
++	if (!cpu_feature_enabled(X86_FEATURE_PKS))
++		return;
++
++	write_pkrs(INIT_PKRS_VALUE);
++	cr4_set_bits(X86_CR4_PKS);
++}
++#else
++static __always_inline void setup_pks(void) { }
++#endif
++
+ /*
+  * This does the hard work of actually picking apart the CPU stuff...
+  */
+@@ -1594,6 +1612,7 @@ static void identify_cpu(struct cpuinfo_x86 *c)
+ 
+ 	x86_init_rdrand(c);
+ 	setup_pku(c);
++	setup_pks();
+ 
+ 	/*
+ 	 * Clear/Set all flags overridden by options, need do it
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 9f444b3a1826..288ae5ac8bbf 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -1160,11 +1160,12 @@ do_kern_addr_fault(struct pt_regs *regs, unsigned long hw_error_code,
+ 		   unsigned long address)
+ {
+ 	/*
+-	 * Protection keys exceptions only happen on user pages.  We
+-	 * have no user pages in the kernel portion of the address
+-	 * space, so do not expect them here.
++	 * PF_PK is expected on kernel addresses when supervisor pkeys are
++	 * enabled.
+ 	 */
+-	WARN_ON_ONCE(hw_error_code & X86_PF_PK);
++	if (!cpu_feature_enabled(X86_FEATURE_PKS))
++		WARN_ON_ONCE(hw_error_code & X86_PF_PK);
++
+ 
+ #ifdef CONFIG_X86_32
+ 	/*
+-- 
+2.25.1
+

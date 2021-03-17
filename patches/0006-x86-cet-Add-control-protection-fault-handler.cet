@@ -1,7 +1,7 @@
-From cafc2cf182488bc5ae059f9f3e4086af88244eed Mon Sep 17 00:00:00 2001
+From 4ef4856f9802244152227ef91e6b36f478e612d7 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Mon, 15 Jun 2020 14:26:27 -0700
-Subject: [PATCH 06/38] x86/cet: Add control-protection fault handler
+Subject: [PATCH 06/42] x86/cet: Add control-protection fault handler
 
 A control-protection fault is triggered when a control-flow transfer
 attempt violates Shadow Stack or Indirect Branch Tracking constraints.
@@ -14,7 +14,6 @@ protection fault handler.  It provides the si_code SEGV_CPERR to the signal
 handler.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
-Reviewed-by: Kees Cook <keescook@chromium.org>
 Cc: Michael Kerrisk <mtk.manpages@gmail.com>
 ---
  arch/x86/include/asm/idtentry.h    |  4 ++
@@ -25,10 +24,10 @@ Cc: Michael Kerrisk <mtk.manpages@gmail.com>
  5 files changed, 74 insertions(+), 2 deletions(-)
 
 diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
-index f656aabd1545..ff4b3bf634da 100644
+index 5eb3bdf36a41..fa98ca6a17a2 100644
 --- a/arch/x86/include/asm/idtentry.h
 +++ b/arch/x86/include/asm/idtentry.h
-@@ -574,6 +574,10 @@ DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_SS,	exc_stack_segment);
+@@ -571,6 +571,10 @@ DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_SS,	exc_stack_segment);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_GP,	exc_general_protection);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_AC,	exc_alignment_check);
  
@@ -68,7 +67,7 @@ index a5330ff498f0..dd92490b1e7f 100644
  	BUILD_BUG_ON(NSIGTRAP != 5);
  	BUILD_BUG_ON(NSIGCHLD != 6);
 diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
-index 7f5aec758f0e..8c7fa91a57c9 100644
+index ac1874a2a70e..ee9c88e4e1bb 100644
 --- a/arch/x86/kernel/traps.c
 +++ b/arch/x86/kernel/traps.c
 @@ -39,6 +39,7 @@
@@ -94,6 +93,9 @@ index 7f5aec758f0e..8c7fa91a57c9 100644
 +	"unknown",
 +};
 +
++static DEFINE_RATELIMIT_STATE(cpf_rate, DEFAULT_RATELIMIT_INTERVAL,
++			      DEFAULT_RATELIMIT_BURST);
++
 +/*
 + * When a control protection exception occurs, send a signal to the responsible
 + * application.  Currently, control protection is only enabled for user mode.
@@ -101,8 +103,6 @@ index 7f5aec758f0e..8c7fa91a57c9 100644
 + */
 +DEFINE_IDTENTRY_ERRORCODE(exc_control_protection)
 +{
-+	static DEFINE_RATELIMIT_STATE(rs, DEFAULT_RATELIMIT_INTERVAL,
-+				      DEFAULT_RATELIMIT_BURST);
 +	struct task_struct *tsk;
 +
 +	if (!user_mode(regs)) {
@@ -124,23 +124,22 @@ index 7f5aec758f0e..8c7fa91a57c9 100644
 +	 * Ratelimit to prevent log spamming.
 +	 */
 +	if (show_unhandled_signals && unhandled_signal(tsk, SIGSEGV) &&
-+	    __ratelimit(&rs)) {
++	    __ratelimit(&cpf_rate)) {
 +		unsigned long ssp;
-+		int err;
++		int cpf_type;
 +
-+		err = array_index_nospec(error_code, ARRAY_SIZE(control_protection_err));
++		cpf_type = array_index_nospec(error_code, ARRAY_SIZE(control_protection_err));
 +
 +		rdmsrl(MSR_IA32_PL3_SSP, ssp);
 +		pr_emerg("%s[%d] control protection ip:%lx sp:%lx ssp:%lx error:%lx(%s)",
 +			 tsk->comm, task_pid_nr(tsk),
 +			 regs->ip, regs->sp, ssp, error_code,
-+			 control_protection_err[err]);
++			 control_protection_err[cpf_type]);
 +		print_vma_addr(KERN_CONT " in ", regs->ip);
 +		pr_cont("\n");
 +	}
 +
-+	force_sig_fault(SIGSEGV, SEGV_CPERR,
-+			(void __user *)uprobe_get_trap_addr(regs));
++	force_sig_fault(SIGSEGV, SEGV_CPERR, (void __user *)0);
 +	cond_local_irq_disable(regs);
 +}
 +#endif
@@ -163,5 +162,5 @@ index d2597000407a..1c2ea91284a0 100644
  /*
   * SIGBUS si_codes
 -- 
-2.27.0
+2.25.1
 

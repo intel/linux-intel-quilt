@@ -1,0 +1,488 @@
+From 2ce1e3d79475cb912c82e86243d01b7afd63d3eb Mon Sep 17 00:00:00 2001
+From: Ira Weiny <ira.weiny@intel.com>
+Date: Mon, 11 Jan 2021 21:29:05 -0800
+Subject: [PATCH 32/60] x86/entry: Preserve PKRS MSR across exceptions
+
+The PKRS MSR is not managed by XSAVE.  It is preserved through a context
+switch but this support leaves exception handling code open to memory
+accesses during exceptions.
+
+2 possible places for preserving this state were considered,
+irqentry_state_t or pt_regs.[1]  pt_regs was much more complicated and
+was potentially fraught with unintended consequences.[2]  However, Andy
+came up with a way to hide additional values on the stack which could be
+accessed as "extended_pt_regs".[3]  This method allows for any place
+which has struct pt_regs to get access to this extra information,
+does not add extra information in irq_state, and leaves pt_regs intact
+for compatibility with outside tools like BPF.
+
+To simplify, the assembly code only pushes space on the stack.  The
+setting or use of any needed values are left to the C code.  While some
+entry points may not use this space we still push it where ever pt_regs
+is passed to the C code for consistency.
+
+Each nested exception gets another copy of this extended space allowing
+for any number of levels of exception handling.
+
+In the assembly, a macro is added which can be enhanced to allow for
+space for other uses should the need arise.
+
+Finally use some of the extra space to preserve the current task's PKRS
+values in the irq_[save_set|restore]_pkrs calls.
+
+Peter, Thomas, Andy, and Dave all suggested parts of the patch or aided
+in the development of the patch..
+
+[1] https://lore.kernel.org/lkml/CALCETrVe1i5JdyzD_BcctxQJn+ZE3T38EFPgjxN1F577M36g+w@mail.gmail.com/
+[2] https://lore.kernel.org/lkml/874kpxx4jf.fsf@nanos.tec.linutronix.de/#t
+[3] https://lore.kernel.org/lkml/CALCETrUHwZPic89oExMMe-WyDY8-O3W68NcZvse3=PGW+iW5=w@mail.gmail.com/
+
+Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+Suggested-by: Dan Williams <dan.j.williams@intel.com>
+Suggested-by: Peter Zijlstra <peterz@infradead.org>
+Suggested-by: Thomas Gleixner <tglx@linutronix.de>
+Suggested-by: Andy Lutomirski <luto@kernel.org>
+Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+---
+ arch/x86/entry/calling.h         | 30 ++++++++++++++++++++++
+ arch/x86/entry/common.c          | 44 ++++++++++++++++++++++++++++++++
+ arch/x86/entry/entry_64.S        | 22 ++++++++--------
+ arch/x86/entry/entry_64_compat.S |  6 ++---
+ arch/x86/include/asm/processor.h | 13 ++++++++++
+ arch/x86/kernel/head_64.S        |  7 +++--
+ arch/x86/mm/fault.c              | 19 ++++++++++++++
+ include/linux/pkeys.h            | 13 ++++++++++
+ kernel/entry/common.c            | 14 ++++++++--
+ 9 files changed, 149 insertions(+), 19 deletions(-)
+
+diff --git a/arch/x86/entry/calling.h b/arch/x86/entry/calling.h
+index 07a9331d55e7..fa04794ec8b4 100644
+--- a/arch/x86/entry/calling.h
++++ b/arch/x86/entry/calling.h
+@@ -97,6 +97,36 @@ For 32-bit we have the following conventions - kernel is built with
+ 
+ #define SIZEOF_PTREGS	21*8
+ 
++/**
++ * call_ext_ptregs - Helper macro to call into C with extended pt_regs
++ * @cfunc:		C function to be called
++ * @has_error_code:	Hardware pushed error code on stack
++ *
++ * This will ensure that extended_ptregs is added and removed as needed during
++ * a call into C code.
++ */
++.macro call_ext_ptregs cfunc annotate_retpoline_safe:req
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++	pushq	$0xDEAD	/* space for extended_pt_regs.thread_pkrs/pad */
++			/* The value does not matter and will
++			 * be overwritten by the C code later if used.
++			 * Regardless, we put a token value in which could be
++			 * used as a debugging flag if needed because it costs
++			 * nothing.
++			 */
++#endif
++	.if \annotate_retpoline_safe == 1
++		ANNOTATE_RETPOLINE_SAFE
++	.endif
++	call	\cfunc
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++	popq %r15	/* remove space for extended_pt_regs.thread_pkrs/pad */
++			/* The value is thrown into r15 which gets overwritten
++			 * by the normal popq of registers
++			 */
++#endif
++.endm
++
+ .macro PUSH_AND_CLEAR_REGS rdx=%rdx rax=%rax save_ret=0
+ 	.if \save_ret
+ 	pushq	%rsi		/* pt_regs->si */
+diff --git a/arch/x86/entry/common.c b/arch/x86/entry/common.c
+index 4efd39aacb9f..390808bf0622 100644
+--- a/arch/x86/entry/common.c
++++ b/arch/x86/entry/common.c
+@@ -19,6 +19,7 @@
+ #include <linux/nospec.h>
+ #include <linux/syscalls.h>
+ #include <linux/uaccess.h>
++#include <linux/pkeys.h>
+ 
+ #ifdef CONFIG_XEN_PV
+ #include <xen/xen-ops.h>
+@@ -28,6 +29,7 @@
+ #include <asm/desc.h>
+ #include <asm/traps.h>
+ #include <asm/vdso.h>
++#include <asm/processor.h>
+ #include <asm/cpufeature.h>
+ #include <asm/fpu/api.h>
+ #include <asm/nospec-branch.h>
+@@ -214,6 +216,46 @@ SYSCALL_DEFINE0(ni_syscall)
+ 	return -ENOSYS;
+ }
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++/*
++ * PKRS is a per-logical-processor MSR which overlays additional protection for
++ * pages which have been mapped with a protection key.
++ *
++ * The register is not maintained with XSAVE so we have to maintain the MSR
++ * value in software during context switch and exception handling.
++ *
++ * Context switches save the MSR in the task struct thus taking that value to
++ * other processors if necessary.
++ *
++ * To protect against exceptions having access to this memory we save the
++ * current running value and sets the PKRS value to be used during the
++ * exception.
++ */
++void irq_save_set_pkrs(struct pt_regs *regs, u32 val)
++{
++	struct extended_pt_regs *ept_regs;
++
++	if (!cpu_feature_enabled(X86_FEATURE_PKS))
++		return;
++
++	ept_regs = extended_pt_regs(regs);
++	ept_regs->thread_pkrs = current->thread.saved_pkrs;
++	write_pkrs(val);
++}
++
++void irq_restore_pkrs(struct pt_regs *regs)
++{
++	struct extended_pt_regs *ept_regs;
++
++	if (!cpu_feature_enabled(X86_FEATURE_PKS))
++		return;
++
++	ept_regs = extended_pt_regs(regs);
++	write_pkrs(ept_regs->thread_pkrs);
++	current->thread.saved_pkrs = ept_regs->thread_pkrs;
++}
++#endif /* CONFIG_ARCH_HAS_SUPERVISOR_PKEYS */
++
+ #ifdef CONFIG_XEN_PV
+ #ifndef CONFIG_PREEMPTION
+ /*
+@@ -270,6 +312,8 @@ __visible noinstr void xen_pv_evtchn_do_upcall(struct pt_regs *regs)
+ 
+ 	inhcall = get_and_clear_inhcall();
+ 	if (inhcall && !WARN_ON_ONCE(state.exit_rcu)) {
++		/* Normally called by irqentry_exit, we must restore pkrs here */
++		irq_restore_pkrs(regs);
+ 		instrumentation_begin();
+ 		irqentry_exit_cond_resched();
+ 		instrumentation_end();
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 400908dff42e..d49866e3cb8c 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -331,7 +331,7 @@ SYM_CODE_END(ret_from_fork)
+ 		movq	$-1, ORIG_RAX(%rsp)	/* no syscall to restart */
+ 	.endif
+ 
+-	call	\cfunc
++	call_ext_ptregs \cfunc, annotate_retpoline_safe=0
+ 
+ 	jmp	error_return
+ .endm
+@@ -434,7 +434,7 @@ SYM_CODE_START(\asmsym)
+ 
+ 	movq	%rsp, %rdi		/* pt_regs pointer */
+ 
+-	call	\cfunc
++	call_ext_ptregs \cfunc, annotate_retpoline_safe=0
+ 
+ 	jmp	paranoid_exit
+ 
+@@ -495,7 +495,7 @@ SYM_CODE_START(\asmsym)
+ 	 * stack.
+ 	 */
+ 	movq	%rsp, %rdi		/* pt_regs pointer */
+-	call	vc_switch_off_ist
++	call_ext_ptregs vc_switch_off_ist, annotate_retpoline_safe=0
+ 	movq	%rax, %rsp		/* Switch to new stack */
+ 
+ 	UNWIND_HINT_REGS
+@@ -506,7 +506,7 @@ SYM_CODE_START(\asmsym)
+ 
+ 	movq	%rsp, %rdi		/* pt_regs pointer */
+ 
+-	call	\cfunc
++	call_ext_ptregs \cfunc, annotate_retpoline_safe=0
+ 
+ 	/*
+ 	 * No need to switch back to the IST stack. The current stack is either
+@@ -541,7 +541,7 @@ SYM_CODE_START(\asmsym)
+ 	movq	%rsp, %rdi		/* pt_regs pointer into first argument */
+ 	movq	ORIG_RAX(%rsp), %rsi	/* get error code into 2nd argument*/
+ 	movq	$-1, ORIG_RAX(%rsp)	/* no syscall to restart */
+-	call	\cfunc
++	call_ext_ptregs \cfunc, annotate_retpoline_safe=0
+ 
+ 	jmp	paranoid_exit
+ 
+@@ -780,7 +780,7 @@ SYM_CODE_START_LOCAL(exc_xen_hypervisor_callback)
+ 	movq	%rdi, %rsp			/* we don't return, adjust the stack frame */
+ 	UNWIND_HINT_REGS
+ 
+-	call	xen_pv_evtchn_do_upcall
++	call_ext_ptregs xen_pv_evtchn_do_upcall, annotate_retpoline_safe=0
+ 
+ 	jmp	error_return
+ SYM_CODE_END(exc_xen_hypervisor_callback)
+@@ -986,7 +986,7 @@ SYM_CODE_START_LOCAL(error_entry)
+ 	/* Put us onto the real thread stack. */
+ 	popq	%r12				/* save return addr in %12 */
+ 	movq	%rsp, %rdi			/* arg0 = pt_regs pointer */
+-	call	sync_regs
++	call_ext_ptregs sync_regs, annotate_retpoline_safe=0
+ 	movq	%rax, %rsp			/* switch stack */
+ 	ENCODE_FRAME_POINTER
+ 	pushq	%r12
+@@ -1041,7 +1041,7 @@ SYM_CODE_START_LOCAL(error_entry)
+ 	 * as if we faulted immediately after IRET.
+ 	 */
+ 	mov	%rsp, %rdi
+-	call	fixup_bad_iret
++	call_ext_ptregs fixup_bad_iret, annotate_retpoline_safe=0
+ 	mov	%rax, %rsp
+ 	jmp	.Lerror_entry_from_usermode_after_swapgs
+ SYM_CODE_END(error_entry)
+@@ -1147,7 +1147,7 @@ SYM_CODE_START(asm_exc_nmi)
+ 
+ 	movq	%rsp, %rdi
+ 	movq	$-1, %rsi
+-	call	exc_nmi
++	call_ext_ptregs exc_nmi, annotate_retpoline_safe=0
+ 
+ 	/*
+ 	 * Return back to user mode.  We must *not* do the normal exit
+@@ -1183,6 +1183,8 @@ SYM_CODE_START(asm_exc_nmi)
+ 	 * +---------------------------------------------------------+
+ 	 * | pt_regs                                                 |
+ 	 * +---------------------------------------------------------+
++	 * | (Optionally) extended_pt_regs                           |
++	 * +---------------------------------------------------------+
+ 	 *
+ 	 * The "original" frame is used by hardware.  Before re-enabling
+ 	 * NMIs, we need to be done with it, and we need to leave enough
+@@ -1359,7 +1361,7 @@ end_repeat_nmi:
+ 
+ 	movq	%rsp, %rdi
+ 	movq	$-1, %rsi
+-	call	exc_nmi
++	call_ext_ptregs exc_nmi, annotate_retpoline_safe=0
+ 
+ 	/* Always restore stashed CR3 value (see paranoid_entry) */
+ 	RESTORE_CR3 scratch_reg=%r15 save_reg=%r14
+diff --git a/arch/x86/entry/entry_64_compat.S b/arch/x86/entry/entry_64_compat.S
+index 0051cf5c792d..5717bc66a9d1 100644
+--- a/arch/x86/entry/entry_64_compat.S
++++ b/arch/x86/entry/entry_64_compat.S
+@@ -136,7 +136,7 @@ SYM_INNER_LABEL(entry_SYSENTER_compat_after_hwframe, SYM_L_GLOBAL)
+ .Lsysenter_flags_fixed:
+ 
+ 	movq	%rsp, %rdi
+-	call	do_SYSENTER_32
++	call_ext_ptregs do_SYSENTER_32, annotate_retpoline_safe=0
+ 	/* XEN PV guests always use IRET path */
+ 	ALTERNATIVE "testl %eax, %eax; jz swapgs_restore_regs_and_return_to_usermode", \
+ 		    "jmp swapgs_restore_regs_and_return_to_usermode", X86_FEATURE_XENPV
+@@ -253,7 +253,7 @@ SYM_INNER_LABEL(entry_SYSCALL_compat_after_hwframe, SYM_L_GLOBAL)
+ 	UNWIND_HINT_REGS
+ 
+ 	movq	%rsp, %rdi
+-	call	do_fast_syscall_32
++	call_ext_ptregs do_fast_syscall_32, annotate_retpoline_safe=0
+ 	/* XEN PV guests always use IRET path */
+ 	ALTERNATIVE "testl %eax, %eax; jz swapgs_restore_regs_and_return_to_usermode", \
+ 		    "jmp swapgs_restore_regs_and_return_to_usermode", X86_FEATURE_XENPV
+@@ -410,6 +410,6 @@ SYM_CODE_START(entry_INT80_compat)
+ 	cld
+ 
+ 	movq	%rsp, %rdi
+-	call	do_int80_syscall_32
++	call_ext_ptregs do_int80_syscall_32, annotate_retpoline_safe=0
+ 	jmp	swapgs_restore_regs_and_return_to_usermode
+ SYM_CODE_END(entry_INT80_compat)
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index a731441808b2..9b1f5ea34c81 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -879,4 +879,17 @@ enum mds_mitigations {
+ 	MDS_MITIGATION_VMWERV,
+ };
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++struct extended_pt_regs {
++	u32 thread_pkrs;
++	u32 pad;
++	struct pt_regs pt_regs;
++};
++
++static inline struct extended_pt_regs *extended_pt_regs(struct pt_regs *regs)
++{
++	return container_of(regs, struct extended_pt_regs, pt_regs);
++}
++#endif
++
+ #endif /* _ASM_X86_PROCESSOR_H */
+diff --git a/arch/x86/kernel/head_64.S b/arch/x86/kernel/head_64.S
+index 04bddaaba8e2..a56f17f3fc3a 100644
+--- a/arch/x86/kernel/head_64.S
++++ b/arch/x86/kernel/head_64.S
+@@ -319,8 +319,7 @@ SYM_CODE_START_NOALIGN(vc_boot_ghcb)
+ 	movq    %rsp, %rdi
+ 	movq	ORIG_RAX(%rsp), %rsi
+ 	movq	initial_vc_handler(%rip), %rax
+-	ANNOTATE_RETPOLINE_SAFE
+-	call	*%rax
++	call_ext_ptregs *%rax, annotate_retpoline_safe=1
+ 
+ 	/* Unwind pt_regs */
+ 	POP_REGS
+@@ -397,7 +396,7 @@ SYM_CODE_START_LOCAL(early_idt_handler_common)
+ 	UNWIND_HINT_REGS
+ 
+ 	movq %rsp,%rdi		/* RDI = pt_regs; RSI is already trapnr */
+-	call do_early_exception
++	call_ext_ptregs do_early_exception, annotate_retpoline_safe=0
+ 
+ 	decl early_recursion_flag(%rip)
+ 	jmp restore_regs_and_return_to_kernel
+@@ -421,7 +420,7 @@ SYM_CODE_START_NOALIGN(vc_no_ghcb)
+ 	/* Call C handler */
+ 	movq    %rsp, %rdi
+ 	movq	ORIG_RAX(%rsp), %rsi
+-	call    do_vc_no_ghcb
++	call_ext_ptregs do_vc_no_ghcb, annotate_retpoline_safe=0
+ 
+ 	/* Unwind pt_regs */
+ 	POP_REGS
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index a73347e2cdfc..9f444b3a1826 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -20,6 +20,7 @@
+ #include <linux/efi.h>			/* efi_crash_gracefully_on_page_fault()*/
+ #include <linux/mm_types.h>
+ 
++#include <asm/processor.h>		/* extended_pt_regs, ...	*/
+ #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
+ #include <asm/traps.h>			/* dotraplinkage, ...		*/
+ #include <asm/fixmap.h>			/* VSYSCALL_ADDR		*/
+@@ -502,6 +503,22 @@ static void show_ldttss(const struct desc_ptr *gdt, const char *name, u16 index)
+ 		 name, index, addr, (desc.limit0 | (desc.limit1 << 16)));
+ }
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++static void
++show_extended_regs_oops(struct pt_regs *regs, unsigned error_code)
++{
++	struct extended_pt_regs *ept_regs = extended_pt_regs(regs);
++
++	if (cpu_feature_enabled(X86_FEATURE_PKS) && (error_code & X86_PF_PK))
++		pr_alert("PKRS: 0x%x\n", ept_regs->thread_pkrs);
++}
++#else
++static __always_inline void show_extended_regs_oops(struct pt_regs *regs,
++						    unsigned error_code)
++{
++}
++#endif
++
+ static void
+ show_fault_oops(struct pt_regs *regs, unsigned long error_code, unsigned long address)
+ {
+@@ -547,6 +564,8 @@ show_fault_oops(struct pt_regs *regs, unsigned long error_code, unsigned long ad
+ 		 (error_code & X86_PF_PK)    ? "protection keys violation" :
+ 					       "permissions violation");
+ 
++	show_extended_regs_oops(regs, error_code);
++
+ 	if (!(error_code & X86_PF_USER) && user_mode(regs)) {
+ 		struct desc_ptr idt, gdt;
+ 		u16 ldtr, tr;
+diff --git a/include/linux/pkeys.h b/include/linux/pkeys.h
+index 2955ba976048..6432269e9fda 100644
+--- a/include/linux/pkeys.h
++++ b/include/linux/pkeys.h
+@@ -50,4 +50,17 @@ static inline void copy_init_pkru_to_fpregs(void)
+ 
+ #endif /* ! CONFIG_ARCH_HAS_PKEYS */
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++void irq_save_set_pkrs(struct pt_regs *regs, u32 val);
++void irq_restore_pkrs(struct pt_regs *regs);
++#else
++
++#ifndef INIT_PKRS_VALUE
++#define INIT_PKRS_VALUE 0
++#endif
++
++static __always_inline void irq_save_set_pkrs(struct pt_regs *regs, u32 val) { }
++static __always_inline void irq_restore_pkrs(struct pt_regs *regs) { }
++#endif /* ! CONFIG_ARCH_HAS_SUPERVISOR_PKEYS */
++
+ #endif /* _LINUX_PKEYS_H */
+diff --git a/kernel/entry/common.c b/kernel/entry/common.c
+index 8442e5c9cfa2..125d240a7575 100644
+--- a/kernel/entry/common.c
++++ b/kernel/entry/common.c
+@@ -5,6 +5,7 @@
+ #include <linux/highmem.h>
+ #include <linux/livepatch.h>
+ #include <linux/audit.h>
++#include <linux/pkeys.h>
+ 
+ #include "common.h"
+ 
+@@ -363,7 +364,7 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
+ 		instrumentation_end();
+ 
+ 		ret.exit_rcu = true;
+-		return ret;
++		goto done;
+ 	}
+ 
+ 	/*
+@@ -378,6 +379,8 @@ noinstr irqentry_state_t irqentry_enter(struct pt_regs *regs)
+ 	trace_hardirqs_off_finish();
+ 	instrumentation_end();
+ 
++done:
++	irq_save_set_pkrs(regs, INIT_PKRS_VALUE);
+ 	return ret;
+ }
+ 
+@@ -403,7 +406,12 @@ noinstr void irqentry_exit(struct pt_regs *regs, irqentry_state_t state)
+ 	/* Check whether this returns to user mode */
+ 	if (user_mode(regs)) {
+ 		irqentry_exit_to_user_mode(regs);
+-	} else if (!regs_irqs_disabled(regs)) {
++		return;
++	}
++
++	irq_restore_pkrs(regs);
++
++	if (!regs_irqs_disabled(regs)) {
+ 		/*
+ 		 * If RCU was not watching on entry this needs to be done
+ 		 * carefully and needs the same ordering of lockdep/tracing
+@@ -457,11 +465,13 @@ irqentry_state_t noinstr irqentry_nmi_enter(struct pt_regs *regs)
+ 	ftrace_nmi_enter();
+ 	instrumentation_end();
+ 
++	irq_save_set_pkrs(regs, INIT_PKRS_VALUE);
+ 	return irq_state;
+ }
+ 
+ void noinstr irqentry_nmi_exit(struct pt_regs *regs, irqentry_state_t irq_state)
+ {
++	irq_restore_pkrs(regs);
+ 	instrumentation_begin();
+ 	ftrace_nmi_exit();
+ 	if (irq_state.lockdep) {
+-- 
+2.25.1
+

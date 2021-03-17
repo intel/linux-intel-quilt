@@ -1,0 +1,412 @@
+From 3a6da4ddc0d5427cb50ca7e062f0389cc9ac383e Mon Sep 17 00:00:00 2001
+From: Ira Weiny <ira.weiny@intel.com>
+Date: Mon, 22 Feb 2021 17:31:38 -0800
+Subject: [PATCH 37/60] kmap: Add stray access protection for device pages
+
+Device managed pages may have additional protections.  These protections
+need to be removed prior to valid use by kernel users.
+
+Check for special treatment of device managed pages in kmap and take
+action if needed.  Use kmap as an interface for generic kernel code
+because under normal circumstances it would be a bug for general kernel
+code to not use kmap prior to accessing kernel memory.  Therefore, this
+should allow any valid kernel users to seamlessly use these pages
+without issues.
+
+Some users of kmap() have incorrectly used the mapped address outside of
+the thread which performed the mapping.  It is not anticipated that
+these 'global' mappings will be required to protect pmem as the 2
+filesystems which support DAX (one of the main uses of pmem) are ext4
+and xfs.  Neither of these perform such global mappings.
+
+To handle kmap() users, mark mappings performed through kmap() 'global'
+and introduce 'fault.pks_mode' to control how faults are handled in
+other threads.
+
+3 modes are available:
+
+	'relaxed' (default) -- WARN_ONCE, and update the current
+	thread's PKS value to allow the access.
+
+	'silent' -- same as 'relaxed' without the warning.
+
+	'strict' -- fails the fault
+
+The mappings protected by PKS are those originally configured when zone
+device pages are added to the direct map with the PGMAP_PROT_ENABLED.
+
+ZONE_DEVICE requires 64BIT which does not require HIGHMEM.  Therefore,
+zone device protections are only required in the !HIGHMEM case.
+
+Because of the critical nature of mapping pages the implementation is
+careful to be as fast as possible when 'mapping' pages of regular DRAM.
+
+Furthermore, it should be noted that the underlying MSR write required
+on device pages when protected is better than a normal MSR write.
+Specifically, WRMSR(MSR_IA32_PKRS) is not serializing but still
+maintains ordering properties similar to WRPKRU.  The current SDM
+section on PKRS needs updating but should be the same as that of WRPKRU.
+So to quote from the WRPKRU text:
+
+	WRPKRU will never execute speculatively. Memory accesses
+	affected by PKRU register will not execute (even speculatively)
+	until all prior executions of WRPKRU have completed execution
+	and updated the PKRU register.
+
+Still this will make accessing pmem more expensive from the kernel but
+the overhead is minimized and most pmem users access this memory through
+user page mappings which are not affected at all.
+
+Signed-off-by: Ira Weiny <ira.weiny@intel.com>
+---
+ .../admin-guide/kernel-parameters.txt         | 14 +++
+ arch/x86/include/asm/processor.h              | 11 +++
+ arch/x86/mm/fault.c                           | 98 +++++++++++++++++++
+ include/linux/highmem-internal.h              | 31 ++++++
+ include/linux/memremap.h                      |  1 +
+ include/linux/mm.h                            | 19 ++++
+ mm/Kconfig                                    |  1 +
+ mm/memremap.c                                 |  6 ++
+ 8 files changed, 181 insertions(+)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 45c6276a6ad3..e5394656a70a 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -3884,6 +3884,20 @@
+ 	pirq=		[SMP,APIC] Manual mp-table setup
+ 			See Documentation/x86/i386/IO-APIC.rst.
+ 
++	fault.pks_mode=	[X86] Control the behavior of a PKS fault.
++			(depends on CONFIG_ARCH_HAS_SUPERVISOR_PKEYS).  Change
++			at run-time Control how a PKS fault is handled on a
++			page which has been mapped 'global'.
++
++			Format: { relaxed | silent | strict }
++
++			relaxed - Print a warning and handle the fault by
++				  updating the thread pks value
++			silent - Same as relaxed but without the warning
++			strict - Do not handle the fault
++
++			default: relaxed
++
+ 	plip=		[PPT,NET] Parallel port network link
+ 			Format: { parport<nr> | timid | 0 }
+ 			See also Documentation/admin-guide/parport.rst.
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 977d0b1ca476..53d7066b2cc6 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -890,6 +890,17 @@ static inline struct extended_pt_regs *extended_pt_regs(struct pt_regs *regs)
+ {
+ 	return container_of(regs, struct extended_pt_regs, pt_regs);
+ }
++
++bool handle_pks(struct pt_regs *regs, unsigned long error_code,
++		unsigned long address);
++#else
++
++static inline bool handle_pks(struct pt_regs *regs, unsigned long error_code,
++			      unsigned long address)
++{
++	return false;
++}
++
+ #endif
+ 
+ #endif /* _ASM_X86_PROCESSOR_H */
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 00430512a5c4..dd6fcd8a1999 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -37,6 +37,70 @@
+ #define CREATE_TRACE_POINTS
+ #include <asm/trace/exceptions.h>
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++
++typedef enum {
++	PKS_MODE_STRICT  = 0,
++	PKS_MODE_RELAXED = 1,
++	PKS_MODE_SILENT  = 2,
++} pks_fault_modes;
++
++pks_fault_modes pks_mode = PKS_MODE_RELAXED;
++
++static int param_set_pks_fault_mode(const char *val, const struct kernel_param *kp)
++{
++	char *s = strstrip((char *)val);
++	int ret = -EINVAL;
++
++	if (!strcmp(s, "relaxed")) {
++		pks_mode = PKS_MODE_RELAXED;
++		ret = 0;
++	} else if (!strcmp(s, "silent")) {
++		pks_mode = PKS_MODE_SILENT;
++		ret = 0;
++	} else if (!strcmp(s, "strict")) {
++		pks_mode = PKS_MODE_STRICT;
++		ret = 0;
++	}
++
++	return ret;
++}
++
++static int param_get_pks_fault_mode(char *buffer, const struct kernel_param *kp)
++{
++	int ret = 0;
++
++	switch (pks_mode) {
++	case PKS_MODE_STRICT:
++		ret = sprintf(buffer, "strict\n");
++		break;
++	case PKS_MODE_RELAXED:
++		ret = sprintf(buffer, "relaxed\n");
++		break;
++	case PKS_MODE_SILENT:
++		ret = sprintf(buffer, "silent\n");
++		break;
++	default:
++		ret = sprintf(buffer, "<unknown>\n");
++		break;
++	}
++
++	return ret;
++}
++
++static const struct kernel_param_ops param_ops_pks_fault_modes =
++{
++	.set = param_set_pks_fault_mode,
++	.get = param_get_pks_fault_mode,
++};
++
++#define param_check_pks_fault_modes(name, p) \
++	__param_check(name, p, pks_fault_modes)
++module_param(pks_mode, pks_fault_modes, 0644);
++
++#endif /* CONFIG_ARCH_HAS_SUPERVISOR_PKEYS */
++
++
+ /*
+  * Returns 0 if mmiotrace is disabled, or if the fault is not
+  * handled by mmiotrace:
+@@ -1168,6 +1232,37 @@ static bool handle_pks_test(unsigned long hw_error_code, struct pt_regs *regs)
+ }
+ #endif
+ 
++#ifdef CONFIG_ARCH_HAS_SUPERVISOR_PKEYS
++bool handle_pks(struct pt_regs *regs, unsigned long error_code,
++		unsigned long address)
++{
++	if (error_code & X86_PF_PK) {
++		struct extended_pt_regs *ept_regs;
++		struct page *page;
++		int pkey;
++
++		page = virt_to_page(address);
++
++		if (!page || !page_is_globally_mapped(page))
++			return false;
++
++		if (pks_mode == PKS_MODE_STRICT)
++			return false;
++
++		WARN_ONCE(pks_mode == PKS_MODE_RELAXED,
++			"PKS fault on globally mapped device page 0x%lu pfn %lu",
++			address, page_to_pfn(page));
++
++		pkey = dev_get_dev_pkey();
++		ept_regs = extended_pt_regs(regs);
++		update_pkey_val(ept_regs->thread_pkrs, pkey, 0);
++		return true;
++	}
++
++	return false;
++}
++#endif
++
+ /*
+  * Called for all faults where 'address' is part of the kernel address
+  * space.  Might get called for faults that originate from *code* that
+@@ -1187,6 +1282,9 @@ do_kern_addr_fault(struct pt_regs *regs, unsigned long hw_error_code,
+ 	if (handle_pks_test(hw_error_code, regs))
+ 		return;
+ 
++	if (handle_pks(regs, hw_error_code, address))
++		return;
++
+ #ifdef CONFIG_X86_32
+ 	/*
+ 	 * We can fault-in kernel-space virtual memory on-demand. The
+diff --git a/include/linux/highmem-internal.h b/include/linux/highmem-internal.h
+index 7902c7d8b55f..5a9db3190923 100644
+--- a/include/linux/highmem-internal.h
++++ b/include/linux/highmem-internal.h
+@@ -134,6 +134,31 @@ static inline void totalhigh_pages_add(long count)
+ 
+ #else /* CONFIG_HIGHMEM */
+ 
++#ifdef CONFIG_ZONE_DEVICE_ACCESS_PROTECTION
++
++static inline void dev_page_mk_readwrite(struct page *page, bool global)
++{
++	if (!page_is_access_protected(page))
++		return;
++	if (global)
++		page->pgmap->flags |=  PGMAP_KMAP_GLOBAL;
++	dev_mk_readwrite();
++}
++
++static inline void dev_page_mk_noaccess(struct page *page, bool global)
++{
++	if (!page_is_access_protected(page))
++		return;
++	if (global)
++		page->pgmap->flags &= ~PGMAP_KMAP_GLOBAL;
++	dev_mk_noaccess();
++}
++
++#else
++static inline void dev_page_mk_readwrite(struct page *page, bool global) { }
++static inline void dev_page_mk_noaccess(struct page *page, bool global) { }
++#endif
++
+ static inline struct page *kmap_to_page(void *addr)
+ {
+ 	return virt_to_page(addr);
+@@ -142,6 +167,7 @@ static inline struct page *kmap_to_page(void *addr)
+ static inline void *kmap(struct page *page)
+ {
+ 	might_sleep();
++	dev_page_mk_readwrite(page, true);
+ 	return page_address(page);
+ }
+ 
+@@ -150,6 +176,7 @@ static inline void kmap_flush_unused(void) { }
+ 
+ static inline void kunmap(struct page *page)
+ {
++	dev_page_mk_noaccess(page, true);
+ #ifdef ARCH_HAS_FLUSH_ON_KUNMAP
+ 	kunmap_flush_on_unmap(page_address(page));
+ #endif
+@@ -157,6 +184,7 @@ static inline void kunmap(struct page *page)
+ 
+ static inline void *kmap_local_page(struct page *page)
+ {
++	dev_page_mk_readwrite(page, false);
+ 	return page_address(page);
+ }
+ 
+@@ -175,12 +203,14 @@ static inline void __kunmap_local(void *addr)
+ #ifdef ARCH_HAS_FLUSH_ON_KUNMAP
+ 	kunmap_flush_on_unmap(addr);
+ #endif
++	dev_page_mk_noaccess(kmap_to_page(addr), false);
+ }
+ 
+ static inline void *kmap_atomic(struct page *page)
+ {
+ 	preempt_disable();
+ 	pagefault_disable();
++	dev_page_mk_readwrite(page, false);
+ 	return page_address(page);
+ }
+ 
+@@ -199,6 +229,7 @@ static inline void __kunmap_atomic(void *addr)
+ #ifdef ARCH_HAS_FLUSH_ON_KUNMAP
+ 	kunmap_flush_on_unmap(addr);
+ #endif
++	dev_page_mk_noaccess(kmap_to_page(addr), false);
+ 	pagefault_enable();
+ 	preempt_enable();
+ }
+diff --git a/include/linux/memremap.h b/include/linux/memremap.h
+index 25a2429c2d87..503a4b360eb2 100644
+--- a/include/linux/memremap.h
++++ b/include/linux/memremap.h
+@@ -91,6 +91,7 @@ struct dev_pagemap_ops {
+ 
+ #define PGMAP_ALTMAP_VALID	(1 << 0)
+ #define PGMAP_PROT_ENABLED	(1 << 1)
++#define PGMAP_KMAP_GLOBAL	(1 << 2)
+ 
+ /**
+  * struct dev_pagemap - metadata for ZONE_DEVICE mappings
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index d6212e85f369..02fe1640ac09 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -1193,6 +1193,12 @@ static inline bool page_is_access_protected(struct page *page)
+ 	return false;
+ }
+ 
++static inline bool page_is_globally_mapped(struct page *page)
++{
++	return page_is_access_protected(page) &&
++		(page->pgmap->flags & PGMAP_KMAP_GLOBAL);
++}
++
+ void __dev_mk_readwrite(void);
+ void __dev_mk_noaccess(void);
+ static __always_inline void dev_mk_readwrite(void)
+@@ -1205,13 +1211,26 @@ static __always_inline void dev_mk_noaccess(void)
+ 	if (static_branch_unlikely(&dev_protection_static_key))
+ 		__dev_mk_noaccess();
+ }
++
++int dev_get_dev_pkey(void);
+ #else
+ static inline bool page_is_access_protected(struct page *page)
+ {
+ 	return false;
+ }
++
+ static inline void dev_mk_readwrite(void) { }
+ static inline void dev_mk_noaccess(void) { }
++
++static inline bool page_is_globally_mapped(struct page *page)
++{
++	return false;
++}
++
++static inline int dev_get_dev_pkey(void)
++{
++	return INT_MIN;
++}
+ #endif /* CONFIG_ZONE_DEVICE_ACCESS_PROTECTION */
+ 
+ /* 127: arbitrary random number, small enough to assemble well */
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 51737174953c..be915a7c5ae1 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -784,6 +784,7 @@ config ZONE_DEVICE_ACCESS_PROTECTION
+ 	bool "Device memory access protection"
+ 	depends on ZONE_DEVICE
+ 	depends on ARCH_HAS_SUPERVISOR_PKEYS
++	depends on !HIGHMEM
+ 
+ 	help
+ 	  Enable extra protections on device memory.  This protects against
+diff --git a/mm/memremap.c b/mm/memremap.c
+index 15ab86c1ba31..f6450fcfbd0e 100644
+--- a/mm/memremap.c
++++ b/mm/memremap.c
+@@ -131,6 +131,12 @@ static int __init __dev_access_protection_init(void)
+ 	return 0;
+ }
+ subsys_initcall(__dev_access_protection_init);
++
++int dev_get_dev_pkey(void)
++{
++	return dev_page_pkey;
++}
++EXPORT_SYMBOL_GPL(dev_get_dev_pkey);
+ #else
+ static pgprot_t dev_pgprot_get(struct dev_pagemap *pgmap, pgprot_t prot)
+ {
+-- 
+2.25.1
+
