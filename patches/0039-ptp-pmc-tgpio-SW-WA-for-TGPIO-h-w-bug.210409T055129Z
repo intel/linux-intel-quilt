@@ -1,0 +1,61 @@
+From 343bd85c22ad18a9f6d041b9bb68fcadd859d4e5 Mon Sep 17 00:00:00 2001
+From: "D, Lakshmi Sowjanya" <lakshmi.sowjanya.d@intel.com>
+Date: Thu, 8 Apr 2021 14:54:49 +0530
+Subject: [PATCH 39/40] ptp: pmc-tgpio: SW WA for TGPIO h/w bug
+
+The interface returns the timestamp of the last event or
+-EAGAIN if no events are available.
+
+Signed-off-by: D, Lakshmi Sowjanya <lakshmi.sowjanya.d@intel.com>
+---
+ drivers/ptp/ptp-intel-pmc-tgpio.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/ptp/ptp-intel-pmc-tgpio.c b/drivers/ptp/ptp-intel-pmc-tgpio.c
+index 2a2947b0e896..6a3bf4c3e8a0 100644
+--- a/drivers/ptp/ptp-intel-pmc-tgpio.c
++++ b/drivers/ptp/ptp-intel-pmc-tgpio.c
+@@ -477,9 +477,12 @@ static int intel_pmc_tgpio_counttstamp
+ 	struct intel_pmc_tgpio_t	*tgpio = to_intel_pmc_tgpio(info);
+ 	u32                              dt_hi_s;
+ 	u32                              dt_hi_e;
+-	u32				 dt_lo;
++	static u32			 dt_lo;
++	u32				 dt_lo_prev;
++	int				 err = 0;
+ 	struct timespec64		 dt_ts;
+ 	struct timespec64		 tsc_now;
++	unsigned long long               prev_count;
+ 
+ 	mutex_lock(&intel_pmc_tgpio->lock);
+ 	while (intel_pmc_tgpio->pin[count->index].busy) {
+@@ -494,6 +497,9 @@ static int intel_pmc_tgpio_counttstamp
+ 	tsc_now = get_tsc_ns_now(NULL);
+ 	dt_hi_s = convert_tsc_ns_to_art(&tsc_now) >> 32;
+ 
++	dt_lo_prev = dt_lo;
++	prev_count = count->event_count;
++
+ 	/* Reading lower 32-bit word of Time Capture Value (TCV) loads */
+ 	/* the event time and event count capture */
+ 	dt_lo = INTEL_PMC_TGPIO_RD_REG(TGPIOTCV31_0, count->index);
+@@ -511,12 +517,15 @@ static int intel_pmc_tgpio_counttstamp
+ 
+ 	count->device_time = ts64_to_ptp_clock_time(dt_ts);
+ 
++	if (count->event_count == prev_count || dt_lo_prev == dt_lo)
++		err = -EAGAIN;
++
+ 	mutex_lock(&intel_pmc_tgpio->lock);
+ 	intel_pmc_tgpio->pin[count->index].busy = false;
+ 	complete(&intel_pmc_tgpio->pin[count->index].transact_comp);
+ 	mutex_unlock(&intel_pmc_tgpio->lock);
+ 
+-	return 0;
++	return err;
+ }
+ 
+ static int intel_pmc_tgpio_verify(
+-- 
+2.17.1
+
