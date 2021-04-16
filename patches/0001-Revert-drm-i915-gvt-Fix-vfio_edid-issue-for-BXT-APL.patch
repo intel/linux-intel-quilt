@@ -1,0 +1,159 @@
+From 3b9ed8ee21652ad5479665ae221f6012528a86ce Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Tue, 13 Apr 2021 11:32:15 +0800
+Subject: [PATCH 1/5] Revert "drm/i915/gvt: Fix vfio_edid issue for BXT/APL"
+
+This reverts commit 28e53acd3065891b6762f7eeee98c66d4ed1ce6d.
+---
+ drivers/gpu/drm/i915/gvt/display.c | 83 ++++++++----------------------
+ drivers/gpu/drm/i915/gvt/vgpu.c    |  2 +-
+ 2 files changed, 23 insertions(+), 62 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gvt/display.c b/drivers/gpu/drm/i915/gvt/display.c
+index 21a562c2b1f5..4aec43a3588b 100644
+--- a/drivers/gpu/drm/i915/gvt/display.c
++++ b/drivers/gpu/drm/i915/gvt/display.c
+@@ -215,15 +215,6 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
+ 				  DDI_BUF_CTL_ENABLE);
+ 			vgpu_vreg_t(vgpu, DDI_BUF_CTL(port)) |= DDI_BUF_IS_IDLE;
+ 		}
+-		vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-			~(PORTA_HOTPLUG_ENABLE | PORTA_HOTPLUG_STATUS_MASK);
+-		vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-			~(PORTB_HOTPLUG_ENABLE | PORTB_HOTPLUG_STATUS_MASK);
+-		vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-			~(PORTC_HOTPLUG_ENABLE | PORTC_HOTPLUG_STATUS_MASK);
+-		/* No hpd_invert set in vgpu vbt, need to clear invert mask */
+-		vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &= ~BXT_DDI_HPD_INVERT_MASK;
+-		vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &= ~BXT_DE_PORT_HOTPLUG_MASK;
+ 
+ 		vgpu_vreg_t(vgpu, BXT_P_CR_GT_DISP_PWRON) &= ~(BIT(0) | BIT(1));
+ 		vgpu_vreg_t(vgpu, BXT_PORT_CL1CM_DW0(DPIO_PHY0)) &=
+@@ -280,8 +271,6 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
+ 			vgpu_vreg_t(vgpu, TRANS_DDI_FUNC_CTL(TRANSCODER_EDP)) |=
+ 				(TRANS_DDI_BPC_8 | TRANS_DDI_MODE_SELECT_DP_SST |
+ 				 TRANS_DDI_FUNC_ENABLE);
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTA_HOTPLUG_ENABLE;
+ 			vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+ 				BXT_DE_PORT_HP_DDIA;
+ 		}
+@@ -310,8 +299,6 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
+ 				(TRANS_DDI_BPC_8 | TRANS_DDI_MODE_SELECT_DP_SST |
+ 				 (PORT_B << TRANS_DDI_PORT_SHIFT) |
+ 				 TRANS_DDI_FUNC_ENABLE);
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTB_HOTPLUG_ENABLE;
+ 			vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+ 				BXT_DE_PORT_HP_DDIB;
+ 		}
+@@ -340,8 +327,6 @@ static void emulate_monitor_status_change(struct intel_vgpu *vgpu)
+ 				(TRANS_DDI_BPC_8 | TRANS_DDI_MODE_SELECT_DP_SST |
+ 				 (PORT_B << TRANS_DDI_PORT_SHIFT) |
+ 				 TRANS_DDI_FUNC_ENABLE);
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTC_HOTPLUG_ENABLE;
+ 			vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+ 				BXT_DE_PORT_HP_DDIC;
+ 		}
+@@ -667,62 +652,38 @@ void intel_vgpu_emulate_hotplug(struct intel_vgpu *vgpu, bool connected)
+ 				PORTD_HOTPLUG_STATUS_MASK;
+ 		intel_vgpu_trigger_virtual_event(vgpu, DP_D_HOTPLUG);
+ 	} else if (IS_BROXTON(dev_priv)) {
+-		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_A)) {
+-			if (connected) {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+-					BXT_DE_PORT_HP_DDIA;
+-			} else {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &=
+-					~BXT_DE_PORT_HP_DDIA;
++		if (connected) {
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_A)) {
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIA;
+ 			}
+-			vgpu_vreg_t(vgpu, GEN8_DE_PORT_IIR) |=
+-				BXT_DE_PORT_HP_DDIA;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-				~PORTA_HOTPLUG_STATUS_MASK;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTA_HOTPLUG_LONG_DETECT;
+-			intel_vgpu_trigger_virtual_event(vgpu, DP_A_HOTPLUG);
+-		}
+-		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_B)) {
+-			if (connected) {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+-					BXT_DE_PORT_HP_DDIB;
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_B)) {
+ 				vgpu_vreg_t(vgpu, SFUSE_STRAP) |=
+ 					SFUSE_STRAP_DDIB_DETECTED;
+-			} else {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &=
+-					~BXT_DE_PORT_HP_DDIB;
+-				vgpu_vreg_t(vgpu, SFUSE_STRAP) &=
+-					~SFUSE_STRAP_DDIB_DETECTED;
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIB;
+ 			}
+-			vgpu_vreg_t(vgpu, GEN8_DE_PORT_IIR) |=
+-				BXT_DE_PORT_HP_DDIB;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-				~PORTB_HOTPLUG_STATUS_MASK;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTB_HOTPLUG_LONG_DETECT;
+-			intel_vgpu_trigger_virtual_event(vgpu, DP_B_HOTPLUG);
+-		}
+-		if (intel_vgpu_has_monitor_on_port(vgpu, PORT_C)) {
+-			if (connected) {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |=
+-					BXT_DE_PORT_HP_DDIC;
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_C)) {
+ 				vgpu_vreg_t(vgpu, SFUSE_STRAP) |=
+ 					SFUSE_STRAP_DDIC_DETECTED;
+-			} else {
+-				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &=
+-					~BXT_DE_PORT_HP_DDIC;
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) |= BXT_DE_PORT_HP_DDIC;
++			}
++		} else {
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_A)) {
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &= ~BXT_DE_PORT_HP_DDIA;
++			}
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_B)) {
++				vgpu_vreg_t(vgpu, SFUSE_STRAP) &=
++					~SFUSE_STRAP_DDIB_DETECTED;
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &= ~BXT_DE_PORT_HP_DDIB;
++			}
++			if (intel_vgpu_has_monitor_on_port(vgpu, PORT_C)) {
+ 				vgpu_vreg_t(vgpu, SFUSE_STRAP) &=
+ 					~SFUSE_STRAP_DDIC_DETECTED;
++				vgpu_vreg_t(vgpu, GEN8_DE_PORT_ISR) &= ~BXT_DE_PORT_HP_DDIC;
+ 			}
+-			vgpu_vreg_t(vgpu, GEN8_DE_PORT_IIR) |=
+-				BXT_DE_PORT_HP_DDIC;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) &=
+-				~PORTC_HOTPLUG_STATUS_MASK;
+-			vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
+-				PORTC_HOTPLUG_LONG_DETECT;
+-			intel_vgpu_trigger_virtual_event(vgpu, DP_C_HOTPLUG);
+ 		}
++		vgpu_vreg_t(vgpu, PCH_PORT_HOTPLUG) |=
++			PORTB_HOTPLUG_STATUS_MASK;
++		intel_vgpu_trigger_virtual_event(vgpu, DP_B_HOTPLUG);
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/vgpu.c b/drivers/gpu/drm/i915/gvt/vgpu.c
+index 4deb7fec5eb5..4daaf302f429 100644
+--- a/drivers/gpu/drm/i915/gvt/vgpu.c
++++ b/drivers/gpu/drm/i915/gvt/vgpu.c
+@@ -432,7 +432,7 @@ static struct intel_vgpu *__intel_gvt_create_vgpu(struct intel_gvt *gvt,
+ 	if (ret)
+ 		goto out_clean_sched_policy;
+ 
+-	if (IS_BROADWELL(gvt->dev_priv) || IS_BROXTON(gvt->dev_priv))
++	if (IS_BROADWELL(gvt->dev_priv))
+ 		ret = intel_gvt_hypervisor_set_edid(vgpu, PORT_B);
+ 	else
+ 		ret = intel_gvt_hypervisor_set_edid(vgpu, PORT_D);
+-- 
+2.25.1
+
