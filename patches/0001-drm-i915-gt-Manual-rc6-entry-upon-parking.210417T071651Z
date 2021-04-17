@@ -1,0 +1,186 @@
+From 814675bf7fa81b2df6a24880e84a5e30453c9cdc Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 27 Nov 2019 09:56:57 +0000
+Subject: [PATCH 1/3] drm/i915/gt: Manual rc6 entry upon parking
+
+Now that we rapidly park the GT when the GPU idles, we often find
+ourselves idling faster than the RC6 promotion timer. Thus if we tell
+the GPU to enter RC6 manually as we park, we can do so quicker (by
+around 50ms, half an EI on average) and marginally increase our
+powersaving across all execlists platforms.
+
+v2: Now with a selftest to check we can enter RC6 manually [removed by James]
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Andi Shyti <andi.shyti@intel.com>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Imre Deak <imre.deak@intel.com>
+Acked-by: Imre Deak <imre.deak@intel.com>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191127095657.3209854-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c     |  2 +
+ drivers/gpu/drm/i915/gt/intel_rc6.c       | 52 ++++++++++++++++-------
+ drivers/gpu/drm/i915/gt/intel_rc6.h       |  3 ++
+ drivers/gpu/drm/i915/gt/intel_rc6_types.h |  2 +
+ 4 files changed, 44 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index ab9977b64c17..962e07f5d156 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -61,6 +61,7 @@ static int __gt_unpark(struct intel_wakeref *wf)
+ 	gt->awake = intel_display_power_get(i915, POWER_DOMAIN_GT_IRQ);
+ 	GEM_BUG_ON(!gt->awake);
+ 
++	intel_rc6_unpark(&gt->rc6);
+ 	intel_rps_unpark(&gt->rps);
+ 	i915_pmu_gt_unparked(i915);
+ 
+@@ -82,6 +83,7 @@ static int __gt_park(struct intel_wakeref *wf)
+ 	i915_vma_parked(gt);
+ 	i915_pmu_gt_parked(i915);
+ 	intel_rps_park(&gt->rps);
++	intel_rc6_park(&gt->rc6);
+ 
+ 	/* Everything switched off, flush any residual interrupt just in case */
+ 	intel_synchronize_irq(i915);
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6.c b/drivers/gpu/drm/i915/gt/intel_rc6.c
+index 5ad4a92a9582..c8e8e554ffe8 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6.c
++++ b/drivers/gpu/drm/i915/gt/intel_rc6.c
+@@ -99,10 +99,9 @@ static void gen11_rc6_enable(struct intel_rc6 *rc6)
+ 	set(uncore, GEN9_RENDER_PG_IDLE_HYSTERESIS, 250);
+ 
+ 	/* 3a: Enable RC6 */
+-	set(uncore, GEN6_RC_CONTROL,
+-	    GEN6_RC_CTL_HW_ENABLE |
+-	    GEN6_RC_CTL_RC6_ENABLE |
+-	    GEN6_RC_CTL_EI_MODE(1));
++	rc6->ctl_enable = GEN6_RC_CTL_HW_ENABLE |
++			  GEN6_RC_CTL_RC6_ENABLE |
++			  GEN6_RC_CTL_EI_MODE(1);
+ 
+ 	set(uncore, GEN9_PG_ENABLE,
+ 	    GEN9_RENDER_PG_ENABLE |
+@@ -173,10 +172,10 @@ static void gen9_rc6_enable(struct intel_rc6 *rc6)
+ 	else
+ 		rc6_mode = GEN6_RC_CTL_EI_MODE(1);
+ 
+-	set(uncore, GEN6_RC_CONTROL,
+-	    GEN6_RC_CTL_HW_ENABLE |
+-	    GEN6_RC_CTL_RC6_ENABLE |
+-	    rc6_mode);
++	rc6->ctl_enable =
++		GEN6_RC_CTL_HW_ENABLE |
++		GEN6_RC_CTL_RC6_ENABLE |
++		rc6_mode;
+ 
+ 	set(uncore, GEN9_PG_ENABLE,
+ 	    GEN9_RENDER_PG_ENABLE | GEN9_MEDIA_PG_ENABLE);
+@@ -198,10 +197,10 @@ static void gen8_rc6_enable(struct intel_rc6 *rc6)
+ 	set(uncore, GEN6_RC6_THRESHOLD, 625); /* 800us/1.28 for TO */
+ 
+ 	/* 3: Enable RC6 */
+-	set(uncore, GEN6_RC_CONTROL,
++	rc6->ctl_enable =
+ 	    GEN6_RC_CTL_HW_ENABLE |
+ 	    GEN7_RC_CTL_TO_MODE |
+-	    GEN6_RC_CTL_RC6_ENABLE);
++	    GEN6_RC_CTL_RC6_ENABLE;
+ }
+ 
+ static void gen6_rc6_enable(struct intel_rc6 *rc6)
+@@ -237,10 +236,10 @@ static void gen6_rc6_enable(struct intel_rc6 *rc6)
+ 		rc6_mask |= GEN6_RC_CTL_RC6p_ENABLE;
+ 	if (HAS_RC6pp(i915))
+ 		rc6_mask |= GEN6_RC_CTL_RC6pp_ENABLE;
+-	set(uncore, GEN6_RC_CONTROL,
++	rc6->ctl_enable =
+ 	    rc6_mask |
+ 	    GEN6_RC_CTL_EI_MODE(1) |
+-	    GEN6_RC_CTL_HW_ENABLE);
++	    GEN6_RC_CTL_HW_ENABLE;
+ 
+ 	rc6vids = 0;
+ 	ret = sandybridge_pcode_read(i915, GEN6_PCODE_READ_RC6VIDS,
+@@ -358,7 +357,7 @@ static void chv_rc6_enable(struct intel_rc6 *rc6)
+ 			       VLV_RENDER_RC6_COUNT_EN));
+ 
+ 	/* 3: Enable RC6 */
+-	set(uncore, GEN6_RC_CONTROL, GEN7_RC_CTL_TO_MODE);
++	rc6->ctl_enable = GEN7_RC_CTL_TO_MODE;
+ }
+ 
+ static void vlv_rc6_enable(struct intel_rc6 *rc6)
+@@ -384,8 +383,8 @@ static void vlv_rc6_enable(struct intel_rc6 *rc6)
+ 			       VLV_MEDIA_RC6_COUNT_EN |
+ 			       VLV_RENDER_RC6_COUNT_EN));
+ 
+-	set(uncore, GEN6_RC_CONTROL,
+-	    GEN7_RC_CTL_TO_MODE | VLV_RC_CTL_CTX_RST_PARALLEL);
++	rc6->ctl_enable =
++	    GEN7_RC_CTL_TO_MODE | VLV_RC_CTL_CTX_RST_PARALLEL;
+ }
+ 
+ static bool bxt_check_bios_rc6_setup(struct intel_rc6 *rc6)
+@@ -566,6 +565,29 @@ void intel_rc6_enable(struct intel_rc6 *rc6)
+ 	rc6->enabled = true;
+ }
+ 
++void intel_rc6_unpark(struct intel_rc6 *rc6)
++{
++	struct intel_uncore *uncore = rc6_to_uncore(rc6);
++
++	if (!rc6->enabled)
++		return;
++
++	/* Restore HW timers for automatic RC6 entry while busy */
++	set(uncore, GEN6_RC_CONTROL, rc6->ctl_enable);
++}
++
++void intel_rc6_park(struct intel_rc6 *rc6)
++{
++	struct intel_uncore *uncore = rc6_to_uncore(rc6);
++
++	if (!rc6->enabled)
++		return;
++
++	/* Turn off the HW timers and go directly to rc6 */
++	set(uncore, GEN6_RC_CONTROL, GEN6_RC_CTL_RC6_ENABLE);
++	set(uncore, GEN6_RC_STATE, 0x4 << RC_SW_TARGET_STATE_SHIFT);
++}
++
+ void intel_rc6_disable(struct intel_rc6 *rc6)
+ {
+ 	if (!rc6->enabled)
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6.h b/drivers/gpu/drm/i915/gt/intel_rc6.h
+index 5e6711f36457..9f0f23fca8af 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6.h
++++ b/drivers/gpu/drm/i915/gt/intel_rc6.h
+@@ -15,6 +15,9 @@ struct intel_rc6;
+ void intel_rc6_init(struct intel_rc6 *rc6);
+ void intel_rc6_fini(struct intel_rc6 *rc6);
+ 
++void intel_rc6_unpark(struct intel_rc6 *rc6);
++void intel_rc6_park(struct intel_rc6 *rc6);
++
+ void intel_rc6_sanitize(struct intel_rc6 *rc6);
+ void intel_rc6_enable(struct intel_rc6 *rc6);
+ void intel_rc6_disable(struct intel_rc6 *rc6);
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6_types.h b/drivers/gpu/drm/i915/gt/intel_rc6_types.h
+index 214f354d6ae4..60decae1abc9 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_rc6_types.h
+@@ -18,6 +18,8 @@ struct intel_rc6 {
+ 	u64 prev_hw_residency[4];
+ 	u64 cur_residency[4];
+ 
++	u32 ctl_enable;
++
+ 	struct drm_i915_gem_object *pctx;
+ 
+ 	bool supported : 1;
+-- 
+2.17.1
+
