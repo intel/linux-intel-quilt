@@ -1,0 +1,64 @@
+From 39b7cc15ab0920897863ae3054aafae3623c7e19 Mon Sep 17 00:00:00 2001
+From: Imre Deak <imre.deak@intel.com>
+Date: Mon, 30 Mar 2020 12:54:25 +0300
+Subject: [PATCH 19/33] drm/i915: Extend hotplug detect retry on TypeC
+ connectors to 5 seconds
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+On TypeC ports if a sink deasserts/reasserts its HPD signal, generating
+a hotplug interrupt without the sink getting unplugged/replugged from
+the connector, there can be an up to 3 seconds delay until the AUX
+channel gets functional. To avoid detection failures this delay causes
+retry the detection for 5 seconds.
+
+I noticed this on ICL/TGL RVPs and a DELL XPS 13 7390 ICL laptop.
+
+References: https://gitlab.freedesktop.org/drm/intel/issues/1067
+Signed-off-by: Imre Deak <imre.deak@intel.com>
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200330095425.29113-2-imre.deak@intel.com
+
+Rebased into 5.4.x LTS kernel to fix hotplug issue
+
+Signed-off-by: Mazlan, Hazwan Arif <hazwan.arif.mazlan@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_ddi.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_ddi.c b/drivers/gpu/drm/i915/display/intel_ddi.c
+index 17dc1f8854e2..b5c85e1af821 100644
+--- a/drivers/gpu/drm/i915/display/intel_ddi.c
++++ b/drivers/gpu/drm/i915/display/intel_ddi.c
+@@ -4771,7 +4771,10 @@ static enum intel_hotplug_state
+ intel_ddi_hotplug(struct intel_encoder *encoder,
+ 		  struct intel_connector *connector)
+ {
++	struct drm_i915_private *i915 = to_i915(encoder->base.dev);
+ 	struct intel_digital_port *dig_port = enc_to_dig_port(&encoder->base);
++	enum phy phy = intel_port_to_phy(i915, encoder->port);
++	bool is_tc = intel_phy_is_tc(i915, phy);
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	enum intel_hotplug_state state;
+ 	int ret;
+@@ -4813,8 +4816,15 @@ intel_ddi_hotplug(struct intel_encoder *encoder,
+ 	 * valid EDID. To solve this schedule another detection cycle if this
+ 	 * time around we didn't detect any change in the sink's connection
+ 	 * status.
++	 *
++	 * Type-c connectors which get their HPD signal deasserted then
++	 * reasserted, without unplugging/replugging the sink from the
++	 * connector, introduce a delay until the AUX channel communication
++	 * becomes functional. Retry the detection for 5 seconds on type-c
++	 * connectors to account for this delay.
+ 	 */
+-	if (state == INTEL_HOTPLUG_UNCHANGED && !connector->hotplug_retries &&
++	if (state == INTEL_HOTPLUG_UNCHANGED &&
++	    connector->hotplug_retries < (is_tc ? 5 : 1) &&
+ 	    !dig_port->dp.is_mst)
+ 		state = INTEL_HOTPLUG_RETRY;
+ 
+-- 
+2.17.1
+
