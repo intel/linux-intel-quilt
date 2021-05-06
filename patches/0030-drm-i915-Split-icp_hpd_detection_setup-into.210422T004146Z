@@ -1,0 +1,101 @@
+From fd73e9e79caa914619a368548868ba77de0a0d4c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Wed, 1 Jul 2020 00:55:57 +0300
+Subject: [PATCH 30/33] drm/i915: Split icp_hpd_detection_setup() into ddi vs.
+ tc parts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+No reason to stuff both DDI and TC port handling into the same
+function. Split it into two.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200630215601.28557-9-ville.syrjala@linux.intel.com
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+---
+ drivers/gpu/drm/i915/i915_irq.c | 48 ++++++++++++++++++---------------
+ 1 file changed, 27 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 10fb237bea36..5709a769f003 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -3007,21 +3007,24 @@ static void ibx_hpd_irq_setup(struct drm_i915_private *dev_priv)
+ 	ibx_hpd_detection_setup(dev_priv);
+ }
+ 
+-static void icp_hpd_detection_setup(struct drm_i915_private *dev_priv,
+-				    u32 ddi_hotplug_enable_mask,
+-				    u32 tc_hotplug_enable_mask)
++static void icp_ddi_hpd_detection_setup(struct drm_i915_private *dev_priv,
++					u32 enable_mask)
+ {
+ 	u32 hotplug;
+ 
+ 	hotplug = I915_READ(SHOTPLUG_CTL_DDI);
+-	hotplug |= ddi_hotplug_enable_mask;
++	hotplug |= enable_mask;
+ 	I915_WRITE(SHOTPLUG_CTL_DDI, hotplug);
++}
+ 
+-	if (tc_hotplug_enable_mask) {
+-		hotplug = I915_READ(SHOTPLUG_CTL_TC);
+-		hotplug |= tc_hotplug_enable_mask;
+-		I915_WRITE(SHOTPLUG_CTL_TC, hotplug);
+-	}
++static void icp_tc_hpd_detection_setup(struct drm_i915_private *dev_priv,
++				       u32 enable_mask)
++{
++	u32 hotplug;
++
++	hotplug = I915_READ(SHOTPLUG_CTL_TC);
++	hotplug |= enable_mask;
++	I915_WRITE(SHOTPLUG_CTL_TC, hotplug);
+ }
+ 
+ static void icp_hpd_irq_setup(struct drm_i915_private *dev_priv,
+@@ -3036,7 +3039,9 @@ static void icp_hpd_irq_setup(struct drm_i915_private *dev_priv,
+ 
+ 	ibx_display_interrupt_update(dev_priv, hotplug_irqs, enabled_irqs);
+ 
+-	icp_hpd_detection_setup(dev_priv, ddi_enable_mask, tc_enable_mask);
++	icp_ddi_hpd_detection_setup(dev_priv, ddi_enable_mask);
++	if (tc_enable_mask)
++		icp_tc_hpd_detection_setup(dev_priv, tc_enable_mask);
+ }
+ 
+ /*
+@@ -3469,17 +3474,18 @@ static void icp_irq_postinstall(struct drm_i915_private *dev_priv)
+ 	gen3_assert_iir_is_zero(&dev_priv->uncore, SDEIIR);
+ 	I915_WRITE(SDEIMR, ~mask);
+ 
+-	if (HAS_PCH_TGP(dev_priv))
+-		icp_hpd_detection_setup(dev_priv, TGP_DDI_HPD_ENABLE_MASK,
+-					TGP_TC_HPD_ENABLE_MASK);
+-	else if (HAS_PCH_JSP(dev_priv))
+-		icp_hpd_detection_setup(dev_priv, TGP_DDI_HPD_ENABLE_MASK, 0);
+-	else if (HAS_PCH_MCC(dev_priv))
+-		icp_hpd_detection_setup(dev_priv, ICP_DDI_HPD_ENABLE_MASK,
+-					ICP_TC_HPD_ENABLE(PORT_TC1));
+-	else
+-		icp_hpd_detection_setup(dev_priv, ICP_DDI_HPD_ENABLE_MASK,
+-					ICP_TC_HPD_ENABLE_MASK);
++	if (HAS_PCH_TGP(dev_priv)) {
++		icp_ddi_hpd_detection_setup(dev_priv, TGP_DDI_HPD_ENABLE_MASK);
++		icp_tc_hpd_detection_setup(dev_priv, TGP_TC_HPD_ENABLE_MASK);
++	} else if (HAS_PCH_JSP(dev_priv)) {
++		icp_ddi_hpd_detection_setup(dev_priv, TGP_DDI_HPD_ENABLE_MASK);
++	} else if (HAS_PCH_MCC(dev_priv)) {
++		icp_ddi_hpd_detection_setup(dev_priv, ICP_DDI_HPD_ENABLE_MASK);
++		icp_tc_hpd_detection_setup(dev_priv, ICP_TC_HPD_ENABLE(PORT_TC1));
++	} else {
++		icp_ddi_hpd_detection_setup(dev_priv, ICP_DDI_HPD_ENABLE_MASK);
++		icp_tc_hpd_detection_setup(dev_priv, ICP_TC_HPD_ENABLE_MASK);
++	}
+ }
+ 
+ static void gen11_irq_postinstall(struct drm_i915_private *dev_priv)
+-- 
+2.17.1
+

@@ -1,0 +1,64 @@
+From 31c7dd8086c76e34290341e04902538c9139eef8 Mon Sep 17 00:00:00 2001
+From: Stanislav Lisovskiy <stanislav.lisovskiy@intel.com>
+Date: Tue, 30 Jun 2020 05:56:59 +0530
+Subject: [PATCH 16/17] drm: Introduce epoch counter to drm_connector
+
+This counter will be used by drm_helper_probe_detect caller to determine
+if anything had changed(including edid, connection status and etc).
+Hardware specific driver detect hooks are responsible for updating this
+counter when some change is detected to notify the drm part,
+which can trigger for example hotplug event.
+
+Also now call drm_connector_update_edid_property
+right after we get edid always to make sure there is a
+unified way to handle edid change, without having to
+change tons of source code as currently
+drm_connector_update_edid_property is called only in
+certain cases like reprobing and not right after edid is
+actually updated.
+
+v2: Added documentation for the new counter. Rename change_counter to
+    epoch_counter.
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=105540
+
+Rebased into 5.4.x LTS kernel to fix hotplug issue
+
+Signed-off-by: Mazlan, Hazwan Arif <hazwan.arif.mazlan@intel.com>
+Signed-off-by: Stanislav Lisovskiy <stanislav.lisovskiy@intel.com>
+Signed-off-by: Maarten Lankhorst <maarten.lankhorst@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200630002700.5451-3-kunal1.joshi@intel.com
+---
+ drivers/gpu/drm/drm_connector.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/gpu/drm/drm_connector.c b/drivers/gpu/drm/drm_connector.c
+index 2cd4ef8ee10b..65cf4db645b0 100644
+--- a/drivers/gpu/drm/drm_connector.c
++++ b/drivers/gpu/drm/drm_connector.c
+@@ -1954,6 +1954,22 @@ int drm_connector_update_edid_property(struct drm_connector *connector,
+ 	else
+ 		drm_reset_display_info(connector);
+ 
++	drm_update_tile_info(connector, edid);
++
++	if (connector->edid_blob_ptr) {
++		old_edid = (const struct edid *)connector->edid_blob_ptr->data;
++		if (old_edid) {
++			if (!drm_edid_are_equal(edid, old_edid)) {
++				DRM_DEBUG_KMS("[CONNECTOR:%d:%s] Edid was changed.\n",
++					      connector->base.id, connector->name);
++
++				connector->epoch_counter += 1;
++				DRM_DEBUG_KMS("Updating change counter to %llu\n",
++					      connector->epoch_counter);
++			}
++		}
++	}
++
+ 	drm_object_property_set_value(&connector->base,
+ 				      dev->mode_config.non_desktop_property,
+ 				      connector->display_info.non_desktop);
+-- 
+2.17.1
+

@@ -1,0 +1,128 @@
+From f4e62c30c93afb7dd21f8af3388ef3309cb5675c Mon Sep 17 00:00:00 2001
+From: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+Date: Mon, 19 Apr 2021 14:30:05 +0800
+Subject: [PATCH 11/17] REVERTME: net: stmmac: Prevent double release for
+ suspended port in stmmac_release
+
+Reboot operation will hang if there is suspended port present. During
+reboot, stmmac_release() is called to perform "release" for available
+port. But, if there is a port already suspended, there will be "double
+release" happens in stmmac_release().
+
+So, to fix this, add pm_runtime_suspended(priv->device) checking so
+that, for suspended port, skip any "release" operation that already done
+in stmmac_suspend().
+
+Fixes: 1455d4a9ab51 ("net: stmmac: enable runtime power management support")
+Signed-off-by: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+---
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 70 ++++++++++---------
+ 1 file changed, 38 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 583a7cc609a4..143011c66c77 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -3700,20 +3700,48 @@ static int stmmac_open(struct net_device *dev)
+ static int stmmac_release(struct net_device *dev)
+ {
+ 	struct stmmac_priv *priv = netdev_priv(dev);
++	bool suspended = pm_runtime_suspended(priv->device);
+ 	u32 chan;
+ 	int ret;
+ 
+-	/* Use pm_runtime_get_sync() call paired with pm_runtime_put() call to
+-	 * ensure that the device is not put into runtime suspend during the
+-	 * operation.
++	/* For suspended device/port, skip the release operation that already
++	 * done in stmmac_suspend().
+ 	 */
+-	pm_runtime_get_sync(priv->device);
++	if (!suspended) {
++		/* Use pm_runtime_get_sync() call paired with pm_runtime_put()
++		 * call to ensure that the device is not put into runtime
++		 * suspend during the operation.
++		 */
++		pm_runtime_get_sync(priv->device);
+ 
+-	/* Stop and disconnect the PHY */
+-	phylink_stop(priv->phylink);
+-	phylink_disconnect_phy(priv->phylink);
++		/* Stop and disconnect the PHY */
++		phylink_stop(priv->phylink);
++		phylink_disconnect_phy(priv->phylink);
+ 
+-	stmmac_disable_all_queues(priv);
++		stmmac_disable_all_queues(priv);
++
++		if (priv->plat->remove_phy_conv) {
++			ret = priv->plat->remove_phy_conv(priv->mii,
++							priv->plat->intel_bi);
++			if (ret < 0) {
++				netdev_err(priv->dev,
++					   "%s: ERROR: remove phy conv (error: %d)\n",
++					   __func__, ret);
++				goto out;
++			}
++		}
++
++		/* Stop TX/RX DMA and clear the descriptors */
++		stmmac_stop_all_dma(priv);
++		stmmac_stop_mac_tx(priv, priv->ioaddr);
++		stmmac_stop_mac_rx(priv, priv->ioaddr);
++
++		/* Disable the MAC Rx/Tx */
++		stmmac_mac_set(priv, priv->ioaddr, false);
++
++		netif_carrier_off(dev);
++		netif_tx_stop_all_queues(dev);
++	}
+ 
+ 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
+ 		stmmac_remove_txtimer_q(priv, chan);
+@@ -3726,32 +3754,9 @@ static int stmmac_release(struct net_device *dev)
+ 		del_timer_sync(&priv->eee_ctrl_timer);
+ 	}
+ 
+-	/* Start phy converter after MDIO bus IRQ handling is up */
+-	if (priv->plat->remove_phy_conv) {
+-		ret = priv->plat->remove_phy_conv(priv->mii,
+-						  priv->plat->intel_bi);
+-		if (ret < 0) {
+-			netdev_err(priv->dev,
+-				   "%s: ERROR: remove phy conv (error: %d)\n",
+-				   __func__, ret);
+-			goto out;
+-		}
+-	}
+-
+-	/* Stop TX/RX DMA and clear the descriptors */
+-	stmmac_stop_all_dma(priv);
+-	stmmac_stop_mac_tx(priv, priv->ioaddr);
+-	stmmac_stop_mac_rx(priv, priv->ioaddr);
+-
+ 	/* Release and free the Rx/Tx resources */
+ 	free_dma_desc_resources(priv);
+ 
+-	/* Disable the MAC Rx/Tx */
+-	stmmac_mac_set(priv, priv->ioaddr, false);
+-
+-	netif_carrier_off(dev);
+-	netif_tx_stop_all_queues(dev);
+-
+ 	stmmac_release_ptp(priv);
+ 
+ 	stmmac_tsn_hw_unsetup(priv, priv->hw, dev);
+@@ -3761,7 +3766,8 @@ static int stmmac_release(struct net_device *dev)
+ 		stmmac_netproxy_deregister(dev);
+ #endif
+ out:
+-	pm_runtime_put(priv->device);
++	if (!suspended)
++		pm_runtime_put(priv->device);
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+
