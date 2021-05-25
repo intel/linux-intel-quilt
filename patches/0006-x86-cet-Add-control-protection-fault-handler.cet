@@ -1,7 +1,7 @@
-From dcb931b4ec2ad508ddef93a1614c909e10599f8c Mon Sep 17 00:00:00 2001
+From 2e5f1fa17f9a2ca25cdff88e8761a058d1be00a0 Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Mon, 15 Jun 2020 14:26:27 -0700
-Subject: [PATCH 06/40] x86/cet: Add control-protection fault handler
+Subject: [PATCH 06/46] x86/cet: Add control-protection fault handler
 
 A control-protection fault is triggered when a control-flow transfer
 attempt violates Shadow Stack or Indirect Branch Tracking constraints.
@@ -14,7 +14,12 @@ protection fault handler.  It provides the si_code SEGV_CPERR to the signal
 handler.
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
+Cc: Kees Cook <keescook@chromium.org>
 Cc: Michael Kerrisk <mtk.manpages@gmail.com>
+
+v25:
+- Change CONFIG_X86_CET to CONFIG_X86_SHADOW_STACK.
+- Change X86_FEATURE_CET to X86_FEATURE_SHSTK.
 ---
  arch/x86/include/asm/idtentry.h    |  4 ++
  arch/x86/kernel/idt.c              |  4 ++
@@ -24,14 +29,14 @@ Cc: Michael Kerrisk <mtk.manpages@gmail.com>
  5 files changed, 74 insertions(+), 2 deletions(-)
 
 diff --git a/arch/x86/include/asm/idtentry.h b/arch/x86/include/asm/idtentry.h
-index 5eb3bdf36a41..fa98ca6a17a2 100644
+index 73d45b0dfff2..74366706c994 100644
 --- a/arch/x86/include/asm/idtentry.h
 +++ b/arch/x86/include/asm/idtentry.h
 @@ -571,6 +571,10 @@ DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_SS,	exc_stack_segment);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_GP,	exc_general_protection);
  DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_AC,	exc_alignment_check);
  
-+#ifdef CONFIG_X86_CET
++#ifdef CONFIG_X86_SHADOW_STACK
 +DECLARE_IDTENTRY_ERRORCODE(X86_TRAP_CP, exc_control_protection);
 +#endif
 +
@@ -39,7 +44,7 @@ index 5eb3bdf36a41..fa98ca6a17a2 100644
  DECLARE_IDTENTRY_RAW(X86_TRAP_UD,		exc_invalid_op);
  DECLARE_IDTENTRY_RAW(X86_TRAP_BP,		exc_int3);
 diff --git a/arch/x86/kernel/idt.c b/arch/x86/kernel/idt.c
-index ee1a283f8e96..e8166d9bbb10 100644
+index d552f177eca0..bddeeb88b416 100644
 --- a/arch/x86/kernel/idt.c
 +++ b/arch/x86/kernel/idt.c
 @@ -105,6 +105,10 @@ static const __initconst struct idt_data def_idts[] = {
@@ -47,14 +52,14 @@ index ee1a283f8e96..e8166d9bbb10 100644
  	SYSG(IA32_SYSCALL_VECTOR,	entry_INT80_32),
  #endif
 +
-+#ifdef CONFIG_X86_CET
++#ifdef CONFIG_X86_SHADOW_STACK
 +	INTG(X86_TRAP_CP,		asm_exc_control_protection),
 +#endif
  };
  
  /*
 diff --git a/arch/x86/kernel/signal_compat.c b/arch/x86/kernel/signal_compat.c
-index a5330ff498f0..dd92490b1e7f 100644
+index 06743ec054d2..049ea3dcc6cb 100644
 --- a/arch/x86/kernel/signal_compat.c
 +++ b/arch/x86/kernel/signal_compat.c
 @@ -27,7 +27,7 @@ static inline void signal_compat_build_tests(void)
@@ -64,10 +69,10 @@ index a5330ff498f0..dd92490b1e7f 100644
 -	BUILD_BUG_ON(NSIGSEGV != 9);
 +	BUILD_BUG_ON(NSIGSEGV != 10);
  	BUILD_BUG_ON(NSIGBUS  != 5);
- 	BUILD_BUG_ON(NSIGTRAP != 5);
+ 	BUILD_BUG_ON(NSIGTRAP != 6);
  	BUILD_BUG_ON(NSIGCHLD != 6);
 diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
-index 651e3e508959..e2f821e96c5e 100644
+index 853ea7a80806..52f7d23d96e6 100644
 --- a/arch/x86/kernel/traps.c
 +++ b/arch/x86/kernel/traps.c
 @@ -39,6 +39,7 @@
@@ -78,11 +83,11 @@ index 651e3e508959..e2f821e96c5e 100644
  
  #include <asm/stacktrace.h>
  #include <asm/processor.h>
-@@ -606,6 +607,68 @@ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
+@@ -607,6 +608,68 @@ DEFINE_IDTENTRY_ERRORCODE(exc_general_protection)
  	cond_local_irq_disable(regs);
  }
  
-+#ifdef CONFIG_X86_CET
++#ifdef CONFIG_X86_SHADOW_STACK
 +static const char * const control_protection_err[] = {
 +	"unknown",
 +	"near-ret",
@@ -113,7 +118,7 @@ index 651e3e508959..e2f821e96c5e 100644
 +
 +	cond_local_irq_enable(regs);
 +
-+	if (!boot_cpu_has(X86_FEATURE_CET))
++	if (!boot_cpu_has(X86_FEATURE_SHSTK))
 +		WARN_ONCE(1, "Control protection fault with CET support disabled\n");
 +
 +	tsk = current;
@@ -148,10 +153,10 @@ index 651e3e508959..e2f821e96c5e 100644
  {
  	int res;
 diff --git a/include/uapi/asm-generic/siginfo.h b/include/uapi/asm-generic/siginfo.h
-index d2597000407a..1c2ea91284a0 100644
+index 5a3c221f4c9d..a1a153ea3cc3 100644
 --- a/include/uapi/asm-generic/siginfo.h
 +++ b/include/uapi/asm-generic/siginfo.h
-@@ -231,7 +231,8 @@ typedef struct siginfo {
+@@ -235,7 +235,8 @@ typedef struct siginfo {
  #define SEGV_ADIPERR	7	/* Precise MCD exception */
  #define SEGV_MTEAERR	8	/* Asynchronous ARM MTE error */
  #define SEGV_MTESERR	9	/* Synchronous ARM MTE exception */

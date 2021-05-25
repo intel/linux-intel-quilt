@@ -1,7 +1,7 @@
-From 6e24a5c62e3f1eafabf5e958e9e515c3c6c4e93f Mon Sep 17 00:00:00 2001
+From 6dddb911cc79fec359b1aaee11699104f208580d Mon Sep 17 00:00:00 2001
 From: Yu-cheng Yu <yu-cheng.yu@intel.com>
 Date: Thu, 29 Aug 2019 09:24:13 -0700
-Subject: [PATCH 11/40] x86/mm: Update pte_modify for _PAGE_COW
+Subject: [PATCH 11/46] x86/mm: Update pte_modify for _PAGE_COW
 
 The read-only and Dirty PTE has been used to indicate copy-on-write pages.
 However, newer x86 processors also regard a read-only and Dirty PTE as a
@@ -16,16 +16,16 @@ to either _PAGE_DIRTY or _PAGE_COW.
 Apply the same changes to pmd_modify().
 
 Signed-off-by: Yu-cheng Yu <yu-cheng.yu@intel.com>
-Reviewed-by: Kees Cook <keescook@chromium.org>
+Reviewed-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
 ---
- arch/x86/include/asm/pgtable.h | 33 +++++++++++++++++++++++++++++++++
- 1 file changed, 33 insertions(+)
+ arch/x86/include/asm/pgtable.h | 37 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
 
 diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index 9c056d5815de..f493404c5376 100644
+index 2f1e44db42b6..f7bc20780fee 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
-@@ -799,6 +799,21 @@ static inline pmd_t pmd_mkinvalid(pmd_t pmd)
+@@ -799,6 +799,23 @@ static inline pmd_t pmd_mkinvalid(pmd_t pmd)
  
  static inline u64 flip_protnone_guard(u64 oldval, u64 val, u64 mask);
  
@@ -33,13 +33,15 @@ index 9c056d5815de..f493404c5376 100644
 +{
 +	pte_t pte = __pte(pteval);
 +
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK) && pte_dirty(pte)) {
-+		pte = pte_mkclean(pte);
-+
-+		if (pte_flags(pte) & _PAGE_RW)
-+			pte = pte_set_flags(pte, _PAGE_DIRTY);
-+		else
-+			pte = pte_set_flags(pte, _PAGE_COW);
++	/*
++	 * Fix up potential shadow stack page flags because the RO, Dirty
++	 * PTE is special.
++	 */
++	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
++		if (pte_dirty(pte)) {
++			pte = pte_mkclean(pte);
++			pte = pte_mkdirty(pte);
++		}
 +	}
 +	return pte_val(pte);
 +}
@@ -47,7 +49,7 @@ index 9c056d5815de..f493404c5376 100644
  static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  {
  	pteval_t val = pte_val(pte), oldval = val;
-@@ -809,16 +824,34 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
+@@ -809,16 +826,36 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
  	 */
  	val &= _PAGE_CHG_MASK;
  	val |= check_pgprot(newprot) & ~_PAGE_CHG_MASK;
@@ -61,13 +63,15 @@ index 9c056d5815de..f493404c5376 100644
 +{
 +	pmd_t pmd = __pmd(pmdval);
 +
-+	if (cpu_feature_enabled(X86_FEATURE_SHSTK) && pmd_dirty(pmd)) {
-+		pmd = pmd_mkclean(pmd);
-+
-+		if (pmd_flags(pmd) & _PAGE_RW)
-+			pmd = pmd_set_flags(pmd, _PAGE_DIRTY);
-+		else
-+			pmd = pmd_set_flags(pmd, _PAGE_COW);
++	/*
++	 * Fix up potential shadow stack page flags because the RO, Dirty
++	 * PMD is special.
++	 */
++	if (cpu_feature_enabled(X86_FEATURE_SHSTK)) {
++		if (pmd_dirty(pmd)) {
++			pmd = pmd_mkclean(pmd);
++			pmd = pmd_mkdirty(pmd);
++		}
 +	}
 +	return pmd_val(pmd);
 +}
