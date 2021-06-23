@@ -1,0 +1,95 @@
+From 53cbd8c20c3f8e8afcc3482e6dd4c9400fc77dcd Mon Sep 17 00:00:00 2001
+From: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+Date: Wed, 16 Jun 2021 17:13:33 +0800
+Subject: [PATCH 5/5] net: phy: Enable PHY loopback for GPY PHY
+
+Add PHY loopback (TPI side) capability for GPY PHY. The loopback only
+able to work for GPY PHY FW minor version of 0x73 onward.
+
+Note:
+Maxlinear will upstream this patch as part of GPY PHY enablement.
+
+Signed-off-by: Mohammad Athari Bin Ismail <mohammad.athari.ismail@intel.com>
+---
+ drivers/net/phy/intel-gpy.c | 40 ++++++++++++++++++++++++++++++++-----
+ 1 file changed, 35 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/phy/intel-gpy.c b/drivers/net/phy/intel-gpy.c
+index 3a8ca53791ed..8109b7804a6b 100644
+--- a/drivers/net/phy/intel-gpy.c
++++ b/drivers/net/phy/intel-gpy.c
+@@ -40,6 +40,11 @@
+ #define GPY_VSPEV2_WOL_AD23	0xe09		/* WOL addr Byte3:Byte4 */
+ #define GPY_VSPEV2_WOL_AD45	0xe0a		/* WOL addr Byte1:Byte2 */
+ 
++#define GPY_FW_MINOR_MASK	GENMASK(7, 0)
++#define GPY_FW_MINOR_PHY_LB_FIX	0x73
++
++static bool phy_loopback_supported = true;
++
+ static int gpy_set_eee(struct phy_device *phydev, struct ethtool_eee *data)
+ {
+ 	int cap, old_adv, adv = 0, ret;
+@@ -73,12 +78,19 @@ static int gpy_set_eee(struct phy_device *phydev, struct ethtool_eee *data)
+ 
+ static int gpy_config_init(struct phy_device *phydev)
+ {
+-	int ret, fw_ver = 0;
++	int ret, fw_minor = 0;
+ 
+ 	/* Show GPY PHY FW version in dmesg */
+-	fw_ver = phy_read(phydev, GPY_FW);
+-	phydev_info(phydev, "Firmware Version: 0x%04X (%s)", fw_ver,
+-		    (fw_ver & 8000) ? "release" : "test");
++	ret = phy_read(phydev, GPY_FW);
++	if (ret < 0)
++		return ret;
++	phydev_info(phydev, "Firmware Version: 0x%04X (%s)", ret,
++		    (ret & 8000) ? "release" : "test");
++
++	/* Minor version number of 0x73 onwards has the phy loopback fix. */
++	fw_minor = ret & GPY_FW_MINOR_MASK;
++	if (fw_minor < GPY_FW_MINOR_PHY_LB_FIX)
++		phy_loopback_supported = false;
+ 
+ 	/* In GPY PHY FW, by default EEE mode is enabled. So, disable EEE mode
+ 	 * during power up. Ethtool must be used to enable or disable it.
+@@ -368,6 +380,24 @@ static int gpy_set_wol(struct phy_device *phydev,
+ 	return ret;
+ }
+ 
++static int gpy_loopback(struct phy_device *phydev, bool enable)
++{
++	int ret;
++
++	if (!phy_loopback_supported)
++		return -EOPNOTSUPP;
++
++	ret = genphy_loopback(phydev, enable);
++	if (!ret) {
++		/* It takes some time for PHY device to switch
++		 * into/out-of loopback mode.
++		 */
++		msleep(100);
++	}
++
++	return ret;
++}
++
+ static struct phy_driver intel_gpy_drivers[] = {
+ 	{
+ 		.phy_id		= INTEL_PHY_ID_GPY,
+@@ -385,9 +415,9 @@ static struct phy_driver intel_gpy_drivers[] = {
+ 		.config_intr	= gpy_config_intr,
+ 		.config_aneg	= gpy_config_aneg,
+ 		.read_status	= gpy_read_status,
+-		.set_loopback	= genphy_loopback,
+ 		.get_wol	= gpy_get_wol,
+ 		.set_wol	= gpy_set_wol,
++		.set_loopback	= gpy_loopback,
+ 	},
+ };
+ module_phy_driver(intel_gpy_drivers);
+-- 
+2.17.1
+
