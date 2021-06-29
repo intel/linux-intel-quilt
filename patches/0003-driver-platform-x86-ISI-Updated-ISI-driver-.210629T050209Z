@@ -1,0 +1,108 @@
+From 50f0d182e154701445eed17ffb6cb790be25d939 Mon Sep 17 00:00:00 2001
+From: "D M, Karthik" <karthik.d.m@intel.com>
+Date: Sat, 19 Jun 2021 02:14:05 +0530
+Subject: [PATCH 3/4] driver: platform: x86: ISI: Updated ISI driver, ver 1.0
+
+Final ISI driver commit to yocto-meta
+
+Signed-off-by: D M, Karthik <karthik.d.m@intel.com>
+---
+ drivers/platform/x86/intel_isi_mb.c | 13 +++++++++++--
+ drivers/platform/x86/intel_isi_mb.h |  8 ++++----
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/platform/x86/intel_isi_mb.c b/drivers/platform/x86/intel_isi_mb.c
+index 450732874ec9..1ebdc2eaff24 100644
+--- a/drivers/platform/x86/intel_isi_mb.c
++++ b/drivers/platform/x86/intel_isi_mb.c
+@@ -2,7 +2,7 @@
+ /*
+  * Intel Safety Island(ISI) Mailbox communication
+  * driver
+- *
++ * Version : 1.0
+  * Copyright (c) 2019, Intel Corp.
+  */
+ #include <linux/cdev.h>
+@@ -35,7 +35,6 @@
+ #define DB_IN_REG 0x14U
+ #define DB_IN_BIT 0x0U
+ 
+-/* Interrupt Status Register */
+ /* Interrupt Status Register */
+ #define INTR_STATUS_REG 0x34U
+ #define DB_IN_CLR_INTR_STS_BIT 0x0U
+@@ -794,6 +793,7 @@ static int reg_dereg_async_notify(unsigned int cmd, struct isi_wl_proc *wl_proc,
+ 		return ret;
+ 
+ 	mutex_lock(&wl_proc->p_wl_ctx->wl_ctx_lock);
++	wl_proc->async_cmd_req_bitmap = cmd_req_bitmap;
+ 	wl_proc->p_wl_ctx->async_cmd_req_bitmap = cmd_req_bitmap;
+ 	mutex_unlock(&wl_proc->p_wl_ctx->wl_ctx_lock);
+ 
+@@ -1195,6 +1195,7 @@ static int isi_dev_release(struct inode *p_inode, struct file *p_file)
+ 	struct isi_wl_ctx *pos, *wl_ctxt;
+ 	struct isi_wl_proc *wl_proc;
+ 	struct hlist_node *h_node, *prev_node;
++	unsigned long flags;
+ 
+ 	/* Get current tgid */
+ 	tgid = current->tgid;
+@@ -1219,6 +1220,14 @@ static int isi_dev_release(struct inode *p_inode, struct file *p_file)
+ 							wl_proc_node);
+ 						proc_waitlist_del_safe(pctx,
+ 								       wl_proc);
++						spin_lock_irqsave(
++							&pctx->proc_waitlist_lock,
++							flags);
++						hlist_del_init(
++							&wl_proc->waiting_wl_proc_node_async);
++						spin_unlock_irqrestore(
++							&pctx->proc_waitlist_lock,
++							flags);
+ 						hlist_del_init(
+ 							&wl_proc->wl_proc_node);
+ 						kfree(wl_proc->tx_buf);
+diff --git a/drivers/platform/x86/intel_isi_mb.h b/drivers/platform/x86/intel_isi_mb.h
+index c50ab1c09040..38e4c282dd65 100644
+--- a/drivers/platform/x86/intel_isi_mb.h
++++ b/drivers/platform/x86/intel_isi_mb.h
+@@ -59,7 +59,7 @@ struct isi_generic_packet_header {
+ /**
+  * These all requests are coming from ISI to HOST.
+  */
+-enum icul_asynch_request_type {
++enum smcl_asynch_request_type {
+ 	/**
+      * This command will tell host to reboot itself.
+      * Applies to: SCI/SNI*/
+@@ -96,7 +96,7 @@ enum icul_asynch_request_type {
+ 
+ 	/**
+      * Whenever ERR_0 or ERR1 is asserted, host is notified with this command,
+-     *      HOST can respond by calling icul_ieh_error_sen() API
++     *      HOST can respond by calling smcl_ieh_error_sen() API
+      * Applies to: SCI */
+ 	REQ_IEH_ERROR_GET,
+ 
+@@ -129,7 +129,7 @@ struct isi_asynch_cmd_request {
+ 	enum isi_driver_instance driver_inst;
+ 	uint32_t workload_id;
+ 	uint32_t number_of_requests;
+-	enum icul_asynch_request_type *requests;
++	enum smcl_asynch_request_type *requests;
+ };
+ 
+ /*
+@@ -139,7 +139,7 @@ struct isi_asynch_cmd_request {
+ struct isi_asynch_data {
+ 	enum isi_driver_instance driver_inst;
+ 	uint32_t workload_id;
+-	enum icul_asynch_request_type request_type;
++	enum smcl_asynch_request_type request_type;
+ 	struct isi_generic_packet_header header_buffer;
+ 	uint32_t data_size;
+ 	uint32_t *data_buffer;
+-- 
+2.17.1
+
