@@ -1,0 +1,83 @@
+From 3313d77469f12d2850f14c92ea9454fcef96817e Mon Sep 17 00:00:00 2001
+From: Even Xu <even.xu@intel.com>
+Date: Tue, 13 Apr 2021 14:35:25 +0800
+Subject: [PATCH 2/3] hid: intel-ish-hid: ishtp: Add dma_no_cache_snooping()
+ callback
+
+Different platforms have different DMA capability, on most of
+platforms, DMA support cache snooping. But few platforms,
+such as ElkhartLake (EHL), don't support cache snooping
+which requires cache flush from driver.
+
+So add a hardware level callback to let ishtp driver know if cache
+flush is needed.
+
+As most of platform support cache snooping, so driver will not
+do cache flush by default, until platform implements this callback
+and return true explicitly.
+
+Acked-by: Pandruvada, Srinivas <srinivas.pandruvada@intel.com>
+Signed-off-by: Even Xu <even.xu@intel.com>
+---
+ drivers/hid/intel-ish-hid/ishtp/client.c    | 18 ++++++++++++++++++
+ drivers/hid/intel-ish-hid/ishtp/ishtp-dev.h |  1 +
+ 2 files changed, 19 insertions(+)
+
+diff --git a/drivers/hid/intel-ish-hid/ishtp/client.c b/drivers/hid/intel-ish-hid/ishtp/client.c
+index 1cc157126fce..be443d6a1f22 100644
+--- a/drivers/hid/intel-ish-hid/ishtp/client.c
++++ b/drivers/hid/intel-ish-hid/ishtp/client.c
+@@ -10,6 +10,7 @@
+ #include <linux/wait.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
++#include <asm/cacheflush.h>
+ #include "hbm.h"
+ #include "client.h"
+ 
+@@ -773,6 +774,14 @@ static void ishtp_cl_send_msg_dma(struct ishtp_device *dev,
+ 	/* write msg to dma buf */
+ 	memcpy(msg_addr, cl_msg->send_buf.data, cl_msg->send_buf.size);
+ 
++	/*
++	 * if current fw don't support cache snooping, driver have to
++	 * flush the cache manually.
++	 */
++	if (dev->ops->dma_no_cache_snooping &&
++		dev->ops->dma_no_cache_snooping(dev))
++		clflush_cache_range(msg_addr, cl_msg->send_buf.size);
++
+ 	/* send dma_xfer hbm msg */
+ 	off = msg_addr - (unsigned char *)dev->ishtp_host_dma_tx_buf;
+ 	ishtp_hbm_hdr(&hdr, sizeof(struct dma_xfer_hbm));
+@@ -997,6 +1006,15 @@ void recv_ishtp_cl_msg_dma(struct ishtp_device *dev, void *msg,
+ 		}
+ 
+ 		buffer = rb->buffer.data;
++
++		/*
++		 * if current fw don't support cache snooping, driver have to
++		 * flush the cache manually.
++		 */
++		if (dev->ops->dma_no_cache_snooping &&
++			dev->ops->dma_no_cache_snooping(dev))
++			clflush_cache_range(msg, hbm->msg_length);
++
+ 		memcpy(buffer, msg, hbm->msg_length);
+ 		rb->buf_idx = hbm->msg_length;
+ 
+diff --git a/drivers/hid/intel-ish-hid/ishtp/ishtp-dev.h b/drivers/hid/intel-ish-hid/ishtp/ishtp-dev.h
+index 39e0e6c73adf..249fb7dcd580 100644
+--- a/drivers/hid/intel-ish-hid/ishtp/ishtp-dev.h
++++ b/drivers/hid/intel-ish-hid/ishtp/ishtp-dev.h
+@@ -118,6 +118,7 @@ struct ishtp_hw_ops {
+ 			unsigned long buffer_length);
+ 	uint32_t	(*get_fw_status)(struct ishtp_device *dev);
+ 	void	(*sync_fw_clock)(struct ishtp_device *dev);
++	bool	(*dma_no_cache_snooping)(struct ishtp_device *dev);
+ };
+ 
+ /**
+-- 
+2.17.1
+
