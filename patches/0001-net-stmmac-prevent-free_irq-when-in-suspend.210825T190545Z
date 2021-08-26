@@ -1,0 +1,63 @@
+From 9b0be226842507245c235406d5c1cb46cc47c596 Mon Sep 17 00:00:00 2001
+From: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+Date: Wed, 18 Aug 2021 17:21:43 +0800
+Subject: [PATCH 1/2] net: stmmac: prevent free_irq when in suspended state
+
+During the shutdown sequence, the stmmac_release() will be called
+first, which in turn runs the stmmac_free_irq(), even when the device
+is suspended.
+
+After the stmmac_release() is called, then only the stmmac_pci_resume()
+is called, at this point the device is resumed, but there is no interrupt
+handler to service interrupts, because stmmac_free_irq() was previously
+called. This blocks EHL systems from entering s0ix state after a warm
+reboot because of unhandled interrupts pending from the PSE FW from the
+previous boot.
+
+Normal S5 flow:
+reboot -> stmmac_release() -> shutdown() -> system in S5
+
+Expected S5 flow with runtime PM enabled:
+unplug LAN -> runtime_suspend() -> reboot -> runtime_resume()
+-> stmmac_release() -> shutdown() -> system in S5
+
+Current S5 flow with runtime PM enabled:
+unplug LAN -> runtime_suspend() -> reboot -> stmmac_release()
+-> runtime_resume() -> shutdown() -> system in S5
+-> something wrong in PSE FW due to unhandled interrupt and making it
+malfunction (assuming PSE FW already hung and reboot will not help to
+solve it)
+
+This patch will add a check before stmmac_free_irq() to check for device
+state to prevent free-ing the irqs while in suspended state.
+
+With this in place, since stmmac_release() already stop all incoming
+interrupts, during stmmac_pci_resume(), the device should handle all
+remaining interrupts and proceed to shutdown.
+
+Fixes: 1455d4a9 ("net: stmmac: enable runtime power management support")
+
+Signed-off-by: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 823e376d9d0e..4d84084be9c6 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -3747,8 +3747,9 @@ static int stmmac_release(struct net_device *dev)
+ 	for (chan = 0; chan < priv->plat->tx_queues_to_use; chan++)
+ 		stmmac_remove_txtimer_q(priv, chan);
+ 
+-	/* Free the IRQ lines */
+-	stmmac_free_irq(dev, REQ_IRQ_ERR_ALL, 0);
++	/* Free the IRQ lines only if not in suspended mode */
++	if (!suspended)
++		stmmac_free_irq(dev, REQ_IRQ_ERR_ALL, 0);
+ 
+ 	if (priv->eee_enabled) {
+ 		priv->tx_path_in_lpi_mode = false;
+-- 
+2.17.1
+
