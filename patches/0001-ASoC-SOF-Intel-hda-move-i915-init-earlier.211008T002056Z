@@ -1,0 +1,74 @@
+From 0275e7ab8cedcdc9eea8f6f9b7ecf10e9d40ddab Mon Sep 17 00:00:00 2001
+From: Kai Vehmanen <kai.vehmanen@linux.intel.com>
+Date: Thu, 6 Feb 2020 22:02:23 +0200
+Subject: [PATCH] ASoC: SOF: Intel: hda: move i915 init earlier
+
+To be compliant with i915 display driver requirements, i915 power-up
+must be done before any HDA communication takes place, including
+parsing the bus capabilities. Otherwise the initial codec probe
+may fail.
+
+Move i915 initialization earlier in the SOF HDA sequence. This
+sequence is now aligned with the snd-hda-intel driver where the
+display_power() call is before snd_hdac_bus_parse_capabilities()
+and rest of the capability parsing.
+
+Also remove unnecessary ifdef around hda_codec_i915_init(). There's
+a dummy implementation provided if CONFIG_SND_SOC_SOF_HDA is not
+enabled.
+
+Signed-off-by: Kai Vehmanen <kai.vehmanen@linux.intel.com>
+Reviewed-by: Ranjani Sridharan <ranjani.sridharan@linux.intel.com>
+Reviewed-by: Pierre-Louis Bossart <pierre-louis.bossart@linux.intel.com>
+Reviewed-by: Takashi Iwai <tiwai@suse.de>
+Link: https://lore.kernel.org/r/20200206200223.7715-3-kai.vehmanen@linux.intel.com
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ sound/soc/sof/intel/hda.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/sound/soc/sof/intel/hda.c b/sound/soc/sof/intel/hda.c
+index a10166741865..0cacbe98f6eb 100644
+--- a/sound/soc/sof/intel/hda.c
++++ b/sound/soc/sof/intel/hda.c
+@@ -288,6 +288,13 @@ static int hda_init(struct snd_sof_dev *sdev)
+ 	/* HDA base */
+ 	sdev->bar[HDA_DSP_HDA_BAR] = bus->remap_addr;
+ 
++	/* init i915 and HDMI codecs */
++	ret = hda_codec_i915_init(sdev);
++	if (ret < 0) {
++		dev_err(sdev->dev, "error: init i915 and HDMI codec failed\n");
++		return ret;
++	}
++
+ 	/* get controller capabilities */
+ 	ret = hda_dsp_ctrl_get_caps(sdev);
+ 	if (ret < 0)
+@@ -365,15 +372,6 @@ static int hda_init_caps(struct snd_sof_dev *sdev)
+ 	if (bus->ppcap)
+ 		dev_dbg(sdev->dev, "PP capability, will probe DSP later.\n");
+ 
+-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA)
+-	/* init i915 and HDMI codecs */
+-	ret = hda_codec_i915_init(sdev);
+-	if (ret < 0) {
+-		dev_err(sdev->dev, "error: init i915 and HDMI codec failed\n");
+-		return ret;
+-	}
+-#endif
+-
+ 	/* Init HDA controller after i915 init */
+ 	ret = hda_dsp_ctrl_init_chip(sdev, true);
+ 	if (ret < 0) {
+@@ -674,6 +672,7 @@ int hda_dsp_probe(struct snd_sof_dev *sdev)
+ hdac_bus_unmap:
+ 	platform_device_unregister(hdev->dmic_dev);
+ 	iounmap(bus->remap_addr);
++	hda_codec_i915_exit(sdev);
+ err:
+ 	return ret;
+ }
+-- 
+2.17.1
+
