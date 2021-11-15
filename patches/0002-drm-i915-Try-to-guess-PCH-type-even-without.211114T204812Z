@@ -1,0 +1,134 @@
+From 10c3d69bc60059b194dcfa816cbc1240ffb0431d Mon Sep 17 00:00:00 2001
+From: Zhenyu Wang <zhenyuw@linux.intel.com>
+Date: Thu, 14 Jan 2021 08:58:19 +0800
+Subject: [PATCH 2/2] drm/i915: Try to guess PCH type even without ISA bridge
+
+Some vmm like hyperv and crosvm don't supply any ISA bridge to their guest,
+when igd passthrough is equipped on these vmm, guest i915 display may
+couldn't work as guest i915 detects PCH_NONE pch type.
+
+When i915 runs as guest, this patch guess pch type through gpu type even
+without ISA bridge.
+
+v2: Fix CI warning
+v3: Add HAS_DISPLAY()= true condition beforce guessing virt pch, then
+    refactori.
+v4: Fix CI warning
+
+Signed-off-by: Zhenyu Wang <zhenyuw@linux.intel.com>
+Co-developed-by: Xiong Zhang <xiong.y.zhang@intel.com>
+Signed-off-by: Xiong Zhang <xiong.y.zhang@intel.com>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20210114005819.4290-1-xiong.y.zhang@intel.com
+---
+ drivers/gpu/drm/i915/i915_drv.h  |  7 ++++++-
+ drivers/gpu/drm/i915/intel_pch.c | 35 ++++++++++++++++++++------------
+ 2 files changed, 28 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6907a390f4a0..39786034b11c 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1760,6 +1760,11 @@ IS_SUBPLATFORM(const struct drm_i915_private *i915,
+ /* Only valid when HAS_DISPLAY() is true */
+ #define INTEL_DISPLAY_ENABLED(dev_priv) (WARN_ON(!HAS_DISPLAY(dev_priv)), !i915_modparams.disable_display)
+ 
++static inline bool run_as_guest(void)
++{
++	return !hypervisor_is_type(X86_HYPER_NATIVE);
++}
++
+ static inline bool intel_vtd_active(void)
+ {
+ #ifdef CONFIG_INTEL_IOMMU
+@@ -1768,7 +1773,7 @@ static inline bool intel_vtd_active(void)
+ #endif
+ 
+ 	/* Running as a guest, we assume the host is enforcing VT'd */
+-	return !hypervisor_is_type(X86_HYPER_NATIVE);
++	return run_as_guest();
+ }
+ 
+ static inline bool intel_scanout_needs_vtd_wa(struct drm_i915_private *dev_priv)
+diff --git a/drivers/gpu/drm/i915/intel_pch.c b/drivers/gpu/drm/i915/intel_pch.c
+index 43b68b5fc562..03ac7881323d 100644
+--- a/drivers/gpu/drm/i915/intel_pch.c
++++ b/drivers/gpu/drm/i915/intel_pch.c
+@@ -113,8 +113,9 @@ static bool intel_is_virt_pch(unsigned short id,
+ 		 sdevice == PCI_SUBDEVICE_ID_QEMU));
+ }
+ 
+-static unsigned short
+-intel_virt_detect_pch(const struct drm_i915_private *dev_priv)
++static void
++intel_virt_detect_pch(const struct drm_i915_private *dev_priv,
++		      unsigned short *pch_id, enum intel_pch *pch_type)
+ {
+ 	unsigned short id = 0;
+ 
+@@ -149,12 +150,20 @@ intel_virt_detect_pch(const struct drm_i915_private *dev_priv)
+ 	else
+ 		DRM_DEBUG_KMS("Assuming no PCH\n");
+ 
+-	return id;
++	*pch_type = intel_pch_type(dev_priv, id);
++
++	/* Sanity check virtual PCH id */
++	if (WARN_ON(id && *pch_type == PCH_NONE))
++		id = 0;
++
++	*pch_id = id;
+ }
+ 
+ void intel_detect_pch(struct drm_i915_private *dev_priv)
+ {
+ 	struct pci_dev *pch = NULL;
++	unsigned short id;
++	enum intel_pch pch_type;
+ 
+ 	/*
+ 	 * The reason to probe ISA bridge instead of Dev31:Fun0 is to
+@@ -168,9 +177,6 @@ void intel_detect_pch(struct drm_i915_private *dev_priv)
+ 	 * of only checking the first one.
+ 	 */
+ 	while ((pch = pci_get_class(PCI_CLASS_BRIDGE_ISA << 8, pch))) {
+-		unsigned short id;
+-		enum intel_pch pch_type;
+-
+ 		if (pch->vendor != PCI_VENDOR_ID_INTEL)
+ 			continue;
+ 
+@@ -183,13 +189,7 @@ void intel_detect_pch(struct drm_i915_private *dev_priv)
+ 			break;
+ 		} else if (intel_is_virt_pch(id, pch->subsystem_vendor,
+ 					     pch->subsystem_device)) {
+-			id = intel_virt_detect_pch(dev_priv);
+-			pch_type = intel_pch_type(dev_priv, id);
+-
+-			/* Sanity check virtual PCH id */
+-			if (WARN_ON(id && pch_type == PCH_NONE))
+-				id = 0;
+-
++			intel_virt_detect_pch(dev_priv, &id, &pch_type);
+ 			dev_priv->pch_type = pch_type;
+ 			dev_priv->pch_id = id;
+ 			break;
+@@ -204,6 +204,15 @@ void intel_detect_pch(struct drm_i915_private *dev_priv)
+ 		DRM_DEBUG_KMS("Display disabled, reverting to NOP PCH\n");
+ 		dev_priv->pch_type = PCH_NOP;
+ 		dev_priv->pch_id = 0;
++	} else if (!pch) {
++		if (run_as_guest() && HAS_DISPLAY(dev_priv)) {
++			intel_virt_detect_pch(dev_priv, &id, &pch_type);
++			dev_priv->pch_type = pch_type;
++			dev_priv->pch_id = id;
++			DRM_DEBUG_KMS("PCH is found.\n");
++		} else {
++			DRM_DEBUG_KMS("No PCH found.\n");
++		}
+ 	}
+ 
+ 	if (!pch)
+-- 
+2.17.1
+
