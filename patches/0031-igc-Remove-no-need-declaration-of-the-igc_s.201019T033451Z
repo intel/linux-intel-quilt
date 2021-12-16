@@ -1,7 +1,7 @@
-From be699ddae448c9c6301687fde89319a282e09d8f Mon Sep 17 00:00:00 2001
+From 0ad2e029fcb52ccedfa28b45e5c5ceb37870597f Mon Sep 17 00:00:00 2001
 From: Sasha Neftin <sasha.neftin@intel.com>
 Date: Tue, 19 Nov 2019 13:45:40 +0200
-Subject: [PATCH 031/177] igc: Remove no need declaration of the igc_sw_init
+Subject: [PATCH] igc: Remove no need declaration of the igc_sw_init
 
 We want to avoid forward-declarations of function if possible.
 Rearrange the igc_sw_init function implementation.
@@ -10,14 +10,14 @@ Signed-off-by: Sasha Neftin <sasha.neftin@intel.com>
 Tested-by: Aaron Brown <aaron.f.brown@intel.com>
 Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
 ---
- drivers/net/ethernet/intel/igc/igc_main.c | 2733 ++++++++++-----------
- 1 file changed, 1365 insertions(+), 1368 deletions(-)
+ drivers/net/ethernet/intel/igc/igc_main.c | 2746 ++++++++++-----------
+ 1 file changed, 1372 insertions(+), 1374 deletions(-)
 
-Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
-===================================================================
---- kernel-lts-staging.orig/drivers/net/ethernet/intel/igc/igc_main.c
-+++ kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
-@@ -51,9 +51,6 @@ static const struct pci_device_id igc_pc
+diff --git a/drivers/net/ethernet/intel/igc/igc_main.c b/drivers/net/ethernet/intel/igc/igc_main.c
+index 4849e83238ff..ec795f66488a 100644
+--- a/drivers/net/ethernet/intel/igc/igc_main.c
++++ b/drivers/net/ethernet/intel/igc/igc_main.c
+@@ -51,9 +51,6 @@ static const struct pci_device_id igc_pci_tbl[] = {
  
  MODULE_DEVICE_TABLE(pci, igc_pci_tbl);
  
@@ -27,7 +27,7 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
  enum latency_range {
  	lowest_latency = 0,
  	low_latency = 1,
-@@ -2367,1232 +2364,1304 @@ static void igc_irq_disable(struct igc_a
+@@ -2369,629 +2366,628 @@ static void igc_irq_disable(struct igc_adapter *adapter)
  	}
  }
  
@@ -1124,6 +1124,7 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
 -static int igc_request_msix(struct igc_adapter *adapter)
 +static int igc_alloc_q_vectors(struct igc_adapter *adapter)
  {
+ 	unsigned int num_q_vectors = adapter->num_q_vectors;
 -	int i = 0, err = 0, vector = 0, free_vector = 0;
 -	struct net_device *netdev = adapter->netdev;
 +	int rxr_remaining = adapter->num_rx_queues;
@@ -1140,18 +1141,26 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
 +		for (; rxr_remaining; v_idx++) {
 +			err = igc_alloc_q_vector(adapter, q_vectors, v_idx,
 +						 0, 0, 1, rxr_idx);
- 
--	for (i = 0; i < adapter->num_q_vectors; i++) {
--		struct igc_q_vector *q_vector = adapter->q_vector[i];
++
 +			if (err)
 +				goto err_out;
- 
--		vector++;
++
 +			/* update counts and index */
 +			rxr_remaining--;
 +			rxr_idx++;
 +		}
 +	}
+ 
+ 	if (num_q_vectors > MAX_Q_VECTORS) {
+ 		num_q_vectors = MAX_Q_VECTORS;
+@@ -2999,609 +2995,683 @@ static int igc_request_msix(struct igc_adapter *adapter)
+ 			 "The number of queue vectors (%d) is higher than max allowed (%d)\n",
+ 			 adapter->num_q_vectors, MAX_Q_VECTORS);
+ 	}
+-	for (i = 0; i < num_q_vectors; i++) {
+-		struct igc_q_vector *q_vector = adapter->q_vector[i];
+-
+-		vector++;
  
 -		q_vector->itr_register = adapter->io_addr + IGC_EITR(vector);
 +	for (; v_idx < q_vectors; v_idx++) {
@@ -1177,17 +1186,11 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
 -				  q_vector);
  		if (err)
 -			goto err_free;
-+			goto err_out;
-+
-+		/* update counts and index */
-+		rxr_remaining -= rqpv;
-+		txr_remaining -= tqpv;
-+		rxr_idx++;
-+		txr_idx++;
- 	}
- 
+-	}
+-
 -	igc_configure_msix(adapter);
- 	return 0;
+-	return 0;
++			goto err_out;
  
 -err_free:
 -	/* free already assigned IRQs */
@@ -1197,7 +1200,15 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
 -	for (i = 0; i < vector; i++) {
 -		free_irq(adapter->msix_entries[free_vector++].vector,
 -			 adapter->q_vector[i]);
--	}
++		/* update counts and index */
++		rxr_remaining -= rqpv;
++		txr_remaining -= tqpv;
++		rxr_idx++;
++		txr_idx++;
+ 	}
++
++	return 0;
++
  err_out:
 -	return err;
 +	adapter->num_tx_queues = 0;
@@ -2303,7 +2314,7 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
  	if (icr & IGC_ICR_DRSTA)
  		schedule_work(&adapter->reset_task);
  
-@@ -3601,408 +3670,428 @@ static irqreturn_t igc_intr_msi(int irq,
+@@ -3610,408 +3680,428 @@ static irqreturn_t igc_intr_msi(int irq, void *data)
  		adapter->stats.doosync++;
  	}
  
@@ -3037,7 +3048,7 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
  }
  
  static void igc_free_irq(struct igc_adapter *adapter)
-@@ -4815,98 +4904,6 @@ static struct pci_driver igc_driver = {
+@@ -4825,98 +4915,6 @@ static struct pci_driver igc_driver = {
  	.shutdown = igc_shutdown,
  };
  
@@ -3136,3 +3147,6 @@ Index: kernel-lts-staging/drivers/net/ethernet/intel/igc/igc_main.c
  /**
   * igc_reinit_queues - return error
   * @adapter: pointer to adapter structure
+-- 
+2.27.0
+
