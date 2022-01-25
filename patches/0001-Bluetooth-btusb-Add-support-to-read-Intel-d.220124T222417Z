@@ -1,0 +1,128 @@
+From 82e750cb87e846903a0cc21525e36df5213c250d Mon Sep 17 00:00:00 2001
+From: Chethan T N <chethan.tumkur.narayan@intel.com>
+Date: Mon, 8 Jun 2020 17:57:46 +0530
+Subject: [PATCH 01/14] Bluetooth: btusb: Add support to read Intel debug
+ feature
+
+The command shall read the Intel controller supported
+debug feature. Based on the supported features additional debug
+configuration shall be enabled.
+
+Signed-off-by: Chethan T N <chethan.tumkur.narayan@intel.com>
+Signed-off-by: Ps AyappadasX <AyappadasX.Ps@intel.com>
+Signed-off-by: Kiran K <kiran.k@intel.com>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+---
+ drivers/bluetooth/btintel.c | 32 ++++++++++++++++++++++++++++++++
+ drivers/bluetooth/btintel.h | 15 +++++++++++++++
+ drivers/bluetooth/btusb.c   |  6 ++++++
+ 3 files changed, 53 insertions(+)
+
+diff --git a/drivers/bluetooth/btintel.c b/drivers/bluetooth/btintel.c
+index bb99c8653aab..b343bc5c3e7e 100644
+--- a/drivers/bluetooth/btintel.c
++++ b/drivers/bluetooth/btintel.c
+@@ -709,6 +709,38 @@ int btintel_download_firmware(struct hci_dev *hdev, const struct firmware *fw,
+ }
+ EXPORT_SYMBOL_GPL(btintel_download_firmware);
+ 
++int btintel_read_debug_features(struct hci_dev *hdev,
++				struct intel_debug_features *features)
++{
++	struct sk_buff *skb;
++	u8 page_no = 1;
++
++	/* Intel controller supports two pages, each page is of 128-bit
++	 * feature bit mask. And each bit defines specific feature support
++	 */
++	skb = __hci_cmd_sync(hdev, 0xfca6, sizeof(page_no), &page_no,
++			     HCI_INIT_TIMEOUT);
++	if (IS_ERR(skb)) {
++		bt_dev_err(hdev, "Reading supported features failed (%ld)",
++			   PTR_ERR(skb));
++		return PTR_ERR(skb);
++	}
++
++	if (skb->len != (sizeof(features->page1) + 3)) {
++		bt_dev_err(hdev, "Supported features event size mismatch");
++		kfree_skb(skb);
++		return -EILSEQ;
++	}
++
++	memcpy(features->page1, skb->data + 3, sizeof(features->page1));
++
++	/* Read the supported features page2 if required in future.
++	 */
++	kfree_skb(skb);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(btintel_read_debug_features);
++
+ MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
+ MODULE_DESCRIPTION("Bluetooth support for Intel devices ver " VERSION);
+ MODULE_VERSION(VERSION);
+diff --git a/drivers/bluetooth/btintel.h b/drivers/bluetooth/btintel.h
+index 3d846190f2bf..6886d545637b 100644
+--- a/drivers/bluetooth/btintel.h
++++ b/drivers/bluetooth/btintel.h
+@@ -62,6 +62,10 @@ struct intel_reset {
+ 	__le32   boot_param;
+ } __packed;
+ 
++struct intel_debug_features {
++	__u8    page1[16];
++} __packed;
++
+ #if IS_ENABLED(CONFIG_BT_INTEL)
+ 
+ int btintel_check_bdaddr(struct hci_dev *hdev);
+@@ -87,6 +91,10 @@ int btintel_read_boot_params(struct hci_dev *hdev,
+ 			     struct intel_boot_params *params);
+ int btintel_download_firmware(struct hci_dev *dev, const struct firmware *fw,
+ 			      u32 *boot_param);
++
++int btintel_read_debug_features(struct hci_dev *hdev,
++				struct intel_debug_features *features);
++
+ #else
+ 
+ static inline int btintel_check_bdaddr(struct hci_dev *hdev)
+@@ -181,4 +189,11 @@ static inline int btintel_download_firmware(struct hci_dev *dev,
+ {
+ 	return -EOPNOTSUPP;
+ }
++
++static inline int btintel_read_debug_features(struct hci_dev *hdev,
++					      struct intel_debug_features *features)
++{
++	return -EOPNOTSUPP;
++}
++
+ #endif
+diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
+index 6d643651d69f..e79eedb1e3b8 100644
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -2161,6 +2161,7 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
+ 	struct btusb_data *data = hci_get_drvdata(hdev);
+ 	struct intel_version ver;
+ 	struct intel_boot_params params;
++	struct intel_debug_features features;
+ 	const struct firmware *fw;
+ 	u32 boot_param;
+ 	char fwname[64];
+@@ -2424,6 +2425,11 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
+ 	 */
+ 	btintel_load_ddc_config(hdev, fwname);
+ 
++	/* Read the Intel supported features and if new exception formats
++	 * supported, need to load the additional DDC config to enable.
++	 */
++	btintel_read_debug_features(hdev, &features);
++
+ 	/* Set the event mask for Intel specific vendor events. This enables
+ 	 * a few extra events that are useful during general operation. It
+ 	 * does not enable any debugging related events.
+-- 
+2.17.1
+
