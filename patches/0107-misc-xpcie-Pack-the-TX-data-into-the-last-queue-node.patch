@@ -1,0 +1,104 @@
+From c50ceaa222f6ebbec7436b1001bbcdbef59df55c Mon Sep 17 00:00:00 2001
+From: Raghuveer KadarlaX <raghuveerx.kadarla@intel.com>
+Date: Thu, 6 Jan 2022 12:27:39 +0530
+Subject: [PATCH 107/109] misc: xpcie: Pack the TX data into the last queue
+ node
+
+When PCIE queue depth is larger than PACKING_QUEUE_DEPTH try packing
+
+Signed-off-by: Raghuveer KadarlaX <raghuveerx.kadarla@intel.com>
+---
+ drivers/misc/xlink-pcie/common/util.c      | 23 ++++++++++++++++++++++
+ drivers/misc/xlink-pcie/common/util.h      |  1 +
+ drivers/misc/xlink-pcie/local_host/core.c  |  6 ++++++
+ drivers/misc/xlink-pcie/remote_host/core.c |  6 ++++++
+ 4 files changed, 36 insertions(+)
+
+diff --git a/drivers/misc/xlink-pcie/common/util.c b/drivers/misc/xlink-pcie/common/util.c
+index 58e2e9037a1b..16b7260cf631 100644
+--- a/drivers/misc/xlink-pcie/common/util.c
++++ b/drivers/misc/xlink-pcie/common/util.c
+@@ -8,6 +8,9 @@
+ #include "util.h"
+ #include "xpcie.h"
+ 
++/*Set the PCIE TX queue threashold when try packing*/
++#define PACKING_QUEUE_DEPTH  (1)
++
+ void intel_xpcie_list_add_device(struct xpcie *xpcie)
+ {
+ 	mutex_lock(&dev_list_mutex);
+@@ -324,6 +327,26 @@ u32 intel_xpcie_get_host_swdev_id(struct xpcie *xpcie)
+ 	return intel_xpcie_ioread32(xpcie->mmio + XPCIE_MMIO_HOST_SWDEV_ID);
+ }
+ 
++bool intel_xpcie_list_try_packing(struct xpcie_list *list, void *data, size_t size)
++{
++	struct xpcie_buf_desc *bd_tail;
++	bool is_packed = false;
++
++	spin_lock(&list->lock);
++	if (list->tail && list->buffers >= PACKING_QUEUE_DEPTH) {
++		bd_tail = list->tail;
++		if ((bd_tail->length + size) <= bd_tail->true_len) {
++			memcpy((bd_tail->data + bd_tail->length), data, size);
++			bd_tail->length += size;
++			list->bytes += size;
++			is_packed = true;
++		}
++	}
++	spin_unlock(&list->lock);
++
++	return is_packed;
++}
++
+ struct xpcie_buf_desc *intel_xpcie_alloc_bd_reuse(size_t length, void *virt,
+ 						  dma_addr_t phys)
+ {
+diff --git a/drivers/misc/xlink-pcie/common/util.h b/drivers/misc/xlink-pcie/common/util.h
+index ebf8c8dee5f3..7e41e8951c11 100644
+--- a/drivers/misc/xlink-pcie/common/util.h
++++ b/drivers/misc/xlink-pcie/common/util.h
+@@ -98,4 +98,5 @@ int intel_xpcie_get_device_name_by_id(u32 sw_devid, char *device_name,
+ 				      size_t name_size);
+ struct xpcie *intel_xpcie_get_device_by_phys_id(u32 phys_id);
+ 
++bool intel_xpcie_list_try_packing(struct xpcie_list *list, void *data, size_t size);
+ #endif /* XPCIE_UTIL_HEADER_ */
+diff --git a/drivers/misc/xlink-pcie/local_host/core.c b/drivers/misc/xlink-pcie/local_host/core.c
+index 27ff9c54164f..b46c2b6b9e46 100644
+--- a/drivers/misc/xlink-pcie/local_host/core.c
++++ b/drivers/misc/xlink-pcie/local_host/core.c
+@@ -692,6 +692,12 @@ int intel_xpcie_core_write(struct xpcie *xpcie, void *buffer,
+ 	if (ret < 0)
+ 		return -EINTR;
+ 
++	if (intel_xpcie_list_try_packing(&xpcie->write, buffer, len)) {
++		*length = len;
++		mutex_unlock(&xpcie->wlock);
++		return 0;
++	}
++
+ 	do {
+ 		bd = intel_xpcie_alloc_tx_bd(xpcie);
+ 		head = bd;
+diff --git a/drivers/misc/xlink-pcie/remote_host/core.c b/drivers/misc/xlink-pcie/remote_host/core.c
+index 7e64016a34d9..76cfe42790f6 100644
+--- a/drivers/misc/xlink-pcie/remote_host/core.c
++++ b/drivers/misc/xlink-pcie/remote_host/core.c
+@@ -625,6 +625,12 @@ int intel_xpcie_core_write(struct xpcie *xpcie, void *buffer, size_t *length,
+ 	if (ret < 0)
+ 		return -EINTR;
+ 
++	if (intel_xpcie_list_try_packing(&xpcie->write, buffer, len)) {
++		*length = len;
++		mutex_unlock(&xpcie->wlock);
++		return 0;
++	}
++
+ 	do {
+ 		bd = intel_xpcie_alloc_tx_bd(xpcie);
+ 		head = bd;
+-- 
+2.25.1
+

@@ -1,0 +1,191 @@
+From 89a46d45dd6c9737009a19b65e04782d91e5ed16 Mon Sep 17 00:00:00 2001
+From: Krishnakumar <krishnakumarx.kulakarni@intel.com>
+Date: Thu, 24 Jun 2021 18:38:40 +0530
+Subject: [PATCH 041/109] KMB: Fixed issues in Platform Manageability
+
+Fixed KW issues in the HDDL driver
+
+Signed-off-by: Krishnakumar <krishnakumarx.kulakarni@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device.c    |  2 +-
+ drivers/misc/hddl_device/hddl_device_lh.c | 12 +++++++-----
+ drivers/misc/hddl_device/hddl_device_rh.c | 12 +++++++-----
+ include/linux/hddl_device.h               | 15 +++++++++------
+ 4 files changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/misc/hddl_device/hddl_device.c b/drivers/misc/hddl_device/hddl_device.c
+index 8632472b79c7..786c9008439c 100644
+--- a/drivers/misc/hddl_device/hddl_device.c
++++ b/drivers/misc/hddl_device/hddl_device.c
+@@ -465,8 +465,8 @@ void intel_hddl_device_remove(struct intel_hddl_clients *d)
+ static int intel_hddl_device_event_notify(u32 sw_device_id,
+ 					  uint32_t event_type)
+ {
++	struct intel_hddl_clients *client = NULL;
+ 	struct intel_hddl_clients **clients;
+-	struct intel_hddl_clients *client;
+ 	int i, ret = 0;
+ 	int ndevs = 0;
+ 
+diff --git a/drivers/misc/hddl_device/hddl_device_lh.c b/drivers/misc/hddl_device/hddl_device_lh.c
+index 45681f1726de..adc756b17c6b 100644
+--- a/drivers/misc/hddl_device/hddl_device_lh.c
++++ b/drivers/misc/hddl_device/hddl_device_lh.c
+@@ -236,6 +236,7 @@ static int intel_hddl_i2c_register_clients(struct device *dev,
+ 			dev_err(&priv->pdev->dev,
+ 				"xlink write data failed rc = %d\n",
+ 				rc);
++			kfree(data);
+ 			return rc;
+ 		}
+ 		kfree(data);
+@@ -309,6 +310,7 @@ static int intel_hddl_send_tsens_data(struct intel_hddl_clients *c)
+ 			dev_err(&priv->pdev->dev,
+ 				"xlink write data failed rc = %d\n",
+ 				rc);
++			kfree(data);
+ 			return rc;
+ 		}
+ 		kfree(data);
+@@ -545,7 +547,7 @@ static int hddl_get_onchip_sensors(struct platform_device *pdev,
+ 		if (!tsens)
+ 			return -ENOMEM;
+ 		priv->tsens[i] = tsens;
+-		strcpy(tsens->data.name, np->name);
++		strncpy(tsens->data.name, np->name, HDDL_I2C_STRING_SIZE - 1);
+ 		if (hddl_tsens_config_sensors(np, priv, i)) {
+ 			dev_err(&pdev->dev,
+ 				"Missing sensor info in dts for %s\n",
+@@ -666,7 +668,7 @@ static int hddl_get_socreset_data(struct platform_device *pdev,
+ 
+ 			of_property_read_string_index(soc_node, "io-exp-name",
+ 						      0, &name);
+-			strcpy(board_info->iox_name, name);
++			strncpy(board_info->iox_name, name, HDDL_STRING_SIZE - 1);
+ 			of_property_read_u32_index(soc_node, "io-exp-addr",
+ 						   0, &board_info->iox_addr);
+ 			of_property_read_u32_index(soc_node, "io-exp-addr",
+@@ -785,9 +787,9 @@ static int intel_hddl_config_dt(struct intel_hddl_client_priv *priv)
+ 			of_property_read_string_index(s_node, "compatible", 0,
+ 						      &name);
+ 			if (name) {
+-				strcpy(i2c_dev->name, name);
+-				strcpy(i2c_dev->board_info.type,
+-				       i2c_dev->name);
++				strncpy(i2c_dev->name, name, HDDL_I2C_STRING_SIZE - 1);
++				strncpy(i2c_dev->board_info.type,
++					i2c_dev->name, HDDL_I2C_STRING_SIZE - 1);
+ 			}
+ 			/**
+ 			 * below dt params are optional.
+diff --git a/drivers/misc/hddl_device/hddl_device_rh.c b/drivers/misc/hddl_device/hddl_device_rh.c
+index f483c686445e..006f12e602b9 100644
+--- a/drivers/misc/hddl_device/hddl_device_rh.c
++++ b/drivers/misc/hddl_device/hddl_device_rh.c
+@@ -127,11 +127,11 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ {
+ 	struct intel_hddl_device_priv *priv = file->private_data;
+ 	u32 __user *user_ptr = (u32 __user *)arg;
++	struct intel_hddl_clients *client = NULL;
+ 	struct device *dev = &priv->pdev->dev;
+ 	struct sw_id_hddl_status swid_status;
+ 	struct intel_hddl_clients **clients;
+ 	struct sw_id_soft_reset soft_reset;
+-	struct intel_hddl_clients *client;
+ 	struct sw_id_hddl_data swid_data;
+ 	int i, rc;
+ 
+@@ -184,6 +184,7 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		if (copy_from_user(&swid_data, user_ptr,
+ 				   sizeof(struct sw_id_hddl_data)))
+ 			return -EFAULT;
++
+ 		for (i = 0; i < priv->ndevs; i++) {
+ 			if (clients[i]->xlink_dev.sw_device_id ==
+ 					swid_data.sw_id) {
+@@ -197,13 +198,13 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 				swid_data.sw_id);
+ 			return -ENODEV;
+ 		}
+-		strcpy(swid_data.board_type, client->board_info.board_type);
++		strncpy(swid_data.board_type, client->board_info.board_type, HDDL_STRING_SIZE - 1);
+ 		swid_data.board_id = client->board_info.board_id;
+ 		swid_data.soc_id = client->board_info.soc_id;
+ 		swid_data.iox_addr = client->board_info.iox_addr;
+ 		swid_data.iox_pin = client->board_info.iox_pin;
+ 		swid_data.pci_pin = client->board_info.pci_pin;
+-		strcpy(swid_data.iox_name, client->board_info.iox_name);
++		strncpy(swid_data.iox_name, client->board_info.iox_name, HDDL_STRING_SIZE - 1);
+ 		if (client->adap[0])
+ 			swid_data.soc_adaptor_no[0] = client->adap[0]->nr;
+ 		if (client->adap[1])
+@@ -248,7 +249,7 @@ static int hddl_open(struct inode *inode, struct file *filp)
+ 	priv = container_of(inode->i_cdev,
+ 			    struct intel_hddl_device_priv, hddl_cdev);
+ 	if (!priv) {
+-		dev_err(&priv->pdev->dev, "Device open failed\n");
++		pr_err("HDDL: Device open failed\n");
+ 		return -ENODEV;
+ 	}
+ 	filp->private_data = priv;
+@@ -624,7 +625,8 @@ static int intel_hddl_device_connect_task(void *data)
+ 	c->chan_num = priv->xlink_chan;
+ 	c->i2c_chan_num = priv->i2c_xlink_chan;
+ 	c->smbus_adap = priv->smbus_adap;
+-	if (intel_hddl_open_xlink_device(&priv->pdev->dev, c)) {
++	rc = intel_hddl_open_xlink_device(&priv->pdev->dev, c);
++	if (rc) {
+ 		dev_err(&priv->pdev->dev, "HDDL open xlink dev failed\n");
+ 		goto exit_connect_task;
+ 	}
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+index a35096d1fe89..37f4968b64b1 100644
+--- a/include/linux/hddl_device.h
++++ b/include/linux/hddl_device.h
+@@ -26,9 +26,12 @@
+ #define HDDL_SOFT_RESET		_IOW(HDDL_MAGIC, 'b', void*)
+ #define HDDL_READ_STATUS	_IOW(HDDL_MAGIC, 'c', void*)
+ 
++#define HDDL_STRING_SIZE 16
++#define HDDL_I2C_STRING_SIZE 20
++
+ struct sw_id_hddl_data {
+-	char iox_name[15];
+-	char board_type[15];
++	char iox_name[HDDL_STRING_SIZE];
++	char board_type[HDDL_STRING_SIZE];
+ 	uint32_t board_id;
+ 	uint32_t soc_id;
+ 	uint32_t iox_addr;
+@@ -93,8 +96,8 @@ struct intel_hddl_tsens_msg {
+ } __packed __aligned(HDDL_ALIGN);
+ 
+ struct intel_hddl_board_info {
+-	char iox_name[15];
+-	char board_type[15];
++	char iox_name[HDDL_STRING_SIZE];
++	char board_type[HDDL_STRING_SIZE];
+ 	int board_id;
+ 	int soc_id;
+ 	int iox_addr;
+@@ -111,7 +114,7 @@ struct intel_tsens_data {
+ } __packed __aligned(HDDL_ALIGN);
+ 
+ struct intel_hddl_i2c_devs_data {
+-	char name[20];
++	char name[HDDL_I2C_STRING_SIZE];
+ 	u32 addr;
+ 	u32 bus;
+ 	int enabled;
+@@ -120,7 +123,7 @@ struct intel_hddl_i2c_devs_data {
+ } __packed __aligned(HDDL_ALIGN);
+ 
+ struct intel_hddl_i2c_devs {
+-	char name[20];
++	char name[HDDL_I2C_STRING_SIZE];
+ 	u32 addr;
+ 	u32 bus;
+ 	int enabled;
+-- 
+2.25.1
+

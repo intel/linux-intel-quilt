@@ -1,0 +1,229 @@
+From fbb2cf1a077a7e17f4f98bab7074887e267f005b Mon Sep 17 00:00:00 2001
+From: Seamus Kelly <seamus.kelly@intel.com>
+Date: Tue, 27 Apr 2021 12:22:55 +0100
+Subject: [PATCH 086/109] xlink-core: xlink-ipc: Add get and set device_mode
+ APIs
+
+Signed-off-by: Seamus Kelly <seamus.kelly@intel.com>
+---
+ drivers/misc/xlink-core/xlink-platform.c |  12 +-
+ drivers/misc/xlink-ipc/xlink-ipc.c       | 137 +++++++++++++++++++++++
+ include/linux/xlink-ipc.h                |   4 +
+ 3 files changed, 150 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/xlink-core/xlink-platform.c b/drivers/misc/xlink-core/xlink-platform.c
+index ad95a09d125e..2e10ac6e38e2 100644
+--- a/drivers/misc/xlink-core/xlink-platform.c
++++ b/drivers/misc/xlink-core/xlink-platform.c
+@@ -18,7 +18,7 @@
+ 
+ #include "xlink-platform.h"
+ 
+-#ifdef CONFIG_XLINK_LOCAL_HOST
++#if IS_ENABLED(CONFIG_XLINK_LOCAL_HOST)
+ #include <linux/xlink-ipc.h>
+ #else /* !CONFIG_XLINK_LOCAL_HOST */
+ 
+@@ -55,6 +55,12 @@ static inline int xlink_ipc_close_channel(u32 sw_device_id,
+ 					  u32 channel)
+ { return -1; }
+ 
++static inline int xlink_ipc_get_device_mode(u32 sw_device_id, u32 *power_mode)
++{ return -1; }
++
++static inline int xlink_ipc_set_device_mode(u32 sw_device_id, u32 power_mode)
++{ return -1; }
++
+ #endif /* CONFIG_XLINK_LOCAL_HOST */
+ 
+ /*
+@@ -86,9 +92,9 @@ static int (*dev_status_fcts[NMB_OF_INTERFACES])(u32, u32 *) = {
+ 		xlink_ipc_get_device_status, xlink_pcie_get_device_status,
+ 		NULL, NULL};
+ static int (*dev_set_mode_fcts[NMB_OF_INTERFACES])(u32, u32) = {
+-		NULL, NULL, NULL, NULL};
++		xlink_ipc_set_device_mode, NULL, NULL, NULL};
+ static int (*dev_get_mode_fcts[NMB_OF_INTERFACES])(u32, u32 *) = {
+-		NULL, NULL, NULL, NULL};
++		xlink_ipc_get_device_mode, NULL, NULL, NULL};
+ static int (*open_chan_fcts[NMB_OF_INTERFACES])(u32, u32) = {
+ 		xlink_ipc_open_channel, NULL, NULL, NULL};
+ 
+diff --git a/drivers/misc/xlink-ipc/xlink-ipc.c b/drivers/misc/xlink-ipc/xlink-ipc.c
+index 4d1f8f008545..c45fdf6f12c9 100644
+--- a/drivers/misc/xlink-ipc/xlink-ipc.c
++++ b/drivers/misc/xlink-ipc/xlink-ipc.c
+@@ -54,6 +54,10 @@
+ /* the timeout (in ms) used to wait for the vpu ready message */
+ #define XLINK_VPU_WAIT_FOR_READY_MS 3000
+ 
++#define IP_CONTROL_CHANNEL (0x0A)
++static struct mutex get_device_mode_lock;
++static struct mutex set_device_mode_lock;
++
+ /* xlink buffer memory region */
+ struct xlink_buf_mem {
+ 	struct device *dev;	/* child device managing the memory region */
+@@ -761,6 +765,136 @@ int xlink_ipc_close_channel(u32 sw_device_id, u32 channel)
+ }
+ EXPORT_SYMBOL_GPL(xlink_ipc_close_channel);
+ 
++enum control_channel_commands {
++	GET_DEVICE_PWR_MODE_REQ,
++	GET_DEVICE_PWR_MODE_RESP,
++	SET_DEVICE_PWR_MODE,
++	SET_DEVICE_PWR_MODE_RESP
++};
++
++#define CONTROL_CHAN_TIMEOUT 5000
++
++struct control_channel_cmd {
++	u32 command;
++	u8 data[128];
++};
++
++int xlink_ipc_get_device_mode(u32 sw_device_id, u32 *power_mode)
++{
++	int rc = 0, sc = 0;
++	struct xlink_ipc_context ipc = {0};
++	struct control_channel_cmd *cmd;
++	u8 databuf[XLINK_MAX_BUF_SIZE];
++	size_t size;
++
++	rc = xlink_ipc_open_channel(sw_device_id, IP_CONTROL_CHANNEL);
++	if (rc == 0 || rc == -EEXIST) {
++		mutex_lock(&get_device_mode_lock);
++		ipc.chan = IP_CONTROL_CHANNEL;
++		ipc.is_volatile = 1;
++		cmd = (struct control_channel_cmd *)databuf;
++		cmd->command = GET_DEVICE_PWR_MODE_REQ;
++		size = 4;
++		rc = xlink_ipc_write(sw_device_id, databuf, &size, 0, &ipc);
++		if (rc) {
++			pr_info("%s:Error IPC write %d\n", __func__, rc);
++			goto getdev_error;
++		}
++		memset(databuf, 0, sizeof(databuf));
++		rc = xlink_ipc_read(sw_device_id, databuf, &size, CONTROL_CHAN_TIMEOUT, &ipc);
++		if (rc || size > XLINK_MAX_BUF_SIZE) {
++			pr_info("%s:Error IPC read rc %d size %d\n", __func__,
++				rc, (int)size);
++			rc = EINVAL;
++			goto getdev_error;
++		} else {
++			if (cmd->command == GET_DEVICE_PWR_MODE_RESP) {
++				*power_mode = cmd->data[1];
++				rc = (cmd->data[0]) ? EINVAL : 0;
++			} else {
++				rc = EINVAL;
++				pr_info("%s:Error command not expected cmd=%d\n",
++					__func__, cmd->command);
++			}
++		}
++getdev_error:
++		sc = xlink_ipc_close_channel(sw_device_id, IP_CONTROL_CHANNEL);
++		if (sc) {
++			pr_info("%s:Error closing control channel %d\n",
++				__func__, IP_CONTROL_CHANNEL);
++			rc = EINVAL;
++		}
++		mutex_unlock(&get_device_mode_lock);
++	} else
++		pr_info("%s:Error opening control channel %d\n",
++			__func__, IP_CONTROL_CHANNEL);
++	if (rc)
++		rc = -EINVAL;
++	else
++		rc = 0;
++	return rc;
++
++}
++EXPORT_SYMBOL(xlink_ipc_get_device_mode);
++
++int xlink_ipc_set_device_mode(u32 sw_device_id, u32 power_mode)
++{
++	int rc = 0, sc = 0;
++	struct xlink_ipc_context ipc = {0};
++	struct control_channel_cmd *cmd;
++	u8 databuf[XLINK_MAX_BUF_SIZE];
++	size_t size;
++
++	rc = xlink_ipc_open_channel(sw_device_id, IP_CONTROL_CHANNEL);
++	if (rc == 0 || rc == -EEXIST) {
++		mutex_lock(&set_device_mode_lock);
++		ipc.chan = IP_CONTROL_CHANNEL;
++		ipc.is_volatile = 1;
++		cmd = (struct control_channel_cmd *)databuf;
++		cmd->command = SET_DEVICE_PWR_MODE;
++		cmd->data[0] = power_mode;
++		size = 5;
++		rc = xlink_ipc_write(sw_device_id, databuf, &size, 0, &ipc);
++		if (rc) {
++			pr_info("%s:Error IPC write %d\n", __func__, rc);
++			goto setdev_error;
++		}
++		memset(databuf, 0, sizeof(databuf));
++		// wait for response
++		rc = xlink_ipc_read(sw_device_id, databuf, &size, CONTROL_CHAN_TIMEOUT, &ipc);
++		if (rc || size > XLINK_MAX_BUF_SIZE) {
++			pr_info("%s:Error IPC read %d size %d\n",
++				__func__, rc, (int)size);
++			rc = EINVAL;
++			goto setdev_error;
++		} else {
++			if (cmd->command == SET_DEVICE_PWR_MODE_RESP) {
++				rc = (cmd->data[0]) ? EINVAL : 0;
++			} else {
++				pr_info("%s:Error command not expected cmd=%d\n",
++					__func__, cmd->command);
++				rc = EINVAL;
++			}
++		}
++setdev_error:
++		sc = xlink_ipc_close_channel(sw_device_id, IP_CONTROL_CHANNEL);
++		if (sc) {
++			pr_info("%s:Error closing control channel %d\n",
++				__func__, IP_CONTROL_CHANNEL);
++			rc = EINVAL;
++		}
++		mutex_unlock(&set_device_mode_lock);
++	} else
++		pr_info("%s:Error opening control channel %d rc = %d\n",
++			__func__, IP_CONTROL_CHANNEL, rc);
++	if (rc)
++		rc = EINVAL;
++	else
++		rc = 0;
++	return rc;
++}
++EXPORT_SYMBOL(xlink_ipc_set_device_mode);
++
+ /*
+  * xlink ipc driver functions
+  */
+@@ -831,6 +965,9 @@ static int keembay_xlink_ipc_probe(struct platform_device *pdev)
+ 	dev_info(dev, "Device id=%u sw_device_id=0x%x name=%s probe complete.\n",
+ 		 xlink_dev->vpu_id, xlink_dev->sw_device_id,
+ 			xlink_dev->device_name);
++	mutex_init(&get_device_mode_lock);
++	mutex_init(&set_device_mode_lock);
++
+ 	return 0;
+ 
+ r_cleanup:
+diff --git a/include/linux/xlink-ipc.h b/include/linux/xlink-ipc.h
+index f26b53bf6506..85a8aa95c29d 100644
+--- a/include/linux/xlink-ipc.h
++++ b/include/linux/xlink-ipc.h
+@@ -45,4 +45,8 @@ int xlink_ipc_register_for_events(u32 sw_device_id,
+ 
+ int xlink_ipc_unregister_for_events(u32 sw_device_id);
+ 
++int xlink_ipc_get_device_mode(u32 sw_device_id, u32 *power_mode);
++
++int xlink_ipc_set_device_mode(u32 sw_device_id, u32 power_mode);
++
+ #endif /* _XLINK_IPC_H_ */
+-- 
+2.25.1
+

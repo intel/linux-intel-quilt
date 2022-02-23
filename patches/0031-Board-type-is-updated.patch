@@ -1,0 +1,118 @@
+From ad06e384b759c5b840c6d734138ab58af73686b7 Mon Sep 17 00:00:00 2001
+From: Krishnakumar <krishnakumarx.kulakarni@intel.com>
+Date: Tue, 6 Apr 2021 17:01:08 +0530
+Subject: [PATCH 031/109] Board type is updated
+
+Signed-off-by: Krishnakumar <krishnakumarx.kulakarni@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device_lh.c | 53 +++++++++++++++++++++++
+ drivers/misc/hddl_device/hddl_device_rh.c |  1 +
+ include/linux/hddl_device.h               |  2 +
+ 3 files changed, 56 insertions(+)
+
+diff --git a/drivers/misc/hddl_device/hddl_device_lh.c b/drivers/misc/hddl_device/hddl_device_lh.c
+index 821ff24c983e..45681f1726de 100644
+--- a/drivers/misc/hddl_device/hddl_device_lh.c
++++ b/drivers/misc/hddl_device/hddl_device_lh.c
+@@ -558,6 +558,53 @@ static int hddl_get_onchip_sensors(struct platform_device *pdev,
+ 	return 0;
+ }
+ 
++static int intel_hddl_get_board_type(struct platform_device *pdev,
++				     struct intel_hddl_client_priv *priv)
++{
++	int ret = 0;
++	struct device_node *np_bios;
++	const char *board_type;
++	const char *board_type_var = NULL;
++
++	np_bios = of_find_node_by_name(NULL, "bios");
++	if (np_bios) {
++		if (of_property_read_bool(np_bios,
++					  "system-product-name-variant")) {
++			board_type_var = NULL;
++			ret = of_property_read_string(np_bios, "system-product-name-variant", &board_type_var);
++			if (ret < 0 || !board_type_var) {
++				dev_err(&pdev->dev,
++					"failed to get board variant %d",
++					ret);
++				return ret;
++			 }
++			dev_info(&pdev->dev,
++				"Board type var is %s\n", board_type_var);
++		}
++
++		ret = of_property_read_string(np_bios, "system-product-name", &board_type);
++		if (ret < 0 || !board_type) {
++			dev_err(&pdev->dev,
++				"failed to get board type %d",
++				ret);
++			return ret;
++		} else {
++			strncpy(priv->board_info.board_type, board_type, 15);
++			if (board_type_var)
++				strncat(priv->board_info.board_type,
++					board_type_var,
++					15 - strlen(priv->board_info.board_type));
++			dev_info(&pdev->dev,
++					"Board type is %s\n", priv->board_info.board_type);
++		}
++	} else {
++		dev_err(&pdev->dev,
++			"node pointer for bios is not found\n");
++		ret = -EINVAL;
++	}
++	return ret;
++}
++
+ static int intel_hddl_get_ids(struct platform_device *pdev,
+ 			      struct intel_hddl_client_priv *priv)
+ {
+@@ -686,6 +733,12 @@ static int intel_hddl_config_dt(struct intel_hddl_client_priv *priv)
+ 		dev_err(&pdev->dev, "i2c xlink channel not available in dt");
+ 		return ret;
+ 	}
++
++	ret = intel_hddl_get_board_type(pdev, priv);
++	if (ret) {
++		dev_err(&pdev->dev, "Unable to get board type");
++		return ret;
++	}
+ 	ret = intel_hddl_get_ids(pdev, priv);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "Unable to get board/soc id");
+diff --git a/drivers/misc/hddl_device/hddl_device_rh.c b/drivers/misc/hddl_device/hddl_device_rh.c
+index f04860828299..150503d788b6 100644
+--- a/drivers/misc/hddl_device/hddl_device_rh.c
++++ b/drivers/misc/hddl_device/hddl_device_rh.c
+@@ -197,6 +197,7 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 				swid_data.sw_id);
+ 			return -ENODEV;
+ 		}
++		strcpy(swid_data.board_type, d->board_info.board_type);
+ 		swid_data.board_id = client->board_info.board_id;
+ 		swid_data.soc_id = client->board_info.soc_id;
+ 		swid_data.iox_addr = client->board_info.iox_addr;
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+index 2c02cb6a0c0b..a35096d1fe89 100644
+--- a/include/linux/hddl_device.h
++++ b/include/linux/hddl_device.h
+@@ -28,6 +28,7 @@
+ 
+ struct sw_id_hddl_data {
+ 	char iox_name[15];
++	char board_type[15];
+ 	uint32_t board_id;
+ 	uint32_t soc_id;
+ 	uint32_t iox_addr;
+@@ -93,6 +94,7 @@ struct intel_hddl_tsens_msg {
+ 
+ struct intel_hddl_board_info {
+ 	char iox_name[15];
++	char board_type[15];
+ 	int board_id;
+ 	int soc_id;
+ 	int iox_addr;
+-- 
+2.25.1
+
