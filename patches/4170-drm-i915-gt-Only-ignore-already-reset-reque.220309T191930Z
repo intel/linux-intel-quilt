@@ -1,0 +1,46 @@
+From e5f675f17e2883b01d6e4d294b6a6b8ab226f302 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 7 Feb 2020 16:16:02 +0000
+Subject: [PATCH 4170/4530] drm/i915/gt: Only ignore already reset requests
+
+If a request is being re-run after an innocent reset, it is marked as
+-EAGAIN. So only skip an engine reset if the request is marked as -EIO.
+
+Testcase: igt/gem_ctx_exec/basic-nohangcheck
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200207161602.2838218-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gem/i915_gem_context.c | 2 +-
+ drivers/gpu/drm/i915/gt/intel_reset.c       | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_context.c b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+index 52a749691a8d..cfaf5bbdbcab 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_context.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_context.c
+@@ -419,7 +419,7 @@ static struct intel_engine_cs *__active_engine(struct i915_request *rq)
+ 	}
+ 
+ 	engine = NULL;
+-	if (i915_request_is_active(rq) && !rq->fence.error)
++	if (i915_request_is_active(rq) && rq->fence.error != -EIO)
+ 		engine = rq->engine;
+ 
+ 	spin_unlock_irq(&locked->active.lock);
+diff --git a/drivers/gpu/drm/i915/gt/intel_reset.c b/drivers/gpu/drm/i915/gt/intel_reset.c
+index a8317e046f81..aef6ab58d7d9 100644
+--- a/drivers/gpu/drm/i915/gt/intel_reset.c
++++ b/drivers/gpu/drm/i915/gt/intel_reset.c
+@@ -1182,7 +1182,7 @@ static void intel_gt_reset_global(struct intel_gt *gt,
+ 
+ 	kobject_uevent_env(kobj, KOBJ_CHANGE, error_event);
+ 
+-	drm_dbg(&gt->i915->drm, "resetting chip\n");
++	drm_dbg(&gt->i915->drm, "resetting chip, engines=%x\n", engine_mask);
+ 	kobject_uevent_env(kobj, KOBJ_CHANGE, reset_event);
+ 
+ 	/* Use a watchdog to ensure that our reset completes */
+-- 
+2.17.1
+

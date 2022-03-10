@@ -1,0 +1,58 @@
+From 5a8595989219eb39a8b34b42c409579e97c2f88b Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 25 Feb 2020 19:22:06 +0000
+Subject: [PATCH 4284/4530] drm/i915/gem: Honour O_NONBLOCK before throttling
+ execbuf submissions
+
+Check the user's flags on the struct file before deciding whether or not
+to stall before submitting a request. This allows us to reasonably
+cheaply honour O_NONBLOCK without checking at more critical phases
+during request submission.
+
+Suggested-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Cc: Steve Carbonari <steven.carbonari@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200225192206.1107336-3-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/gem/i915_gem_execbuffer.c    | 21 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index 78a2a36203bf..ce6cdede6e08 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -2328,15 +2328,22 @@ static int __eb_pin_engine(struct i915_execbuffer *eb, struct intel_context *ce)
+ 	intel_context_timeline_unlock(tl);
+ 
+ 	if (rq) {
+-		if (i915_request_wait(rq,
+-				      I915_WAIT_INTERRUPTIBLE,
+-				      MAX_SCHEDULE_TIMEOUT) < 0) {
+-			i915_request_put(rq);
+-			err = -EINTR;
+-			goto err_exit;
+-		}
++		bool nonblock = eb->file->filp->f_flags & O_NONBLOCK;
++		long timeout;
++
++		timeout = MAX_SCHEDULE_TIMEOUT;
++		if (nonblock)
++			timeout = 0;
+ 
++		timeout = i915_request_wait(rq,
++					    I915_WAIT_INTERRUPTIBLE,
++					    timeout);
+ 		i915_request_put(rq);
++
++		if (timeout < 0) {
++			err = nonblock ? -EWOULDBLOCK : timeout;
++			goto err_exit;
++		}
+ 	}
+ 
+ 	eb->engine = ce->engine;
+-- 
+2.17.1
+

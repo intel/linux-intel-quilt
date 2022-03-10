@@ -1,0 +1,81 @@
+From eed2d9b994525754766ca46e7d2702d8a62b4f81 Mon Sep 17 00:00:00 2001
+From: Thierry Reding <treding@nvidia.com>
+Date: Tue, 3 Dec 2019 17:29:57 +0100
+Subject: [PATCH 3378/4530] drm/tegra: output: Implement system suspend/resume
+
+Implement generic system suspend/resume functions that can be used with
+any output type. Currently this only implements disabling and enabling
+of the IRQ functionality across system suspend/resume. This prevents an
+interrupt from happening before the display driver has fully resumed.
+
+Signed-off-by: Thierry Reding <treding@nvidia.com>
+---
+ drivers/gpu/drm/tegra/output.c | 16 ++++++++++++++++
+ drivers/gpu/drm/tegra/sor.c    | 17 +++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/drivers/gpu/drm/tegra/output.c b/drivers/gpu/drm/tegra/output.c
+index 80ddde4adbae..a264259b97a2 100644
+--- a/drivers/gpu/drm/tegra/output.c
++++ b/drivers/gpu/drm/tegra/output.c
+@@ -250,3 +250,19 @@ void tegra_output_find_possible_crtcs(struct tegra_output *output,
+ 
+ 	output->encoder.possible_crtcs = mask;
+ }
++
++int tegra_output_suspend(struct tegra_output *output)
++{
++	if (output->hpd_irq)
++		disable_irq(output->hpd_irq);
++
++	return 0;
++}
++
++int tegra_output_resume(struct tegra_output *output)
++{
++	if (output->hpd_irq)
++		enable_irq(output->hpd_irq);
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/tegra/sor.c b/drivers/gpu/drm/tegra/sor.c
+index 2e17249c4e36..41d24949478e 100644
+--- a/drivers/gpu/drm/tegra/sor.c
++++ b/drivers/gpu/drm/tegra/sor.c
+@@ -3996,9 +3996,16 @@ static int __maybe_unused tegra_sor_suspend(struct device *dev)
+ 	struct tegra_sor *sor = dev_get_drvdata(dev);
+ 	int err;
+ 
++	err = tegra_output_suspend(&sor->output);
++	if (err < 0) {
++		dev_err(dev, "failed to suspend output: %d\n", err);
++		return err;
++	}
++
+ 	if (sor->hdmi_supply) {
+ 		err = regulator_disable(sor->hdmi_supply);
+ 		if (err < 0) {
++			tegra_output_resume(&sor->output);
+ 			return err;
+ 		}
+ 	}
+@@ -4017,6 +4024,16 @@ static int __maybe_unused tegra_sor_resume(struct device *dev)
+ 			return err;
+ 	}
+ 
++	err = tegra_output_resume(&sor->output);
++	if (err < 0) {
++		dev_err(dev, "failed to resume output: %d\n", err);
++
++		if (sor->hdmi_supply)
++			regulator_disable(sor->hdmi_supply);
++
++		return err;
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.17.1
+

@@ -1,0 +1,321 @@
+From 9eb8aed6c0f3ab6df863b80ab62e68cca88c07b2 Mon Sep 17 00:00:00 2001
+From: Junxiao Chang <junxiao.chang@intel.com>
+Date: Fri, 11 Feb 2022 19:45:04 +0800
+Subject: [PATCH 3898/4530] fix build issue during backporting
+
+Some conflicts are fix in merge commits, this commit is for
+those "merge conflict fixes"
+
+Signed-off-by: Junxiao Chang <junxiao.chang@intel.com>
+---
+ drivers/gpio/gpio-ath79.c                  |  2 +-
+ drivers/gpio/gpio-em.c                     |  4 ++--
+ drivers/gpu/drm/amd/amdgpu/amdgpu_device.c |  1 -
+ drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c     |  2 --
+ drivers/gpu/drm/amd/amdgpu/gmc_v9_0.c      | 24 ++++------------------
+ drivers/gpu/drm/bridge/ti-tfp410.c         |  5 +++--
+ drivers/gpu/drm/i915/gt/gen6_ppgtt.c       |  1 +
+ drivers/gpu/drm/i915/gt/gen8_ppgtt.c       |  1 +
+ drivers/gpu/drm/i915/gt/intel_ggtt.c       |  2 +-
+ drivers/gpu/drm/i915/gt/intel_lrc.c        |  8 ++++++++
+ drivers/gpu/drm/via/via_dmablit.c          | 10 +++++++--
+ drivers/gpu/drm/vmwgfx/vmwgfx_ttm_glue.c   |  5 -----
+ fs/tracefs/inode.c                         |  2 +-
+ include/linux/intel_tsens_host.h           |  2 ++
+ include/linux/lockdep.h                    |  2 +-
+ kernel/locking/rwsem.c                     |  4 ++--
+ 16 files changed, 35 insertions(+), 40 deletions(-)
+
+diff --git a/drivers/gpio/gpio-ath79.c b/drivers/gpio/gpio-ath79.c
+index f1a5ea9b3de2..5d4f0c70dfa9 100644
+--- a/drivers/gpio/gpio-ath79.c
++++ b/drivers/gpio/gpio-ath79.c
+@@ -259,7 +259,7 @@ static int ath79_gpio_probe(struct platform_device *pdev)
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	if (!res)
+ 		return -EINVAL;
+-	ctrl->base = devm_ioremap_nocache(dev, res->start, resource_size(res));
++	ctrl->base = ioremap_nocache(res->start, resource_size(res));
+ 	if (!ctrl->base)
+ 		return -ENOMEM;
+ 
+diff --git a/drivers/gpio/gpio-em.c b/drivers/gpio/gpio-em.c
+index 620f25b7efb4..9e3f2b72de51 100644
+--- a/drivers/gpio/gpio-em.c
++++ b/drivers/gpio/gpio-em.c
+@@ -295,12 +295,12 @@ static int em_gio_probe(struct platform_device *pdev)
+ 		return -EINVAL;
+ 	}
+ 
+-	p->base0 = devm_ioremap_nocache(dev, io[0]->start,
++	p->base0 = ioremap_nocache(io[0]->start,
+ 					resource_size(io[0]));
+ 	if (!p->base0)
+ 		return -ENOMEM;
+ 
+-	p->base1 = devm_ioremap_nocache(dev, io[1]->start,
++	p->base1 = ioremap_nocache(io[1]->start,
+ 				   resource_size(io[1]));
+ 	if (!p->base1)
+ 		return -ENOMEM;
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index 941605d73b4b..b8975857d60d 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -2847,7 +2847,6 @@ int amdgpu_device_init(struct amdgpu_device *adev,
+ 	mutex_init(&adev->virt.vf_errors.lock);
+ 	hash_init(adev->mn_hash);
+ 	mutex_init(&adev->lock_reset);
+-	mutex_init(&adev->notifier_lock);
+ 	mutex_init(&adev->psp.mutex);
+ 	mutex_init(&adev->notifier_lock);
+ 
+diff --git a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+index a41487be2fef..02702597ddeb 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -1782,8 +1782,6 @@ static int gfx_v10_0_init_csb(struct amdgpu_device *adev)
+ {
+ 	adev->gfx.rlc.funcs->get_csb_buffer(adev, adev->gfx.rlc.cs_ptr);
+ 
+-	adev->gfx.rlc.funcs->get_csb_buffer(adev, adev->gfx.rlc.cs_ptr);
+-
+ 	/* csib */
+ 	WREG32_SOC15(GC, 0, mmRLC_CSIB_ADDR_HI,
+ 		     adev->gfx.rlc.clear_state_gpu_addr >> 32);
+diff --git a/drivers/gpu/drm/amd/amdgpu/gmc_v9_0.c b/drivers/gpu/drm/amd/amdgpu/gmc_v9_0.c
+index 1616e9bd2026..cc0c273a86f9 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v9_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gmc_v9_0.c
+@@ -508,11 +508,7 @@ static void gmc_v9_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 	 */
+ 
+ 	/* TODO: It needs to continue working on debugging with semaphore for GFXHUB as well. */
+-	if ((vmhub == AMDGPU_MMHUB_0 ||
+-	     vmhub == AMDGPU_MMHUB_1) &&
+-	    (!(adev->asic_type == CHIP_RAVEN &&
+-	       adev->rev_id < 0x8 &&
+-	       adev->pdev->device == 0x15d8))) {
++	if (use_semaphore) {
+ 		for (j = 0; j < adev->usec_timeout; j++) {
+ 			/* a read return value of 1 means semaphore acuqire */
+ 			tmp = RREG32_NO_KIQ(hub->vm_inv_eng0_sem + eng);
+@@ -542,11 +538,7 @@ static void gmc_v9_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 	}
+ 
+ 	/* TODO: It needs to continue working on debugging with semaphore for GFXHUB as well. */
+-	if ((vmhub == AMDGPU_MMHUB_0 ||
+-	     vmhub == AMDGPU_MMHUB_1) &&
+-	    (!(adev->asic_type == CHIP_RAVEN &&
+-	       adev->rev_id < 0x8 &&
+-	       adev->pdev->device == 0x15d8)))
++	if (use_semaphore)
+ 		/*
+ 		 * add semaphore release after invalidation,
+ 		 * write with 0 means semaphore release
+@@ -640,11 +632,7 @@ static uint64_t gmc_v9_0_emit_flush_gpu_tlb(struct amdgpu_ring *ring,
+ 	 */
+ 
+ 	/* TODO: It needs to continue working on debugging with semaphore for GFXHUB as well. */
+-	if ((ring->funcs->vmhub == AMDGPU_MMHUB_0 ||
+-	     ring->funcs->vmhub == AMDGPU_MMHUB_1) &&
+-	    (!(adev->asic_type == CHIP_RAVEN &&
+-	       adev->rev_id < 0x8 &&
+-	       adev->pdev->device == 0x15d8)))
++	if (use_semaphore)
+ 		/* a read return value of 1 means semaphore acuqire */
+ 		amdgpu_ring_emit_reg_wait(ring,
+ 					  hub->vm_inv_eng0_sem + eng, 0x1, 0x1);
+@@ -660,11 +648,7 @@ static uint64_t gmc_v9_0_emit_flush_gpu_tlb(struct amdgpu_ring *ring,
+ 					    req, 1 << vmid);
+ 
+ 	/* TODO: It needs to continue working on debugging with semaphore for GFXHUB as well. */
+-	if ((ring->funcs->vmhub == AMDGPU_MMHUB_0 ||
+-	     ring->funcs->vmhub == AMDGPU_MMHUB_1) &&
+-	    (!(adev->asic_type == CHIP_RAVEN &&
+-	       adev->rev_id < 0x8 &&
+-	       adev->pdev->device == 0x15d8)))
++	if (use_semaphore)
+ 		/*
+ 		 * add semaphore release after invalidation,
+ 		 * write with 0 means semaphore release
+diff --git a/drivers/gpu/drm/bridge/ti-tfp410.c b/drivers/gpu/drm/bridge/ti-tfp410.c
+index f195a4732e0b..ac0ef0680d26 100644
+--- a/drivers/gpu/drm/bridge/ti-tfp410.c
++++ b/drivers/gpu/drm/bridge/ti-tfp410.c
+@@ -286,8 +286,9 @@ static int tfp410_get_connector_properties(struct tfp410 *dvi)
+ 	else
+ 		dvi->connector_type = DRM_MODE_CONNECTOR_DVID;
+ 
+-	dvi->hpd = fwnode_gpiod_get_index(&connector_node->fwnode,
+-					  "hpd", 0, GPIOD_IN, "hpd");
++	dvi->hpd = fwnode_get_named_gpiod(&connector_node->fwnode,
++			"hpd-gpios", 0, GPIOD_IN, "hpd");
++
+ 	if (IS_ERR(dvi->hpd)) {
+ 		ret = PTR_ERR(dvi->hpd);
+ 		dvi->hpd = NULL;
+diff --git a/drivers/gpu/drm/i915/gt/gen6_ppgtt.c b/drivers/gpu/drm/i915/gt/gen6_ppgtt.c
+index f10b2c41571c..f4fec7eb4064 100644
+--- a/drivers/gpu/drm/i915/gt/gen6_ppgtt.c
++++ b/drivers/gpu/drm/i915/gt/gen6_ppgtt.c
+@@ -131,6 +131,7 @@ static void gen6_ppgtt_insert_entries(struct i915_address_space *vm,
+ 
+ 	vaddr = kmap_atomic_px(i915_pt_entry(pd, act_pt));
+ 	do {
++		GEM_BUG_ON(iter.sg->length < I915_GTT_PAGE_SIZE);
+ 		vaddr[act_pte] = pte_encode | GEN6_PTE_ADDR_ENCODE(iter.dma);
+ 
+ 		iter.dma += I915_GTT_PAGE_SIZE;
+diff --git a/drivers/gpu/drm/i915/gt/gen8_ppgtt.c b/drivers/gpu/drm/i915/gt/gen8_ppgtt.c
+index 077b8f7cf6cb..4d1de2d97d5c 100644
+--- a/drivers/gpu/drm/i915/gt/gen8_ppgtt.c
++++ b/drivers/gpu/drm/i915/gt/gen8_ppgtt.c
+@@ -379,6 +379,7 @@ gen8_ppgtt_insert_pte(struct i915_ppgtt *ppgtt,
+ 	pd = i915_pd_entry(pdp, gen8_pd_index(idx, 2));
+ 	vaddr = kmap_atomic_px(i915_pt_entry(pd, gen8_pd_index(idx, 1)));
+ 	do {
++		GEM_BUG_ON(iter->sg->length < I915_GTT_PAGE_SIZE);
+ 		vaddr[gen8_pd_index(idx, 0)] = pte_encode | iter->dma;
+ 
+ 		iter->dma += I915_GTT_PAGE_SIZE;
+diff --git a/drivers/gpu/drm/i915/gt/intel_ggtt.c b/drivers/gpu/drm/i915/gt/intel_ggtt.c
+index 79096722ce16..531d501be01f 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ggtt.c
++++ b/drivers/gpu/drm/i915/gt/intel_ggtt.c
+@@ -787,7 +787,7 @@ static int ggtt_probe_common(struct i915_ggtt *ggtt, u64 size)
+ 	 * readback check when writing GTT PTE entries.
+ 	 */
+ 	if (IS_GEN9_LP(i915) || INTEL_GEN(i915) >= 10)
+-		ggtt->gsm = ioremap_nocache(phys_addr, size);
++		ggtt->gsm = ioremap(phys_addr, size);
+ 	else
+ 		ggtt->gsm = ioremap_wc(phys_addr, size);
+ 	if (!ggtt->gsm) {
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 8f640a23281e..31455eceeb0c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1272,6 +1272,14 @@ __execlists_schedule_out(struct i915_request *rq,
+ 	 * refrain from doing non-trivial work here.
+ 	 */
+ 
++	/*
++	 * If we have just completed this context, the engine may now be
++	 * idle and we want to re-enter powersaving.
++	 */
++	if (list_is_last(&rq->link, &ce->timeline->requests) &&
++	    i915_request_completed(rq))
++		intel_engine_add_retire(engine, ce->timeline);
++
+ 	intel_engine_context_out(engine);
+ 	execlists_context_status_change(rq, INTEL_CONTEXT_SCHEDULE_OUT);
+ 	intel_gt_pm_put_async(engine->gt);
+diff --git a/drivers/gpu/drm/via/via_dmablit.c b/drivers/gpu/drm/via/via_dmablit.c
+index d13a3897506e..12fa45d3146d 100644
+--- a/drivers/gpu/drm/via/via_dmablit.c
++++ b/drivers/gpu/drm/via/via_dmablit.c
+@@ -174,6 +174,7 @@ via_map_blit_for_device(struct pci_dev *pdev,
+ static void
+ via_free_sg_info(struct pci_dev *pdev, drm_via_sg_info_t *vsg)
+ {
++	struct page *page;
+ 	int i;
+ 
+ 	switch (vsg->state) {
+@@ -188,8 +189,13 @@ via_free_sg_info(struct pci_dev *pdev, drm_via_sg_info_t *vsg)
+ 		kfree(vsg->desc_pages);
+ 		/* fall through */
+ 	case dr_via_pages_locked:
+-		put_user_pages_dirty_lock(vsg->pages, vsg->num_pages,
+-					  (vsg->direction == DMA_FROM_DEVICE));
++		for (i = 0; i < vsg->num_pages; ++i) {
++			if (NULL != (page = vsg->pages[i])) {
++				if (!PageReserved(page) && (DMA_FROM_DEVICE == vsg->direction))
++					SetPageDirty(page);
++				put_page(page);
++			}
++		}
+ 		/* fall through */
+ 	case dr_via_pages_alloc:
+ 		vfree(vsg->pages);
+diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_ttm_glue.c b/drivers/gpu/drm/vmwgfx/vmwgfx_ttm_glue.c
+index c6f8a3b35ebb..0347d219a516 100644
+--- a/drivers/gpu/drm/vmwgfx/vmwgfx_ttm_glue.c
++++ b/drivers/gpu/drm/vmwgfx/vmwgfx_ttm_glue.c
+@@ -32,11 +32,6 @@ int vmw_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	struct drm_file *file_priv = filp->private_data;
+ 	struct vmw_private *dev_priv = vmw_priv(file_priv->minor->dev);
+ 
+-	if (ret)
+-		return ret;
+-
+-	vma->vm_ops = &vmw_vm_ops;
+-
+ 	/* Use VM_PFNMAP rather than VM_MIXEDMAP if not a COW mapping */
+ 	if ((vma->vm_flags & (VM_SHARED | VM_MAYWRITE)) != VM_MAYWRITE)
+ 		vma->vm_flags = (vma->vm_flags & ~VM_MIXEDMAP) | VM_PFNMAP;
+diff --git a/fs/tracefs/inode.c b/fs/tracefs/inode.c
+index 3fdbbc7a9848..03cc368be525 100644
+--- a/fs/tracefs/inode.c
++++ b/fs/tracefs/inode.c
+@@ -196,7 +196,7 @@ static void set_gid(struct dentry *parent, kgid_t gid)
+ 
+ 		if (!list_empty(&dentry->d_subdirs)) {
+ 			spin_unlock(&this_parent->d_lock);
+-			spin_release(&dentry->d_lock.dep_map, 1, _RET_IP_);
++			spin_release(&dentry->d_lock.dep_map, _RET_IP_);
+ 			this_parent = dentry;
+ 			spin_acquire(&this_parent->d_lock.dep_map, 0, 1, _RET_IP_);
+ 			goto repeat;
+diff --git a/include/linux/intel_tsens_host.h b/include/linux/intel_tsens_host.h
+index b604bd08534b..c482833f7532 100644
+--- a/include/linux/intel_tsens_host.h
++++ b/include/linux/intel_tsens_host.h
+@@ -8,6 +8,8 @@
+ #ifndef _LINUX_INTEL_TSENS_HOST_DEVICE_H
+ #define _LINUX_INTEL_TSENS_HOST_DEVICE_H
+ 
++#include <linux/thermal.h>
++
+ __packed __aligned(4) struct intel_tsens_host_trip_info {
+ 	enum thermal_trip_type trip_type;
+ 	int temp;
+diff --git a/include/linux/lockdep.h b/include/linux/lockdep.h
+index 5bbfd5866081..664f52c6dd4c 100644
+--- a/include/linux/lockdep.h
++++ b/include/linux/lockdep.h
+@@ -632,7 +632,7 @@ do {									\
+ 	typecheck(struct lockdep_map *, &(lock)->dep_map);		\
+ 	lock_acquire(&(lock)->dep_map, subclass, 0, 1, 1, NULL,		\
+ 		     _THIS_IP_);					\
+-	lock_release(&(lock)->dep_map, 0, _THIS_IP_);		\
++	lock_release(&(lock)->dep_map, _THIS_IP_);			\
+ } while (0)
+ 
+ #define lockdep_assert_irqs_enabled()	do {				\
+diff --git a/kernel/locking/rwsem.c b/kernel/locking/rwsem.c
+index b01765d63099..fd089c2abc04 100644
+--- a/kernel/locking/rwsem.c
++++ b/kernel/locking/rwsem.c
+@@ -1516,7 +1516,7 @@ int __sched down_read_interruptible(struct rw_semaphore *sem)
+ 	rwsem_acquire_read(&sem->dep_map, 0, 0, _RET_IP_);
+ 
+ 	if (LOCK_CONTENDED_RETURN(sem, __down_read_trylock, __down_read_interruptible)) {
+-		rwsem_release(&sem->dep_map, 1, _RET_IP_);
++		rwsem_release(&sem->dep_map, _RET_IP_);
+ 		return -EINTR;
+ 	}
+ 
+@@ -1640,7 +1640,7 @@ int down_read_killable_nested(struct rw_semaphore *sem, int subclass)
+ 	rwsem_acquire_read(&sem->dep_map, subclass, 0, _RET_IP_);
+ 
+ 	if (LOCK_CONTENDED_RETURN(sem, __down_read_trylock, __down_read_killable)) {
+-		rwsem_release(&sem->dep_map, 1, _RET_IP_);
++		rwsem_release(&sem->dep_map, _RET_IP_);
+ 		return -EINTR;
+ 	}
+ 
+-- 
+2.17.1
+

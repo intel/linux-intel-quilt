@@ -1,0 +1,60 @@
+From f8315d77a6c7d271cce62e1f1d053d7b4c8a1882 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 6 Feb 2020 20:49:12 +0000
+Subject: [PATCH 3808/4530] drm/i915/gt: Prevent queuing retire workers on the
+ virtual engine
+
+Virtual engines are fleeting. They carry a reference count and may be freed
+when their last request is retired. This makes them unsuitable for the
+task of housing engine->retire.work so assert that it is not used.
+
+Tvrtko tracked down an instance where we did indeed violate this rule.
+In virtual_submit_request, we flush a completed request directly with
+__i915_request_submit and this causes us to queue that request on the
+veng's breadcrumb list and signal it. Leading us down a path where we
+should not attach the retire.
+
+Reported-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Fixes: dc93c9b69315 ("drm/i915/gt: Schedule request retirement when signaler idles")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200206204915.2636606-1-chris@chris-wilson.co.uk
+(cherry picked from commit f91d8156ab8afb32447cd2bf3189219bab943f18)
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+---
+ drivers/gpu/drm/i915/gt/intel_breadcrumbs.c | 3 +++
+ drivers/gpu/drm/i915/gt/intel_gt_requests.c | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_breadcrumbs.c b/drivers/gpu/drm/i915/gt/intel_breadcrumbs.c
+index 0ba524a414c6..cbad7fe722ce 100644
+--- a/drivers/gpu/drm/i915/gt/intel_breadcrumbs.c
++++ b/drivers/gpu/drm/i915/gt/intel_breadcrumbs.c
+@@ -136,6 +136,9 @@ static void add_retire(struct intel_breadcrumbs *b, struct intel_timeline *tl)
+ 	struct intel_engine_cs *engine =
+ 		container_of(b, struct intel_engine_cs, breadcrumbs);
+ 
++	if (unlikely(intel_engine_is_virtual(engine)))
++		engine = intel_virtual_engine_get_sibling(engine, 0);
++
+ 	intel_engine_add_retire(engine, tl);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_requests.c b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+index 7ef1d37970f6..8a5054f21bf8 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_requests.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+@@ -99,6 +99,9 @@ static bool add_retire(struct intel_engine_cs *engine,
+ void intel_engine_add_retire(struct intel_engine_cs *engine,
+ 			     struct intel_timeline *tl)
+ {
++	/* We don't deal well with the engine disappearing beneath us */
++	GEM_BUG_ON(intel_engine_is_virtual(engine));
++
+ 	if (add_retire(engine, tl))
+ 		schedule_work(&engine->retire_work);
+ }
+-- 
+2.17.1
+

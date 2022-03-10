@@ -1,0 +1,62 @@
+From 77c3afce7c2adb552529bf1d1f4e6888770cb6f7 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 14 Nov 2019 17:25:35 +0000
+Subject: [PATCH 2137/4530] drm/i915: Split i915_active.mutex into an irq-safe
+ spinlock for the rbtree
+
+As we want to be able to run inside atomic context for retiring the
+i915_active, and we are no longer allowed to abuse mutex_trylock, split
+the tree management portion of i915_active.mutex into an irq-safe
+spinlock.
+
+References: a0855d24fc22d ("locking/mutex: Complain upon mutex API misuse in IRQ contexts")
+References: https://bugs.freedesktop.org/show_bug.cgi?id=111626
+Fixes: 274cbf20fd10 ("drm/i915: Push the i915_active.retire into a worker")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>
+Cc: Matthew Auld <matthew.auld@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191114172535.1116-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_active.c           | 2 ++
+ drivers/gpu/drm/i915/selftests/i915_active.c | 4 ++--
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index a19e7d89bc8a..63992b666719 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -672,6 +672,7 @@ void i915_active_acquire_barrier(struct i915_active *ref)
+ 	 * populated by i915_request_add_active_barriers() to point to the
+ 	 * request that will eventually release them.
+ 	 */
++	spin_lock_irqsave_nested(&ref->tree_lock, flags, SINGLE_DEPTH_NESTING);
+ 	llist_for_each_safe(pos, next, take_preallocated_barriers(ref)) {
+ 		struct active_node *node = barrier_from_ll(pos);
+ 		struct intel_engine_cs *engine = barrier_to_engine(node);
+@@ -700,6 +701,7 @@ void i915_active_acquire_barrier(struct i915_active *ref)
+ 		llist_add(barrier_to_ll(node), &engine->barrier_tasks);
+ 		intel_engine_pm_put(engine);
+ 	}
++	spin_unlock_irqrestore(&ref->tree_lock, flags);
+ }
+ 
+ void i915_request_add_active_barriers(struct i915_request *rq)
+diff --git a/drivers/gpu/drm/i915/selftests/i915_active.c b/drivers/gpu/drm/i915/selftests/i915_active.c
+index f3fa05c78d78..60290f78750d 100644
+--- a/drivers/gpu/drm/i915/selftests/i915_active.c
++++ b/drivers/gpu/drm/i915/selftests/i915_active.c
+@@ -277,8 +277,8 @@ void i915_active_unlock_wait(struct i915_active *ref)
+ 	}
+ 
+ 	/* And wait for the retire callback */
+-	mutex_lock(&ref->mutex);
+-	mutex_unlock(&ref->mutex);
++	spin_lock_irq(&ref->tree_lock);
++	spin_unlock_irq(&ref->tree_lock);
+ 
+ 	/* ... which may have been on a thread instead */
+ 	flush_work(&ref->work);
+-- 
+2.17.1
+

@@ -1,0 +1,92 @@
+From 98c7d43f0f6f553be3893527b3425a02f2f1665a Mon Sep 17 00:00:00 2001
+From: Jani Nikula <jani.nikula@intel.com>
+Date: Tue, 11 Feb 2020 18:28:01 +0200
+Subject: [PATCH 4208/4530] drm/i915: register vga switcheroo later, unregister
+ earlier
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move vga switcheroo and dsm handler register later in
+i915_driver_register(), and unregister in i915_driver_unregister(). The
+dsm handler unregister is a nop, and is only added for completeness.
+
+My unsubstantiated suspicion is that the vga switcheroo state change
+would not work as early as we register the hooks currently. In any case
+exposing the interfaces to the world only after we've got everything set
+up seems prudent.
+
+Also replace the error handling in vga switcheroo register with a simple
+error message. This is done at the same time due to lack of error
+propagation from i915_driver_register().
+
+Cc: Lukas Wunner <lukas@wunner.de>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Acked-by: Lukas Wunner <lukas@wunner.de>
+Signed-off-by: Jani Nikula <jani.nikula@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200211162802.16180-1-jani.nikula@intel.com
+---
+ drivers/gpu/drm/i915/i915_drv.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index aa30fba3e640..9d0b234583b4 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -293,12 +293,6 @@ static int i915_driver_modeset_probe(struct drm_i915_private *i915)
+ 	if (ret)
+ 		goto out;
+ 
+-	intel_register_dsm_handler();
+-
+-	ret = i915_switcheroo_register(i915);
+-	if (ret)
+-		goto cleanup_vga_client;
+-
+ 	intel_power_domains_init_hw(i915, false);
+ 
+ 	intel_csr_ucode_init(i915);
+@@ -346,8 +340,6 @@ static int i915_driver_modeset_probe(struct drm_i915_private *i915)
+ cleanup_csr:
+ 	intel_csr_ucode_fini(i915);
+ 	intel_power_domains_driver_remove(i915);
+-	i915_switcheroo_unregister(i915);
+-cleanup_vga_client:
+ 	intel_vga_unregister(i915);
+ out:
+ 	return ret;
+@@ -361,8 +353,6 @@ static void i915_driver_modeset_remove(struct drm_i915_private *i915)
+ 
+ 	intel_bios_driver_remove(i915);
+ 
+-	i915_switcheroo_unregister(i915);
+-
+ 	intel_vga_unregister(i915);
+ 
+ 	intel_csr_ucode_fini(i915);
+@@ -1369,6 +1359,11 @@ static void i915_driver_register(struct drm_i915_private *dev_priv)
+ 
+ 	intel_power_domains_enable(dev_priv);
+ 	intel_runtime_pm_enable(&dev_priv->runtime_pm);
++
++	intel_register_dsm_handler();
++
++	if (i915_switcheroo_register(dev_priv))
++		drm_err(&dev_priv->drm, "Failed to register vga switcheroo!\n");
+ }
+ 
+ /**
+@@ -1377,6 +1372,10 @@ static void i915_driver_register(struct drm_i915_private *dev_priv)
+  */
+ static void i915_driver_unregister(struct drm_i915_private *dev_priv)
+ {
++	i915_switcheroo_unregister(dev_priv);
++
++	intel_unregister_dsm_handler();
++
+ 	intel_runtime_pm_disable(&dev_priv->runtime_pm);
+ 	intel_power_domains_disable(dev_priv);
+ 
+-- 
+2.17.1
+

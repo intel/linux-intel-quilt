@@ -1,0 +1,69 @@
+From f4ba484266d2b254e712e069f2b4eabe0d2f7e0f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Sat, 30 Nov 2019 12:05:03 +0000
+Subject: [PATCH 2428/4530] drm/i915/gt: Push the flush_pd before the
+ set-context
+
+Move our "wait for the PD load to complete" paranoia before the
+MI_SET_CONTEXT just in case the context restore tries to access local
+addresses.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Acked-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191130120503.1609483-1-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/gt/intel_ring_submission.c   | 28 +++++++++----------
+ 1 file changed, 13 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index 9a0cdd3b0828..3fa3cd224710 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -1583,24 +1583,11 @@ static int switch_context(struct i915_request *rq)
+ 	GEM_BUG_ON(HAS_EXECLISTS(rq->i915));
+ 
+ 	if (vm) {
+-		ret = load_pd_dir(rq, i915_vm_to_ppgtt(vm));
+-		if (ret)
+-			return ret;
+-	}
+-
+-	if (ce->state) {
+-		GEM_BUG_ON(rq->engine->id != RCS0);
+-
+-		if (!rq->engine->default_state)
+-			hw_flags = MI_RESTORE_INHIBIT;
++		struct intel_engine_cs *engine = rq->engine;
+ 
+-		ret = mi_set_context(rq, hw_flags);
++		ret = load_pd_dir(rq, i915_vm_to_ppgtt(vm));
+ 		if (ret)
+ 			return ret;
+-	}
+-
+-	if (vm) {
+-		struct intel_engine_cs *engine = rq->engine;
+ 
+ 		ret = engine->emit_flush(rq, EMIT_INVALIDATE);
+ 		if (ret)
+@@ -1627,6 +1614,17 @@ static int switch_context(struct i915_request *rq)
+ 			return ret;
+ 	}
+ 
++	if (ce->state) {
++		GEM_BUG_ON(rq->engine->id != RCS0);
++
++		if (!rq->engine->default_state)
++			hw_flags = MI_RESTORE_INHIBIT;
++
++		ret = mi_set_context(rq, hw_flags);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = remap_l3(rq);
+ 	if (ret)
+ 		return ret;
+-- 
+2.17.1
+

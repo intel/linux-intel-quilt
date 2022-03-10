@@ -1,0 +1,69 @@
+From d90b29c8d0db598a0cc29d874d91caeb897829a7 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 1 Nov 2019 14:10:09 +0000
+Subject: [PATCH 1904/4530] drm/i915: Defer rc6 shutdown to suspend_late
+
+Currently we shutdown rc6 during i915_gem_resume() but this is called
+during the preparation phase (i915_drm_prepare) for all suspend paths,
+but we only want to shutdown rc6 for S3+. Move the actual shutdown to
+i915_gem_suspend_late().
+
+We then need to differentiate between suspend targets, to distinguish S0
+(s2idle) where the device is kept awake but needs to be in a low power
+mode (the same as runtime suspend) from the device suspend levels where
+we lose control of HW and so must disable any HW access to dangling
+memory.
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=111909
+Fixes: c113236718e8 ("drm/i915: Extract GT render sleep (rc6) management")
+Testcase: igt/gem_exec_suspend/power-S0
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Andi Shyti <andi.shyti@intel.com>
+Acked-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191101141009.15581-4-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index 89abbfa8f137..72b977235ce0 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -259,6 +259,7 @@ static void wait_for_suspend(struct intel_gt *gt)
+ 		intel_gt_set_wedged(gt);
+ 	}
+ 
++	GEM_BUG_ON(atomic_read(&gt->user_wakeref));
+ 	intel_gt_pm_wait_for_idle(gt);
+ }
+ 
+@@ -272,7 +273,7 @@ void intel_gt_suspend_prepare(struct intel_gt *gt)
+ 
+ static suspend_state_t pm_suspend_target(void)
+ {
+-#if IS_ENABLED(CONFIG_SUSPEND) && IS_ENABLED(CONFIG_PM_SLEEP)
++#if IS_ENABLED(CONFIG_PM_SLEEP)
+ 	return pm_suspend_target_state;
+ #else
+ 	return PM_SUSPEND_TO_IDLE;
+@@ -283,8 +284,6 @@ void intel_gt_suspend_late(struct intel_gt *gt)
+ {
+ 	intel_wakeref_t wakeref;
+ 
+-	user_forcewake(gt, true);
+-
+ 	/* We expect to be idle already; but also want to be independent */
+ 	wait_for_suspend(gt);
+ 
+@@ -301,8 +300,6 @@ void intel_gt_suspend_late(struct intel_gt *gt)
+ 	if (pm_suspend_target() == PM_SUSPEND_TO_IDLE)
+ 		return;
+ 
+-	intel_uc_suspend(&gt->uc);
+-
+ 	with_intel_runtime_pm(gt->uncore->rpm, wakeref) {
+ 		intel_rps_disable(&gt->rps);
+ 		intel_rc6_disable(&gt->rc6);
+-- 
+2.17.1
+

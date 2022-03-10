@@ -1,0 +1,49 @@
+From 4fb29aa08f28b22ea6f26fbc052fe3a5bc4713f9 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 6 Mar 2020 07:16:13 +0000
+Subject: [PATCH 4404/4530] drm/i915: Always propagate the invocation to
+ i915_schedule
+
+We only call i915_schedule() when we know we have changed the priority
+on a request and so require to propagate any change in priority to its
+signalers (for PI). By unconditionally checking all of our signalers, we
+avoid skipping changes made prior to construction of the request (as the
+request may be waited upon before submission when used in parallel).
+
+References: https://gitlab.freedesktop.org/drm/intel/issues/1318
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200306071614.2846708-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_scheduler.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_scheduler.c b/drivers/gpu/drm/i915/i915_scheduler.c
+index be770f2419b1..52f71e83e088 100644
+--- a/drivers/gpu/drm/i915/i915_scheduler.c
++++ b/drivers/gpu/drm/i915/i915_scheduler.c
+@@ -227,10 +227,10 @@ static void kick_submission(struct intel_engine_cs *engine,
+ static void __i915_schedule(struct i915_sched_node *node,
+ 			    const struct i915_sched_attr *attr)
+ {
++	const int prio = max(attr->priority, node->attr.priority);
+ 	struct intel_engine_cs *engine;
+ 	struct i915_dependency *dep, *p;
+ 	struct i915_dependency stack;
+-	const int prio = attr->priority;
+ 	struct sched_cache cache;
+ 	LIST_HEAD(dfs);
+ 
+@@ -238,9 +238,6 @@ static void __i915_schedule(struct i915_sched_node *node,
+ 	lockdep_assert_held(&schedule_lock);
+ 	GEM_BUG_ON(prio == I915_PRIORITY_INVALID);
+ 
+-	if (prio <= READ_ONCE(node->attr.priority))
+-		return;
+-
+ 	if (node_signaled(node))
+ 		return;
+ 
+-- 
+2.17.1
+

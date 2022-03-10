@@ -1,0 +1,63 @@
+From babf157893b142946662c00c91b04950525e18c3 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 11 Nov 2019 13:32:05 +0000
+Subject: [PATCH 2019/4530] drm/i915/execlists: Move reset_active() from
+ schedule-out to schedule-in
+
+The gem_ctx_persistence/smoketest was detecting an odd coherency issue
+inside the LRC context image; that the address of the ring buffer did
+not match our associated struct intel_ring. As we set the address into
+the context image when we pin the ring buffer into place before the
+context is active, that leaves the question of where did it get
+overwritten. Either the HW context save occurred after our pin which
+would imply that our idle barriers are broken, or we overwrote the
+context image ourselves. It is only in reset_active() where we dabble
+inside the context image outside of a serialised path from schedule-out;
+but we could equally perform the operation inside schedule-in which is
+then fully serialised with the context pin -- and remains serialised by
+the engine pulse with kill_context(). (The only downside, aside from
+doing more work inside the engine->active.lock, was the plan to merge
+all the reset paths into doing their context scrubbing on schedule-out
+needs more thought.)
+
+Fixes: d12acee84ffb ("drm/i915/execlists: Cancel banned contexts on schedule-out")
+Testcase: igt/gem_ctx_persistence/smoketest
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@linux.intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191111133205.11590-3-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 10 +---------
+ 1 file changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 9073cb29924e..6e1b48be6628 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1100,7 +1100,7 @@ __execlists_schedule_in(struct i915_request *rq)
+ 		reset_active(rq, engine);
+ 
+ 	if (IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM))
+-		execlists_check_context(ce, rq->engine);
++		execlists_check_context(ce, engine);
+ 
+ 	if (ce->tag) {
+ 		/* Use a fixed tag for OA and friends */
+@@ -1163,14 +1163,6 @@ __execlists_schedule_out(struct i915_request *rq,
+ 	 * refrain from doing non-trivial work here.
+ 	 */
+ 
+-	/*
+-	 * If we have just completed this context, the engine may now be
+-	 * idle and we want to re-enter powersaving.
+-	 */
+-	if (list_is_last(&rq->link, &ce->timeline->requests) &&
+-	    i915_request_completed(rq))
+-		intel_engine_add_retire(engine, ce->timeline);
+-
+ 	intel_engine_context_out(engine);
+ 	execlists_context_status_change(rq, INTEL_CONTEXT_SCHEDULE_OUT);
+ 	intel_gt_pm_put_async(engine->gt);
+-- 
+2.17.1
+

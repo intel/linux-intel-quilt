@@ -1,0 +1,54 @@
+From c143cd678d300baead5df2c23b54b0efe2520345 Mon Sep 17 00:00:00 2001
+From: Emily Deng <Emily.Deng@amd.com>
+Date: Tue, 15 Oct 2019 10:08:22 +0800
+Subject: [PATCH 1062/4530] drm/amdgpu: Fix tdr3 could hang with slow compute
+ issue
+
+When index is 1, need to set compute ring timeout for sriov and passthrough.
+
+Signed-off-by: Emily Deng <Emily.Deng@amd.com>
+Reviewed-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_device.c | 5 ++++-
+ drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c    | 6 ++++--
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index 9b5ad2e6a692..b56ad16d2eb9 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -2622,8 +2622,11 @@ static int amdgpu_device_get_job_timeout_settings(struct amdgpu_device *adev)
+ 		 * There is only one value specified and
+ 		 * it should apply to all non-compute jobs.
+ 		 */
+-		if (index == 1)
++		if (index == 1) {
+ 			adev->sdma_timeout = adev->video_timeout = adev->gfx_timeout;
++			if (amdgpu_sriov_vf(adev) || amdgpu_passthrough(adev))
++				adev->compute_timeout = adev->gfx_timeout;
++		}
+ 	}
+ 
+ 	return ret;
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index 36a8955ded94..bac0bf5c2f03 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -250,9 +250,11 @@ module_param_named(msi, amdgpu_msi, int, 0444);
+  * By default(with no lockup_timeout settings), the timeout for all non-compute(GFX, SDMA and Video)
+  * jobs is 10000. And there is no timeout enforced on compute jobs.
+  */
+-MODULE_PARM_DESC(lockup_timeout, "GPU lockup timeout in ms (default: 10000 for non-compute jobs and infinity timeout for compute jobs."
++MODULE_PARM_DESC(lockup_timeout, "GPU lockup timeout in ms (default: for bare metal 10000 for non-compute jobs and infinity timeout for compute jobs; "
++		"for passthrough or sriov, 10000 for all jobs."
+ 		" 0: keep default value. negative: infinity timeout), "
+-		"format is [Non-Compute] or [GFX,Compute,SDMA,Video]");
++		"format: for bare metal [Non-Compute] or [GFX,Compute,SDMA,Video]; "
++		"for passthrough or sriov [all jobs] or [GFX,Compute,SDMA,Video].");
+ module_param_string(lockup_timeout, amdgpu_lockup_timeout, sizeof(amdgpu_lockup_timeout), 0444);
+ 
+ /**
+-- 
+2.17.1
+

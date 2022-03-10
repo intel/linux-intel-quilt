@@ -1,0 +1,81 @@
+From ffdde2ca14ac1b55106f8d8b5e8bdf46cb03ef54 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 5 Dec 2019 11:37:26 +0000
+Subject: [PATCH 2539/4530] drm/i915/gt: Bump the PP_DIR invalidation for
+ Baytrail
+
+Invalidate the ring TLB and increase the delay required for Baytrail.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Acked-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191205113726.413351-3-chris@chris-wilson.co.uk
+---
+ .../gpu/drm/i915/gt/intel_ring_submission.c   | 39 +++++++++++++++++--
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index 6c7bc209091b..751a72017c10 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -1396,6 +1396,25 @@ static int load_pd_dir(struct i915_request *rq, const struct i915_ppgtt *ppgtt)
+ 	return 0;
+ }
+ 
++static int flush_tlb(struct i915_request *rq)
++{
++	const struct intel_engine_cs * const engine = rq->engine;
++	u32 *cs;
++
++	cs = intel_ring_begin(rq, 4);
++	if (IS_ERR(cs))
++		return PTR_ERR(cs);
++
++	*cs++ = MI_LOAD_REGISTER_IMM(1);
++	*cs++ = i915_mmio_reg_offset(RING_INSTPM(engine->mmio_base));
++	*cs++ = _MASKED_BIT_ENABLE(INSTPM_TLB_INVALIDATE);
++
++	*cs++ = MI_NOOP;
++	intel_ring_advance(rq, cs);
++
++	return 0;
++}
++
+ static inline int mi_set_context(struct i915_request *rq, u32 flags)
+ {
+ 	struct drm_i915_private *i915 = rq->i915;
+@@ -1580,16 +1599,28 @@ static int switch_context(struct i915_request *rq)
+ 		 * post-sync op, this extra pass appears vital before a
+ 		 * mm switch!
+ 		 */
+-		do {
+-			ret = rq->engine->emit_flush(rq, EMIT_FLUSH);
+-			if (ret)
+-				return ret;
++		ret = rq->engine->emit_flush(rq, EMIT_INVALIDATE);
++		if (ret)
++			return ret;
++
++		ret = flush_tlb(rq);
++		if (ret)
++			return ret;
+ 
++		do {
+ 			ret = load_pd_dir(rq, i915_vm_to_ppgtt(vm));
+ 			if (ret)
+ 				return ret;
+ 		} while (--loops);
+ 
++		ret = flush_tlb(rq);
++		if (ret)
++			return ret;
++
++		ret = rq->engine->emit_flush(rq, EMIT_FLUSH);
++		if (ret)
++			return ret;
++
+ 		ret = rq->engine->emit_flush(rq, EMIT_INVALIDATE);
+ 		if (ret)
+ 			return ret;
+-- 
+2.17.1
+

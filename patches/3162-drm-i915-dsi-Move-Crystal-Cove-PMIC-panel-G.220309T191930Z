@@ -1,0 +1,147 @@
+From 1f6a020089f62b289470368b39b8171d50c16488 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <hdegoede@redhat.com>
+Date: Mon, 16 Dec 2019 21:51:21 +0100
+Subject: [PATCH 3162/4530] drm/i915/dsi: Move Crystal Cove PMIC panel GPIO
+ lookup from mfd to the i915 driver
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move the Crystal Cove PMIC panel GPIO lookup-table from
+drivers/mfd/intel_soc_pmic_core.c to the i915 driver.
+
+The moved looked-up table is adding a GPIO lookup to the i915 PCI
+device and the GPIO subsys allows only one lookup table per device,
+
+The intel_soc_pmic_core.c code only adds lookup-table entries for the
+PMIC panel GPIO (as it deals only with the PMIC), but we also need to be
+able to access some GPIOs on the SoC itself, which requires entries for
+these GPIOs in the lookup-table.
+
+Since the lookup-table is attached to the i915 PCI device it really
+should be part of the i915 driver, this will also allow us to extend
+it with GPIOs from other sources when necessary.
+
+Acked-by: Linus Walleij <linus.walleij@linaro.org>
+Reviewed-by: Andy Shevchenko <andriy.shevchenko@intel.com>
+Reviewed-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Signed-off-by: Hans de Goede <hdegoede@redhat.com>
+Acked-by: Lee Jones <lee.jones@linaro.org>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191216205122.1850923-5-hdegoede@redhat.com
+---
+ drivers/gpu/drm/i915/display/intel_dsi_vbt.c | 23 +++++++++++++++++++-
+ drivers/mfd/intel_soc_pmic_core.c            | 19 ----------------
+ 2 files changed, 22 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_dsi_vbt.c b/drivers/gpu/drm/i915/display/intel_dsi_vbt.c
+index 4210f449553e..89558ccf79c8 100644
+--- a/drivers/gpu/drm/i915/display/intel_dsi_vbt.c
++++ b/drivers/gpu/drm/i915/display/intel_dsi_vbt.c
+@@ -25,6 +25,7 @@
+  */
+ 
+ #include <linux/gpio/consumer.h>
++#include <linux/gpio/machine.h>
+ #include <linux/mfd/intel_soc_pmic.h>
+ #include <linux/slab.h>
+ 
+@@ -686,8 +687,18 @@ bool intel_dsi_vbt_init(struct intel_dsi *intel_dsi, u16 panel_id)
+ 
+ /*
+  * On some BYT/CHT devs some sequences are incomplete and we need to manually
+- * control some GPIOs.
++ * control some GPIOs. We need to add a GPIO lookup table before we get these.
+  */
++static struct gpiod_lookup_table pmic_panel_gpio_table = {
++	/* Intel GFX is consumer */
++	.dev_id = "0000:00:02.0",
++	.table = {
++		/* Panel EN/DISABLE */
++		GPIO_LOOKUP("gpio_crystalcove", 94, "panel", GPIO_ACTIVE_HIGH),
++		{ }
++	},
++};
++
+ void intel_dsi_vbt_gpio_init(struct intel_dsi *intel_dsi, bool panel_is_on)
+ {
+ 	struct drm_device *dev = intel_dsi->base.base.dev;
+@@ -697,6 +708,8 @@ void intel_dsi_vbt_gpio_init(struct intel_dsi *intel_dsi, bool panel_is_on)
+ 
+ 	if ((IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv)) &&
+ 	    mipi_config->pwm_blc == PPS_BLC_PMIC) {
++		gpiod_add_lookup_table(&pmic_panel_gpio_table);
++
+ 		intel_dsi->gpio_panel = gpiod_get(dev->dev, "panel", flags);
+ 		if (IS_ERR(intel_dsi->gpio_panel)) {
+ 			DRM_ERROR("Failed to own gpio for panel control\n");
+@@ -707,8 +720,16 @@ void intel_dsi_vbt_gpio_init(struct intel_dsi *intel_dsi, bool panel_is_on)
+ 
+ void intel_dsi_vbt_gpio_cleanup(struct intel_dsi *intel_dsi)
+ {
++	struct drm_device *dev = intel_dsi->base.base.dev;
++	struct drm_i915_private *dev_priv = to_i915(dev);
++	struct mipi_config *mipi_config = dev_priv->vbt.dsi.config;
++
+ 	if (intel_dsi->gpio_panel) {
+ 		gpiod_put(intel_dsi->gpio_panel);
+ 		intel_dsi->gpio_panel = NULL;
+ 	}
++
++	if ((IS_VALLEYVIEW(dev_priv) || IS_CHERRYVIEW(dev_priv)) &&
++	    mipi_config->pwm_blc == PPS_BLC_PMIC)
++		gpiod_remove_lookup_table(&pmic_panel_gpio_table);
+ }
+diff --git a/drivers/mfd/intel_soc_pmic_core.c b/drivers/mfd/intel_soc_pmic_core.c
+index c9f35378d391..01c1359f5127 100644
+--- a/drivers/mfd/intel_soc_pmic_core.c
++++ b/drivers/mfd/intel_soc_pmic_core.c
+@@ -9,8 +9,6 @@
+  */
+ 
+ #include <linux/acpi.h>
+-#include <linux/gpio/consumer.h>
+-#include <linux/gpio/machine.h>
+ #include <linux/i2c.h>
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+@@ -25,17 +23,6 @@
+ #define BYT_CRC_HRV		2
+ #define CHT_CRC_HRV		3
+ 
+-/* Lookup table for the Panel Enable/Disable line as GPIO signals */
+-static struct gpiod_lookup_table panel_gpio_table = {
+-	/* Intel GFX is consumer */
+-	.dev_id = "0000:00:02.0",
+-	.table = {
+-		/* Panel EN/DISABLE */
+-		GPIO_LOOKUP("gpio_crystalcove", 94, "panel", GPIO_ACTIVE_HIGH),
+-		{ },
+-	},
+-};
+-
+ /* PWM consumed by the Intel GFX */
+ static struct pwm_lookup crc_pwm_lookup[] = {
+ 	PWM_LOOKUP("crystal_cove_pwm", 0, "0000:00:02.0", "pwm_backlight", 0, PWM_POLARITY_NORMAL),
+@@ -96,9 +83,6 @@ static int intel_soc_pmic_i2c_probe(struct i2c_client *i2c,
+ 	if (ret)
+ 		dev_warn(dev, "Can't enable IRQ as wake source: %d\n", ret);
+ 
+-	/* Add lookup table binding for Panel Control to the GPIO Chip */
+-	gpiod_add_lookup_table(&panel_gpio_table);
+-
+ 	/* Add lookup table for crc-pwm */
+ 	pwm_add_table(crc_pwm_lookup, ARRAY_SIZE(crc_pwm_lookup));
+ 
+@@ -121,9 +105,6 @@ static int intel_soc_pmic_i2c_remove(struct i2c_client *i2c)
+ 
+ 	regmap_del_irq_chip(pmic->irq, pmic->irq_chip_data);
+ 
+-	/* Remove lookup table for Panel Control from the GPIO Chip */
+-	gpiod_remove_lookup_table(&panel_gpio_table);
+-
+ 	/* remove crc-pwm lookup table */
+ 	pwm_remove_table(crc_pwm_lookup, ARRAY_SIZE(crc_pwm_lookup));
+ 
+-- 
+2.17.1
+

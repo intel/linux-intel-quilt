@@ -1,0 +1,48 @@
+From 6c007b7d2f91332b280a16d2244f503c3b72ca75 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 27 Feb 2020 20:47:27 +0000
+Subject: [PATCH 4304/4530] drm/i915/gt: Check engine-is-awake on reset later
+
+As we drop the engine-pm on retiring, that may happen while there are
+still CS events in the buffer. As such we cannot assert the engine is
+still active on reset, until we know that the current request is still
+in flight.
+
+Closes: https://gitlab.freedesktop.org/drm/intel/issues/1338
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200227204727.2009346-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 7315df5f9e0f..9cc894c0c3d5 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -3636,9 +3636,6 @@ static void __execlists_reset(struct intel_engine_cs *engine, bool stalled)
+ 	if (!rq)
+ 		goto unwind;
+ 
+-	/* We still have requests in-flight; the engine should be active */
+-	GEM_BUG_ON(!intel_engine_pm_is_awake(engine));
+-
+ 	ce = rq->context;
+ 	GEM_BUG_ON(!i915_vma_is_pinned(ce->state));
+ 
+@@ -3648,8 +3645,12 @@ static void __execlists_reset(struct intel_engine_cs *engine, bool stalled)
+ 		goto out_replay;
+ 	}
+ 
++	/* We still have requests in-flight; the engine should be active */
++	GEM_BUG_ON(!intel_engine_pm_is_awake(engine));
++
+ 	/* Context has requests still in-flight; it should not be idle! */
+ 	GEM_BUG_ON(i915_active_is_idle(&ce->active));
++
+ 	rq = active_request(ce->timeline, rq);
+ 	head = intel_ring_wrap(ce->ring, rq->head);
+ 	GEM_BUG_ON(head == ce->ring->tail);
+-- 
+2.17.1
+

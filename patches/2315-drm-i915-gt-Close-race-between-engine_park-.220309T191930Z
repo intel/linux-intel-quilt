@@ -1,0 +1,54 @@
+From 5f7df5f486f764aff62c27f738fdf849c6223162 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 20 Nov 2019 16:55:13 +0000
+Subject: [PATCH 2315/4530] drm/i915/gt: Close race between engine_park and
+ intel_gt_retire_requests
+
+The general concept was that intel_timeline.active_count was locked by
+the intel_timeline.mutex. The exception was for power management, where
+the engine->kernel_context->timeline could be manipulated under the
+global wakeref.mutex.
+
+This was quite solid, as we always manipulated the timeline only while
+we held an engine wakeref.
+
+And then we started retiring requests outside of struct_mutex, only
+using the timelines.active_list and the timeline->mutex. There we
+started manipulating intel_timeline.active_count outside of an engine
+wakeref, and so introduced a race between __engine_park() and
+intel_gt_retire_requests(), a race that could result in the
+engine->kernel_context not being added to the active timelines and so
+losing requests, which caused us to keep the system permanently powered
+up [and unloadable].
+
+The race would be easy to close if we could take the engine wakeref for
+the timeline before we retire -- except timelines are not bound to any
+engine and so we would need to keep all active engines awake. The
+alternative is to guard intel_timeline_enter/intel_timeline_exit for use
+outside of the timeline->mutex.
+
+Fixes: e5dadff4b093 ("drm/i915: Protect request retirement with timeline->mutex")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Matthew Auld <matthew.auld@intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191120165514.3955081-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_requests.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_requests.c b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+index 780dc922bb9b..ca97982078fb 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_requests.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+@@ -146,7 +146,6 @@ long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
+ 
+ 		/* Resume iteration after dropping lock */
+ 		list_safe_reset_next(tl, tn, link);
+-
+ 		if (atomic_dec_and_test(&tl->active_count))
+ 			list_del(&tl->link);
+ 
+-- 
+2.17.1
+

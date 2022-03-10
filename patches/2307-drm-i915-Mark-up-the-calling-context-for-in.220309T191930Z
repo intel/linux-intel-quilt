@@ -1,0 +1,47 @@
+From 847e2a0739a124e7cce41afe69d376a9e1110f4e Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 20 Nov 2019 12:54:33 +0000
+Subject: [PATCH 2307/4530] drm/i915: Mark up the calling context for
+ intel_wakeref_put()
+
+Previously, we assumed we could use mutex_trylock() within an atomic
+context, falling back to a worker if contended. However, such trickery
+is illegal inside interrupt context, and so we need to always use a
+worker under such circumstances. As we normally are in process context,
+we can typically use a plain mutex, and only defer to a work when we
+know we are being called from an interrupt path.
+
+Fixes: 51fbd8de87dc ("drm/i915/pmu: Atomically acquire the gt_pm wakeref")
+References: a0855d24fc22d ("locking/mutex: Complain upon mutex API misuse in IRQ contexts")
+References: https://bugs.freedesktop.org/show_bug.cgi?id=111626
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191120125433.3767149-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_active.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index 63992b666719..a19e7d89bc8a 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -672,7 +672,6 @@ void i915_active_acquire_barrier(struct i915_active *ref)
+ 	 * populated by i915_request_add_active_barriers() to point to the
+ 	 * request that will eventually release them.
+ 	 */
+-	spin_lock_irqsave_nested(&ref->tree_lock, flags, SINGLE_DEPTH_NESTING);
+ 	llist_for_each_safe(pos, next, take_preallocated_barriers(ref)) {
+ 		struct active_node *node = barrier_from_ll(pos);
+ 		struct intel_engine_cs *engine = barrier_to_engine(node);
+@@ -701,7 +700,6 @@ void i915_active_acquire_barrier(struct i915_active *ref)
+ 		llist_add(barrier_to_ll(node), &engine->barrier_tasks);
+ 		intel_engine_pm_put(engine);
+ 	}
+-	spin_unlock_irqrestore(&ref->tree_lock, flags);
+ }
+ 
+ void i915_request_add_active_barriers(struct i915_request *rq)
+-- 
+2.17.1
+

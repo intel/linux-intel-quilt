@@ -1,0 +1,89 @@
+From 002fb65cef1ca219206c092c2fd31000eb813d4a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Christian=20K=C3=B6nig?= <christian.koenig@amd.com>
+Date: Mon, 16 Sep 2019 10:35:53 -0500
+Subject: [PATCH 0387/4530] drm/amdgpu: allocate PDs/PTs with no_gpu_wait in a
+ page fault
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+While handling a page fault we can't wait for other ongoing GPU
+operations or we can potentially run into deadlocks.
+
+Signed-off-by: Christian König <christian.koenig@amd.com>
+Reviewed-by: Felix Kuehling <Felix.Kuehling@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_object.c | 2 +-
+ drivers/gpu/drm/amd/amdgpu/amdgpu_object.h | 1 +
+ drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c     | 8 +++++---
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
+index 7289e1b4fb60..dacf93d3d684 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
+@@ -451,7 +451,7 @@ static int amdgpu_bo_do_create(struct amdgpu_device *adev,
+ {
+ 	struct ttm_operation_ctx ctx = {
+ 		.interruptible = (bp->type != ttm_bo_type_kernel),
+-		.no_wait_gpu = false,
++		.no_wait_gpu = bp->no_wait_gpu,
+ 		.resv = bp->resv,
+ 		.flags = bp->type != ttm_bo_type_kernel ?
+ 			TTM_OPT_FLAG_ALLOW_RES_EVICT : 0
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
+index 658f4c9779b7..314190c2c5c2 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
+@@ -41,6 +41,7 @@ struct amdgpu_bo_param {
+ 	u32				preferred_domain;
+ 	u64				flags;
+ 	enum ttm_bo_type		type;
++	bool				no_wait_gpu;
+ 	struct dma_resv	*resv;
+ };
+ 
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
+index 77e565241ecb..043da23d6d6f 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
+@@ -819,7 +819,8 @@ static int amdgpu_vm_clear_bo(struct amdgpu_device *adev,
+  * @bp: resulting BO allocation parameters
+  */
+ static void amdgpu_vm_bo_param(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+-			       int level, struct amdgpu_bo_param *bp)
++			       int level, bool direct,
++			       struct amdgpu_bo_param *bp)
+ {
+ 	memset(bp, 0, sizeof(*bp));
+ 
+@@ -834,6 +835,7 @@ static void amdgpu_vm_bo_param(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+ 	else if (!vm->root.base.bo || vm->root.base.bo->shadow)
+ 		bp->flags |= AMDGPU_GEM_CREATE_SHADOW;
+ 	bp->type = ttm_bo_type_kernel;
++	bp->no_wait_gpu = direct;
+ 	if (vm->root.base.bo)
+ 		bp->resv = vm->root.base.bo->tbo.base.resv;
+ }
+@@ -875,7 +877,7 @@ static int amdgpu_vm_alloc_pts(struct amdgpu_device *adev,
+ 	if (entry->base.bo)
+ 		return 0;
+ 
+-	amdgpu_vm_bo_param(adev, vm, cursor->level, &bp);
++	amdgpu_vm_bo_param(adev, vm, cursor->level, direct, &bp);
+ 
+ 	r = amdgpu_bo_create(adev, &bp, &pt);
+ 	if (r)
+@@ -2712,7 +2714,7 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
+ 		vm->update_funcs = &amdgpu_vm_sdma_funcs;
+ 	vm->last_update = NULL;
+ 
+-	amdgpu_vm_bo_param(adev, vm, adev->vm_manager.root_level, &bp);
++	amdgpu_vm_bo_param(adev, vm, adev->vm_manager.root_level, false, &bp);
+ 	if (vm_context == AMDGPU_VM_CONTEXT_COMPUTE)
+ 		bp.flags &= ~AMDGPU_GEM_CREATE_SHADOW;
+ 	r = amdgpu_bo_create(adev, &bp, &root);
+-- 
+2.17.1
+

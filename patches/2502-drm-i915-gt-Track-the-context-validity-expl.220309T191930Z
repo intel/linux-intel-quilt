@@ -1,0 +1,81 @@
+From b6ac2c3003c41d9d10322ecb52ef92e3802d3820 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 3 Dec 2019 12:41:55 +0000
+Subject: [PATCH 2502/4530] drm/i915/gt: Track the context validity explicitly
+
+Rather than assume if and only if the engine->default_state is not set
+that the context is invalid, instead track when we know the context has
+valid state -- either because we have copied the default_state or we
+have completed a context switch to save the HW state.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Acked-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191203124155.3019926-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_context.c         | 1 +
+ drivers/gpu/drm/i915/gt/intel_context_types.h   | 1 +
+ drivers/gpu/drm/i915/gt/intel_lrc.c             | 1 +
+ drivers/gpu/drm/i915/gt/intel_ring_submission.c | 4 +++-
+ 4 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_context.c b/drivers/gpu/drm/i915/gt/intel_context.c
+index e00e53aa4ef6..8908a56347a8 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context.c
++++ b/drivers/gpu/drm/i915/gt/intel_context.c
+@@ -181,6 +181,7 @@ static void __intel_context_retire(struct i915_active *active)
+ 	GEM_TRACE("%s context:%llx retire\n",
+ 		  ce->engine->name, ce->timeline->fence_context);
+ 
++	set_bit(CONTEXT_VALID_BIT, &ce->flags);
+ 	if (ce->state)
+ 		__context_unpin_state(ce->state);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_context_types.h b/drivers/gpu/drm/i915/gt/intel_context_types.h
+index 6959b05ae5f8..d1204cc899a3 100644
+--- a/drivers/gpu/drm/i915/gt/intel_context_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_context_types.h
+@@ -55,6 +55,7 @@ struct intel_context {
+ 
+ 	unsigned long flags;
+ #define CONTEXT_ALLOC_BIT 0
++#define CONTEXT_VALID_BIT 1
+ 
+ 	u32 *lrc_reg_state;
+ 	u64 lrc_desc;
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index d6e82e85f583..a53fdc4060f7 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -4098,6 +4098,7 @@ populate_lr_context(struct intel_context *ce,
+ 
+ 		memcpy(vaddr, defaults, engine->context_size);
+ 		i915_gem_object_unpin_map(engine->default_state);
++		__set_bit(CONTEXT_VALID_BIT, &ce->flags);
+ 		inhibit = false;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index 3fa3cd224710..412a6da8225a 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -1319,6 +1319,8 @@ static int ring_context_alloc(struct intel_context *ce)
+ 			return PTR_ERR(vma);
+ 
+ 		ce->state = vma;
++		if (engine->default_state)
++			__set_bit(CONTEXT_VALID_BIT, &ce->flags);
+ 	}
+ 
+ 	return 0;
+@@ -1617,7 +1619,7 @@ static int switch_context(struct i915_request *rq)
+ 	if (ce->state) {
+ 		GEM_BUG_ON(rq->engine->id != RCS0);
+ 
+-		if (!rq->engine->default_state)
++		if (!test_bit(CONTEXT_VALID_BIT, &ce->flags))
+ 			hw_flags = MI_RESTORE_INHIBIT;
+ 
+ 		ret = mi_set_context(rq, hw_flags);
+-- 
+2.17.1
+

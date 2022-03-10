@@ -1,0 +1,202 @@
+From 38cf16a2eb179f781ea6b050b9fe4c306ae0cce9 Mon Sep 17 00:00:00 2001
+From: Kevin Wang <kevin1.wang@amd.com>
+Date: Tue, 3 Sep 2019 16:02:33 +0800
+Subject: [PATCH 0295/4530] drm/amd/powerplay: replace smu->table_count with
+ SMU_TABLE_COUNT in smu (v2)
+
+fix bellow patch issue:
+drm/amd/powerplay: introduce smu table id type to handle the smu table
+for each asic
+----
+"This patch introduces new smu table type, it's to handle the
+ different smu table
+ defines for each asic with the same smu ip."
+
+before:
+use smu->table_count to represent the actual table count in smc firmware
+use actual table count to check smu function parameter about smu table
+after:
+use logic table count "SMU_TABLE_COUNT" to check function parameter
+because table id already mapped in smu driver,
+and smu function will use logic table id not actual table id to check func parameter.
+
+v2: squash in warning fix
+
+Signed-off-by: Kevin Wang <kevin1.wang@amd.com>
+Reviewed-by: Evan Quan <evan.quan@amd.com>
+Acked-by: Huang Rui <ray.huang@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/powerplay/amdgpu_smu.c     | 13 ++++---------
+ drivers/gpu/drm/amd/powerplay/arcturus_ppt.c   |  3 ---
+ drivers/gpu/drm/amd/powerplay/inc/amdgpu_smu.h |  1 -
+ drivers/gpu/drm/amd/powerplay/navi10_ppt.c     |  3 ---
+ drivers/gpu/drm/amd/powerplay/renoir_ppt.c     |  3 ---
+ drivers/gpu/drm/amd/powerplay/smu_v11_0.c      |  5 ++---
+ drivers/gpu/drm/amd/powerplay/smu_v12_0.c      |  4 ++--
+ drivers/gpu/drm/amd/powerplay/vega20_ppt.c     |  3 ---
+ 8 files changed, 8 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/powerplay/amdgpu_smu.c b/drivers/gpu/drm/amd/powerplay/amdgpu_smu.c
+index bcb39613c84a..a26bd591169a 100644
+--- a/drivers/gpu/drm/amd/powerplay/amdgpu_smu.c
++++ b/drivers/gpu/drm/amd/powerplay/amdgpu_smu.c
+@@ -485,7 +485,7 @@ int smu_update_table(struct smu_context *smu, enum smu_table_id table_index, int
+ 	int ret = 0;
+ 	int table_id = smu_table_get_index(smu, table_index);
+ 
+-	if (!table_data || table_id >= smu_table->table_count || table_id < 0)
++	if (!table_data || table_id >= SMU_TABLE_COUNT || table_id < 0)
+ 		return -EINVAL;
+ 
+ 	table = &smu_table->tables[table_index];
+@@ -916,14 +916,10 @@ static int smu_init_fb_allocations(struct smu_context *smu)
+ 	struct amdgpu_device *adev = smu->adev;
+ 	struct smu_table_context *smu_table = &smu->smu_table;
+ 	struct smu_table *tables = smu_table->tables;
+-	uint32_t table_count = smu_table->table_count;
+ 	uint32_t i = 0;
+ 	int32_t ret = 0;
+ 
+-	if (table_count <= 0)
+-		return -EINVAL;
+-
+-	for (i = 0 ; i < table_count; i++) {
++	for (i = 0; i < SMU_TABLE_COUNT; i++) {
+ 		if (tables[i].size == 0)
+ 			continue;
+ 		ret = amdgpu_bo_create_kernel(adev,
+@@ -954,13 +950,12 @@ static int smu_fini_fb_allocations(struct smu_context *smu)
+ {
+ 	struct smu_table_context *smu_table = &smu->smu_table;
+ 	struct smu_table *tables = smu_table->tables;
+-	uint32_t table_count = smu_table->table_count;
+ 	uint32_t i = 0;
+ 
+-	if (table_count == 0 || tables == NULL)
++	if (!tables)
+ 		return 0;
+ 
+-	for (i = 0 ; i < table_count; i++) {
++	for (i = 0; i < SMU_TABLE_COUNT; i++) {
+ 		if (tables[i].size == 0)
+ 			continue;
+ 		amdgpu_bo_free_kernel(&tables[i].bo,
+diff --git a/drivers/gpu/drm/amd/powerplay/arcturus_ppt.c b/drivers/gpu/drm/amd/powerplay/arcturus_ppt.c
+index d493a3f8c07a..13d5e37eb66e 100644
+--- a/drivers/gpu/drm/amd/powerplay/arcturus_ppt.c
++++ b/drivers/gpu/drm/amd/powerplay/arcturus_ppt.c
+@@ -1933,8 +1933,5 @@ static const struct pptable_funcs arcturus_ppt_funcs = {
+ 
+ void arcturus_set_ppt_funcs(struct smu_context *smu)
+ {
+-	struct smu_table_context *smu_table = &smu->smu_table;
+-
+ 	smu->ppt_funcs = &arcturus_ppt_funcs;
+-	smu_table->table_count = TABLE_COUNT;
+ }
+diff --git a/drivers/gpu/drm/amd/powerplay/inc/amdgpu_smu.h b/drivers/gpu/drm/amd/powerplay/inc/amdgpu_smu.h
+index 9578aa067cc2..12fe59abcb8d 100644
+--- a/drivers/gpu/drm/amd/powerplay/inc/amdgpu_smu.h
++++ b/drivers/gpu/drm/amd/powerplay/inc/amdgpu_smu.h
+@@ -259,7 +259,6 @@ struct smu_table_context
+ 	struct smu_bios_boot_up_values	boot_values;
+ 	void                            *driver_pptable;
+ 	struct smu_table		*tables;
+-	uint32_t			table_count;
+ 	struct smu_table		memory_pool;
+ 	uint8_t                         thermal_controller_type;
+ 	uint16_t			TDPODLimit;
+diff --git a/drivers/gpu/drm/amd/powerplay/navi10_ppt.c b/drivers/gpu/drm/amd/powerplay/navi10_ppt.c
+index 328e258a6895..764b8be60f10 100644
+--- a/drivers/gpu/drm/amd/powerplay/navi10_ppt.c
++++ b/drivers/gpu/drm/amd/powerplay/navi10_ppt.c
+@@ -1639,8 +1639,5 @@ static const struct pptable_funcs navi10_ppt_funcs = {
+ 
+ void navi10_set_ppt_funcs(struct smu_context *smu)
+ {
+-	struct smu_table_context *smu_table = &smu->smu_table;
+-
+ 	smu->ppt_funcs = &navi10_ppt_funcs;
+-	smu_table->table_count = TABLE_COUNT;
+ }
+diff --git a/drivers/gpu/drm/amd/powerplay/renoir_ppt.c b/drivers/gpu/drm/amd/powerplay/renoir_ppt.c
+index e62bfba51562..a5cf846b50d4 100644
+--- a/drivers/gpu/drm/amd/powerplay/renoir_ppt.c
++++ b/drivers/gpu/drm/amd/powerplay/renoir_ppt.c
+@@ -257,9 +257,6 @@ static const struct pptable_funcs renoir_ppt_funcs = {
+ 
+ void renoir_set_ppt_funcs(struct smu_context *smu)
+ {
+-	struct smu_table_context *smu_table = &smu->smu_table;
+-
+ 	smu->ppt_funcs = &renoir_ppt_funcs;
+ 	smu->smc_if_version = SMU12_DRIVER_IF_VERSION;
+-	smu_table->table_count = TABLE_COUNT;
+ }
+diff --git a/drivers/gpu/drm/amd/powerplay/smu_v11_0.c b/drivers/gpu/drm/amd/powerplay/smu_v11_0.c
+index 68740d4b66a0..d50e0d07e630 100644
+--- a/drivers/gpu/drm/amd/powerplay/smu_v11_0.c
++++ b/drivers/gpu/drm/amd/powerplay/smu_v11_0.c
+@@ -439,7 +439,7 @@ static int smu_v11_0_init_smc_tables(struct smu_context *smu)
+ 	struct smu_table *tables = NULL;
+ 	int ret = 0;
+ 
+-	if (smu_table->tables || smu_table->table_count == 0)
++	if (smu_table->tables)
+ 		return -EINVAL;
+ 
+ 	tables = kcalloc(SMU_TABLE_COUNT, sizeof(struct smu_table),
+@@ -465,13 +465,12 @@ static int smu_v11_0_fini_smc_tables(struct smu_context *smu)
+ 	struct smu_table_context *smu_table = &smu->smu_table;
+ 	int ret = 0;
+ 
+-	if (!smu_table->tables || smu_table->table_count == 0)
++	if (!smu_table->tables)
+ 		return -EINVAL;
+ 
+ 	kfree(smu_table->tables);
+ 	kfree(smu_table->metrics_table);
+ 	smu_table->tables = NULL;
+-	smu_table->table_count = 0;
+ 	smu_table->metrics_table = NULL;
+ 	smu_table->metrics_time = 0;
+ 
+diff --git a/drivers/gpu/drm/amd/powerplay/smu_v12_0.c b/drivers/gpu/drm/amd/powerplay/smu_v12_0.c
+index 9d2280ca1f4b..24274c9bb87d 100644
+--- a/drivers/gpu/drm/amd/powerplay/smu_v12_0.c
++++ b/drivers/gpu/drm/amd/powerplay/smu_v12_0.c
+@@ -275,7 +275,7 @@ static int smu_v12_0_init_smc_tables(struct smu_context *smu)
+ 	struct smu_table_context *smu_table = &smu->smu_table;
+ 	struct smu_table *tables = NULL;
+ 
+-	if (smu_table->tables || smu_table->table_count == 0)
++	if (smu_table->tables)
+ 		return -EINVAL;
+ 
+ 	tables = kcalloc(SMU_TABLE_COUNT, sizeof(struct smu_table),
+@@ -292,7 +292,7 @@ static int smu_v12_0_fini_smc_tables(struct smu_context *smu)
+ {
+ 	struct smu_table_context *smu_table = &smu->smu_table;
+ 
+-	if (!smu_table->tables || smu_table->table_count == 0)
++	if (!smu_table->tables)
+ 		return -EINVAL;
+ 
+ 	kfree(smu_table->clocks_table);
+diff --git a/drivers/gpu/drm/amd/powerplay/vega20_ppt.c b/drivers/gpu/drm/amd/powerplay/vega20_ppt.c
+index ed8e13c6f2fa..682ee599de01 100644
+--- a/drivers/gpu/drm/amd/powerplay/vega20_ppt.c
++++ b/drivers/gpu/drm/amd/powerplay/vega20_ppt.c
+@@ -3182,8 +3182,5 @@ static const struct pptable_funcs vega20_ppt_funcs = {
+ 
+ void vega20_set_ppt_funcs(struct smu_context *smu)
+ {
+-	struct smu_table_context *smu_table = &smu->smu_table;
+-
+ 	smu->ppt_funcs = &vega20_ppt_funcs;
+-	smu_table->table_count = TABLE_COUNT;
+ }
+-- 
+2.17.1
+

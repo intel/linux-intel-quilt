@@ -1,0 +1,63 @@
+From 916be906620d60af8b4812ad47abb3861280fdd8 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 19 Dec 2019 23:29:32 +0000
+Subject: [PATCH 3003/4530] drm/i915/gt: Teach veng to defer the context
+ allocation
+
+Since we added the context_alloc callback to intel_context_ops, we can
+safely install a custom hook for the deferred virtual context allocation.
+This means that all new contexts behave the same upon creation,
+simplifying later code.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Andi Shyti <andi.shyti@intel.com>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191219232932.189197-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index d3a23fa5db9e..cbb8b225ea88 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -4240,6 +4240,13 @@ static void virtual_engine_initial_hint(struct virtual_engine *ve)
+ 						ve->siblings[0]);
+ }
+ 
++static int virtual_context_alloc(struct intel_context *ce)
++{
++	struct virtual_engine *ve = container_of(ce, typeof(*ve), context);
++
++	return __execlists_context_alloc(ce, ve->siblings[0]);
++}
++
+ static int virtual_context_pin(struct intel_context *ce)
+ {
+ 	struct virtual_engine *ve = container_of(ce, typeof(*ve), context);
+@@ -4277,6 +4284,8 @@ static void virtual_context_exit(struct intel_context *ce)
+ }
+ 
+ static const struct intel_context_ops virtual_context_ops = {
++	.alloc = virtual_context_alloc,
++
+ 	.pin = virtual_context_pin,
+ 	.unpin = execlists_context_unpin,
+ 
+@@ -4595,12 +4604,6 @@ intel_execlists_create_virtual(struct i915_gem_context *ctx,
+ 
+ 	ve->base.flags |= I915_ENGINE_IS_VIRTUAL;
+ 
+-	err = __execlists_context_alloc(&ve->context, siblings[0]);
+-	if (err)
+-		goto err_put;
+-
+-	__set_bit(CONTEXT_ALLOC_BIT, &ve->context.flags);
+-
+ 	return &ve->context;
+ 
+ err_put:
+-- 
+2.17.1
+

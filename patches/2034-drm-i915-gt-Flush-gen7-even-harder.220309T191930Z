@@ -1,0 +1,41 @@
+From 542b8ffb1c416b8508f1f5532e8fc289a49e7c97 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 12 Nov 2019 16:09:41 +0000
+Subject: [PATCH 2034/4530] drm/i915/gt: Flush gen7 even harder
+
+live_blt is still failing on hsw, showing the hallmark of incoherency.
+Since we are fairly certain that the interrupt is after the seqno is
+visible, the other possibility is that the seqno is before the writes to
+memory are flushed. Throw in an TLB invalidate before the breadcrumb as
+we are reasonably confident that forces a CS stall.
+
+References: f9228f765873 ("drm/i915/gt: Try an extra flush on the Haswell blitter")
+References: https://bugs.freedesktop.org/show_bug.cgi?id=112147
+Testcase: igt/i915_selftest/live_blt
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Acked-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191112160941.23969-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_ring_submission.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index 94f3bb64d14e..07399a33a694 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -454,8 +454,9 @@ static u32 *gen7_xcs_emit_breadcrumb(struct i915_request *rq, u32 *cs)
+ 	GEM_BUG_ON(i915_request_active_timeline(rq)->hwsp_ggtt != rq->engine->status_page.vma);
+ 	GEM_BUG_ON(offset_in_page(i915_request_active_timeline(rq)->hwsp_offset) != I915_GEM_HWS_SEQNO_ADDR);
+ 
+-	*cs++ = MI_FLUSH_DW;
+-	*cs++ = 0;
++	*cs++ = (MI_FLUSH_DW | MI_INVALIDATE_TLB |
++		 MI_FLUSH_DW_STORE_INDEX | MI_FLUSH_DW_OP_STOREDW);
++	*cs++ = I915_GEM_HWS_SCRATCH_ADDR | MI_FLUSH_DW_USE_GTT;
+ 	*cs++ = 0;
+ 
+ 	*cs++ = MI_FLUSH_DW | MI_FLUSH_DW_OP_STOREDW | MI_FLUSH_DW_STORE_INDEX;
+-- 
+2.17.1
+

@@ -1,0 +1,77 @@
+From 5db1e3511d28a76b5765d644b0bee22db3779394 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 20 Nov 2019 16:55:14 +0000
+Subject: [PATCH 2316/4530] drm/i915/gt: Unlock engine-pm after queuing the
+ kernel context switch
+
+In commit a79ca656b648 ("drm/i915: Push the wakeref->count deferral to
+the backend"), I erroneously concluded that we last modify the engine
+inside __i915_request_commit() meaning that we could enable concurrent
+submission for userspace as we enqueued this request. However, this
+falls into a trap with other users of the engine->kernel_context waking
+up and submitting their request before the idle-switch is queued, with
+the result that the kernel_context is executed out-of-sequence most
+likely upsetting the GPU and certainly ourselves when we try to retire
+the out-of-sequence requests.
+
+As such we need to hold onto the effective engine->kernel_context mutex
+lock (via the engine pm mutex proxy) until we have finish queuing the
+request to the engine.
+
+v2: Serialise against concurrent intel_gt_retire_requests()
+v3: Describe the hairy locking scheme with intel_gt_retire_requests()
+for future reference.
+v4: Combine timeline->lock and engine pm release; it's hairy.
+
+Fixes: a79ca656b648 ("drm/i915: Push the wakeref->count deferral to the backend")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191120165514.3955081-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine_pm.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.c b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+index c1dd0cd3efc7..2c5e4bf60d78 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+@@ -73,6 +73,22 @@ static inline void __timeline_mark_unlock(struct intel_context *ce,
+ 
+ #endif /* !IS_ENABLED(CONFIG_LOCKDEP) */
+ 
++static void
++__intel_timeline_enter_and_release_pm(struct intel_timeline *tl,
++				      struct intel_engine_cs *engine)
++{
++	struct intel_gt_timelines *timelines = &engine->gt->timelines;
++
++	spin_lock(&timelines->lock);
++
++	if (!atomic_fetch_inc(&tl->active_count))
++		list_add_tail(&tl->link, &timelines->active_list);
++
++	__intel_wakeref_defer_park(&engine->wakeref);
++
++	spin_unlock(&timelines->lock);
++}
++
+ static void
+ __queue_and_release_pm(struct i915_request *rq,
+ 		       struct intel_timeline *tl,
+@@ -168,6 +184,11 @@ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+ 	/* Expose ourselves to the world */
+ 	__queue_and_release_pm(rq, ce->timeline, engine);
+ 
++	__i915_request_queue(rq, NULL);
++
++	/* Expose ourselves to intel_gt_retire_requests() and new submission */
++	__intel_timeline_enter_and_release_pm(ce->timeline, engine);
++
+ 	result = false;
+ out_unlock:
+ 	__timeline_mark_unlock(ce, flags);
+-- 
+2.17.1
+
