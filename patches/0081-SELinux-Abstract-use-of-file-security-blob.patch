@@ -1,7 +1,7 @@
-From df90d6a3a153bcb695b2b07a9257820e380a711a Mon Sep 17 00:00:00 2001
+From 50570ca6ec823673c6089f893eac03e4cca8df85 Mon Sep 17 00:00:00 2001
 From: Casey Schaufler <casey@schaufler-ca.com>
 Date: Thu, 10 May 2018 14:01:52 -0700
-Subject: [PATCH 0081/1225] SELinux: Abstract use of file security blob
+Subject: [PATCH 09/97] SELinux: Abstract use of file security blob
 
 Don't use the file->f_security pointer directly.
 Provide a helper function that provides the security blob pointer.
@@ -12,11 +12,11 @@ Signed-off-by: Casey Schaufler <casey@schaufler-ca.com>
  security/selinux/include/objsec.h |  5 +++++
  2 files changed, 14 insertions(+), 9 deletions(-)
 
-diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index a47ff07..13d65ae 100644
+Index: b/security/selinux/hooks.c
+===================================================================
 --- a/security/selinux/hooks.c
 +++ b/security/selinux/hooks.c
-@@ -397,7 +397,7 @@ static int file_alloc_security(struct file *file)
+@@ -397,7 +397,7 @@ static int file_alloc_security(struct fi
  
  static void file_free_security(struct file *file)
  {
@@ -25,7 +25,7 @@ index a47ff07..13d65ae 100644
  	file->f_security = NULL;
  	kmem_cache_free(file_security_cache, fsec);
  }
-@@ -1910,7 +1910,7 @@ static int file_has_perm(const struct cred *cred,
+@@ -1918,7 +1918,7 @@ static int file_has_perm(const struct cr
  			 struct file *file,
  			 u32 av)
  {
@@ -34,16 +34,16 @@ index a47ff07..13d65ae 100644
  	struct inode *inode = file_inode(file);
  	struct common_audit_data ad;
  	u32 sid = cred_sid(cred);
-@@ -2254,7 +2254,7 @@ static int selinux_binder_transfer_file(struct task_struct *from,
+@@ -2256,7 +2256,7 @@ static int selinux_binder_transfer_file(
  					struct file *file)
  {
- 	u32 sid = task_sid(to);
+ 	u32 sid = cred_sid(to);
 -	struct file_security_struct *fsec = file->f_security;
 +	struct file_security_struct *fsec = selinux_file(file);
  	struct dentry *dentry = file->f_path.dentry;
  	struct inode_security_struct *isec;
  	struct common_audit_data ad;
-@@ -3575,7 +3575,7 @@ static int selinux_revalidate_file_permission(struct file *file, int mask)
+@@ -3589,7 +3589,7 @@ static int selinux_revalidate_file_permi
  static int selinux_file_permission(struct file *file, int mask)
  {
  	struct inode *inode = file_inode(file);
@@ -52,7 +52,7 @@ index a47ff07..13d65ae 100644
  	struct inode_security_struct *isec;
  	u32 sid = current_sid();
  
-@@ -3610,7 +3610,7 @@ static int ioctl_has_perm(const struct cred *cred, struct file *file,
+@@ -3624,7 +3624,7 @@ static int ioctl_has_perm(const struct c
  		u32 requested, u16 cmd)
  {
  	struct common_audit_data ad;
@@ -61,7 +61,7 @@ index a47ff07..13d65ae 100644
  	struct inode *inode = file_inode(file);
  	struct inode_security_struct *isec;
  	struct lsm_ioctlop_audit ioctl;
-@@ -3862,7 +3862,7 @@ static void selinux_file_set_fowner(struct file *file)
+@@ -3876,7 +3876,7 @@ static void selinux_file_set_fowner(stru
  {
  	struct file_security_struct *fsec;
  
@@ -70,7 +70,7 @@ index a47ff07..13d65ae 100644
  	fsec->fown_sid = current_sid();
  }
  
-@@ -3877,7 +3877,7 @@ static int selinux_file_send_sigiotask(struct task_struct *tsk,
+@@ -3891,7 +3891,7 @@ static int selinux_file_send_sigiotask(s
  	/* struct fown_struct is never outside the context of a struct file */
  	file = container_of(fown, struct file, f_owner);
  
@@ -79,7 +79,7 @@ index a47ff07..13d65ae 100644
  
  	if (!signum)
  		perm = signal_to_av(SIGIO); /* as per send_sigio_to_task */
-@@ -3901,7 +3901,7 @@ static int selinux_file_open(struct file *file)
+@@ -3915,7 +3915,7 @@ static int selinux_file_open(struct file
  	struct file_security_struct *fsec;
  	struct inode_security_struct *isec;
  
@@ -88,7 +88,7 @@ index a47ff07..13d65ae 100644
  	isec = inode_security(file_inode(file));
  	/*
  	 * Save inode label and policy sequence number
-@@ -4041,7 +4041,7 @@ static int selinux_kernel_module_from_file(struct file *file)
+@@ -4055,7 +4055,7 @@ static int selinux_kernel_module_from_fi
  	ad.type = LSM_AUDIT_DATA_FILE;
  	ad.u.file = file;
  
@@ -97,11 +97,11 @@ index a47ff07..13d65ae 100644
  	if (sid != fsec->sid) {
  		rc = avc_has_perm(&selinux_state,
  				  sid, fsec->sid, SECCLASS_FD, FD__USE, &ad);
-diff --git a/security/selinux/include/objsec.h b/security/selinux/include/objsec.h
-index db1c700..2586fbc 100644
+Index: b/security/selinux/include/objsec.h
+===================================================================
 --- a/security/selinux/include/objsec.h
 +++ b/security/selinux/include/objsec.h
-@@ -167,4 +167,9 @@ static inline struct task_security_struct *selinux_cred(const struct cred *cred)
+@@ -167,4 +167,9 @@ static inline struct task_security_struc
  	return cred->security;
  }
  
@@ -111,6 +111,3 @@ index db1c700..2586fbc 100644
 +}
 +
  #endif /* _SELINUX_OBJSEC_H_ */
--- 
-2.7.4
-
