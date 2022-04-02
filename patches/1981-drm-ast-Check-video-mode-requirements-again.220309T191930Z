@@ -1,0 +1,57 @@
+From fb06991dc83818fa090f078b6778aedcdb120f43 Mon Sep 17 00:00:00 2001
+From: Thomas Zimmermann <tzimmermann@suse.de>
+Date: Thu, 7 Nov 2019 09:33:57 +0100
+Subject: [PATCH 1981/4530] drm/ast: Check video-mode requirements against VRAM
+ size
+
+Each video mode's primary plane requires a minimum amount of video
+memory. For double buffering, this is at most half the available
+VRAM. Check this constraint.
+
+Signed-off-by: Thomas Zimmermann <tzimmermann@suse.de>
+Acked-by: Gerd Hoffmann <kraxel@redhat.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191107083404.6852-3-tzimmermann@suse.de
+---
+ drivers/gpu/drm/ast/ast_main.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/ast/ast_main.c b/drivers/gpu/drm/ast/ast_main.c
+index 3a9b4cb73f2f..48d57ab42955 100644
+--- a/drivers/gpu/drm/ast/ast_main.c
++++ b/drivers/gpu/drm/ast/ast_main.c
+@@ -387,8 +387,31 @@ static int ast_get_dram_info(struct drm_device *dev)
+ 	return 0;
+ }
+ 
++enum drm_mode_status ast_mode_config_mode_valid(struct drm_device *dev,
++						const struct drm_display_mode *mode)
++{
++	static const unsigned long max_bpp = 4; /* DRM_FORMAT_XRGBA8888 */
++
++	struct ast_private *ast = dev->dev_private;
++	unsigned long fbsize, fbpages, max_fbpages;
++
++	/* To support double buffering, a framebuffer may not
++	 * consume more than half of the available VRAM.
++	 */
++	max_fbpages = (ast->vram_size / 2) >> PAGE_SHIFT;
++
++	fbsize = mode->hdisplay * mode->vdisplay * max_bpp;
++	fbpages = DIV_ROUND_UP(fbsize, PAGE_SIZE);
++
++	if (fbpages > max_fbpages)
++		return MODE_MEM;
++
++	return MODE_OK;
++}
++
+ static const struct drm_mode_config_funcs ast_mode_funcs = {
+-	.fb_create = drm_gem_fb_create
++	.fb_create = drm_gem_fb_create,
++	.mode_valid = ast_mode_config_mode_valid,
+ };
+ 
+ static u32 ast_get_vram_info(struct drm_device *dev)
+-- 
+2.17.1
+

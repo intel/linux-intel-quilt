@@ -1,0 +1,84 @@
+From 4e1a12b9f7925881677573484c7577696608f7d8 Mon Sep 17 00:00:00 2001
+From: Ben Skeggs <bskeggs@redhat.com>
+Date: Wed, 15 Jan 2020 06:34:22 +1000
+Subject: [PATCH 3520/4530] drm/nouveau/flcn/msgq: simplify msg_queue_pop()
+ error handling
+
+We always want at least requested size, make anything less a more direct
+error condition.
+
+Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+---
+ drivers/gpu/drm/nouveau/nvkm/falcon/msgq.c | 25 ++++++----------------
+ 1 file changed, 7 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/falcon/msgq.c b/drivers/gpu/drm/nouveau/nvkm/falcon/msgq.c
+index ea3e7c73e990..15299ff45685 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/falcon/msgq.c
++++ b/drivers/gpu/drm/nouveau/nvkm/falcon/msgq.c
+@@ -67,20 +67,14 @@ msg_queue_pop(struct nvkm_msgqueue *priv, struct nvkm_msgqueue_queue *queue,
+ 	tail = queue->position;
+ 
+ 	available = head - tail;
+-
+-	if (available == 0) {
+-		nvkm_warn(subdev, "no message data available\n");
+-		return 0;
+-	}
+-
+ 	if (size > available) {
+ 		nvkm_warn(subdev, "message data smaller than read request\n");
+-		size = available;
++		return -EINVAL;
+ 	}
+ 
+ 	nvkm_falcon_read_dmem(priv->falcon, tail, size, 0, data);
+ 	queue->position += ALIGN(size, QUEUE_ALIGNMENT);
+-	return size;
++	return 0;
+ }
+ 
+ static int
+@@ -88,19 +82,15 @@ msg_queue_read(struct nvkm_msgqueue *priv, struct nvkm_msgqueue_queue *queue,
+ 	       struct nv_falcon_msg *hdr)
+ {
+ 	const struct nvkm_subdev *subdev = priv->falcon->owner;
+-	int ret;
++	int ret = 0;
+ 
+ 	msg_queue_open(priv, queue);
+ 
+-	if (msg_queue_empty(priv, queue)) {
+-		ret = 0;
++	if (msg_queue_empty(priv, queue))
+ 		goto close;
+-	}
+ 
+ 	ret = msg_queue_pop(priv, queue, hdr, HDR_SIZE);
+-	if (ret >= 0 && ret != HDR_SIZE)
+-		ret = -EINVAL;
+-	if (ret < 0) {
++	if (ret) {
+ 		nvkm_error(subdev, "failed to read message header: %d\n", ret);
+ 		goto close;
+ 	}
+@@ -115,14 +105,13 @@ msg_queue_read(struct nvkm_msgqueue *priv, struct nvkm_msgqueue_queue *queue,
+ 		u32 read_size = hdr->size - HDR_SIZE;
+ 
+ 		ret = msg_queue_pop(priv, queue, (hdr + 1), read_size);
+-		if (ret >= 0 && ret != read_size)
+-			ret = -EINVAL;
+-		if (ret < 0) {
++		if (ret) {
+ 			nvkm_error(subdev, "failed to read message: %d\n", ret);
+ 			goto close;
+ 		}
+ 	}
+ 
++	ret = 1;
+ close:
+ 	msg_queue_close(priv, queue, (ret >= 0));
+ 	return ret;
+-- 
+2.17.1
+

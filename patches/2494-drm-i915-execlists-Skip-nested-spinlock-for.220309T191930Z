@@ -1,0 +1,41 @@
+From 520edb12b1873e6c88741bf58b828a429bb91a77 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 3 Dec 2019 15:26:31 +0000
+Subject: [PATCH 2494/4530] drm/i915/execlists: Skip nested spinlock for
+ validating pending
+
+Only along the submission path can we guarantee that the locked request
+is indeed from a foreign engine, and so the nesting of engine/rq is
+permissible. On the submission tasklet (process_csb()), we may find
+ourselves competing with the normal nesting of rq/engine, invalidating
+our nesting. As we only use the spinlock for debug purposes, skip the
+debug if we cannot acquire the spinlock for safe validation - catching
+99% of the bugs is better than causing a hard lockup.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Fixes: c95d31c3df1b ("drm/i915/execlists: Lock the request while validating it during promotion")
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191203152631.3107653-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 5bfe25c2db83..d6e82e85f583 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -1313,8 +1313,8 @@ assert_pending_valid(const struct intel_engine_execlists *execlists,
+ 		ce = rq->hw_context;
+ 
+ 		/* Hold tightly onto the lock to prevent concurrent retires! */
+-		spin_lock_irqsave_nested(&rq->lock, flags,
+-					 SINGLE_DEPTH_NESTING);
++		if (!spin_trylock_irqsave(&rq->lock, flags))
++			continue;
+ 
+ 		if (i915_request_completed(rq))
+ 			goto unlock;
+-- 
+2.17.1
+

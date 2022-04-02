@@ -1,0 +1,49 @@
+From a24b3082337f89d91b93512b51c23b28834d7454 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 6 Dec 2019 16:04:27 +0000
+Subject: [PATCH 2616/4530] drm/i915: Propagate errors on awaiting already
+ signaled fences
+
+If we see an already signaled fence that we want to await on, we skip
+adding to the i915_sw_fence. However, we should pay attention to whether
+there was an error on that fence and if so propagate it for our future
+request.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191206160428.1503343-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/i915_request.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_request.c b/drivers/gpu/drm/i915/i915_request.c
+index 41d63b6d53fc..a6238c626a16 100644
+--- a/drivers/gpu/drm/i915/i915_request.c
++++ b/drivers/gpu/drm/i915/i915_request.c
+@@ -972,8 +972,10 @@ i915_request_await_dma_fence(struct i915_request *rq, struct dma_fence *fence)
+ 
+ 	do {
+ 		fence = *child++;
+-		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
++		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
++			i915_sw_fence_set_error_once(&rq->submit, fence->error);
+ 			continue;
++		}
+ 
+ 		/*
+ 		 * Requests on the same timeline are explicitly ordered, along
+@@ -1080,8 +1082,10 @@ i915_request_await_execution(struct i915_request *rq,
+ 
+ 	do {
+ 		fence = *child++;
+-		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags))
++		if (test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags)) {
++			i915_sw_fence_set_error_once(&rq->submit, fence->error);
+ 			continue;
++		}
+ 
+ 		/*
+ 		 * We don't squash repeated fence dependencies here as we
+-- 
+2.17.1
+

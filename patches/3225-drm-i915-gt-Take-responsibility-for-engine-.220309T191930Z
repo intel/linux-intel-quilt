@@ -1,0 +1,69 @@
+From ef32ff51d34e741807df273ecd969fee20c61b7b Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 7 Jan 2020 14:31:18 +0000
+Subject: [PATCH 3225/4530] drm/i915/gt: Take responsibility for
+ engine->release as the last step
+
+In order to avoid a double cleanup on error, take ownership of
+engine->release past the point of no [error] return.
+
+Reported-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Fixes: e26b6d434147 ("drm/i915/gt: Pull GT initialisation under intel_gt_init()")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Tested-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200107143118.3288995-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c             | 4 +++-
+ drivers/gpu/drm/i915/gt/intel_ring_submission.c | 5 +++--
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index 9b741a30fc10..6754d47d1359 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -3925,7 +3925,6 @@ logical_ring_default_vfuncs(struct intel_engine_cs *engine)
+ {
+ 	/* Default vfuncs which can be overriden by each engine. */
+ 
+-	engine->release = execlists_release;
+ 	engine->resume = execlists_resume;
+ 
+ 	engine->cops = &execlists_context_ops;
+@@ -4040,6 +4039,9 @@ int intel_execlists_submission_setup(struct intel_engine_cs *engine)
+ 
+ 	reset_csb_pointers(engine);
+ 
++	/* Finally, take ownership and responsibility for cleanup! */
++	engine->release = execlists_release;
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index 2e1478a48a4b..0525d67c6fc3 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -1840,8 +1840,6 @@ static void setup_common(struct intel_engine_cs *engine)
+ 
+ 	setup_irq(engine);
+ 
+-	engine->release = ring_release;
+-
+ 	engine->resume = xcs_resume;
+ 	engine->reset.prepare = reset_prepare;
+ 	engine->reset.rewind = reset_rewind;
+@@ -2007,6 +2005,9 @@ int intel_ring_submission_setup(struct intel_engine_cs *engine)
+ 
+ 	GEM_BUG_ON(timeline->hwsp_ggtt != engine->status_page.vma);
+ 
++	/* Finally, take ownership and responsibility for cleanup! */
++	engine->release = ring_release;
++
+ 	return 0;
+ 
+ err_ring:
+-- 
+2.17.1
+

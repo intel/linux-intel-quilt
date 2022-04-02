@@ -1,0 +1,81 @@
+From de6dbd074480a43a341751585485006a6e6ec2ab Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 21 Nov 2019 07:10:40 +0000
+Subject: [PATCH 2321/4530] Revert "drm/i915/gt: Wait for new requests in
+ intel_gt_retire_requests()"
+
+From inside an active timeline in the execbuf ioctl, we may try to
+reclaim some space in the GGTT. We need GGTT space for all objects on
+!full-ppgtt platforms, and for context images everywhere. However, to
+free up space in the GGTT we may need to remove some pinned objects
+(e.g. context images) that require flushing the idle barriers to remove.
+For this we use the big hammer of intel_gt_wait_for_idle()
+
+However, commit 7936a22dd466 ("drm/i915/gt: Wait for new requests in
+intel_gt_retire_requests()") will continue spinning on the wait if a
+timeline is active but lacks requests, as is the case during execbuf
+reservation. Spinning forever is quite time consuming, so revert that
+commit and start again.
+
+In practice, the effect commit 7936a22dd466 was trying to achieve is
+accomplished by commit 1683d24c1470 ("drm/i915/gt: Move new timelines
+to the end of active_list"), so there is no immediate rush to replace
+the looping.
+
+Testcase: igt/gem_exec_reloc/basic-range
+Fixes: 7936a22dd466 ("drm/i915/gt: Wait for new requests in intel_gt_retire_requests()")
+References: 1683d24c1470 ("drm/i915/gt: Move new timelines to the end of active_list")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Cc: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Reviewed-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191121071044.97798-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_requests.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_requests.c b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+index 7face3e8c9c9..8cb5421e5f0e 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_requests.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_requests.c
+@@ -108,6 +108,7 @@ long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
+ {
+ 	struct intel_gt_timelines *timelines = &gt->timelines;
+ 	struct intel_timeline *tl, *tn;
++	unsigned long active_count = 0;
+ 	bool interruptible;
+ 	LIST_HEAD(free);
+ 
+@@ -119,8 +120,10 @@ long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
+ 
+ 	spin_lock(&timelines->lock);
+ 	list_for_each_entry_safe(tl, tn, &timelines->active_list, link) {
+-		if (!mutex_trylock(&tl->mutex))
++		if (!mutex_trylock(&tl->mutex)) {
++			active_count++; /* report busy to caller, try again? */
+ 			continue;
++		}
+ 
+ 		intel_timeline_get(tl);
+ 		GEM_BUG_ON(!atomic_read(&tl->active_count));
+@@ -147,6 +150,8 @@ long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
+ 		list_safe_reset_next(tl, tn, link);
+ 		if (atomic_dec_and_test(&tl->active_count))
+ 			list_del(&tl->link);
++		else
++			active_count += !!rcu_access_pointer(tl->last_request.fence);
+ 
+ 		mutex_unlock(&tl->mutex);
+ 
+@@ -161,7 +166,7 @@ long intel_gt_retire_requests_timeout(struct intel_gt *gt, long timeout)
+ 	list_for_each_entry_safe(tl, tn, &free, link)
+ 		__intel_timeline_free(&tl->kref);
+ 
+-	return list_empty(&timelines->active_list) ? 0 : timeout;
++	return active_count ? timeout : 0;
+ }
+ 
+ int intel_gt_wait_for_idle(struct intel_gt *gt, long timeout)
+-- 
+2.17.1
+

@@ -1,0 +1,117 @@
+From 552eb79e94d33e35d0e08c0a535479c7c77d8e70 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Wed, 30 Oct 2019 21:08:15 +0200
+Subject: [PATCH 1957/4530] drm/i915: Preload LUTs if the hw isn't currently
+ using them
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The LUTs are single buffered so in order to program them without
+tearing we'd have to do it during vblank (actually to be 100%
+effective it has to happen between start of vblank and frame start).
+We have no proper mechanism for that at the moment so we just
+defer loading them after the vblank waits have happened. That
+is not quite sufficient (especially when committing multiple pipes
+whose vblanks don't line up) so the LUT load will often leak into
+the following frame causing tearing.
+
+However in case the hardware wasn't previously using the LUT we
+can preload it before setting the enable bit (which is double
+buffered so won't tear). Let's determine if we can do such
+preloading and make it happen. Slight variation between the
+hardware requires some platforms specifics in the checks.
+
+Hans is seeing ugly colored flash on VLV/CHV macchines (GPD win
+and Asus T100HA) when the gamma LUT gets loaded for the first
+time as the BIOS has left some junk in the LUT memory.
+
+v2: Deal with uapi vs. hw crtc state split
+    s/GCM/CGM/ typo fix
+
+Cc: Hans de Goede <hdegoede@redhat.com>
+Fixes: 051a6d8d3ca0 ("drm/i915: Move LUT programming to happen after vblank waits")
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191030190815.7359-1-ville.syrjala@linux.intel.com
+Tested-by: Hans de Goede <hdegoede@redhat.com>
+Reviewed-by: Hans de Goede <hdegoede@redhat.com>
+---
+ drivers/gpu/drm/i915/display/intel_color.c   | 20 ++++++++++----------
+ drivers/gpu/drm/i915/display/intel_display.c |  2 +-
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_color.c b/drivers/gpu/drm/i915/display/intel_color.c
+index 6ad772d19972..3980e8b50c28 100644
+--- a/drivers/gpu/drm/i915/display/intel_color.c
++++ b/drivers/gpu/drm/i915/display/intel_color.c
+@@ -1024,21 +1024,21 @@ void intel_color_commit(const struct intel_crtc_state *crtc_state)
+ 
+ static bool intel_can_preload_luts(const struct intel_crtc_state *new_crtc_state)
+ {
+-	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->base.crtc);
++	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->uapi.crtc);
+ 	struct intel_atomic_state *state =
+-		to_intel_atomic_state(new_crtc_state->base.state);
++		to_intel_atomic_state(new_crtc_state->uapi.state);
+ 	const struct intel_crtc_state *old_crtc_state =
+ 		intel_atomic_get_old_crtc_state(state, crtc);
+ 
+-	return !old_crtc_state->base.gamma_lut &&
+-		!old_crtc_state->base.degamma_lut;
++	return !old_crtc_state->hw.gamma_lut &&
++		!old_crtc_state->hw.degamma_lut;
+ }
+ 
+ static bool chv_can_preload_luts(const struct intel_crtc_state *new_crtc_state)
+ {
+-	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->base.crtc);
++	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->uapi.crtc);
+ 	struct intel_atomic_state *state =
+-		to_intel_atomic_state(new_crtc_state->base.state);
++		to_intel_atomic_state(new_crtc_state->uapi.state);
+ 	const struct intel_crtc_state *old_crtc_state =
+ 		intel_atomic_get_old_crtc_state(state, crtc);
+ 
+@@ -1050,14 +1050,14 @@ static bool chv_can_preload_luts(const struct intel_crtc_state *new_crtc_state)
+ 	if (old_crtc_state->cgm_mode || new_crtc_state->cgm_mode)
+ 		return false;
+ 
+-	return !old_crtc_state->base.gamma_lut;
++	return !old_crtc_state->hw.gamma_lut;
+ }
+ 
+ static bool glk_can_preload_luts(const struct intel_crtc_state *new_crtc_state)
+ {
+-	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->base.crtc);
++	struct intel_crtc *crtc = to_intel_crtc(new_crtc_state->uapi.crtc);
+ 	struct intel_atomic_state *state =
+-		to_intel_atomic_state(new_crtc_state->base.state);
++		to_intel_atomic_state(new_crtc_state->uapi.state);
+ 	const struct intel_crtc_state *old_crtc_state =
+ 		intel_atomic_get_old_crtc_state(state, crtc);
+ 
+@@ -1068,7 +1068,7 @@ static bool glk_can_preload_luts(const struct intel_crtc_state *new_crtc_state)
+ 	 * linear hardware degamma mid scanout.
+ 	 */
+ 	return !old_crtc_state->csc_enable &&
+-		!old_crtc_state->base.gamma_lut;
++		!old_crtc_state->hw.gamma_lut;
+ }
+ 
+ int intel_color_check(struct intel_crtc_state *crtc_state)
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 22aaa03a4a3a..ced769919adc 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -14328,7 +14328,7 @@ static void intel_update_crtc(struct intel_crtc *crtc,
+ 		intel_crtc_enable_pipe_crc(crtc);
+ 	} else {
+ 		if (new_crtc_state->preload_luts &&
+-		    (new_crtc_state->base.color_mgmt_changed ||
++		    (new_crtc_state->uapi.color_mgmt_changed ||
+ 		     new_crtc_state->update_pipe))
+ 			intel_color_load_luts(new_crtc_state);
+ 
+-- 
+2.17.1
+

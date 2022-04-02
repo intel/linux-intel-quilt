@@ -1,0 +1,71 @@
+From 95c4be7d8c59ad7fecdd0f9a677aebe44a001060 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 25 Nov 2019 10:58:57 +0000
+Subject: [PATCH 2363/4530] drm/i915/gt: Adapt engine_park synchronisation
+ rules for engine_retire
+
+In the next patch, we will introduce a new asynchronous retirement
+worker, fed by execlists CS events. Here we may queue a retirement as
+soon as a request is submitted to HW (and completes instantly), and we
+also want to process that retirement as early as possible and cannot
+afford to postpone (as there may not be another opportunity to retire it
+for a few seconds). To allow the new async retirer to run in parallel
+with our submission, pull the __i915_request_queue (that passes the
+request to HW) inside the timelines spinlock so that the retirement
+cannot release the timeline before we have completed the submission.
+
+v2: Actually to play nicely with engine_retire, we have to raise the
+timeline.active_lock before releasing the HW. intel_gt_retire_requsts()
+is still serialised by the outer lock so they cannot see this
+intermediate state, and engine_retire is serialised by HW submission.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191125105858.1718307-2-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_engine_pm.c | 21 ---------------------
+ 1 file changed, 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_engine_pm.c b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+index 2c5e4bf60d78..c1dd0cd3efc7 100644
+--- a/drivers/gpu/drm/i915/gt/intel_engine_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_engine_pm.c
+@@ -73,22 +73,6 @@ static inline void __timeline_mark_unlock(struct intel_context *ce,
+ 
+ #endif /* !IS_ENABLED(CONFIG_LOCKDEP) */
+ 
+-static void
+-__intel_timeline_enter_and_release_pm(struct intel_timeline *tl,
+-				      struct intel_engine_cs *engine)
+-{
+-	struct intel_gt_timelines *timelines = &engine->gt->timelines;
+-
+-	spin_lock(&timelines->lock);
+-
+-	if (!atomic_fetch_inc(&tl->active_count))
+-		list_add_tail(&tl->link, &timelines->active_list);
+-
+-	__intel_wakeref_defer_park(&engine->wakeref);
+-
+-	spin_unlock(&timelines->lock);
+-}
+-
+ static void
+ __queue_and_release_pm(struct i915_request *rq,
+ 		       struct intel_timeline *tl,
+@@ -184,11 +168,6 @@ static bool switch_to_kernel_context(struct intel_engine_cs *engine)
+ 	/* Expose ourselves to the world */
+ 	__queue_and_release_pm(rq, ce->timeline, engine);
+ 
+-	__i915_request_queue(rq, NULL);
+-
+-	/* Expose ourselves to intel_gt_retire_requests() and new submission */
+-	__intel_timeline_enter_and_release_pm(ce->timeline, engine);
+-
+ 	result = false;
+ out_unlock:
+ 	__timeline_mark_unlock(ce, flags);
+-- 
+2.17.1
+

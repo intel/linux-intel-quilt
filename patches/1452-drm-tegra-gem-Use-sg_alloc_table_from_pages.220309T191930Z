@@ -1,0 +1,44 @@
+From 459cad2610689af840448b2d7e19695f75d9257a Mon Sep 17 00:00:00 2001
+From: Thierry Reding <treding@nvidia.com>
+Date: Fri, 8 Jun 2018 15:00:05 +0200
+Subject: [PATCH 1452/4530] drm/tegra: gem: Use sg_alloc_table_from_pages()
+
+Instead of manually creating the SG table for a discontiguous buffer,
+use the existing sg_alloc_table_from_pages(). Note that this is not safe
+to be used with the ARM DMA/IOMMU integration code because that will not
+ensure that the whole buffer is mapped contiguously. Depending on the
+size of the individual entries the mapping may end up containing holes
+to ensure alignment.
+
+However, we only ever use these buffers with explicit IOMMU API usage
+and know how to avoid these holes.
+
+Signed-off-by: Thierry Reding <treding@nvidia.com>
+---
+ drivers/gpu/drm/tegra/gem.c | 9 ++-------
+ 1 file changed, 2 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/tegra/gem.c b/drivers/gpu/drm/tegra/gem.c
+index 00701cadaceb..d2f88cc3134f 100644
+--- a/drivers/gpu/drm/tegra/gem.c
++++ b/drivers/gpu/drm/tegra/gem.c
+@@ -508,14 +508,9 @@ tegra_gem_prime_map_dma_buf(struct dma_buf_attachment *attach,
+ 		return NULL;
+ 
+ 	if (bo->pages) {
+-		struct scatterlist *sg;
+-		unsigned int i;
+-
+-		if (sg_alloc_table(sgt, bo->num_pages, GFP_KERNEL))
++		if (sg_alloc_table_from_pages(sgt, bo->pages, bo->num_pages,
++					      0, gem->size, GFP_KERNEL) < 0)
+ 			goto free;
+-
+-		for_each_sg(sgt->sgl, sg, bo->num_pages, i)
+-			sg_set_page(sg, bo->pages[i], PAGE_SIZE, 0);
+ 	} else {
+ 		if (dma_get_sgtable(attach->dev, sgt, bo->vaddr, bo->iova,
+ 				    gem->size) < 0)
+-- 
+2.17.1
+

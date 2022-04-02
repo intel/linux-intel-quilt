@@ -1,0 +1,52 @@
+From 89c56df40be0e4c5d3de2acd7f26ed164a584f08 Mon Sep 17 00:00:00 2001
+From: Alex Deucher <alexander.deucher@amd.com>
+Date: Tue, 10 Dec 2019 16:21:44 -0500
+Subject: [PATCH 2964/4530] drm/amdgpu: wait for all rings to drain before
+ runtime suspending
+
+Add a safety check to runtime suspend to make sure all outstanding
+fences have signaled before we suspend.  Doesn't fix any known issue.
+
+We already do this via the fence driver suspend function, but we
+just force completion rather than bailing.  This bails on runtime
+suspend so we can try again later once the fences are signaled to
+avoid missing any outstanding work.
+
+Reviewed-by: Andrey Grodzovsky <andrey.grodzovsky@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index b5c8e10f3e82..94e2fd758e01 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -1203,13 +1203,23 @@ static int amdgpu_pmops_runtime_suspend(struct device *dev)
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+ 	struct drm_device *drm_dev = pci_get_drvdata(pdev);
+ 	struct amdgpu_device *adev = drm_dev->dev_private;
+-	int ret;
++	int ret, i;
+ 
+ 	if (!adev->runpm) {
+ 		pm_runtime_forbid(dev);
+ 		return -EBUSY;
+ 	}
+ 
++	/* wait for all rings to drain before suspending */
++	for (i = 0; i < AMDGPU_MAX_RINGS; i++) {
++		struct amdgpu_ring *ring = adev->rings[i];
++		if (ring && ring->sched.ready) {
++			ret = amdgpu_fence_wait_empty(ring);
++			if (ret)
++				return -EBUSY;
++		}
++	}
++
+ 	if (amdgpu_device_supports_boco(drm_dev))
+ 		drm_dev->switch_power_state = DRM_SWITCH_POWER_CHANGING;
+ 	drm_kms_helper_poll_disable(drm_dev);
+-- 
+2.17.1
+

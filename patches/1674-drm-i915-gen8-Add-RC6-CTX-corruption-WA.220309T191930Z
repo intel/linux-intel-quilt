@@ -1,0 +1,237 @@
+From a77b95f7bc7b523c154f37fd1dd9e17f655378fd Mon Sep 17 00:00:00 2001
+From: Imre Deak <imre.deak@intel.com>
+Date: Thu, 17 Oct 2019 16:38:31 +0300
+Subject: [PATCH 1674/4530] drm/i915/gen8+: Add RC6 CTX corruption WA
+
+In some circumstances the RC6 context can get corrupted. We can detect
+this and take the required action, that is disable RC6 and runtime PM.
+The HW recovers from the corrupted state after a system suspend/resume
+cycle, so detect the recovery and re-enable RC6 and runtime PM.
+
+v2: rebase (Mika)
+v3:
+- Move intel_suspend_gt_powersave() to the end of the GEM suspend
+  sequence.
+- Add commit message.
+v4:
+- Rebased on intel_uncore_forcewake_put(i915->uncore, ...) API
+  change.
+v5:
+- Rebased on latest upstream gt_pm refactoring.
+v6:
+- s/i915_rc6_/intel_rc6_/
+- Don't return a value from i915_rc6_ctx_wa_check().
+v7:
+- Rebased on latest gt rc6 refactoring.
+
+Signed-off-by: Imre Deak <imre.deak@intel.com>
+Signed-off-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+[airlied: pull this later version of this patch into drm-next
+to make resolving the conflict mess easier.]
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+---
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c     |  8 +++
+ drivers/gpu/drm/i915/gt/intel_rc6.c       | 65 +++++++++++++++++++++++
+ drivers/gpu/drm/i915/gt/intel_rc6.h       |  3 ++
+ drivers/gpu/drm/i915/gt/intel_rc6_types.h |  1 +
+ drivers/gpu/drm/i915/i915_drv.c           |  3 ++
+ drivers/gpu/drm/i915/i915_drv.h           |  6 ++-
+ drivers/gpu/drm/i915/i915_reg.h           |  2 +
+ 7 files changed, 86 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index 060a27d9af34..6187cdd06646 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -61,6 +61,9 @@ static int __gt_unpark(struct intel_wakeref *wf)
+ 	gt->awake = intel_display_power_get(i915, POWER_DOMAIN_GT_IRQ);
+ 	GEM_BUG_ON(!gt->awake);
+ 
++	if (NEEDS_RC6_CTX_CORRUPTION_WA(i915))
++		intel_uncore_forcewake_get(&i915->uncore, FORCEWAKE_ALL);
++
+ 	intel_rps_unpark(&gt->rps);
+ 	i915_pmu_gt_unparked(i915);
+ 
+@@ -86,6 +89,11 @@ static int __gt_park(struct intel_wakeref *wf)
+ 	/* Everything switched off, flush any residual interrupt just in case */
+ 	intel_synchronize_irq(i915);
+ 
++	if (NEEDS_RC6_CTX_CORRUPTION_WA(i915)) {
++		intel_rc6_ctx_wa_check(&i915->gt.rc6);
++		intel_uncore_forcewake_put(&i915->uncore, FORCEWAKE_ALL);
++	}
++
+ 	GEM_BUG_ON(!wakeref);
+ 	intel_display_power_put(i915, POWER_DOMAIN_GT_IRQ, wakeref);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6.c b/drivers/gpu/drm/i915/gt/intel_rc6.c
+index 5ad4a92a9582..4bbf28ce29c4 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6.c
++++ b/drivers/gpu/drm/i915/gt/intel_rc6.c
+@@ -486,6 +486,66 @@ static void rpm_put(struct intel_rc6 *rc6)
+ 	rc6->wakeref = false;
+ }
+ 
++static bool intel_rc6_ctx_corrupted(struct intel_rc6 *rc6)
++{
++	return !intel_uncore_read(rc6_to_uncore(rc6), GEN8_RC6_CTX_INFO);
++}
++
++static void intel_rc6_ctx_wa_init(struct intel_rc6 *rc6)
++{
++	struct drm_i915_private *i915 = rc6_to_i915(rc6);
++
++	if (!NEEDS_RC6_CTX_CORRUPTION_WA(i915))
++		return;
++
++	if (intel_rc6_ctx_corrupted(rc6)) {
++		DRM_INFO("RC6 context corrupted, disabling runtime power management\n");
++		rc6->ctx_corrupted = true;
++	}
++}
++
++/**
++ * intel_rc6_ctx_wa_resume - system resume sequence for the RC6 CTX WA
++ * @rc6: rc6 state
++ *
++ * Perform any steps needed to re-init the RC6 CTX WA after system resume.
++ */
++void intel_rc6_ctx_wa_resume(struct intel_rc6 *rc6)
++{
++	if (rc6->ctx_corrupted && !intel_rc6_ctx_corrupted(rc6)) {
++		DRM_INFO("RC6 context restored, re-enabling runtime power management\n");
++		rc6->ctx_corrupted = false;
++	}
++}
++
++/**
++ * intel_rc6_ctx_wa_check - check for a new RC6 CTX corruption
++ * @rc6: rc6 state
++ *
++ * Check if an RC6 CTX corruption has happened since the last check and if so
++ * disable RC6 and runtime power management.
++*/
++void intel_rc6_ctx_wa_check(struct intel_rc6 *rc6)
++{
++	struct drm_i915_private *i915 = rc6_to_i915(rc6);
++
++	if (!NEEDS_RC6_CTX_CORRUPTION_WA(i915))
++		return;
++
++	if (rc6->ctx_corrupted)
++		return;
++
++	if (!intel_rc6_ctx_corrupted(rc6))
++		return;
++
++	DRM_NOTE("RC6 context corruption, disabling runtime power management\n");
++
++	intel_rc6_disable(rc6);
++	rc6->ctx_corrupted = true;
++
++	return;
++}
++
+ static void __intel_rc6_disable(struct intel_rc6 *rc6)
+ {
+ 	struct drm_i915_private *i915 = rc6_to_i915(rc6);
+@@ -510,6 +570,8 @@ void intel_rc6_init(struct intel_rc6 *rc6)
+ 	if (!rc6_supported(rc6))
+ 		return;
+ 
++	intel_rc6_ctx_wa_init(rc6);
++
+ 	if (IS_CHERRYVIEW(i915))
+ 		err = chv_rc6_init(rc6);
+ 	else if (IS_VALLEYVIEW(i915))
+@@ -544,6 +606,9 @@ void intel_rc6_enable(struct intel_rc6 *rc6)
+ 
+ 	GEM_BUG_ON(rc6->enabled);
+ 
++	if (rc6->ctx_corrupted)
++		return;
++
+ 	intel_uncore_forcewake_get(uncore, FORCEWAKE_ALL);
+ 
+ 	if (IS_CHERRYVIEW(i915))
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6.h b/drivers/gpu/drm/i915/gt/intel_rc6.h
+index 5e6711f36457..1370f6834a4c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6.h
++++ b/drivers/gpu/drm/i915/gt/intel_rc6.h
+@@ -22,4 +22,7 @@ void intel_rc6_disable(struct intel_rc6 *rc6);
+ u64 intel_rc6_residency_ns(struct intel_rc6 *rc6, i915_reg_t reg);
+ u64 intel_rc6_residency_us(struct intel_rc6 *rc6, i915_reg_t reg);
+ 
++void intel_rc6_ctx_wa_check(struct intel_rc6 *rc6);
++void intel_rc6_ctx_wa_resume(struct intel_rc6 *rc6);
++
+ #endif /* INTEL_RC6_H */
+diff --git a/drivers/gpu/drm/i915/gt/intel_rc6_types.h b/drivers/gpu/drm/i915/gt/intel_rc6_types.h
+index 214f354d6ae4..89ad5697a8d4 100644
+--- a/drivers/gpu/drm/i915/gt/intel_rc6_types.h
++++ b/drivers/gpu/drm/i915/gt/intel_rc6_types.h
+@@ -23,6 +23,7 @@ struct intel_rc6 {
+ 	bool supported : 1;
+ 	bool enabled : 1;
+ 	bool wakeref : 1;
++	bool ctx_corrupted : 1;
+ };
+ 
+ #endif /* INTEL_RC6_TYPES_H */
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 82e4e6bf08c3..3c512c571e60 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -63,6 +63,7 @@
+ #include "gem/i915_gem_ioctls.h"
+ #include "gt/intel_gt.h"
+ #include "gt/intel_gt_pm.h"
++#include "gt/intel_rc6.h"
+ 
+ #include "i915_debugfs.h"
+ #include "i915_drv.h"
+@@ -1816,6 +1817,8 @@ static int i915_drm_resume(struct drm_device *dev)
+ 
+ 	disable_rpm_wakeref_asserts(&dev_priv->runtime_pm);
+ 
++	intel_rc6_ctx_wa_resume(&dev_priv->gt.rc6);
++
+ 	intel_gt_sanitize(&dev_priv->gt, true);
+ 
+ 	ret = i915_ggtt_enable_hw(dev_priv);
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 926cbf47331e..632cc1232604 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -1656,10 +1656,12 @@ IS_SUBPLATFORM(const struct drm_i915_private *i915,
+ /* Early gen2 have a totally busted CS tlb and require pinned batches. */
+ #define HAS_BROKEN_CS_TLB(dev_priv)	(IS_I830(dev_priv) || IS_I845G(dev_priv))
+ 
++#define NEEDS_RC6_CTX_CORRUPTION_WA(dev_priv)	\
++	(IS_BROADWELL(dev_priv) || IS_GEN(dev_priv, 9))
++
+ /* WaRsDisableCoarsePowerGating:skl,cnl */
+ #define NEEDS_WaRsDisableCoarsePowerGating(dev_priv) \
+-	(IS_CANNONLAKE(dev_priv) || \
+-	 IS_SKL_GT3(dev_priv) || IS_SKL_GT4(dev_priv))
++	(IS_CANNONLAKE(dev_priv) || IS_GEN(dev_priv, 9))
+ 
+ #define HAS_GMBUS_IRQ(dev_priv) (INTEL_GEN(dev_priv) >= 4)
+ #define HAS_GMBUS_BURST_READ(dev_priv) (INTEL_GEN(dev_priv) >= 10 || \
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 9a7218bb8655..445dacbdc0e9 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -474,6 +474,8 @@ static inline bool i915_mmio_reg_valid(i915_reg_t reg)
+ #define   ECOCHK_PPGTT_WT_HSW		(0x2 << 3)
+ #define   ECOCHK_PPGTT_WB_HSW		(0x3 << 3)
+ 
++#define GEN8_RC6_CTX_INFO		_MMIO(0x8504)
++
+ #define GAC_ECO_BITS			_MMIO(0x14090)
+ #define   ECOBITS_SNB_BIT		(1 << 13)
+ #define   ECOBITS_PPGTT_CACHE64B	(3 << 8)
+-- 
+2.17.1
+

@@ -1,0 +1,46 @@
+From 4efcd114450ae576d0531e1f9c7d0f8a156d9d94 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Mon, 25 Nov 2019 09:43:18 +0000
+Subject: [PATCH 2354/4530] drm/i915/gt: Mark the execlists->active as the
+ primary volatile access
+
+Since we want to do a lockless read of the current active request, and
+that request is written to by process_csb also without serialisation, we
+need to instruct gcc to take care in reading the pointer itself.
+
+Otherwise, we have observed execlists_active() to report 0x40.
+
+[ 2400.760381] igt/para-4098    1..s. 2376479300us : process_csb: rcs0 cs-irq head=3, tail=4
+[ 2400.760826] igt/para-4098    1..s. 2376479303us : process_csb: rcs0 csb[4]: status=0x00000001:0x00000000
+[ 2400.761271] igt/para-4098    1..s. 2376479306us : trace_ports: rcs0: promote { b9c59:2622, b9c55:2624 }
+[ 2400.761726] igt/para-4097    0d... 2376479311us : __i915_schedule: rcs0: -2147483648->3, inflight:0000000000000040, rq:ffff888208c1e940
+
+which is impossible!
+
+The answer is that as we keep the existing execlists->active pointing
+into the array as we copy over that array, the unserialised read may see
+a partial pointer value.
+
+Fixes: df403069029d ("drm/i915/execlists: Lift process_csb() out of the irq-off spinlock")
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Mika Kuoppala <mika.kuoppala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191125094318.1630806-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_lrc.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_lrc.c b/drivers/gpu/drm/i915/gt/intel_lrc.c
+index e19ec1fa8bc6..f343b02f96ab 100644
+--- a/drivers/gpu/drm/i915/gt/intel_lrc.c
++++ b/drivers/gpu/drm/i915/gt/intel_lrc.c
+@@ -2011,6 +2011,7 @@ cancel_port_requests(struct intel_engine_execlists * const execlists)
+ 	memset(execlists->pending, 0, sizeof(execlists->pending));
+ 
+ 	/* Mark the end of active before we overwrite *active */
++	WRITE_ONCE(execlists->active, execlists->pending);
+ 	for (port = xchg(&execlists->active, execlists->pending); *port; port++)
+ 		execlists_schedule_out(*port);
+ 	WRITE_ONCE(execlists->active,
+-- 
+2.17.1
+

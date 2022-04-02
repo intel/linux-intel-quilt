@@ -1,0 +1,43 @@
+From 109afa880dd353818d2e30997dd477f06c83a41e Mon Sep 17 00:00:00 2001
+From: Andrey Grodzovsky <andrey.grodzovsky@amd.com>
+Date: Thu, 7 Nov 2019 17:55:15 -0500
+Subject: [PATCH 1647/4530] drm/sched: Avoid job cleanup if sched thread is
+ parked.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When the sched thread is parked we assume ring_mirror_list is
+not accessed from here.
+
+Signed-off-by: Andrey Grodzovsky <andrey.grodzovsky@amd.com>
+Reviewed-by: Christian König <christian.koenig@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/scheduler/sched_main.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/scheduler/sched_main.c b/drivers/gpu/drm/scheduler/sched_main.c
+index 362cf1aa13b2..3c57e84222ca 100644
+--- a/drivers/gpu/drm/scheduler/sched_main.c
++++ b/drivers/gpu/drm/scheduler/sched_main.c
+@@ -650,9 +650,13 @@ drm_sched_get_cleanup_job(struct drm_gpu_scheduler *sched)
+ 	struct drm_sched_job *job;
+ 	unsigned long flags;
+ 
+-	/* Don't destroy jobs while the timeout worker is running */
+-	if (sched->timeout != MAX_SCHEDULE_TIMEOUT &&
+-	    !cancel_delayed_work(&sched->work_tdr))
++	/*
++	 * Don't destroy jobs while the timeout worker is running  OR thread
++	 * is being parked and hence assumed to not touch ring_mirror_list
++	 */
++	if ((sched->timeout != MAX_SCHEDULE_TIMEOUT &&
++	    !cancel_delayed_work(&sched->work_tdr)) ||
++	    __kthread_should_park(sched->thread))
+ 		return NULL;
+ 
+ 	spin_lock_irqsave(&sched->job_list_lock, flags);
+-- 
+2.17.1
+

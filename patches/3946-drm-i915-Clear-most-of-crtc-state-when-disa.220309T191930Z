@@ -1,0 +1,54 @@
+From 6de6c50eafab3a0aefbcb22b0830c3f994e45d2d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ville=20Syrj=C3=A4l=C3=A4?= <ville.syrjala@linux.intel.com>
+Date: Wed, 15 Jan 2020 21:08:10 +0200
+Subject: [PATCH 3946/4530] drm/i915: Clear most of crtc state when disabling
+ the crtc
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Currently we don't call intel_crtc_prepare_cleared_state() for crtcs
+that are going to be entirely disabled (uapi.enable==false). That
+means such crtcs will leave stale junk lying around in their states
+and we have to sprinkle hw.enable checks all over before we can
+look at the states. Let's change that a bit so that we aways do
+the state clearing, even for fully disabled crtcs.
+
+Note that we still keep some parts of the old state (see
+intel_crtc_prepare_cleared_state() for the details) so probably
+can't trust things 100% when hw.enable==false. But at least there's
+less chance now that we end up looking at stale junk.
+
+Signed-off-by: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200115190813.17971-2-ville.syrjala@linux.intel.com
+Reviewed-by: José Roberto de Souza <jose.souza@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_display.c | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 817f2286a087..2b7d382b7a6a 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -14607,15 +14607,13 @@ static int intel_atomic_check(struct drm_device *dev,
+ 			continue;
+ 		}
+ 
+-		if (!new_crtc_state->uapi.enable) {
+-			intel_crtc_copy_uapi_to_hw_state(new_crtc_state);
+-			continue;
+-		}
+-
+ 		ret = intel_crtc_prepare_cleared_state(new_crtc_state);
+ 		if (ret)
+ 			goto fail;
+ 
++		if (!new_crtc_state->hw.enable)
++			continue;
++
+ 		ret = intel_modeset_pipe_config(new_crtc_state);
+ 		if (ret)
+ 			goto fail;
+-- 
+2.17.1
+

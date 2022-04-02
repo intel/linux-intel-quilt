@@ -1,0 +1,54 @@
+From a2320981d6012c7e52735da6b16aca5634b1f98c Mon Sep 17 00:00:00 2001
+From: Alex Deucher <alexander.deucher@amd.com>
+Date: Fri, 4 Oct 2019 14:57:21 -0500
+Subject: [PATCH 1070/4530] drm/amdgpu: move gpu reset out of
+ amdgpu_device_suspend
+
+Move it into the caller.  There are cases were we don't
+want it.  We need it for hibernation, but we don't need
+it for runtime pm, so drop it for runtime pm.
+
+Reviewed-by: Evan Quan <evan.quan@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_device.c | 4 ----
+ drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c    | 7 ++++++-
+ 2 files changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index 1a9e19879855..1b6c30d4b6ad 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -3183,10 +3183,6 @@ int amdgpu_device_suspend(struct drm_device *dev, bool suspend, bool fbcon)
+ 		/* Shut down the device */
+ 		pci_disable_device(dev->pdev);
+ 		pci_set_power_state(dev->pdev, PCI_D3hot);
+-	} else {
+-		r = amdgpu_asic_reset(adev);
+-		if (r)
+-			DRM_ERROR("amdgpu asic reset failed\n");
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+index bac0bf5c2f03..5a6e79f3398a 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
+@@ -1157,8 +1157,13 @@ static int amdgpu_pmops_resume(struct device *dev)
+ static int amdgpu_pmops_freeze(struct device *dev)
+ {
+ 	struct drm_device *drm_dev = dev_get_drvdata(dev);
++	struct amdgpu_device *adev = drm_dev->dev_private;
++	int r;
+ 
+-	return amdgpu_device_suspend(drm_dev, false, true);
++	r = amdgpu_device_suspend(drm_dev, false, true);
++	if (r)
++		return r;
++	return amdgpu_asic_reset(adev);
+ }
+ 
+ static int amdgpu_pmops_thaw(struct device *dev)
+-- 
+2.17.1
+

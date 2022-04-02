@@ -1,0 +1,41 @@
+From db91680f23d35b9cfb8939ee3672a015978da133 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 27 Nov 2019 11:58:13 +0000
+Subject: [PATCH 2401/4530] drm/i915/gt: Defer breadcrumb processing to after
+ the irq handler
+
+The design of our interrupt handlers is that we ack the receipt of the
+interrupt first, inside the critical section where the master interrupt
+control is off and other cpus cannot start processing the next
+interrupt; and then process the interrupt events afterwards. However,
+Icelake introduced a whole new set of banked GT_IIR that are inherently
+serialised and slow to retrieve the IIR and must be processed within the
+critical section. We can still push our breadcrumbs out of this critical
+section by using our irq_worker. On bdw+, this should not make too much
+of a difference as we only slightly defer the breadcrumbs, but on icl+
+this should make a big difference to our throughput of interrupts from
+concurrently executing engines.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Tvrtko Ursulin <tvrtko.ursulin@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191127115813.3345823-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt_irq.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_irq.c b/drivers/gpu/drm/i915/gt/intel_gt_irq.c
+index 973ee7eded64..332b12a574fb 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_irq.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_irq.c
+@@ -28,7 +28,7 @@ cs_irq_handler(struct intel_engine_cs *engine, u32 iir)
+ 		tasklet = true;
+ 
+ 	if (iir & GT_RENDER_USER_INTERRUPT) {
+-		intel_engine_breadcrumbs_irq(engine);
++		intel_engine_queue_breadcrumbs(engine);
+ 		tasklet |= intel_engine_needs_breadcrumb_tasklet(engine);
+ 	}
+ 
+-- 
+2.17.1
+

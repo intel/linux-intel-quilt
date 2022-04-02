@@ -1,0 +1,51 @@
+From ff5a188ca1c738546b68f0fe784803be7333ad6a Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Sun, 29 Dec 2019 18:31:50 +0000
+Subject: [PATCH 3117/4530] drm/i915/gt: Do not restore invalid RS state
+
+Only restore valid resource streamer state from the context image, i.e.
+avoid restoring if we know the image is invalid.
+
+Closes: https://gitlab.freedesktop.org/drm/intel/issues/446
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20191229183153.3719869-4-chris@chris-wilson.co.uk
+Cc: stable@vger.kernel.org
+---
+ drivers/gpu/drm/i915/gt/intel_ring_submission.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_ring_submission.c b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+index aba7a2bc9351..066c4eddf5d0 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ring_submission.c
++++ b/drivers/gpu/drm/i915/gt/intel_ring_submission.c
+@@ -1599,15 +1599,21 @@ static int switch_context(struct i915_request *rq)
+ 		return ret;
+ 
+ 	if (ce->state) {
+-		u32 hw_flags;
++		u32 flags;
+ 
+ 		GEM_BUG_ON(rq->engine->id != RCS0);
+ 
+-		hw_flags = 0;
+-		if (!test_bit(CONTEXT_VALID_BIT, &ce->flags))
+-			hw_flags = MI_RESTORE_INHIBIT;
++		/* For resource streamer on HSW+ and power context elsewhere */
++		BUILD_BUG_ON(HSW_MI_RS_SAVE_STATE_EN != MI_SAVE_EXT_STATE_EN);
++		BUILD_BUG_ON(HSW_MI_RS_RESTORE_STATE_EN != MI_RESTORE_EXT_STATE_EN);
+ 
+-		ret = mi_set_context(rq, hw_flags);
++		flags = MI_SAVE_EXT_STATE_EN | MI_MM_SPACE_GTT;
++		if (test_bit(CONTEXT_VALID_BIT, &ce->flags))
++			flags |= MI_RESTORE_EXT_STATE_EN;
++		else
++			flags |= MI_RESTORE_INHIBIT;
++
++		ret = mi_set_context(rq, flags);
+ 		if (ret)
+ 			return ret;
+ 	}
+-- 
+2.17.1
+

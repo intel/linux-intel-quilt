@@ -1,0 +1,71 @@
+From f27acbdcad93628c5d470e3bda8ccdf267542ac7 Mon Sep 17 00:00:00 2001
+From: Gerd Hoffmann <kraxel@redhat.com>
+Date: Wed, 23 Oct 2019 08:25:39 +0200
+Subject: [PATCH 2291/4530] drm/virtio: factor out virtio_gpu_update_dumb_bo
+
+No functional change.
+
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+Reviewed-by: Gurchetan Singh <gurchetansingh@chromium.org>
+Link: http://patchwork.freedesktop.org/patch/msgid/20191023062539.11728-4-kraxel@redhat.com
+---
+ drivers/gpu/drm/virtio/virtgpu_plane.c | 36 +++++++++++++++-----------
+ 1 file changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index ffc83a513b6c..2153431770ba 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -102,6 +102,25 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 	return ret;
+ }
+ 
++static void virtio_gpu_update_dumb_bo(struct virtio_gpu_device *vgdev,
++				      struct virtio_gpu_object *bo,
++				      struct drm_plane_state *state)
++{
++	struct virtio_gpu_object_array *objs;
++
++	objs = virtio_gpu_array_alloc(1);
++	if (!objs)
++		return;
++	virtio_gpu_array_add_obj(objs, &bo->base.base);
++	virtio_gpu_cmd_transfer_to_host_2d
++		(vgdev, 0,
++		 state->src_w >> 16,
++		 state->src_h >> 16,
++		 state->src_x >> 16,
++		 state->src_y >> 16,
++		 objs, NULL);
++}
++
+ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 					    struct drm_plane_state *old_state)
+ {
+@@ -129,21 +148,8 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 
+ 	vgfb = to_virtio_gpu_framebuffer(plane->state->fb);
+ 	bo = gem_to_virtio_gpu_obj(vgfb->base.obj[0]);
+-	if (bo->dumb) {
+-		struct virtio_gpu_object_array *objs;
+-
+-		objs = virtio_gpu_array_alloc(1);
+-		if (!objs)
+-			return;
+-		virtio_gpu_array_add_obj(objs, vgfb->base.obj[0]);
+-		virtio_gpu_cmd_transfer_to_host_2d
+-			(vgdev, 0,
+-			 plane->state->src_w >> 16,
+-			 plane->state->src_h >> 16,
+-			 plane->state->src_x >> 16,
+-			 plane->state->src_y >> 16,
+-			 objs, NULL);
+-	}
++	if (bo->dumb)
++		virtio_gpu_update_dumb_bo(vgdev, bo, plane->state);
+ 
+ 	DRM_DEBUG("handle 0x%x, crtc %dx%d+%d+%d, src %dx%d+%d+%d\n",
+ 		  bo->hw_res_handle,
+-- 
+2.17.1
+

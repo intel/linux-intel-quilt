@@ -1,0 +1,72 @@
+From e83902edcac6ad3b9bef3640938441ca6509486c Mon Sep 17 00:00:00 2001
+From: Monk Liu <Monk.Liu@amd.com>
+Date: Tue, 26 Nov 2019 19:42:25 +0800
+Subject: [PATCH 2474/4530] drm/amdgpu: fix calltrace during kmd unload(v3)
+
+issue:
+kernel would report a warning from a double unpin
+during the driver unloading on the CSB bo
+
+why:
+we unpin it during hw_fini, and there will be another
+unpin in sw_fini on CSB bo.
+
+fix:
+actually we don't need to pin/unpin it during
+hw_init/fini since it is created with kernel pinned,
+we only need to fullfill the CSB again during hw_init
+to prevent CSB/VRAM lost after S3
+
+v2:
+get_csb in init_rlc so hw_init() will make CSIB content
+back even after reset or s3
+
+v3:
+use bo_create_kernel instead of bo_create_reserved for CSB
+otherwise the bo_free_kernel() on CSB is not aligned and
+would lead to its internal reserve pending there forever
+
+take care of gfx7/8 as well
+
+Signed-off-by: Monk Liu <Monk.Liu@amd.com>
+Reviewed-by: Hawking Zhang <Hawking.Zhang@amd.com>
+Reviewed-by: Xiaojie Yuan <xiaojie.yuan@amd.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+---
+ drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c | 20 +-------------------
+ 1 file changed, 1 insertion(+), 19 deletions(-)
+
+diff --git a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+index 90b4ce74209b..93d0f354467c 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -1759,25 +1759,7 @@ static void gfx_v10_0_enable_gui_idle_interrupt(struct amdgpu_device *adev,
+ 
+ static int gfx_v10_0_init_csb(struct amdgpu_device *adev)
+ {
+-	int r;
+-
+-	if (adev->in_gpu_reset) {
+-		r = amdgpu_bo_reserve(adev->gfx.rlc.clear_state_obj, false);
+-		if (r)
+-			return r;
+-
+-		r = amdgpu_bo_kmap(adev->gfx.rlc.clear_state_obj,
+-				   (void **)&adev->gfx.rlc.cs_ptr);
+-		if (!r) {
+-			adev->gfx.rlc.funcs->get_csb_buffer(adev,
+-					adev->gfx.rlc.cs_ptr);
+-			amdgpu_bo_kunmap(adev->gfx.rlc.clear_state_obj);
+-		}
+-
+-		amdgpu_bo_unreserve(adev->gfx.rlc.clear_state_obj);
+-		if (r)
+-			return r;
+-	}
++	adev->gfx.rlc.funcs->get_csb_buffer(adev, adev->gfx.rlc.cs_ptr);
+ 
+ 	adev->gfx.rlc.funcs->get_csb_buffer(adev, adev->gfx.rlc.cs_ptr);
+ 
+-- 
+2.17.1
+

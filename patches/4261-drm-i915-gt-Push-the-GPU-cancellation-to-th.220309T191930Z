@@ -1,0 +1,58 @@
+From f272cf8e11f831d83f939f1bfe1651e6ae55be0f Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 21 Feb 2020 23:51:35 +0000
+Subject: [PATCH 4261/4530] drm/i915/gt: Push the GPU cancellation to the
+ backend
+
+Upon unregistering the user interface, we mark the GPU as wedged to
+ensure we push no new work to the GPU, and to flush all current work
+from the GPU. Move this call to the GT backend.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Andi Shyti <andi.shyti@intel.com>
+Reviewed-by: Andi Shyti <andi.shyti@intel.com>
+Link: https://patchwork.freedesktop.org/patch/msgid/20200221235135.2883006-1-chris@chris-wilson.co.uk
+---
+ drivers/gpu/drm/i915/gt/intel_gt.c | 7 +++++++
+ drivers/gpu/drm/i915/i915_drv.c    | 7 -------
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt.c b/drivers/gpu/drm/i915/gt/intel_gt.c
+index cd64f81a3e60..3dea8881e915 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt.c
+@@ -644,6 +644,13 @@ void intel_gt_driver_remove(struct intel_gt *gt)
+ void intel_gt_driver_unregister(struct intel_gt *gt)
+ {
+ 	intel_rps_driver_unregister(&gt->rps);
++
++	/*
++	 * Upon unregistering the device to prevent any new users, cancel
++	 * all in-flight requests so that we can quickly unbind the active
++	 * resources.
++	 */
++	intel_gt_set_wedged(gt);
+ }
+ 
+ void intel_gt_driver_release(struct intel_gt *gt)
+diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
+index 14d51ee309cc..f1b13dfd56f2 100644
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -1497,13 +1497,6 @@ void i915_driver_remove(struct drm_i915_private *i915)
+ 
+ 	i915_driver_unregister(i915);
+ 
+-	/*
+-	 * After unregistering the device to prevent any new users, cancel
+-	 * all in-flight requests so that we can quickly unbind the active
+-	 * resources.
+-	 */
+-	intel_gt_set_wedged(&i915->gt);
+-
+ 	/* Flush any external code that still may be under the RCU lock */
+ 	synchronize_rcu();
+ 
+-- 
+2.17.1
+
