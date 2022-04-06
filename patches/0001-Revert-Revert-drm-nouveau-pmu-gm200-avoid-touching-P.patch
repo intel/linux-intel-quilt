@@ -1,0 +1,86 @@
+From c64c76fd532ebfbac4dfe36d2baf56bb81a77f46 Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Wed, 6 Apr 2022 11:53:35 +0800
+Subject: [PATCH 1/9] Revert "Revert "drm/nouveau/pmu/gm200-: avoid touching
+ PMU outside of DEVINIT/PREOS/ACR""
+
+This reverts commit 5d9453bf4126cfd3c53fdf1cc317f919adf73f5a.
+---
+ .../gpu/drm/nouveau/nvkm/subdev/pmu/base.c    | 37 +++++++++++--------
+ 1 file changed, 21 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/base.c b/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/base.c
+index ea2e11771bca..105b4be467a3 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/base.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/pmu/base.c
+@@ -88,20 +88,13 @@ nvkm_pmu_fini(struct nvkm_subdev *subdev, bool suspend)
+ 	return 0;
+ }
+ 
+-static int
++static void
+ nvkm_pmu_reset(struct nvkm_pmu *pmu)
+ {
+ 	struct nvkm_device *device = pmu->subdev.device;
+ 
+ 	if (!pmu->func->enabled(pmu))
+-		return 0;
+-
+-	/* Inhibit interrupts, and wait for idle. */
+-	nvkm_wr32(device, 0x10a014, 0x0000ffff);
+-	nvkm_msec(device, 2000,
+-		if (!nvkm_rd32(device, 0x10a04c))
+-			break;
+-	);
++		return;
+ 
+ 	/* Reset. */
+ 	if (pmu->func->reset)
+@@ -112,25 +105,37 @@ nvkm_pmu_reset(struct nvkm_pmu *pmu)
+ 		if (!(nvkm_rd32(device, 0x10a10c) & 0x00000006))
+ 			break;
+ 	);
+-
+-	return 0;
+ }
+ 
+ static int
+ nvkm_pmu_preinit(struct nvkm_subdev *subdev)
+ {
+ 	struct nvkm_pmu *pmu = nvkm_pmu(subdev);
+-	return nvkm_pmu_reset(pmu);
++	nvkm_pmu_reset(pmu);
++	return 0;
+ }
+ 
+ static int
+ nvkm_pmu_init(struct nvkm_subdev *subdev)
+ {
+ 	struct nvkm_pmu *pmu = nvkm_pmu(subdev);
+-	int ret = nvkm_pmu_reset(pmu);
+-	if (ret == 0 && pmu->func->init)
+-		ret = pmu->func->init(pmu);
+-	return ret;
++	struct nvkm_device *device = pmu->subdev.device;
++
++	if (!pmu->func->init)
++		return 0;
++
++	if (pmu->func->enabled(pmu)) {
++		/* Inhibit interrupts, and wait for idle. */
++		nvkm_wr32(device, 0x10a014, 0x0000ffff);
++		nvkm_msec(device, 2000,
++			if (!nvkm_rd32(device, 0x10a04c))
++				break;
++		);
++
++		nvkm_pmu_reset(pmu);
++	}
++
++	return pmu->func->init(pmu);
+ }
+ 
+ static int
+-- 
+2.27.0
+
