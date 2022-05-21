@@ -1,0 +1,294 @@
+From 84dd3bb02812cb2381c5b6fdcb104b5500bc3c5f Mon Sep 17 00:00:00 2001
+From: Pavitra <PavitraX.S@intel.com>
+Date: Fri, 9 Apr 2021 21:34:08 +0530
+Subject: [PATCH 053/109] stmmac: ethtool statistic to show rx_pkt_n , irq and
+ tx_pkt_n for each rx and TX ch
+
+Adding new statistics for packets received and transmitted per
+queue/channel. Up to 8
+queue/channels are supported. These counters are incremented by
+stmmac_rx and stmmac_tx_clean respectively.
+Adding new statistics for DMA tx and rx IRQ. Up to 8 channels are
+supported, incremented by dwmac4_dma_interrupt.
+This change is to accommodate interrupt mode(INTM) MODE1.
+As the NIS status bit is not asserted for any RI/TI events
+
+Signed-off-by: Pavitra <PavitraX.S@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/common.h  | 32 +++++++++
+ .../net/ethernet/stmicro/stmmac/dwmac4_lib.c  | 70 ++++++++++++++++++-
+ .../ethernet/stmicro/stmmac/stmmac_ethtool.c  | 32 +++++++++
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c | 58 +++++++++++++++
+ 4 files changed, 189 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/common.h b/drivers/net/ethernet/stmicro/stmmac/common.h
+index 73e59551197f..11b549fe7cc4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/common.h
++++ b/drivers/net/ethernet/stmicro/stmmac/common.h
+@@ -114,7 +114,23 @@ struct stmmac_extra_stats {
+ 	unsigned long rx_early_irq;
+ 	unsigned long threshold;
+ 	unsigned long tx_pkt_n;
++	unsigned long q0_tx_pkt_n;
++	unsigned long q1_tx_pkt_n;
++	unsigned long q2_tx_pkt_n;
++	unsigned long q3_tx_pkt_n;
++	unsigned long q4_tx_pkt_n;
++	unsigned long q5_tx_pkt_n;
++	unsigned long q6_tx_pkt_n;
++	unsigned long q7_tx_pkt_n;
+ 	unsigned long rx_pkt_n;
++	unsigned long q0_rx_pkt_n;
++	unsigned long q1_rx_pkt_n;
++	unsigned long q2_rx_pkt_n;
++	unsigned long q3_rx_pkt_n;
++	unsigned long q4_rx_pkt_n;
++	unsigned long q5_rx_pkt_n;
++	unsigned long q6_rx_pkt_n;
++	unsigned long q7_rx_pkt_n;
+ 	unsigned long normal_irq_n;
+ 	unsigned long rx_normal_irq_n;
+ 	unsigned long napi_poll;
+@@ -122,6 +138,22 @@ struct stmmac_extra_stats {
+ 	unsigned long tx_clean;
+ 	unsigned long tx_set_ic_bit;
+ 	unsigned long irq_receive_pmt_irq_n;
++	unsigned long q0_rx_irq_n;
++	unsigned long q1_rx_irq_n;
++	unsigned long q2_rx_irq_n;
++	unsigned long q3_rx_irq_n;
++	unsigned long q4_rx_irq_n;
++	unsigned long q5_rx_irq_n;
++	unsigned long q6_rx_irq_n;
++	unsigned long q7_rx_irq_n;
++	unsigned long q0_tx_irq_n;
++	unsigned long q1_tx_irq_n;
++	unsigned long q2_tx_irq_n;
++	unsigned long q3_tx_irq_n;
++	unsigned long q4_tx_irq_n;
++	unsigned long q5_tx_irq_n;
++	unsigned long q6_tx_irq_n;
++	unsigned long q7_tx_irq_n;
+ 	/* MMC info */
+ 	unsigned long mmc_tx_irq_n;
+ 	unsigned long mmc_rx_irq_n;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
+index 73cafe779e54..ad241ad9c8a4 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_lib.c
+@@ -159,18 +159,82 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
+ 	/* TX/RX NORMAL interrupts */
+ 	if (likely(intr_status & DMA_CHAN_STATUS_NIS))
+ 		x->normal_irq_n++;
++
+ 	if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
++		u32 value;
+ 		x->rx_normal_irq_n++;
+ 		x->rxq_stats[chan].rx_normal_irq_n++;
+ 		ret |= handle_rx;
++
++		value = readl(ioaddr + DMA_CHAN_INTR_ENA(chan));
++		/* to schedule NAPI on real RIE event. */
++		if (likely(value & DMA_CHAN_INTR_ENA_RIE)) {
++			x->rx_normal_irq_n++;
++			switch (chan) {
++			case 0x0:
++				x->q0_rx_irq_n++;
++				break;
++			case 0x1:
++				x->q1_rx_irq_n++;
++				break;
++			case 0x2:
++				x->q2_rx_irq_n++;
++				break;
++			case 0x3:
++				x->q3_rx_irq_n++;
++				break;
++			case 0x4:
++				x->q4_rx_irq_n++;
++				break;
++			case 0x5:
++				x->q5_rx_irq_n++;
++				break;
++			case 0x6:
++				x->q6_rx_irq_n++;
++				break;
++			case 0x7:
++				x->q7_rx_irq_n++;
++				break;
++			default:
++				break;
++			}
++			ret |= handle_rx;
++		}
+ 	}
+-	if (likely(intr_status & DMA_CHAN_STATUS_TI)) {
++	if (likely(intr_status & (DMA_CHAN_STATUS_TI |
++				  DMA_CHAN_STATUS_TBU))) {
+ 		x->tx_normal_irq_n++;
+ 		x->txq_stats[chan].tx_normal_irq_n++;
++		switch (chan) {
++		case 0x0:
++			x->q0_tx_irq_n++;
++			break;
++		case 0x1:
++			x->q1_tx_irq_n++;
++			break;
++		case 0x2:
++			x->q2_tx_irq_n++;
++			break;
++		case 0x3:
++			x->q3_tx_irq_n++;
++			break;
++		case 0x4:
++			x->q4_tx_irq_n++;
++			break;
++		case 0x5:
++			x->q5_tx_irq_n++;
++			break;
++		case 0x6:
++			x->q6_tx_irq_n++;
++			break;
++		case 0x7:
++			x->q7_tx_irq_n++;
++			break;
++		default:
++			break;
++		}
+ 		ret |= handle_tx;
+ 	}
+-	if (unlikely(intr_status & DMA_CHAN_STATUS_TBU))
+-		ret |= handle_tx;
+ 	if (unlikely(intr_status & DMA_CHAN_STATUS_ERI))
+ 		x->rx_early_irq++;
+ 
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+index 1f81651ffc23..f2d8a81920e5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_ethtool.c
+@@ -83,7 +83,23 @@ static const struct stmmac_stats stmmac_gstrings_stats[] = {
+ 	STMMAC_STAT(rx_early_irq),
+ 	STMMAC_STAT(threshold),
+ 	STMMAC_STAT(tx_pkt_n),
++	STMMAC_STAT(q0_tx_pkt_n),
++	STMMAC_STAT(q1_tx_pkt_n),
++	STMMAC_STAT(q2_tx_pkt_n),
++	STMMAC_STAT(q3_tx_pkt_n),
++	STMMAC_STAT(q4_tx_pkt_n),
++	STMMAC_STAT(q5_tx_pkt_n),
++	STMMAC_STAT(q6_tx_pkt_n),
++	STMMAC_STAT(q7_tx_pkt_n),
+ 	STMMAC_STAT(rx_pkt_n),
++	STMMAC_STAT(q0_rx_pkt_n),
++	STMMAC_STAT(q1_rx_pkt_n),
++	STMMAC_STAT(q2_rx_pkt_n),
++	STMMAC_STAT(q3_rx_pkt_n),
++	STMMAC_STAT(q4_rx_pkt_n),
++	STMMAC_STAT(q5_rx_pkt_n),
++	STMMAC_STAT(q6_rx_pkt_n),
++	STMMAC_STAT(q7_rx_pkt_n),
+ 	STMMAC_STAT(normal_irq_n),
+ 	STMMAC_STAT(rx_normal_irq_n),
+ 	STMMAC_STAT(napi_poll),
+@@ -91,6 +107,22 @@ static const struct stmmac_stats stmmac_gstrings_stats[] = {
+ 	STMMAC_STAT(tx_clean),
+ 	STMMAC_STAT(tx_set_ic_bit),
+ 	STMMAC_STAT(irq_receive_pmt_irq_n),
++	STMMAC_STAT(q0_rx_irq_n),
++	STMMAC_STAT(q1_rx_irq_n),
++	STMMAC_STAT(q2_rx_irq_n),
++	STMMAC_STAT(q3_rx_irq_n),
++	STMMAC_STAT(q4_rx_irq_n),
++	STMMAC_STAT(q5_rx_irq_n),
++	STMMAC_STAT(q6_rx_irq_n),
++	STMMAC_STAT(q7_rx_irq_n),
++	STMMAC_STAT(q0_tx_irq_n),
++	STMMAC_STAT(q1_tx_irq_n),
++	STMMAC_STAT(q2_tx_irq_n),
++	STMMAC_STAT(q3_tx_irq_n),
++	STMMAC_STAT(q4_tx_irq_n),
++	STMMAC_STAT(q5_tx_irq_n),
++	STMMAC_STAT(q6_tx_irq_n),
++	STMMAC_STAT(q7_tx_irq_n),
+ 	/* MMC info */
+ 	STMMAC_STAT(mmc_tx_irq_n),
+ 	STMMAC_STAT(mmc_rx_irq_n),
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 8477f776f725..908490713023 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -2584,6 +2584,35 @@ static int stmmac_tx_clean(struct stmmac_priv *priv, int budget, u32 queue)
+ 				priv->dev->stats.tx_packets++;
+ 				priv->xstats.tx_pkt_n++;
+ 				priv->xstats.txq_stats[queue].tx_pkt_n++;
++
++				switch (queue) {
++				case 0x0:
++					priv->xstats.q0_tx_pkt_n++;
++					break;
++				case 0x1:
++					priv->xstats.q1_tx_pkt_n++;
++					break;
++				case 0x2:
++					priv->xstats.q2_tx_pkt_n++;
++					break;
++				case 0x3:
++					priv->xstats.q3_tx_pkt_n++;
++					break;
++				case 0x4:
++					priv->xstats.q4_tx_pkt_n++;
++					break;
++				case 0x5:
++					priv->xstats.q5_tx_pkt_n++;
++					break;
++				case 0x6:
++					priv->xstats.q6_tx_pkt_n++;
++					break;
++				case 0x7:
++					priv->xstats.q7_tx_pkt_n++;
++					break;
++				default:
++					break;
++				}
+ 			}
+ 			if (skb &&
+ 			    skb_shinfo(skb)->tx_flags & SKBTX_IN_PROGRESS) {
+@@ -5469,6 +5498,35 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit, u32 queue)
+ 	priv->xstats.rx_pkt_n += count;
+ 	priv->xstats.rxq_stats[queue].rx_pkt_n += count;
+ 
++	switch (queue) {
++	case 0x0:
++		priv->xstats.q0_rx_pkt_n += count;
++		break;
++	case 0x1:
++		priv->xstats.q1_rx_pkt_n += count;
++		break;
++	case 0x2:
++		priv->xstats.q2_rx_pkt_n += count;
++		break;
++	case 0x3:
++		priv->xstats.q3_rx_pkt_n += count;
++		break;
++	case 0x4:
++		priv->xstats.q4_rx_pkt_n += count;
++		break;
++	case 0x5:
++		priv->xstats.q5_rx_pkt_n += count;
++		break;
++	case 0x6:
++		priv->xstats.q6_rx_pkt_n += count;
++		break;
++	case 0x7:
++		priv->xstats.q7_rx_pkt_n += count;
++		break;
++	default:
++		break;
++	}
++
+ 	return count;
+ }
+ 
+-- 
+2.25.1
+

@@ -1,0 +1,143 @@
+From 829f3860a2c15abef95901d2181f2da4918560f1 Mon Sep 17 00:00:00 2001
+From: "C, Udhayakumar" <udhayakumar.c@intel.com>
+Date: Fri, 22 Jan 2021 22:15:04 +0530
+Subject: [PATCH 029/109] Reset driver support using IO expander
+
+Support is added to reset devices using IO-expander
+
+Signed-off-by: C, Udhayakumar <udhayakumar.c@intel.com>
+---
+ drivers/misc/hddl_device/hddl_device_lh.c | 61 +++++++++++++++++++++++
+ drivers/misc/hddl_device/hddl_device_rh.c |  4 ++
+ include/linux/hddl_device.h               | 12 ++++-
+ 3 files changed, 75 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/misc/hddl_device/hddl_device_lh.c b/drivers/misc/hddl_device/hddl_device_lh.c
+index e44c480379bc..a506fe69aa69 100644
+--- a/drivers/misc/hddl_device/hddl_device_lh.c
++++ b/drivers/misc/hddl_device/hddl_device_lh.c
+@@ -602,6 +602,62 @@ static int intel_hddl_get_ids(struct platform_device *pdev,
+ 	return 0;
+ }
+ 
++static int hddl_get_socreset_data(struct platform_device *pdev,
++				  struct intel_hddl_client_priv *priv,
++				  struct device_node *np)
++{
++	struct device_node *soc_node;
++
++	for_each_child_of_node(np, soc_node) {
++		struct intel_hddl_board_info *board_info = &priv->board_info;
++		int soc_id;
++
++		of_property_read_u32(soc_node, "id", &soc_id);
++		if (board_info->soc_id == soc_id) {
++			const char *name;
++
++			of_property_read_string_index(soc_node, "io-exp-name",
++						      0, &name);
++			strcpy(board_info->iox_name, name);
++			of_property_read_u32_index(soc_node, "io-exp-addr",
++						   0, &board_info->iox_addr);
++			of_property_read_u32_index(soc_node, "io-exp-addr",
++						   1, &board_info->iox_pin);
++			of_property_read_u32_index(soc_node, "pci-switch",
++						   0, &board_info->pci_pin);
++			return 0;
++		}
++	}
++	return -EINVAL;
++}
++
++static int hddl_get_board_reset_data(struct platform_device *pdev,
++				     struct intel_hddl_client_priv *priv)
++{
++	struct device_node *s_node;
++	struct device_node *np;
++	int n_boards;
++
++	s_node = of_parse_phandle(pdev->dev.of_node, "soc-reset", 0);
++	if (!s_node)
++		return -EINVAL;
++	n_boards = of_get_child_count(s_node);
++	if (n_boards == 0) {
++		dev_err(&pdev->dev, "Board reset data not available in dt\n");
++		return -EINVAL;
++	}
++
++	for_each_child_of_node(s_node, np) {
++		int id;
++
++		of_property_read_u32(np, "id", &id);
++		if (priv->board_info.board_id == id) {
++			return hddl_get_socreset_data(pdev, priv, np);
++		}
++	}
++	return -EINVAL;
++}
++
+ static int intel_hddl_config_dt(struct intel_hddl_client_priv *priv)
+ {
+ 	struct platform_device *pdev = priv->pdev;
+@@ -634,6 +690,11 @@ static int intel_hddl_config_dt(struct intel_hddl_client_priv *priv)
+ 		dev_err(&pdev->dev, "Unable to get board/soc id");
+ 		return ret;
+ 	}
++	ret = hddl_get_board_reset_data(pdev, priv);
++	if (ret) {
++		dev_err(&pdev->dev, "Unable to get reset data");
++		return ret;
++	}
+ 	ret = hddl_get_onchip_sensors(pdev, priv);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "Onchip sensor config failed");
+diff --git a/drivers/misc/hddl_device/hddl_device_rh.c b/drivers/misc/hddl_device/hddl_device_rh.c
+index 2ba76cd56612..f04860828299 100644
+--- a/drivers/misc/hddl_device/hddl_device_rh.c
++++ b/drivers/misc/hddl_device/hddl_device_rh.c
+@@ -199,6 +199,10 @@ static long hddl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		}
+ 		swid_data.board_id = client->board_info.board_id;
+ 		swid_data.soc_id = client->board_info.soc_id;
++		swid_data.iox_addr = client->board_info.iox_addr;
++		swid_data.iox_pin = client->board_info.iox_pin;
++		swid_data.pci_pin = client->board_info.pci_pin;
++		strcpy(swid_data.iox_name, client->board_info.iox_name);
+ 		if (client->adap[0])
+ 			swid_data.soc_adaptor_no[0] = client->adap[0]->nr;
+ 		if (client->adap[1])
+diff --git a/include/linux/hddl_device.h b/include/linux/hddl_device.h
+index d6bee2258baa..2c02cb6a0c0b 100644
+--- a/include/linux/hddl_device.h
++++ b/include/linux/hddl_device.h
+@@ -27,8 +27,12 @@
+ #define HDDL_READ_STATUS	_IOW(HDDL_MAGIC, 'c', void*)
+ 
+ struct sw_id_hddl_data {
+-	u32 board_id;
+-	u32 soc_id;
++	char iox_name[15];
++	uint32_t board_id;
++	uint32_t soc_id;
++	uint32_t iox_addr;
++	uint32_t iox_pin;
++	uint32_t pci_pin;
+ 	u32 soc_adaptor_no[2];
+ 	u32 sw_id;
+ 	u32 return_id;
+@@ -88,8 +92,12 @@ struct intel_hddl_tsens_msg {
+ } __packed __aligned(HDDL_ALIGN);
+ 
+ struct intel_hddl_board_info {
++	char iox_name[15];
+ 	int board_id;
+ 	int soc_id;
++	int iox_addr;
++	int iox_pin;
++	int pci_pin;
+ } __packed __aligned(HDDL_ALIGN);
+ 
+ struct intel_tsens_data {
+-- 
+2.25.1
+

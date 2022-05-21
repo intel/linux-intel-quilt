@@ -1,0 +1,346 @@
+From 05e85e5660d59990680e31e128d04a8dfd9aea02 Mon Sep 17 00:00:00 2001
+From: Srikanth Thokala <srikanth.thokala@intel.com>
+Date: Wed, 28 Oct 2020 06:25:01 +0530
+Subject: [PATCH 074/109] misc: xlink-pcie: lh: Prepare changes for adding
+ remote host driver
+
+Move logic that can be reused between local host and remote host to
+common/ folder
+
+Performance improvement changes
+- Implement Flow control at Local Host
+
+Cc: Arnd Bergmann <arnd@arndb.de>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Reviewed-by: Mark Gross <mgross@linux.intel.com>
+Signed-off-by: Mark Gross <mgross@linux.intel.com>
+Signed-off-by: Srikanth Thokala <srikanth.thokala@intel.com>
+---
+ .../xlink-pcie/{local_host => common}/core.h  | 11 ++---
+ .../xlink-pcie/{local_host => common}/util.c  | 45 ++++++++++++++++---
+ .../xlink-pcie/{local_host => common}/util.h  | 22 ++++++---
+ .../xlink-pcie/{local_host => common}/xpcie.h | 15 ++++---
+ drivers/misc/xlink-pcie/local_host/Makefile   |  2 +-
+ drivers/misc/xlink-pcie/local_host/core.c     | 24 +++++++++-
+ drivers/misc/xlink-pcie/local_host/epf.h      |  4 +-
+ 7 files changed, 96 insertions(+), 27 deletions(-)
+ rename drivers/misc/xlink-pcie/{local_host => common}/core.h (96%)
+ rename drivers/misc/xlink-pcie/{local_host => common}/util.c (88%)
+ rename drivers/misc/xlink-pcie/{local_host => common}/util.h (82%)
+ rename drivers/misc/xlink-pcie/{local_host => common}/xpcie.h (89%)
+
+diff --git a/drivers/misc/xlink-pcie/local_host/core.h b/drivers/misc/xlink-pcie/common/core.h
+similarity index 96%
+rename from drivers/misc/xlink-pcie/local_host/core.h
+rename to drivers/misc/xlink-pcie/common/core.h
+index 84985ef41a64..561bbe016e4f 100644
+--- a/drivers/misc/xlink-pcie/local_host/core.h
++++ b/drivers/misc/xlink-pcie/common/core.h
+@@ -1,11 +1,9 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+-/*****************************************************************************
+- *
++/*
+  * Intel Keem Bay XLink PCIe Driver
+  *
+- * Copyright (C) 2020 Intel Corporation
+- *
+- ****************************************************************************/
++ * Copyright (C) 2021 Intel Corporation
++ */
+ 
+ #ifndef XPCIE_CORE_HEADER_
+ #define XPCIE_CORE_HEADER_
+@@ -34,6 +32,9 @@
+ #define XPCIE_DESC_STATUS_SUCCESS	(0)
+ #define XPCIE_DESC_STATUS_ERROR		(0xFFFF)
+ 
++#define HOST_RX_BD_COUNT_THRESHOLD	(64)
++#define MAX_HOST_RX_BD_COUNT		(3 * HOST_RX_BD_COUNT_THRESHOLD)
++
+ /* Layout transfer descriptors used by device and host */
+ struct xpcie_transfer_desc {
+ 	u64 address;
+diff --git a/drivers/misc/xlink-pcie/local_host/util.c b/drivers/misc/xlink-pcie/common/util.c
+similarity index 88%
+rename from drivers/misc/xlink-pcie/local_host/util.c
+rename to drivers/misc/xlink-pcie/common/util.c
+index ec808b0cd72b..1dabc489d9ab 100644
+--- a/drivers/misc/xlink-pcie/local_host/util.c
++++ b/drivers/misc/xlink-pcie/common/util.c
+@@ -1,11 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/*****************************************************************************
+- *
++/*
+  * Intel Keem Bay XLink PCIe Driver
+  *
+- * Copyright (C) 2020 Intel Corporation
+- *
+- ****************************************************************************/
++ * Copyright (C) 2021 Intel Corporation
++ */
+ 
+ #include "util.h"
+ 
+@@ -36,10 +34,38 @@ static size_t intel_xpcie_doorbell_offset(struct xpcie *xpcie,
+ 		return XPCIE_MMIO_DTOH_RX_DOORBELL;
+ 	if (dirt == FROM_DEVICE && type == DEV_EVENT)
+ 		return XPCIE_MMIO_DTOH_EVENT_DOORBELL;
++	if (dirt == TO_DEVICE && type == PARTIAL_DATA_RECEIVED)
++		return XPCIE_MMIO_HTOD_PARTIAL_RX_DOORBELL;
++	if (dirt == TO_DEVICE && type == RX_BD_COUNT)
++		return XPCIE_MMIO_HTOD_RX_BD_LIST_COUNT;
+ 
+ 	return 0;
+ }
+ 
++void intel_xpcie_update_device_flwctl(struct xpcie *xpcie,
++				      enum xpcie_doorbell_direction dirt,
++				      enum xpcie_doorbell_type type,
++				      int value)
++{
++	size_t offset = intel_xpcie_doorbell_offset(xpcie, dirt, type);
++
++	if (dirt == TO_DEVICE && type == RX_BD_COUNT)
++		intel_xpcie_iowrite32(value, xpcie->mmio + offset);
++}
++
++u32 intel_xpcie_get_device_flwctl(struct xpcie *xpcie,
++				  enum xpcie_doorbell_direction dirt,
++				  enum xpcie_doorbell_type type)
++{
++	size_t offset = intel_xpcie_doorbell_offset(xpcie, dirt, type);
++	u32 ret = 0;
++
++	if (dirt == TO_DEVICE && type == RX_BD_COUNT)
++		ret = intel_xpcie_ioread32(xpcie->mmio + offset);
++
++	return ret;
++}
++
+ void intel_xpcie_set_doorbell(struct xpcie *xpcie,
+ 			      enum xpcie_doorbell_direction dirt,
+ 			      enum xpcie_doorbell_type type, u8 value)
+@@ -148,6 +174,14 @@ void intel_xpcie_list_cleanup(struct xpcie_list *list)
+ 	spin_unlock(&list->lock);
+ }
+ 
++bool intel_xpcie_list_empty(struct xpcie_list *list)
++{
++	if (list && !list->head && !list->tail)
++		return false;
++
++	return true;
++}
++
+ int intel_xpcie_list_put(struct xpcie_list *list, struct xpcie_buf_desc *bd)
+ {
+ 	if (!bd)
+@@ -338,6 +372,7 @@ void intel_xpcie_add_bd_to_interface(struct xpcie *xpcie,
+ 	mutex_lock(&inf->rlock);
+ 	inf->data_avail = true;
+ 	mutex_unlock(&inf->rlock);
++
+ 	wake_up_interruptible(&inf->rx_waitq);
+ }
+ 
+diff --git a/drivers/misc/xlink-pcie/local_host/util.h b/drivers/misc/xlink-pcie/common/util.h
+similarity index 82%
+rename from drivers/misc/xlink-pcie/local_host/util.h
+rename to drivers/misc/xlink-pcie/common/util.h
+index 908be897a61d..93cb6ada6f67 100644
+--- a/drivers/misc/xlink-pcie/local_host/util.h
++++ b/drivers/misc/xlink-pcie/common/util.h
+@@ -1,15 +1,14 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+-/*****************************************************************************
+- *
++/*
+  * Intel Keem Bay XLink PCIe Driver
+  *
+- * Copyright (C) 2020 Intel Corporation
+- *
+- ****************************************************************************/
++ * Copyright (C) 2021 Intel Corporation
++ */
+ 
+ #ifndef XPCIE_UTIL_HEADER_
+ #define XPCIE_UTIL_HEADER_
+ 
++#include <linux/atomic.h>
+ #include "xpcie.h"
+ 
+ enum xpcie_doorbell_direction {
+@@ -20,7 +19,9 @@ enum xpcie_doorbell_direction {
+ enum xpcie_doorbell_type {
+ 	DATA_SENT,
+ 	DATA_RECEIVED,
+-	DEV_EVENT
++	DEV_EVENT,
++	PARTIAL_DATA_RECEIVED,
++	RX_BD_COUNT
+ };
+ 
+ enum xpcie_event_type {
+@@ -36,6 +37,14 @@ u8 intel_xpcie_get_doorbell(struct xpcie *xpcie,
+ 			    enum xpcie_doorbell_direction dirt,
+ 			    enum xpcie_doorbell_type type);
+ 
++void intel_xpcie_update_device_flwctl(struct xpcie *xpcie,
++				      enum xpcie_doorbell_direction dirt,
++				      enum xpcie_doorbell_type type,
++				      int value);
++u32 intel_xpcie_get_device_flwctl(struct xpcie *xpcie,
++				  enum xpcie_doorbell_direction dirt,
++				  enum xpcie_doorbell_type type);
++
+ void intel_xpcie_set_device_status(struct xpcie *xpcie, u32 status);
+ u32 intel_xpcie_get_device_status(struct xpcie *xpcie);
+ u32 intel_xpcie_get_host_status(struct xpcie *xpcie);
+@@ -54,6 +63,7 @@ int intel_xpcie_list_put_head(struct xpcie_list *list,
+ struct xpcie_buf_desc *intel_xpcie_list_get(struct xpcie_list *list);
+ void intel_xpcie_list_info(struct xpcie_list *list, size_t *bytes,
+ 			   size_t *buffers);
++bool intel_xpcie_list_empty(struct xpcie_list *list);
+ 
+ struct xpcie_buf_desc *intel_xpcie_alloc_rx_bd(struct xpcie *xpcie);
+ void intel_xpcie_free_rx_bd(struct xpcie *xpcie, struct xpcie_buf_desc *bd);
+diff --git a/drivers/misc/xlink-pcie/local_host/xpcie.h b/drivers/misc/xlink-pcie/common/xpcie.h
+similarity index 89%
+rename from drivers/misc/xlink-pcie/local_host/xpcie.h
+rename to drivers/misc/xlink-pcie/common/xpcie.h
+index 8a559617daba..2c0cabc597e1 100644
+--- a/drivers/misc/xlink-pcie/local_host/xpcie.h
++++ b/drivers/misc/xlink-pcie/common/xpcie.h
+@@ -1,11 +1,9 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+-/*****************************************************************************
+- *
++/*
+  * Intel Keem Bay XLink PCIe Driver
+  *
+- * Copyright (C) 2020 Intel Corporation
+- *
+- ****************************************************************************/
++ * Copyright (C) 2021 Intel Corporation
++ */
+ 
+ #ifndef XPCIE_HEADER_
+ #define XPCIE_HEADER_
+@@ -41,12 +39,13 @@ struct xpcie_mmio {
+ 	u8 legacy_a0;
+ 	u8 htod_tx_doorbell;
+ 	u8 htod_rx_doorbell;
++	u8 htod_partial_rx_doorbell;
+ 	u8 htod_event_doorbell;
+ 	u8 dtoh_tx_doorbell;
+ 	u8 dtoh_rx_doorbell;
+ 	u8 dtoh_event_doorbell;
+-	u8 reserved;
+ 	u32 cap_offset;
++	u32 htod_rx_bd_list_count;
+ 	u8 magic[XPCIE_MAGIC_STRLEN];
+ } __packed;
+ 
+@@ -59,12 +58,16 @@ struct xpcie_mmio {
+ 	(offsetof(struct xpcie_mmio, htod_rx_doorbell))
+ #define XPCIE_MMIO_HTOD_EVENT_DOORBELL \
+ 	(offsetof(struct xpcie_mmio, htod_event_doorbell))
++#define XPCIE_MMIO_HTOD_PARTIAL_RX_DOORBELL \
++	(offsetof(struct xpcie_mmio, htod_partial_rx_doorbell))
+ #define XPCIE_MMIO_DTOH_TX_DOORBELL \
+ 	(offsetof(struct xpcie_mmio, dtoh_tx_doorbell))
+ #define XPCIE_MMIO_DTOH_RX_DOORBELL \
+ 	(offsetof(struct xpcie_mmio, dtoh_rx_doorbell))
+ #define XPCIE_MMIO_DTOH_EVENT_DOORBELL \
+ 	(offsetof(struct xpcie_mmio, dtoh_event_doorbell))
++#define XPCIE_MMIO_HTOD_RX_BD_LIST_COUNT \
++	(offsetof(struct xpcie_mmio, htod_rx_bd_list_count))
+ #define XPCIE_MMIO_CAP_OFF	(offsetof(struct xpcie_mmio, cap_offset))
+ #define XPCIE_MMIO_MAGIC_OFF	(offsetof(struct xpcie_mmio, magic))
+ 
+diff --git a/drivers/misc/xlink-pcie/local_host/Makefile b/drivers/misc/xlink-pcie/local_host/Makefile
+index 28761751d43b..65df94c7e860 100644
+--- a/drivers/misc/xlink-pcie/local_host/Makefile
++++ b/drivers/misc/xlink-pcie/local_host/Makefile
+@@ -2,4 +2,4 @@ obj-$(CONFIG_XLINK_PCIE_LH_DRIVER) += mxlk_ep.o
+ mxlk_ep-objs := epf.o
+ mxlk_ep-objs += dma.o
+ mxlk_ep-objs += core.o
+-mxlk_ep-objs += util.o
++mxlk_ep-objs += ../common/util.o
+diff --git a/drivers/misc/xlink-pcie/local_host/core.c b/drivers/misc/xlink-pcie/local_host/core.c
+index c67ce2c3067d..19d10485d242 100644
+--- a/drivers/misc/xlink-pcie/local_host/core.c
++++ b/drivers/misc/xlink-pcie/local_host/core.c
+@@ -8,8 +8,8 @@
+ #include <linux/of_reserved_mem.h>
+ 
+ #include "epf.h"
+-#include "core.h"
+-#include "util.h"
++#include "../common/core.h"
++#include "../common/util.h"
+ 
+ static struct xpcie *global_xpcie;
+ 
+@@ -368,6 +368,7 @@ static void intel_xpcie_tx_event_handler(struct work_struct *work)
+ 	struct xpcie_transfer_desc *td;
+ 	int descs_num = 0, chan = 0, rc;
+ 	size_t buffers = 0, bytes = 0;
++	int bd_val = 0;
+ 	u64 address;
+ 
+ 	if (intel_xpcie_get_host_status(xpcie) != XPCIE_STATUS_RUN)
+@@ -382,6 +383,16 @@ static void intel_xpcie_tx_event_handler(struct work_struct *work)
+ 
+ 	/* add new entries */
+ 	while (XPCIE_CIRCULAR_INC(tail, ndesc) != head) {
++		/*
++		 * Tx flow control
++		 * Check remote host Rx bd count is more than threshold.
++		 */
++		bd_val = intel_xpcie_get_device_flwctl(xpcie, TO_DEVICE,
++						       RX_BD_COUNT);
++		if (bd_val < MAX_HOST_RX_BD_COUNT &&
++		    bd_val >= HOST_RX_BD_COUNT_THRESHOLD)
++			continue;
++
+ 		bd = intel_xpcie_list_get(&xpcie->write);
+ 		if (!bd)
+ 			break;
+@@ -464,6 +475,15 @@ static irqreturn_t intel_xpcie_core_irq_cb(int irq, void *args)
+ 		if (xpcie->tx_pending)
+ 			intel_xpcie_start_tx(xpcie, 0);
+ 	}
++	if (intel_xpcie_get_doorbell(xpcie, TO_DEVICE,
++				     PARTIAL_DATA_RECEIVED)) {
++		intel_xpcie_set_doorbell(xpcie, TO_DEVICE,
++					 PARTIAL_DATA_RECEIVED, 0);
++		if (xpcie->tx_pending)
++			intel_xpcie_start_tx(xpcie, 0);
++		else
++			intel_xpcie_raise_irq(xpcie, DATA_SENT);
++	}
+ 
+ 	return IRQ_HANDLED;
+ }
+diff --git a/drivers/misc/xlink-pcie/local_host/epf.h b/drivers/misc/xlink-pcie/local_host/epf.h
+index 7220cead0973..40bf4ff36580 100644
+--- a/drivers/misc/xlink-pcie/local_host/epf.h
++++ b/drivers/misc/xlink-pcie/local_host/epf.h
+@@ -11,8 +11,8 @@
+ #include <linux/pci-epc.h>
+ #include <linux/pci-epf.h>
+ 
+-#include "xpcie.h"
+-#include "util.h"
++#include "../common/xpcie.h"
++#include "../common/util.h"
+ 
+ #define XPCIE_DRIVER_NAME "mxlk_pcie_epf"
+ #define XPCIE_DRIVER_DESC "Intel(R) xLink PCIe endpoint function driver"
+-- 
+2.25.1
+
