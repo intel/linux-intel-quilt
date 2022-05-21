@@ -1,0 +1,173 @@
+From 5780ccf123ec7d60dcae20084f0c30ec45813d10 Mon Sep 17 00:00:00 2001
+From: Srikanth Thokala <srikanth.thokala@intel.com>
+Date: Thu, 29 Oct 2020 00:49:14 +0530
+Subject: [PATCH 078/109] misc: xlink-pcie: Add asynchronous event notification
+ support for XLink
+
+Add support to notify XLink layer upon PCIe link UP/DOWN events
+
+Cc: Arnd Bergmann <arnd@arndb.de>
+Cc: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Reviewed-by: Mark Gross <mgross@linux.intel.com>
+Signed-off-by: Mark Gross <mgross@linux.intel.com>
+Signed-off-by: Srikanth Thokala <srikanth.thokala@intel.com>
+---
+ drivers/misc/xlink-pcie/common/core.h      |  3 ++
+ drivers/misc/xlink-pcie/common/interface.c | 17 ++++++++++
+ drivers/misc/xlink-pcie/local_host/core.c  | 11 +++++++
+ drivers/misc/xlink-pcie/remote_host/main.c |  3 ++
+ drivers/misc/xlink-pcie/remote_host/pci.c  | 36 ++++++++++++++++++++++
+ drivers/misc/xlink-pcie/remote_host/pci.h  |  3 ++
+ 6 files changed, 73 insertions(+)
+
+diff --git a/drivers/misc/xlink-pcie/common/core.h b/drivers/misc/xlink-pcie/common/core.h
+index c7e5a5ee4794..c808deed78a9 100644
+--- a/drivers/misc/xlink-pcie/common/core.h
++++ b/drivers/misc/xlink-pcie/common/core.h
+@@ -245,4 +245,7 @@ int intel_xpcie_pci_connect_device(u32 id);
+ int intel_xpcie_pci_read(u32 id, void *data, size_t *size, u32 timeout);
+ int intel_xpcie_pci_write(u32 id, void *data, size_t *size, u32 timeout);
+ int intel_xpcie_pci_reset_device(u32 id);
++int intel_xpcie_pci_register_device_event(u32 sw_device_id,
++					  xlink_device_event event_notif_fn);
++int intel_xpcie_pci_unregister_device_event(u32 sw_device_id);
+ #endif /* XPCIE_CORE_HEADER_ */
+diff --git a/drivers/misc/xlink-pcie/common/interface.c b/drivers/misc/xlink-pcie/common/interface.c
+index fcc69a940a4c..5d30c27dd18d 100644
+--- a/drivers/misc/xlink-pcie/common/interface.c
++++ b/drivers/misc/xlink-pcie/common/interface.c
+@@ -105,3 +105,20 @@ int xlink_pcie_reset_device(u32 sw_device_id)
+ 	return intel_xpcie_pci_reset_device(sw_device_id);
+ }
+ EXPORT_SYMBOL_GPL(xlink_pcie_reset_device);
++
++int xlink_pcie_register_device_event(u32 sw_device_id,
++				     xlink_device_event event_notif_fn)
++{
++	if (!event_notif_fn)
++		return -EINVAL;
++
++	return intel_xpcie_pci_register_device_event(sw_device_id,
++						     event_notif_fn);
++}
++EXPORT_SYMBOL_GPL(xlink_pcie_register_device_event);
++
++int xlink_pcie_unregister_device_event(u32 sw_device_id)
++{
++	return intel_xpcie_pci_unregister_device_event(sw_device_id);
++}
++EXPORT_SYMBOL_GPL(xlink_pcie_unregister_device_event);
+diff --git a/drivers/misc/xlink-pcie/local_host/core.c b/drivers/misc/xlink-pcie/local_host/core.c
+index 19d10485d242..c8258c7960dd 100644
+--- a/drivers/misc/xlink-pcie/local_host/core.c
++++ b/drivers/misc/xlink-pcie/local_host/core.c
+@@ -824,3 +824,14 @@ int intel_xpcie_pci_reset_device(u32 id)
+ {
+ 	return 0;
+ }
++
++int intel_xpcie_pci_register_device_event(u32 sw_device_id,
++					  xlink_device_event event_notif_fn)
++{
++	return 0;
++}
++
++int intel_xpcie_pci_unregister_device_event(u32 sw_device_id)
++{
++	return 0;
++}
+diff --git a/drivers/misc/xlink-pcie/remote_host/main.c b/drivers/misc/xlink-pcie/remote_host/main.c
+index ed1a431ed5d4..efc9143a2fac 100644
+--- a/drivers/misc/xlink-pcie/remote_host/main.c
++++ b/drivers/misc/xlink-pcie/remote_host/main.c
+@@ -53,6 +53,8 @@ static int intel_xpcie_probe(struct pci_dev *pdev,
+ 	if (new_device)
+ 		intel_xpcie_list_add_device(xdev);
+ 
++	intel_xpcie_pci_notify_event(xdev, NOTIFY_DEVICE_CONNECTED);
++
+ 	return ret;
+ }
+ 
+@@ -62,6 +64,7 @@ static void intel_xpcie_remove(struct pci_dev *pdev)
+ 
+ 	if (xdev) {
+ 		intel_xpcie_pci_cleanup(xdev);
++		intel_xpcie_pci_notify_event(xdev, NOTIFY_DEVICE_DISCONNECTED);
+ 		intel_xpcie_remove_device(xdev);
+ 	}
+ }
+diff --git a/drivers/misc/xlink-pcie/remote_host/pci.c b/drivers/misc/xlink-pcie/remote_host/pci.c
+index 71cbe779d1bc..6a79782b983e 100644
+--- a/drivers/misc/xlink-pcie/remote_host/pci.c
++++ b/drivers/misc/xlink-pcie/remote_host/pci.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/mutex.h>
++#include <linux/pci.h>
+ #include <linux/sched.h>
+ #include <linux/wait.h>
+ #include <linux/workqueue.h>
+@@ -485,3 +486,38 @@ int intel_xpcie_pci_reset_device(u32 id)
+ 
+ 	return intel_xpcie_pci_prepare_dev_reset(xdev, true);
+ }
++
++int intel_xpcie_pci_register_device_event(u32 sw_device_id,
++					  xlink_device_event event_notif_fn)
++{
++	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(sw_device_id);
++
++	if (!xdev)
++		return -ENOMEM;
++
++	xdev->event_fn = event_notif_fn;
++
++	return 0;
++}
++
++int intel_xpcie_pci_unregister_device_event(u32 sw_device_id)
++{
++	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(sw_device_id);
++
++	if (!xdev)
++		return -ENOMEM;
++
++	xdev->event_fn = NULL;
++
++	return 0;
++}
++
++void intel_xpcie_pci_notify_event(struct xpcie_dev *xdev,
++				  enum xlink_device_event_type event_type)
++{
++	if (event_type >= NUM_EVENT_TYPE)
++		return;
++
++	if (xdev->event_fn)
++		xdev->event_fn(xdev->devid, event_type);
++}
+diff --git a/drivers/misc/xlink-pcie/remote_host/pci.h b/drivers/misc/xlink-pcie/remote_host/pci.h
+index bd6b01cc58b8..b082bfb73e4f 100644
+--- a/drivers/misc/xlink-pcie/remote_host/pci.h
++++ b/drivers/misc/xlink-pcie/remote_host/pci.h
+@@ -36,6 +36,7 @@ struct xpcie_dev {
+ 	irq_handler_t core_irq_callback;
+ 
+ 	struct xpcie xpcie;
++	xlink_device_event event_fn;
+ };
+ 
+ static inline struct device *xpcie_to_dev(struct xpcie *xpcie)
+@@ -58,5 +59,7 @@ struct xpcie_dev *intel_xpcie_create_device(u32 sw_device_id,
+ void intel_xpcie_remove_device(struct xpcie_dev *xdev);
+ void intel_xpcie_list_add_device(struct xpcie_dev *xdev);
+ void intel_xpcie_list_del_device(struct xpcie_dev *xdev);
++void intel_xpcie_pci_notify_event(struct xpcie_dev *xdev,
++				  enum xlink_device_event_type event_type);
+ 
+ #endif /* XPCIE_PCI_HEADER_ */
+-- 
+2.25.1
+

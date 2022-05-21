@@ -1,0 +1,185 @@
+From d9e372f0f23d3af12caa7e624aa0cbab78017801 Mon Sep 17 00:00:00 2001
+From: "D, Lakshmi Sowjanya" <lakshmi.sowjanya.d@intel.com>
+Date: Mon, 1 Feb 2021 16:44:55 +0530
+Subject: [PATCH 043/109] misc: i3c_test: KeemBay I3C test driver for
+ Introspect
+
+I3C_TEST driver performs the private read and write operations for all
+the SDR(0-4) modes.
+
+Signed-off-by: D, Lakshmi Sowjanya <lakshmi.sowjanya.d@intel.com>
+---
+ drivers/i3c/master/dw-i3c-master.c |  2 +-
+ drivers/misc/Kconfig               |  1 +
+ drivers/misc/Makefile              |  1 +
+ drivers/misc/i3c_test/Kconfig      |  9 +++
+ drivers/misc/i3c_test/Makefile     |  5 ++
+ drivers/misc/i3c_test/i3c_test.c   | 96 ++++++++++++++++++++++++++++++
+ 6 files changed, 113 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/misc/i3c_test/Kconfig
+ create mode 100644 drivers/misc/i3c_test/Makefile
+ create mode 100644 drivers/misc/i3c_test/i3c_test.c
+
+diff --git a/drivers/i3c/master/dw-i3c-master.c b/drivers/i3c/master/dw-i3c-master.c
+index 03a368da51b9..5beefc20b0be 100644
+--- a/drivers/i3c/master/dw-i3c-master.c
++++ b/drivers/i3c/master/dw-i3c-master.c
+@@ -539,7 +539,7 @@ static int dw_i3c_clk_cfg(struct dw_i3c_master *master)
+ 	writel(scl_timing, master->regs + SCL_I3C_PP_TIMING);
+ 
+ 	if (!(readl(master->regs + DEVICE_CTRL) & DEV_CTRL_I2C_SLAVE_PRESENT))
+-		writel(BUS_I3C_MST_FREE(lcnt), master->regs + BUS_FREE_TIMING);
++		writel(0x50, master->regs + BUS_FREE_TIMING);
+ 
+ 	lcnt = DIV_ROUND_UP(I3C_BUS_TLOW_OD_MIN_NS, core_period);
+ 	scl_timing = SCL_I3C_TIMING_HCNT(hcnt) | SCL_I3C_TIMING_LCNT(lcnt);
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 1ff2fcb9da07..9870d295700e 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -494,4 +494,5 @@ source "drivers/misc/noc/Kconfig"
+ source "drivers/misc/intel_tsens/Kconfig"
+ source "drivers/misc/xlink-smbus/Kconfig"
+ source "drivers/misc/hddl_device/Kconfig"
++source "drivers/misc/i3c_test/Kconfig"
+ endmenu
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index 7666a4006097..1a20344a0a64 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -66,3 +66,4 @@ obj-$(CONFIG_NOC_DSS)		+= noc/
+ obj-y                           += intel_tsens/
+ obj-$(CONFIG_XLINK_SMBUS)	+= xlink-smbus/
+ obj-y				+= hddl_device/
++obj-$(CONFIG_I3C_TEST) 		+= i3c_test/
+diff --git a/drivers/misc/i3c_test/Kconfig b/drivers/misc/i3c_test/Kconfig
+new file mode 100644
+index 000000000000..113e9bc13ef9
+--- /dev/null
++++ b/drivers/misc/i3c_test/Kconfig
+@@ -0,0 +1,9 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++config I3C_TEST
++	tristate "KMB I3C test driver"
++	default m
++	depends on I3C
++	select REGMAP_I3C
++	help
++		Keembay I3C test driver for introspect
+diff --git a/drivers/misc/i3c_test/Makefile b/drivers/misc/i3c_test/Makefile
+new file mode 100644
+index 000000000000..7e495db133fc
+--- /dev/null
++++ b/drivers/misc/i3c_test/Makefile
+@@ -0,0 +1,5 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++KBUILD_EXTMOD = ../../i3c
++obj-$(CONFIG_I3C_TEST) += i3c_test.o
++obj-m += i3c_test.o
+diff --git a/drivers/misc/i3c_test/i3c_test.c b/drivers/misc/i3c_test/i3c_test.c
+new file mode 100644
+index 000000000000..473573bb90e3
+--- /dev/null
++++ b/drivers/misc/i3c_test/i3c_test.c
+@@ -0,0 +1,96 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Intel Keem Bay I3C Test Driver for Introspect.
++ * ID mapping done based on the value of dcr.
++ *
++ * Copyright (C) 2020 Intel Corporation
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/i3c/device.h>
++#include <linux/i3c/master.h>
++#include <linux/slab.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++
++
++static const struct i3c_device_id i3c_test_ids[] = {
++	I3C_CLASS(0x0, (void *)ST_LSM6DSO_ID),
++	{ /* sentinel */ },
++};
++MODULE_DEVICE_TABLE(i3c, i3c_test_ids);
++
++static int i3c_test_write(struct i3c_device *i3cdev, const void *data,
++			  size_t count)
++{
++	int ret;
++	struct i3c_priv_xfer xfers[] = {
++		{
++			.rnw = false,
++			.len = count,
++			.data.out = data,
++		},
++	};
++
++
++	ret = i3c_device_do_priv_xfers(i3cdev, xfers, 1);
++	return ret;
++}
++
++static int i3c_test_read(struct i3c_device *i3cdev, void *reg,
++			size_t reg_size, void *val, size_t val_size)
++{
++	struct i3c_priv_xfer xfers[1];
++	char rbuff[4];
++	int ret = 0;
++
++	xfers[0].rnw = true;
++	xfers[0].len = val_size;
++	xfers[0].data.in = (void *)rbuff;
++
++	ret = i3c_device_do_priv_xfers(i3cdev, xfers, 1);
++	dev_info(&i3cdev->dev, "read done: %d, %d, %d, %d\n", rbuff[0],
++						rbuff[1], rbuff[2], rbuff[3]);
++	return ret;
++}
++
++static int i3c_test_probe(struct i3c_device *i3cdev)
++{
++	struct i3c_device_info info;
++	int wbuff = 0x11223344;
++	int speed;
++
++	i3c_device_get_info(i3cdev, &info);
++	dev_info(&i3cdev->dev, "i3c_test: %s, bcr: %x\n", __func__, info.bcr);
++	dev_info(&i3cdev->dev, "i3c_test: %s, dcr: %x\n", __func__, info.dcr);
++	dev_info(&i3cdev->dev, "i3c_test: %s, pid: %llx\n", __func__, info.pid);
++	dev_info(&i3cdev->dev, "i3c_test: %s, static address: %x\n",
++			__func__, info.static_addr);
++	dev_info(&i3cdev->dev, "i3c_test: %s, dyn_addr: %x\n",
++			__func__, info.dyn_addr);
++
++	dev_info(&i3cdev->dev, "i3c_test probe done\n");
++	for (speed = 0; speed < 5; speed++) {
++		dev_info(&i3cdev->dev, "i3c: SDR%d Private Transfer\n ", speed);
++		i3cdev->desc->info.max_write_ds = speed;
++		i3cdev->desc->info.max_read_ds = speed;
++		i3c_test_write(i3cdev, &wbuff, sizeof(wbuff));
++		i3c_test_read(i3cdev, NULL, 2, NULL, 2);
++	}
++
++	return 0;
++}
++
++static struct i3c_driver i3c_test_driver = {
++	.driver = {
++		.name = "i3c_test",
++	},
++	.probe = i3c_test_probe,
++	.id_table = i3c_test_ids,
++};
++module_i3c_driver(i3c_test_driver);
++
++MODULE_AUTHOR("D, Lakshmi Sowjanya <lakshmi.sowjanya.d@intel.com>");
++MODULE_DESCRIPTION("KMB I3C Test Driver");
++MODULE_LICENSE("GPL v2");
+-- 
+2.25.1
+

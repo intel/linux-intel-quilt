@@ -1,0 +1,60 @@
+From 8157242010937b5c3b0b91453b0661a705b1cb60 Mon Sep 17 00:00:00 2001
+From: Vincent Cao <vincent.t.cao@intel.com>
+Date: Thu, 27 May 2021 06:54:54 -0700
+Subject: [PATCH 012/109] tpm:of: Fix Keembay event log memory resource parsing
+
+Keembay SoC eventlog resource is exposed to kernel space through
+"linux,sml-base" and "linux-sml-size" reserved-memory devicetree node.
+The linux kernel will consume this node and exposing the event log
+through the securityfs typically at /sys/kernel/security/tpm0/
+binary_bios_measurements. This is can then be parsed and display
+the event log via a tool from userspace accessing the
+binary_bios_measurements file.
+
+An assumption that the kernel would handled remapping the
+memory for the tpm driver was incorrect, leading to the memory region
+unable to be addressed and accessed during tpm driver intitialation.
+This patch is to fix this issue by handing the memmap for Keembay
+platform.
+
+Signed-off-by: Vincent Cao <vincent.t.cao@intel.com>
+---
+ drivers/char/tpm/eventlog/of.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/char/tpm/eventlog/of.c b/drivers/char/tpm/eventlog/of.c
+index a9ce66d09a75..0e5aa3105d34 100644
+--- a/drivers/char/tpm/eventlog/of.c
++++ b/drivers/char/tpm/eventlog/of.c
+@@ -25,6 +25,9 @@ int tpm_read_log_of(struct tpm_chip *chip)
+ 	struct tpm_bios_log *log;
+ 	u32 size;
+ 	u64 base;
++#ifdef CONFIG_ARCH_KEEMBAY
++	void *vaddr;
++#endif
+ 
+ 	log = &chip->log;
+ 	if (chip->dev.parent && chip->dev.parent->of_node)
+@@ -65,7 +68,18 @@ int tpm_read_log_of(struct tpm_chip *chip)
+ 		return -EIO;
+ 	}
+ 
++#ifdef CONFIG_ARCH_KEEMBAY
++	vaddr = memremap(base, size, MEMREMAP_WB);
++	if (!vaddr) {
++		dev_err(&chip->dev, "Couldn't map Event log memory resource.\n");
++		return -EADDRNOTAVAIL;
++	}
++
++	log->bios_event_log = kmemdup(vaddr, size, GFP_KERNEL);
++	memunmap(vaddr);
++#else
+ 	log->bios_event_log = kmemdup(__va(base), size, GFP_KERNEL);
++#endif
+ 	if (!log->bios_event_log)
+ 		return -ENOMEM;
+ 
+-- 
+2.25.1
+

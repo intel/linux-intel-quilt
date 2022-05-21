@@ -1,0 +1,61 @@
+From 890c5c6bac22a2c7b5c9b1b0eace1fe1976d9600 Mon Sep 17 00:00:00 2001
+From: "Vaidya, Mahesh R" <mahesh.r.vaidya@intel.com>
+Date: Sat, 15 Aug 2020 03:05:36 +0530
+Subject: [PATCH 057/109] Added IOexpander's hwirq contenxt irq handler fix
+
+As the the IOexpander's(i2c slave device) interrupt handler runs in threaded
+irq context, the irq line needs to be disabled before waking up this threaded
+irq handler. The threaded irq handler would then need to enable this irq back,
+once this interrupt is handled and its interrupt is cleared. Disabling irq
+line in hardware irq context and enabling it back before exiting from threaded
+irq was missing, which is now fixed as part of this commit. If the irq is not
+disabled in the hardware irq context, then the interrupt handler of the device
+running in hardware irq context, to which the IOexpander's interrupt line is
+connected to, would keep getting called in loop and the IOexpander threaded
+irq will never get a chance to execute and clear the interrupt, leading to
+unhandled bad irq.
+
+Signed-off-by: Vaidya, Mahesh R <mahesh.r.vaidya@intel.com>
+---
+ drivers/gpio/gpio-pca953x.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpio/gpio-pca953x.c b/drivers/gpio/gpio-pca953x.c
+index d2fe76f3f34f..8621fd40b9e4 100644
+--- a/drivers/gpio/gpio-pca953x.c
++++ b/drivers/gpio/gpio-pca953x.c
+@@ -775,6 +775,13 @@ static bool pca953x_irq_pending(struct pca953x_chip *chip, unsigned long *pendin
+ 	return !bitmap_empty(pending, gc->ngpio);
+ }
+ 
++static irqreturn_t pca953x_hw_irq_handler(int irq, void *devid)
++{
++	/* Disable IRQ before waking the threaded irq handler */
++	disable_irq_nosync(irq);
++	return IRQ_WAKE_THREAD;
++}
++
+ static irqreturn_t pca953x_irq_handler(int irq, void *devid)
+ {
+ 	struct pca953x_chip *chip = devid;
+@@ -805,6 +812,8 @@ static irqreturn_t pca953x_irq_handler(int irq, void *devid)
+ 		}
+ 	}
+ 
++	/* Interrupt handled, Enable back the IRQ before exiting */
++	enable_irq(irq);
+ 	return IRQ_RETVAL(ret);
+ }
+ 
+@@ -866,7 +875,7 @@ static int pca953x_irq_setup(struct pca953x_chip *chip, int irq_base)
+ 	girq->first = irq_base; /* FIXME: get rid of this */
+ 
+ 	ret = devm_request_threaded_irq(&client->dev, client->irq,
+-					NULL, pca953x_irq_handler,
++					pca953x_hw_irq_handler, pca953x_irq_handler,
+ 					IRQF_ONESHOT | IRQF_SHARED,
+ 					dev_name(&client->dev), chip);
+ 	if (ret) {
+-- 
+2.25.1
+

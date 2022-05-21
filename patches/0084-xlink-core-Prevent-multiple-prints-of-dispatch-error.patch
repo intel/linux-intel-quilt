@@ -1,0 +1,46 @@
+From 2e0132d4a9ff0ed328827f82997bae3a835d6c15 Mon Sep 17 00:00:00 2001
+From: Seamus Kelly <seamus.kelly@intel.com>
+Date: Mon, 26 Apr 2021 15:04:02 +0100
+Subject: [PATCH 084/109] xlink-core: Prevent multiple prints of dispatch error
+
+Sometimes there are transient errors that get too chatty in the logbuff that
+are not catastrophic.  pr_err_once cannot be reset so implement the logic
+inline.
+
+
+Signed-off-by: Seamus Kelly <seamus.kelly@intel.com>
+---
+ drivers/misc/xlink-core/xlink-dispatcher.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/xlink-core/xlink-dispatcher.c b/drivers/misc/xlink-core/xlink-dispatcher.c
+index 8a254ce43ae1..40ade8ea8f69 100644
+--- a/drivers/misc/xlink-core/xlink-dispatcher.c
++++ b/drivers/misc/xlink-core/xlink-dispatcher.c
+@@ -123,6 +123,7 @@ static int is_valid_event_header(struct xlink_event *event)
+ 
+ static int dispatcher_event_send(struct xlink_event *event)
+ {
++	static int error_printed;
+ 	size_t event_header_size = sizeof(event->header);
+ 	int rc;
+ 
+@@ -133,11 +134,14 @@ static int dispatcher_event_send(struct xlink_event *event)
+ 				  event->handle->sw_device_id, &event->header,
+ 				  &event_header_size, event->header.timeout, NULL);
+ 	if (rc || event_header_size != sizeof(event->header)) {
+-		pr_err("Write header failed %d\n", rc);
++		if (!error_printed)
++			pr_err("Write header failed %d\n", rc);
++		error_printed = 1;
+ 		return rc;
+ 	}
+ 	if (event->header.type == XLINK_WRITE_REQ ||
+ 	    event->header.type == XLINK_WRITE_VOLATILE_REQ) {
++		error_printed = 0;
+ 		// write event data
+ 		rc = xlink_platform_write(event->interface,
+ 					  event->handle->sw_device_id, event->data,
+-- 
+2.25.1
+

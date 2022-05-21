@@ -1,0 +1,107 @@
+From d30a93f3913857603fe22dbb4176c5f16f86433e Mon Sep 17 00:00:00 2001
+From: "Chuah, Kim Tatt" <kim.tatt.chuah@intel.com>
+Date: Tue, 26 Jun 2018 06:14:17 +0800
+Subject: [PATCH 052/109] net: stmmac: Add support for HW-accelerated VLAN
+ stripping
+
+Currently, VLAN tag stripping is done by driver in stmmac_rx_vlan().
+Add support for VLAN tag stripping by the MAC hardware for MAC drivers
+that support it. This is done by adding rx_hw_van() and set_hw_vlan_mode()
+callbacks at stmmac_ops struct which are called if registered by the MAC
+driver.
+
+Signed-off-by: Chuah, Kim Tatt <kim.tatt.chuah@intel.com>
+Signed-off-by: Ong Boon Leong <boon.leong.ong@intel.com>
+Signed-off-by: Voon Weifeng <weifeng.voon@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/dwmac4.h      | 10 ++++++++++
+ drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c |  6 ++++++
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c |  6 +++++-
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+index 462ca7ed095a..801bc8e4c3f9 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4.h
+@@ -118,6 +118,16 @@
+ #define GMAC_VLAN_TAG_DATA_VEN		BIT(16)
+ #define GMAC_VLAN_TAG_DATA_ETV		BIT(17)
+ 
++/* MAC VLAN Tag Control */
++#define GMAC_VLAN_TAG_CTRL_EVLS_MASK	GENMASK(22, 21)
++#define GMAC_VLAN_TAG_CTRL_EVLS_SHIFT	21
++#define GMAC_VLAN_TAG_CTRL_EVLRXS	BIT(24)
++
++#define GMAC_VLAN_TAG_STRIP_NONE	(0x0 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
++#define GMAC_VLAN_TAG_STRIP_PASS	(0x1 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
++#define GMAC_VLAN_TAG_STRIP_FAIL	(0x2 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
++#define GMAC_VLAN_TAG_STRIP_ALL		(0x3 << GMAC_VLAN_TAG_CTRL_EVLS_SHIFT)
++
+ /* MAC RX Queue Enable */
+ #define GMAC_RX_QUEUE_CLEAR(queue)	~(GENMASK(1, 0) << ((queue) * 2))
+ #define GMAC_RX_AV_QUEUE_ENABLE(queue)	BIT((queue) * 2)
+diff --git a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+index 91cf4744d440..99e4af64d5c5 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac4_core.c
+@@ -1313,6 +1313,8 @@ const struct stmmac_ops dwmac4_ops = {
+ 	.sarc_configure = dwmac4_sarc_configure,
+ 	.enable_vlan = dwmac4_enable_vlan,
+ 	.set_arp_offload = dwmac4_set_arp_offload,
++	.rx_hw_vlan = dwmac4_rx_hw_vlan,
++	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
+ 	.config_l3_filter = dwmac4_config_l3_filter,
+ 	.config_l4_filter = dwmac4_config_l4_filter,
+ 	.add_hw_vlan_rx_fltr = dwmac4_add_hw_vlan_rx_fltr,
+@@ -1363,6 +1365,8 @@ const struct stmmac_ops dwmac410_ops = {
+ 	.sarc_configure = dwmac4_sarc_configure,
+ 	.enable_vlan = dwmac4_enable_vlan,
+ 	.set_arp_offload = dwmac4_set_arp_offload,
++	.rx_hw_vlan = dwmac4_rx_hw_vlan,
++	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
+ 	.config_l3_filter = dwmac4_config_l3_filter,
+ 	.config_l4_filter = dwmac4_config_l4_filter,
+ 	.est_configure = dwmac5_est_configure,
+@@ -1422,6 +1426,8 @@ const struct stmmac_ops dwmac510_ops = {
+ 	.sarc_configure = dwmac4_sarc_configure,
+ 	.enable_vlan = dwmac4_enable_vlan,
+ 	.set_arp_offload = dwmac4_set_arp_offload,
++	.rx_hw_vlan = dwmac4_rx_hw_vlan,
++	.set_hw_vlan_mode = dwmac4_set_hw_vlan_mode,
+ 	.config_l3_filter = dwmac4_config_l3_filter,
+ 	.config_l4_filter = dwmac4_config_l4_filter,
+ 	.est_configure = dwmac5_est_configure,
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index ade9616ba545..8477f776f725 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -3441,6 +3441,9 @@ static int stmmac_hw_setup(struct net_device *dev, bool ptp_register)
+ 			stmmac_fpe_handshake(priv, true);
+ 	}
+ 
++	/* Set HW VLAN stripping mode */
++	stmmac_set_hw_vlan_mode(priv, priv->ioaddr, dev->features);
++
+ 	return 0;
+ }
+ 
+@@ -5701,6 +5704,8 @@ static int stmmac_set_features(struct net_device *netdev,
+ 	if (changed & NETIF_F_HW_VLAN_CTAG_RX)
+ 		stmmac_set_hw_vlan_mode(priv, priv->ioaddr, features);
+ 
++	netdev->features = features;
++
+ 	return 0;
+ }
+ 
+@@ -7263,7 +7268,6 @@ int stmmac_dvr_probe(struct device *device,
+ 	ndev->watchdog_timeo = msecs_to_jiffies(watchdog);
+ #ifdef STMMAC_VLAN_TAG_USED
+ 	/* Both mac100 and gmac support receive VLAN tag detection */
+-	ndev->features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_STAG_RX;
+ 	ndev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX | NETIF_F_HW_VLAN_STAG_RX;
+ 	if (priv->dma_cap.vlhash) {
+ 		ndev->features |= NETIF_F_HW_VLAN_CTAG_FILTER;
+-- 
+2.25.1
+

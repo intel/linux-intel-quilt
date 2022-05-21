@@ -1,0 +1,603 @@
+From ae6b37fe63b8ec333882c61078cf74caea4016ee Mon Sep 17 00:00:00 2001
+From: Srikanth Thokala <srikanth.thokala@intel.com>
+Date: Mon, 6 Sep 2021 19:33:53 +0530
+Subject: [PATCH 092/109] misc: xlink-pcie: Simplify get_* helper APIs
+
+Simplify get_* helper APIs and move the logic to
+common code.
+
+Signed-off-by: Srikanth Thokala <srikanth.thokala@intel.com>
+---
+ drivers/misc/xlink-pcie/common/core.h      |   4 -
+ drivers/misc/xlink-pcie/common/interface.c |   1 +
+ drivers/misc/xlink-pcie/common/util.c      | 111 +++++++++++++++++++
+ drivers/misc/xlink-pcie/common/util.h      |   9 ++
+ drivers/misc/xlink-pcie/local_host/core.c  |  56 +---------
+ drivers/misc/xlink-pcie/local_host/epf.c   |  10 +-
+ drivers/misc/xlink-pcie/remote_host/main.c |  10 +-
+ drivers/misc/xlink-pcie/remote_host/pci.c  | 119 +++------------------
+ drivers/misc/xlink-pcie/remote_host/pci.h  |   8 +-
+ 9 files changed, 153 insertions(+), 175 deletions(-)
+
+diff --git a/drivers/misc/xlink-pcie/common/core.h b/drivers/misc/xlink-pcie/common/core.h
+index c808deed78a9..22c335704b83 100644
+--- a/drivers/misc/xlink-pcie/common/core.h
++++ b/drivers/misc/xlink-pcie/common/core.h
+@@ -236,10 +236,6 @@ int intel_xpcie_core_read(struct xpcie *xpcie, void *buffer, size_t *length,
+ 			  u32 timeout_ms);
+ int intel_xpcie_core_write(struct xpcie *xpcie, void *buffer, size_t *length,
+ 			   u32 timeout_ms);
+-u32 intel_xpcie_get_device_num(u32 *id_list);
+-struct xpcie_dev *intel_xpcie_get_device_by_id(u32 id);
+-int intel_xpcie_get_device_name_by_id(u32 id, char *device_name,
+-				      size_t name_size);
+ int intel_xpcie_get_device_status_by_id(u32 id, u32 *status);
+ int intel_xpcie_pci_connect_device(u32 id);
+ int intel_xpcie_pci_read(u32 id, void *data, size_t *size, u32 timeout);
+diff --git a/drivers/misc/xlink-pcie/common/interface.c b/drivers/misc/xlink-pcie/common/interface.c
+index 5d30c27dd18d..d09c87b9a88c 100644
+--- a/drivers/misc/xlink-pcie/common/interface.c
++++ b/drivers/misc/xlink-pcie/common/interface.c
+@@ -8,6 +8,7 @@
+ #include <linux/xlink_drv_inf.h>
+ 
+ #include "core.h"
++#include "util.h"
+ #include "xpcie.h"
+ 
+ /* Define xpcie driver interface API */
+diff --git a/drivers/misc/xlink-pcie/common/util.c b/drivers/misc/xlink-pcie/common/util.c
+index 27a7565fcaa9..d59bcbcc6370 100644
+--- a/drivers/misc/xlink-pcie/common/util.c
++++ b/drivers/misc/xlink-pcie/common/util.c
+@@ -6,6 +6,10 @@
+  */
+ 
+ #include "util.h"
++#include "xpcie.h"
++
++static LIST_HEAD(dev_list);
++static DEFINE_MUTEX(dev_list_mutex);
+ 
+ u32 intel_xpcie_create_sw_id(u8 func_no, u8 max_pcie_fns, u16 pcie_phys_id)
+ {
+@@ -33,6 +37,113 @@ u32 intel_xpcie_create_sw_id(u8 func_no, u8 max_pcie_fns, u16 pcie_phys_id)
+ 	return xlink_swid;
+ }
+ 
++void intel_xpcie_list_add_device(struct xpcie *xpcie)
++{
++	mutex_lock(&dev_list_mutex);
++	list_add_tail(&xpcie->list, &dev_list);
++	mutex_unlock(&dev_list_mutex);
++}
++
++void intel_xpcie_list_del_device(struct xpcie *xpcie)
++{
++	mutex_lock(&dev_list_mutex);
++	list_del(&xpcie->list);
++	mutex_unlock(&dev_list_mutex);
++}
++
++u32 intel_xpcie_get_device_num(u32 *id_list)
++{
++	struct xpcie *xpcie = NULL;
++	u32 num = 0;
++
++	mutex_lock(&dev_list_mutex);
++	list_for_each_entry(xpcie, &dev_list, list) {
++		if (xpcie && xpcie->sw_devid) {
++			*id_list++ = xpcie->sw_devid;
++			num++;
++		}
++	}
++	mutex_unlock(&dev_list_mutex);
++
++	return num;
++}
++
++struct xpcie *intel_xpcie_get_device_by_id(u32 sw_devid)
++{
++	struct xpcie *xpcie = NULL;
++	bool found = false;
++
++	if (list_empty(&dev_list))
++		return xpcie;
++
++	mutex_lock(&dev_list_mutex);
++	list_for_each_entry(xpcie, &dev_list, list) {
++		if (xpcie->sw_devid == sw_devid) {
++			found = true;
++			break;
++		}
++	}
++	mutex_unlock(&dev_list_mutex);
++
++	if (!found)
++		return NULL;
++
++	return xpcie;
++}
++
++int intel_xpcie_get_device_status_by_id(u32 sw_devid, u32 *status)
++{
++	struct xpcie *xpcie;
++
++	xpcie = intel_xpcie_get_device_by_id(sw_devid);
++	if (!xpcie)
++		return -ENODEV;
++
++	*status = xpcie->status;
++
++	return 0;
++}
++
++int intel_xpcie_get_device_name_by_id(u32 sw_devid, char *device_name,
++				      size_t name_size)
++{
++	struct xpcie *xpcie;
++	size_t size;
++
++	xpcie = intel_xpcie_get_device_by_id(sw_devid);
++	if (!xpcie)
++		return -ENODEV;
++
++	if (!device_name || !name_size)
++		return -EINVAL;
++
++	memset(device_name, 0, name_size);
++	size = name_size > XPCIE_MAX_NAME_LEN ? XPCIE_MAX_NAME_LEN : name_size;
++	memcpy(device_name, xpcie->name, size);
++
++	return 0;
++}
++
++struct xpcie *intel_xpcie_get_device_by_name(const char *name)
++{
++	struct xpcie *xpcie = NULL;
++	bool found = false;
++
++	mutex_lock(&dev_list_mutex);
++	list_for_each_entry(xpcie, &dev_list, list) {
++		if (!strncmp(xpcie->name, name, XPCIE_MAX_NAME_LEN)) {
++			found = true;
++			break;
++		}
++	}
++	mutex_unlock(&dev_list_mutex);
++
++	if (!found)
++		return NULL;
++
++	return xpcie;
++}
++
+ void intel_xpcie_set_device_status(struct xpcie *xpcie, u32 status)
+ {
+ 	xpcie->status = status;
+diff --git a/drivers/misc/xlink-pcie/common/util.h b/drivers/misc/xlink-pcie/common/util.h
+index 682e3b4a1d54..fcbd418862cc 100644
+--- a/drivers/misc/xlink-pcie/common/util.h
++++ b/drivers/misc/xlink-pcie/common/util.h
+@@ -81,4 +81,13 @@ void intel_xpcie_add_bd_to_interface(struct xpcie *xpcie,
+ 				     struct xpcie_buf_desc *bd);
+ void *intel_xpcie_cap_find(struct xpcie *xpcie, u32 start, u16 id);
+ u32 intel_xpcie_create_sw_id(u8 func_no, u8 max_pcie_fns, u16 pcie_phys_id);
++void intel_xpcie_list_add_device(struct xpcie *xpcie);
++void intel_xpcie_list_del_device(struct xpcie *xpcie);
++u32 intel_xpcie_get_device_num(u32 *id_list);
++struct xpcie *intel_xpcie_get_device_by_id(u32 sw_devid);
++struct xpcie *intel_xpcie_get_device_by_name(const char *name);
++int intel_xpcie_get_device_status_by_id(u32 sw_devid, u32 *status);
++int intel_xpcie_get_device_name_by_id(u32 sw_devid, char *device_name,
++				      size_t name_size);
++
+ #endif /* XPCIE_UTIL_HEADER_ */
+diff --git a/drivers/misc/xlink-pcie/local_host/core.c b/drivers/misc/xlink-pcie/local_host/core.c
+index 6160624a9234..f0b5bd31c105 100644
+--- a/drivers/misc/xlink-pcie/local_host/core.c
++++ b/drivers/misc/xlink-pcie/local_host/core.c
+@@ -11,13 +11,6 @@
+ #include "../common/core.h"
+ #include "../common/util.h"
+ 
+-static struct xpcie *global_xpcie;
+-
+-static struct xpcie *intel_xpcie_core_get_by_id(u32 sw_device_id)
+-{
+-	return (sw_device_id == xlink_sw_id) ? global_xpcie : NULL;
+-}
+-
+ static int intel_xpcie_map_dma(struct xpcie *xpcie, struct xpcie_buf_desc *bd,
+ 			       int direction)
+ {
+@@ -520,8 +513,6 @@ int intel_xpcie_core_init(struct xpcie *xpcie)
+ {
+ 	int error;
+ 
+-	global_xpcie = xpcie;
+-
+ 	intel_xpcie_set_cap_txrx(xpcie);
+ 
+ 	error = intel_xpcie_events_init(xpcie);
+@@ -734,52 +725,11 @@ int intel_xpcie_core_write(struct xpcie *xpcie, void *buffer,
+ 	return 0;
+ }
+ 
+-int intel_xpcie_get_device_status_by_id(u32 id, u32 *status)
+-{
+-	struct xpcie *xpcie = intel_xpcie_core_get_by_id(id);
+-
+-	if (!xpcie)
+-		return -ENODEV;
+-
+-	*status = xpcie->status;
+-
+-	return 0;
+-}
+-
+-u32 intel_xpcie_get_device_num(u32 *id_list)
+-{
+-	u32 num_devices = 0;
+-
+-	if (xlink_sw_id) {
+-		num_devices = 1;
+-		*id_list = xlink_sw_id;
+-	}
+-
+-	return num_devices;
+-}
+-
+-int intel_xpcie_get_device_name_by_id(u32 id,
+-				      char *device_name, size_t name_size)
+-{
+-	struct xpcie *xpcie;
+-
+-	xpcie = intel_xpcie_core_get_by_id(id);
+-	if (!xpcie)
+-		return -ENODEV;
+-
+-	memset(device_name, 0, name_size);
+-	if (name_size > strlen(XPCIE_DRIVER_NAME))
+-		name_size = strlen(XPCIE_DRIVER_NAME);
+-	memcpy(device_name, XPCIE_DRIVER_NAME, name_size);
+-
+-	return 0;
+-}
+-
+ int intel_xpcie_pci_connect_device(u32 id)
+ {
+ 	struct xpcie *xpcie;
+ 
+-	xpcie = intel_xpcie_core_get_by_id(id);
++	xpcie = intel_xpcie_get_device_by_id(id);
+ 	if (!xpcie)
+ 		return -ENODEV;
+ 
+@@ -793,7 +743,7 @@ int intel_xpcie_pci_read(u32 id, void *data, size_t *size, u32 timeout)
+ {
+ 	struct xpcie *xpcie;
+ 
+-	xpcie = intel_xpcie_core_get_by_id(id);
++	xpcie = intel_xpcie_get_device_by_id(id);
+ 	if (!xpcie)
+ 		return -ENODEV;
+ 
+@@ -804,7 +754,7 @@ int intel_xpcie_pci_write(u32 id, void *data, size_t *size, u32 timeout)
+ {
+ 	struct xpcie *xpcie;
+ 
+-	xpcie = intel_xpcie_core_get_by_id(id);
++	xpcie = intel_xpcie_get_device_by_id(id);
+ 	if (!xpcie)
+ 		return -ENODEV;
+ 
+diff --git a/drivers/misc/xlink-pcie/local_host/epf.c b/drivers/misc/xlink-pcie/local_host/epf.c
+index 89d7373ef404..d9b9acb165fd 100644
+--- a/drivers/misc/xlink-pcie/local_host/epf.c
++++ b/drivers/misc/xlink-pcie/local_host/epf.c
+@@ -53,8 +53,6 @@ static const struct pci_epf_device_id xpcie_epf_ids[] = {
+ 	{},
+ };
+ 
+-u32 xlink_sw_id;
+-
+ int intel_xpcie_copy_from_host_ll(struct xpcie *xpcie, int chan, int descs_num)
+ {
+ 	struct xpcie_epf *xpcie_epf = container_of(xpcie,
+@@ -484,9 +482,9 @@ static int intel_xpcie_epf_get_platform_data(struct device *dev,
+ 	ret = of_property_read_u8(pdev->dev.of_node,
+ 				  "max-functions",
+ 				  &epc->max_functions);
+-	if (epc->max_functions == THB_FULL_MAX_PCIE_FNS)
++	if (epc->max_functions == 8)
+ 		epf->header->deviceid = PCI_DEVICE_ID_INTEL_THB_FULL;
+-	else if (epc->max_functions == THB_PRIME_MAX_PCIE_FNS)
++	else if (epc->max_functions == 4)
+ 		epf->header->deviceid = PCI_DEVICE_ID_INTEL_THB_PRIME;
+ 
+ 	if (epf->header->deviceid == PCI_DEVICE_ID_INTEL_KEEMBAY) {
+@@ -562,7 +560,6 @@ static int intel_xpcie_epf_bind(struct pci_epf *epf)
+ 							 epc->max_functions,
+ 							 bus_num << 8 |
+ 							 dev_num);
+-		xlink_sw_id = xpcie_epf->xpcie.sw_devid;
+ 	}
+ 
+ 	ret = intel_xpcie_core_init(&xpcie_epf->xpcie);
+@@ -571,6 +568,9 @@ static int intel_xpcie_epf_bind(struct pci_epf *epf)
+ 		goto err_uninit_dma;
+ 	}
+ 
++	intel_xpcie_list_add_device(&xpcie_epf->xpcie);
++	snprintf(xpcie_epf->xpcie.name, XPCIE_MAX_NAME_LEN,
++		 "%s_func%x", epf->name, epf->func_no);
+ 	intel_xpcie_iowrite32(XPCIE_STATUS_UNINIT,
+ 			      xpcie_epf->xpcie.mmio + XPCIE_MMIO_HOST_STATUS);
+ 	intel_xpcie_set_device_status(&xpcie_epf->xpcie, XPCIE_STATUS_RUN);
+diff --git a/drivers/misc/xlink-pcie/remote_host/main.c b/drivers/misc/xlink-pcie/remote_host/main.c
+index 740e32e39bb0..3d6d24258529 100644
+--- a/drivers/misc/xlink-pcie/remote_host/main.c
++++ b/drivers/misc/xlink-pcie/remote_host/main.c
+@@ -24,6 +24,7 @@ static int intel_xpcie_probe(struct pci_dev *pdev,
+ 	u8 max_functions = KMB_MAX_PCIE_FNS;
+ 	struct xpcie_dev *xdev = NULL;
+ 	bool new_device = false;
++	struct xpcie *xpcie;
+ 	u32 sw_devid;
+ 	u16 hw_id;
+ 	int ret;
+@@ -42,13 +43,15 @@ static int intel_xpcie_probe(struct pci_dev *pdev,
+ 	sw_devid = intel_xpcie_create_sw_id(PCI_FUNC(pdev->devfn),
+ 					    max_functions, hw_id);
+ 
+-	xdev = intel_xpcie_get_device_by_id(sw_devid);
+-	if (!xdev) {
++	xpcie = intel_xpcie_get_device_by_id(sw_devid);
++	if (!xpcie) {
+ 		xdev = intel_xpcie_create_device(sw_devid, pdev);
+ 		if (!xdev)
+ 			return -ENOMEM;
+ 
+ 		new_device = true;
++	} else {
++		xdev = xpcie_to_xdev(xpcie);
+ 	}
+ 	xdev->max_functions = max_functions;
+ 
+@@ -59,7 +62,7 @@ static int intel_xpcie_probe(struct pci_dev *pdev,
+ 	}
+ 
+ 	if (new_device)
+-		intel_xpcie_list_add_device(xdev);
++		intel_xpcie_list_add_device(&xdev->xpcie);
+ 
+ 	intel_xpcie_pci_notify_event(xdev, NOTIFY_DEVICE_CONNECTED);
+ 
+@@ -73,6 +76,7 @@ static void intel_xpcie_remove(struct pci_dev *pdev)
+ 	if (xdev) {
+ 		intel_xpcie_pci_cleanup(xdev);
+ 		intel_xpcie_pci_notify_event(xdev, NOTIFY_DEVICE_DISCONNECTED);
++		intel_xpcie_list_del_device(&xdev->xpcie);
+ 		intel_xpcie_remove_device(xdev);
+ 	}
+ }
+diff --git a/drivers/misc/xlink-pcie/remote_host/pci.c b/drivers/misc/xlink-pcie/remote_host/pci.c
+index 0e553d5a3a5e..53d1125cb3d2 100644
+--- a/drivers/misc/xlink-pcie/remote_host/pci.c
++++ b/drivers/misc/xlink-pcie/remote_host/pci.c
+@@ -22,32 +22,6 @@ MODULE_PARM_DESC(aspm_enable, "enable ASPM");
+ 
+ #define DEV_POLL_PERIOD	2000
+ 
+-static LIST_HEAD(dev_list);
+-static DEFINE_MUTEX(dev_list_mutex);
+-
+-struct xpcie_dev *intel_xpcie_get_device_by_id(u32 id)
+-{
+-	struct xpcie_dev *xdev;
+-
+-	mutex_lock(&dev_list_mutex);
+-
+-	if (list_empty(&dev_list)) {
+-		mutex_unlock(&dev_list_mutex);
+-		return NULL;
+-	}
+-
+-	list_for_each_entry(xdev, &dev_list, list) {
+-		if (xdev->devid == id) {
+-			mutex_unlock(&dev_list_mutex);
+-			return xdev;
+-		}
+-	}
+-
+-	mutex_unlock(&dev_list_mutex);
+-
+-	return NULL;
+-}
+-
+ struct xpcie_dev *intel_xpcie_create_device(u32 sw_device_id,
+ 					    struct pci_dev *pdev)
+ {
+@@ -73,24 +47,6 @@ void intel_xpcie_remove_device(struct xpcie_dev *xdev)
+ 	kfree(xdev);
+ }
+ 
+-void intel_xpcie_list_add_device(struct xpcie_dev *xdev)
+-{
+-	mutex_lock(&dev_list_mutex);
+-
+-	list_add_tail(&xdev->list, &dev_list);
+-
+-	mutex_unlock(&dev_list_mutex);
+-}
+-
+-void intel_xpcie_list_del_device(struct xpcie_dev *xdev)
+-{
+-	mutex_lock(&dev_list_mutex);
+-
+-	list_del(&xdev->list);
+-
+-	mutex_unlock(&dev_list_mutex);
+-}
+-
+ static void intel_xpcie_pci_set_aspm(struct xpcie_dev *xdev, int aspm)
+ {
+ 	u16 link_control;
+@@ -374,68 +330,12 @@ int intel_xpcie_pci_raise_irq(struct xpcie_dev *xdev,
+ 	return 0;
+ }
+ 
+-u32 intel_xpcie_get_device_num(u32 *id_list)
+-{
+-	struct xpcie_dev *p;
+-	u32 num = 0;
+-
+-	mutex_lock(&dev_list_mutex);
+-
+-	if (list_empty(&dev_list)) {
+-		mutex_unlock(&dev_list_mutex);
+-		return 0;
+-	}
+-
+-	list_for_each_entry(p, &dev_list, list) {
+-		*id_list++ = p->devid;
+-		num++;
+-	}
+-	mutex_unlock(&dev_list_mutex);
+-
+-	return num;
+-}
+-
+-int intel_xpcie_get_device_name_by_id(u32 id,
+-				      char *device_name, size_t name_size)
+-{
+-	struct xpcie_dev *xdev;
+-	size_t size;
+-
+-	xdev = intel_xpcie_get_device_by_id(id);
+-	if (!xdev)
+-		return -ENODEV;
+-
+-	mutex_lock(&xdev->lock);
+-
+-	size = (name_size > XPCIE_MAX_NAME_LEN) ?
+-		XPCIE_MAX_NAME_LEN : name_size;
+-	memcpy(device_name, xdev->name, size);
+-
+-	mutex_unlock(&xdev->lock);
+-
+-	return 0;
+-}
+-
+-int intel_xpcie_get_device_status_by_id(u32 id, u32 *status)
+-{
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(id);
+-
+-	if (!xdev)
+-		return -ENODEV;
+-
+-	mutex_lock(&xdev->lock);
+-	*status = xdev->xpcie.status;
+-	mutex_unlock(&xdev->lock);
+-
+-	return 0;
+-}
+-
+ int intel_xpcie_pci_connect_device(u32 id)
+ {
+-	struct xpcie_dev *xdev;
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 	int rc = 0;
+ 
+-	xdev = intel_xpcie_get_device_by_id(id);
+ 	if (!xdev)
+ 		return -ENODEV;
+ 
+@@ -468,7 +368,8 @@ int intel_xpcie_pci_connect_device(u32 id)
+ 
+ int intel_xpcie_pci_read(u32 id, void *data, size_t *size, u32 timeout)
+ {
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(id);
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 
+ 	if (!xdev)
+ 		return -ENODEV;
+@@ -478,7 +379,8 @@ int intel_xpcie_pci_read(u32 id, void *data, size_t *size, u32 timeout)
+ 
+ int intel_xpcie_pci_write(u32 id, void *data, size_t *size, u32 timeout)
+ {
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(id);
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 
+ 	if (!xdev)
+ 		return -ENODEV;
+@@ -488,7 +390,8 @@ int intel_xpcie_pci_write(u32 id, void *data, size_t *size, u32 timeout)
+ 
+ int intel_xpcie_pci_reset_device(u32 id)
+ {
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(id);
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 
+ 	if (!xdev)
+ 		return -ENOMEM;
+@@ -499,7 +402,8 @@ int intel_xpcie_pci_reset_device(u32 id)
+ int intel_xpcie_pci_register_device_event(u32 sw_device_id,
+ 					  xlink_device_event event_notif_fn)
+ {
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(sw_device_id);
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(sw_device_id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 
+ 	if (!xdev)
+ 		return -ENOMEM;
+@@ -511,7 +415,8 @@ int intel_xpcie_pci_register_device_event(u32 sw_device_id,
+ 
+ int intel_xpcie_pci_unregister_device_event(u32 sw_device_id)
+ {
+-	struct xpcie_dev *xdev = intel_xpcie_get_device_by_id(sw_device_id);
++	struct xpcie *xpcie = intel_xpcie_get_device_by_id(sw_device_id);
++	struct xpcie_dev *xdev = xpcie_to_xdev(xpcie);
+ 
+ 	if (!xdev)
+ 		return -ENOMEM;
+diff --git a/drivers/misc/xlink-pcie/remote_host/pci.h b/drivers/misc/xlink-pcie/remote_host/pci.h
+index 6be5664fe536..e13b2e23a9c7 100644
+--- a/drivers/misc/xlink-pcie/remote_host/pci.h
++++ b/drivers/misc/xlink-pcie/remote_host/pci.h
+@@ -26,7 +26,6 @@ struct xpcie_dev {
+ 
+ 	struct pci_dev *pci;
+ 	char name[XPCIE_MAX_NAME_LEN];
+-	u32 devid;
+ 	char fw_name[XPCIE_MAX_NAME_LEN];
+ 
+ 	struct delayed_work wait_event;
+@@ -47,6 +46,11 @@ static inline struct device *xpcie_to_dev(struct xpcie *xpcie)
+ 	return &xdev->pci->dev;
+ }
+ 
++static inline struct xpcie_dev *xpcie_to_xdev(struct xpcie *xpcie)
++{
++	return container_of(xpcie, struct xpcie_dev, xpcie);
++}
++
+ int intel_xpcie_pci_init(struct xpcie_dev *xdev, struct pci_dev *pdev);
+ int intel_xpcie_pci_cleanup(struct xpcie_dev *xdev);
+ int intel_xpcie_pci_register_irq(struct xpcie_dev *xdev,
+@@ -58,8 +62,6 @@ int intel_xpcie_pci_raise_irq(struct xpcie_dev *xdev,
+ struct xpcie_dev *intel_xpcie_create_device(u32 sw_device_id,
+ 					    struct pci_dev *pdev);
+ void intel_xpcie_remove_device(struct xpcie_dev *xdev);
+-void intel_xpcie_list_add_device(struct xpcie_dev *xdev);
+-void intel_xpcie_list_del_device(struct xpcie_dev *xdev);
+ void intel_xpcie_pci_notify_event(struct xpcie_dev *xdev,
+ 				  enum xlink_device_event_type event_type);
+ 
+-- 
+2.25.1
+

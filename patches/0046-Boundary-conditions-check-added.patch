@@ -1,0 +1,129 @@
+From 38d358d295b5a2ae0fe50838e80793c7ce464119 Mon Sep 17 00:00:00 2001
+From: "Joshi, Vishakha" <vishakha.joshi@intel.com>
+Date: Thu, 24 Jun 2021 15:10:52 +0530
+Subject: [PATCH 046/109] Boundary conditions check added
+
+Incorporated boundary conditions check for pinctrl-keembay, pwm-keembay,
+i3c_test, and xlink-smbus.
+
+Signed-off-by: Joshi, Vishakha <vishakha.joshi@intel.com>
+---
+ drivers/misc/i3c_test/i3c_test.c       | 24 +++++++++++++-----------
+ drivers/misc/xlink-smbus/xlink-smbus.c |  5 ++++-
+ drivers/pinctrl/pinctrl-keembay.c      |  2 +-
+ drivers/pwm/pwm-keembay.c              |  2 +-
+ 4 files changed, 19 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/misc/i3c_test/i3c_test.c b/drivers/misc/i3c_test/i3c_test.c
+index 473573bb90e3..edccd312db8a 100644
+--- a/drivers/misc/i3c_test/i3c_test.c
++++ b/drivers/misc/i3c_test/i3c_test.c
+@@ -14,7 +14,6 @@
+ #include <linux/of.h>
+ #include <linux/regmap.h>
+ 
+-
+ static const struct i3c_device_id i3c_test_ids[] = {
+ 	I3C_CLASS(0x0, (void *)ST_LSM6DSO_ID),
+ 	{ /* sentinel */ },
+@@ -33,25 +32,28 @@ static int i3c_test_write(struct i3c_device *i3cdev, const void *data,
+ 		},
+ 	};
+ 
+-
+ 	ret = i3c_device_do_priv_xfers(i3cdev, xfers, 1);
+ 	return ret;
+ }
+ 
+ static int i3c_test_read(struct i3c_device *i3cdev, void *reg,
+-			size_t reg_size, void *val, size_t val_size)
++			 size_t reg_size, void *val, size_t val_size)
+ {
+-	struct i3c_priv_xfer xfers[1];
+ 	char rbuff[4];
+-	int ret = 0;
+ 
+-	xfers[0].rnw = true;
+-	xfers[0].len = val_size;
+-	xfers[0].data.in = (void *)rbuff;
++	struct i3c_priv_xfer xfers[] = {
++		{
++			.rnw = true,
++			.len = val_size,
++			.data.in = (void *)rbuff,
++		},
++	};
++
++	int ret = 0;
+ 
+ 	ret = i3c_device_do_priv_xfers(i3cdev, xfers, 1);
+ 	dev_info(&i3cdev->dev, "read done: %d, %d, %d, %d\n", rbuff[0],
+-						rbuff[1], rbuff[2], rbuff[3]);
++		 rbuff[1], rbuff[2], rbuff[3]);
+ 	return ret;
+ }
+ 
+@@ -66,9 +68,9 @@ static int i3c_test_probe(struct i3c_device *i3cdev)
+ 	dev_info(&i3cdev->dev, "i3c_test: %s, dcr: %x\n", __func__, info.dcr);
+ 	dev_info(&i3cdev->dev, "i3c_test: %s, pid: %llx\n", __func__, info.pid);
+ 	dev_info(&i3cdev->dev, "i3c_test: %s, static address: %x\n",
+-			__func__, info.static_addr);
++		 __func__, info.static_addr);
+ 	dev_info(&i3cdev->dev, "i3c_test: %s, dyn_addr: %x\n",
+-			__func__, info.dyn_addr);
++		 __func__, info.dyn_addr);
+ 
+ 	dev_info(&i3cdev->dev, "i3c_test probe done\n");
+ 	for (speed = 0; speed < 5; speed++) {
+diff --git a/drivers/misc/xlink-smbus/xlink-smbus.c b/drivers/misc/xlink-smbus/xlink-smbus.c
+index 4ecfe42ad765..7a4787c11495 100644
+--- a/drivers/misc/xlink-smbus/xlink-smbus.c
++++ b/drivers/misc/xlink-smbus/xlink-smbus.c
+@@ -117,7 +117,7 @@ static s32 handle_slave_mode(struct i2c_client *slave, struct xlink_msg *msg)
+ 			i2c_slave_event(slave,
+ 					I2C_SLAVE_READ_REQUESTED,
+ 					&temp);
+-			msg->data.word |= temp;
++			msg->data.word |= (u16)temp;
+ 		} else if (msg->protocol == I2C_SMBUS_BLOCK_DATA) {
+ 			int i;
+ 
+@@ -345,6 +345,9 @@ static int xlink_i2c_probe(struct platform_device *pdev)
+ 	struct i2c_adapter *adap;
+ 	u32 rc;
+ 
++	if ((pdev->id & 0x3) >= HDDL_XLINK_I2C_END)
++		return -EINVAL;
++
+ 	dev_dbg(dev, "Registering xlink SMBus adapter...\n");
+ 
+ 	adap = kzalloc(sizeof(*adap), GFP_KERNEL);
+diff --git a/drivers/pinctrl/pinctrl-keembay.c b/drivers/pinctrl/pinctrl-keembay.c
+index 2bce563d5b8b..30d6843fca17 100644
+--- a/drivers/pinctrl/pinctrl-keembay.c
++++ b/drivers/pinctrl/pinctrl-keembay.c
+@@ -1144,7 +1144,7 @@ static int keembay_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
+ 		if (ret)
+ 			return ret;
+ 	}
+-	return ret;
++	return 0;
+ }
+ 
+ static const struct pinctrl_ops keembay_pctlops = {
+diff --git a/drivers/pwm/pwm-keembay.c b/drivers/pwm/pwm-keembay.c
+index 733811b05721..81d90cccd051 100644
+--- a/drivers/pwm/pwm-keembay.c
++++ b/drivers/pwm/pwm-keembay.c
+@@ -69,7 +69,7 @@ static int keembay_clk_enable(struct device *dev, struct clk *clk)
+  * for all valid masks (e.g. KMB_PWM_LEADIN_MASK) that they are ok.
+  */
+ static __always_inline void keembay_pwm_update_bits(struct keembay_pwm *priv, u32 mask,
+-					   u32 val, u32 offset)
++						    u32 val, u32 offset)
+ {
+ 	u32 buff = readl(priv->base + offset);
+ 
+-- 
+2.25.1
+

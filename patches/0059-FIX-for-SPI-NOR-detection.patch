@@ -1,0 +1,73 @@
+From a6c6576c3040bf78877a9d2f7eddecae2c9f8121 Mon Sep 17 00:00:00 2001
+From: "Dillibabu, Karthikx" <karthikx.dillibabu@intel.com>
+Date: Thu, 8 Apr 2021 13:30:39 +0530
+Subject: [PATCH 059/109] FIX for SPI-NOR detection
+
+In the spi-mem with cs_gpiod(gpio chip select) scenario, provided
+the fix to resolve spi controller chip select assertion issue.
+Some SPI masters need both GPIO chip select & controller
+slave_select, the slave_select input in the above scenario was
+incorrect which is now fixed.
+
+Signed-off-by: Dillibabu, Karthikx <karthikx.dillibabu@intel.com>
+---
+ drivers/mtd/spi-nor/core.c      | 9 ++++++---
+ drivers/mtd/spi-nor/micron-st.c | 2 ++
+ drivers/spi/spi.c               | 8 ++++++--
+ 3 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/mtd/spi-nor/core.c b/drivers/mtd/spi-nor/core.c
+index cc08bd707378..bf1dc2096a43 100644
+--- a/drivers/mtd/spi-nor/core.c
++++ b/drivers/mtd/spi-nor/core.c
+@@ -3062,9 +3062,12 @@ static const struct flash_info *spi_nor_get_flash_info(struct spi_nor *nor,
+ 			 * marked read-only, and we don't want to lose that
+ 			 * information, even if it's not 100% accurate.
+ 			 */
+-			dev_warn(nor->dev, "found %s, expected %s\n",
+-				 jinfo->name, info->name);
+-			info = jinfo;
++			if ((info->id_len >= jinfo->id_len) &&
++					memcmp(info->id, jinfo->id, info->id_len)) {
++				dev_warn(nor->dev, "found %s, expected %s\n",
++						jinfo->name, info->name);
++				info = jinfo;
++			}
+ 		}
+ 	}
+ 
+diff --git a/drivers/mtd/spi-nor/micron-st.c b/drivers/mtd/spi-nor/micron-st.c
+index c224e59820a1..ad4b66687795 100644
+--- a/drivers/mtd/spi-nor/micron-st.c
++++ b/drivers/mtd/spi-nor/micron-st.c
+@@ -147,6 +147,8 @@ static const struct flash_info st_parts[] = {
+ 			      SPI_NOR_4BIT_BP | SPI_NOR_BP3_SR_BIT6) },
+ 	{ "n25q128a13",  INFO(0x20ba18, 0, 64 * 1024,  256,
+ 			      SECT_4K | USE_FSR | SPI_NOR_QUAD_READ) },
++	{ "mt25qu128",   INFO(0x20bb18, 0, 64 * 1024,  256, SECT_4K | USE_FSR |
++			SPI_NOR_QUAD_READ) },
+ 	{ "mt25ql256a",  INFO6(0x20ba19, 0x104400, 64 * 1024,  512,
+ 			       SECT_4K | USE_FSR | SPI_NOR_DUAL_READ |
+ 			       SPI_NOR_QUAD_READ | SPI_NOR_4B_OPCODES) },
+diff --git a/drivers/spi/spi.c b/drivers/spi/spi.c
+index cac21619ce40..2ee79e02afea 100644
+--- a/drivers/spi/spi.c
++++ b/drivers/spi/spi.c
+@@ -917,8 +917,12 @@ static void spi_set_cs(struct spi_device *spi, bool enable, bool force)
+ 		}
+ 		/* Some SPI masters need both GPIO CS & slave_select */
+ 		if ((spi->controller->flags & SPI_MASTER_GPIO_SS) &&
+-		    spi->controller->set_cs)
+-			spi->controller->set_cs(spi, !enable);
++		    spi->controller->set_cs) {
++			if (spi->cs_gpiod)
++				spi->controller->set_cs(spi, enable1);
++			else
++				spi->controller->set_cs(spi, !enable);
++		}
+ 	} else if (spi->controller->set_cs) {
+ 		spi->controller->set_cs(spi, !enable);
+ 	}
+-- 
+2.25.1
+
