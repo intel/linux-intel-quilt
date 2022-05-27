@@ -1,0 +1,80 @@
+From f265f7797e3947e583a3710c917083508ac3911b Mon Sep 17 00:00:00 2001
+From: Kan Liang <kan.liang@linux.intel.com>
+Date: Mon, 24 Jan 2022 15:20:21 -0800
+Subject: [PATCH 07/21] perf/x86: Support Retire Latency
+
+Retire Latency reports the number of elapsed core clocks between the
+retirement of the instruction indicated by the Instruction Pointer field
+of the PEBS record and the retirement of the prior instruction. It's
+enumerated by the IA32_PERF_CAPABILITIES.PEBS_TIMING_INFO[17].
+
+Add flag PMU_FL_RETIRE_LATENCY to indicate the availability of the
+feature.
+
+Signed-off-by: Kan Liang <kan.liang@linux.intel.com>
+---
+ arch/x86/events/intel/core.c | 4 ++++
+ arch/x86/events/intel/ds.c   | 4 ++++
+ arch/x86/events/perf_event.h | 2 ++
+ 3 files changed, 10 insertions(+)
+
+diff --git a/arch/x86/events/intel/core.c b/arch/x86/events/intel/core.c
+index 17697d934de3..263d74a59451 100644
+--- a/arch/x86/events/intel/core.c
++++ b/arch/x86/events/intel/core.c
+@@ -6327,6 +6327,10 @@ __init int intel_pmu_init(void)
+ 	if (is_hybrid())
+ 		intel_pmu_check_hybrid_pmus((u64)fixed_mask);
+ 
++	if (x86_pmu.intel_cap.pebs_timing_info)
++		x86_pmu.flags |= PMU_FL_RETIRE_LATENCY;
++
++
+ 	return 0;
+ }
+ 
+diff --git a/arch/x86/events/intel/ds.c b/arch/x86/events/intel/ds.c
+index 4dbb55a43dad..1d6f152743e3 100644
+--- a/arch/x86/events/intel/ds.c
++++ b/arch/x86/events/intel/ds.c
+@@ -1617,6 +1617,7 @@ static void adaptive_pebs_save_regs(struct pt_regs *regs,
+ 
+ #define PEBS_LATENCY_MASK			0xffff
+ #define PEBS_CACHE_LATENCY_OFFSET		32
++#define PEBS_RETIRE_LATENCY_OFFSET		32
+ 
+ /*
+  * With adaptive PEBS the layout depends on what fields are configured.
+@@ -1664,6 +1665,9 @@ static void setup_pebs_adaptive_sample_data(struct perf_event *event,
+ 	set_linear_ip(regs, basic->ip);
+ 	regs->flags = PERF_EFLAGS_EXACT;
+ 
++	if ((sample_type & PERF_SAMPLE_WEIGHT_STRUCT) && (x86_pmu.flags & PMU_FL_RETIRE_LATENCY))
++		data->weight.var3_w = format_size >> PEBS_RETIRE_LATENCY_OFFSET & PEBS_LATENCY_MASK;
++
+ 	/*
+ 	 * The record for MEMINFO is in front of GP
+ 	 * But PERF_SAMPLE_TRANSACTION needs gprs->ax.
+diff --git a/arch/x86/events/perf_event.h b/arch/x86/events/perf_event.h
+index d0ce0afb5fc8..efc4b84fa9ac 100644
+--- a/arch/x86/events/perf_event.h
++++ b/arch/x86/events/perf_event.h
+@@ -593,6 +593,7 @@ union perf_capabilities {
+ 		u64     pebs_baseline:1;
+ 		u64	perf_metrics:1;
+ 		u64	pebs_output_pt_available:1;
++		u64	pebs_timing_info:1;
+ 		u64	anythread_deprecated:1;
+ 	};
+ 	u64	capabilities;
+@@ -968,6 +969,7 @@ do {									\
+ #define PMU_FL_PAIR		0x40 /* merge counters for large incr. events */
+ #define PMU_FL_INSTR_LATENCY	0x80 /* Support Instruction Latency in PEBS Memory Info Record */
+ #define PMU_FL_MEM_LOADS_AUX	0x100 /* Require an auxiliary event for the complete memory info */
++#define PMU_FL_RETIRE_LATENCY	0x200 /* Support Retire Latency in PEBS */
+ 
+ #define EVENT_VAR(_id)  event_attr_##_id
+ #define EVENT_PTR(_id) &event_attr_##_id.attr.attr
+-- 
+2.27.0
+
