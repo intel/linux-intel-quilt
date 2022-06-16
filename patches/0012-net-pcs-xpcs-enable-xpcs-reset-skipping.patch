@@ -1,0 +1,142 @@
+From 098763a484aef63e017e883d6342f981b6c6315f Mon Sep 17 00:00:00 2001
+From: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+Date: Wed, 9 Jun 2021 15:12:19 +0800
+Subject: [PATCH 12/33] net: pcs: xpcs: enable xpcs reset skipping
+
+Some platforms such as the Intel AlderLake configure the xPCS in the
+BIOS and a xPCS Soft Reset is not required during driver init.
+
+This changes the xpcs_create function to take in an additional argument
+to check if the platform request to skip xpcs reset during device
+initialization.
+
+Signed-off-by: Michael Sit Wei Hong <michael.wei.hong.sit@intel.com>
+---
+ drivers/net/dsa/sja1105/sja1105_mdio.c           |  2 +-
+ .../net/ethernet/stmicro/stmmac/dwmac-intel.c    |  4 ++++
+ .../net/ethernet/stmicro/stmmac/stmmac_mdio.c    |  4 +++-
+ drivers/net/pcs/pcs-xpcs.c                       | 16 ++++++++++++----
+ include/linux/pcs/pcs-xpcs.h                     |  3 ++-
+ include/linux/stmmac.h                           |  1 +
+ 6 files changed, 23 insertions(+), 7 deletions(-)
+
+Index: b/drivers/net/dsa/sja1105/sja1105_mdio.c
+===================================================================
+--- a/drivers/net/dsa/sja1105/sja1105_mdio.c
++++ b/drivers/net/dsa/sja1105/sja1105_mdio.c
+@@ -435,7 +435,7 @@ static int sja1105_mdiobus_pcs_register(
+ 			goto out_pcs_free;
+ 		}
+ 
+-		xpcs = xpcs_create(mdiodev, priv->phy_mode[port]);
++		xpcs = xpcs_create(mdiodev, priv->phy_mode[port], false);
+ 		if (IS_ERR(xpcs)) {
+ 			rc = PTR_ERR(xpcs);
+ 			goto out_pcs_free;
+Index: b/drivers/net/ethernet/stmicro/stmmac/dwmac-intel.c
+===================================================================
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac-intel.c
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-intel.c
+@@ -796,6 +796,8 @@ static int adls_sgmii_phy0_data(struct p
+ 	if (pdev->revision == PCI_PCH_A0 || pdev->revision == PCI_PCH_A1)
+ 		plat->dma_cfg->pch_intr_wa = 1;
+ 
++	plat->skip_xpcs_reset = 1;
++
+ 	return 0;
+ }
+ 
+@@ -820,6 +822,8 @@ static int adls_sgmii_phy1_data(struct p
+ 	if (pdev->revision == PCI_PCH_A0 || pdev->revision == PCI_PCH_A1)
+ 		plat->dma_cfg->pch_intr_wa = 1;
+ 
++	plat->skip_xpcs_reset = 1;
++
+ 	return 0;
+ }
+ 
+Index: b/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
+===================================================================
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_mdio.c
+@@ -403,10 +403,12 @@ int stmmac_xpcs_setup(struct mii_bus *bu
+ 	struct mdio_device *mdiodev;
+ 	struct stmmac_priv *priv;
+ 	struct dw_xpcs *xpcs;
++	bool skip_xpcs_reset;
+ 	int mode, addr;
+ 
+ 	priv = netdev_priv(ndev);
+ 	mode = priv->plat->phy_interface;
++	skip_xpcs_reset = priv->plat->skip_xpcs_reset;
+ 
+ 	/* Try to probe the XPCS by scanning all addresses. */
+ 	for (addr = 0; addr < PHY_MAX_ADDR; addr++) {
+@@ -414,7 +416,7 @@ int stmmac_xpcs_setup(struct mii_bus *bu
+ 		if (IS_ERR(mdiodev))
+ 			continue;
+ 
+-		xpcs = xpcs_create(mdiodev, mode);
++		xpcs = xpcs_create(mdiodev, mode, skip_xpcs_reset);
+ 		if (IS_ERR_OR_NULL(xpcs)) {
+ 			mdio_device_free(mdiodev);
+ 			continue;
+Index: b/drivers/net/pcs/pcs-xpcs.c
+===================================================================
+--- a/drivers/net/pcs/pcs-xpcs.c
++++ b/drivers/net/pcs/pcs-xpcs.c
+@@ -1112,7 +1112,8 @@ static const struct phylink_pcs_ops xpcs
+ };
+ 
+ struct dw_xpcs *xpcs_create(struct mdio_device *mdiodev,
+-			    phy_interface_t interface)
++			    phy_interface_t interface,
++			    bool skip_reset)
+ {
+ 	struct dw_xpcs *xpcs;
+ 	u32 xpcs_id;
+@@ -1144,9 +1145,16 @@ struct dw_xpcs *xpcs_create(struct mdio_
+ 		xpcs->pcs.ops = &xpcs_phylink_ops;
+ 		xpcs->pcs.poll = true;
+ 
+-		ret = xpcs_soft_reset(xpcs, compat);
+-		if (ret)
+-			goto out;
++		if (!skip_reset) {
++			dev_warn(&xpcs->mdiodev->dev, "%s: xpcs reset\n",
++				 __func__);
++			ret = xpcs_soft_reset(xpcs, compat);
++			if (ret)
++				goto out;
++		} else {
++			dev_warn(&xpcs->mdiodev->dev, "%s: skip xpcs reset\n",
++				 __func__);
++		}
+ 
+ 		return xpcs;
+ 	}
+Index: b/include/linux/pcs/pcs-xpcs.h
+===================================================================
+--- a/include/linux/pcs/pcs-xpcs.h
++++ b/include/linux/pcs/pcs-xpcs.h
+@@ -36,7 +36,8 @@ void xpcs_validate(struct dw_xpcs *xpcs,
+ int xpcs_config_eee(struct dw_xpcs *xpcs, int mult_fact_100ns,
+ 		    int enable);
+ struct dw_xpcs *xpcs_create(struct mdio_device *mdiodev,
+-			    phy_interface_t interface);
++			    phy_interface_t interface,
++			    bool skip_reset);
+ void xpcs_destroy(struct dw_xpcs *xpcs);
+ 
+ #endif /* __LINUX_PCS_XPCS_H */
+Index: b/include/linux/stmmac.h
+===================================================================
+--- a/include/linux/stmmac.h
++++ b/include/linux/stmmac.h
+@@ -275,5 +275,6 @@ struct plat_stmmacenet_data {
+ 	int msi_tx_base_vec;
+ 	bool use_phy_wol;
+ 	bool sph_disable;
++	bool skip_xpcs_reset;
+ };
+ #endif
