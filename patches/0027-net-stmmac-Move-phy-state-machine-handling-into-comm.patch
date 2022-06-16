@@ -1,0 +1,60 @@
+From 4ac85afb83a1bdd15c5086551c9b127f1bf5e371 Mon Sep 17 00:00:00 2001
+From: Noor Azura Ahmad Tarmizi <noor.azura.ahmad.tarmizi@intel.com>
+Date: Thu, 13 Jan 2022 13:16:25 +0800
+Subject: [PATCH 27/33] net: stmmac: Move phy state machine handling into
+ common suspend/resume func
+
+When WOL is enabled, phy state machine will still running even
+Ethernet driver is suspended. This will hit phy_error kernel
+dump because mdio bus is not available when IP is put into D3.
+
+Therefore, this commit place the phy state machine handling into
+common suspend/resume function as the handling is also needed for
+non network proxy GbE port if wakeup machanism is enabled.
+
+Signed-off-by: Song, Yoong Siang <yoong.siang.song@intel.com>
+Signed-off-by: Noor Azura Ahmad Tarmizi <noor.azura.ahmad.tarmizi@intel.com>
+---
+ drivers/net/ethernet/stmicro/stmmac/stmmac_main.c | 6 ++++++
+ drivers/net/phy/phy.c                             | 1 +
+ 2 files changed, 7 insertions(+)
+
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index d650dedfb58e..18cd3dd77907 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -7493,6 +7493,9 @@ int stmmac_suspend_common(struct stmmac_priv *priv, struct net_device *ndev)
+ {
+ 	u32 chan;
+ 
++	if (ndev->phydev && device_may_wakeup(priv->device))
++		phy_stop_machine(ndev->phydev);
++
+ 	mutex_lock(&priv->lock);
+ 
+ 	netif_device_detach(ndev);
+@@ -7712,6 +7715,9 @@ int stmmac_resume_common(struct stmmac_priv *priv, struct net_device *ndev)
+ 	mutex_unlock(&priv->lock);
+ 	rtnl_unlock();
+ 
++	if (ndev->phydev && device_may_wakeup(priv->device))
++		phy_start_machine(ndev->phydev);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(stmmac_resume_common);
+diff --git a/drivers/net/phy/phy.c b/drivers/net/phy/phy.c
+index beb2b66da132..9677d5c665ce 100644
+--- a/drivers/net/phy/phy.c
++++ b/drivers/net/phy/phy.c
+@@ -927,6 +927,7 @@ void phy_stop_machine(struct phy_device *phydev)
+ 		phydev->state = PHY_UP;
+ 	mutex_unlock(&phydev->lock);
+ }
++EXPORT_SYMBOL_GPL(phy_stop_machine);
+ 
+ /**
+  * phy_error - enter HALTED state for this PHY device
+-- 
+2.32.0
+
