@@ -1,0 +1,68 @@
+From 835c00f9fc8cfdc886a421d3e3c477568fe090d3 Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Fri, 12 Aug 2022 17:03:59 +0800
+Subject: [PATCH 25/46] Revert "drm/bridge: Fix error handling in
+ analogix_dp_probe"
+
+This reverts commit 55fddbb1e2787ffbfc3009d0f24c59f6fa599dd4.
+---
+ .../gpu/drm/bridge/analogix/analogix_dp_core.c | 18 +++++-------------
+ 1 file changed, 5 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+index 3db0a631a6be..1f26890a8da6 100644
+--- a/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
++++ b/drivers/gpu/drm/bridge/analogix/analogix_dp_core.c
+@@ -1696,10 +1696,8 @@ analogix_dp_probe(struct device *dev, struct analogix_dp_plat_data *plat_data)
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 
+ 	dp->reg_base = devm_ioremap_resource(&pdev->dev, res);
+-	if (IS_ERR(dp->reg_base)) {
+-		ret = PTR_ERR(dp->reg_base);
+-		goto err_disable_clk;
+-	}
++	if (IS_ERR(dp->reg_base))
++		return ERR_CAST(dp->reg_base);
+ 
+ 	dp->force_hpd = of_property_read_bool(dev->of_node, "force-hpd");
+ 
+@@ -1711,8 +1709,7 @@ analogix_dp_probe(struct device *dev, struct analogix_dp_plat_data *plat_data)
+ 	if (IS_ERR(dp->hpd_gpiod)) {
+ 		dev_err(dev, "error getting HDP GPIO: %ld\n",
+ 			PTR_ERR(dp->hpd_gpiod));
+-		ret = PTR_ERR(dp->hpd_gpiod);
+-		goto err_disable_clk;
++		return ERR_CAST(dp->hpd_gpiod);
+ 	}
+ 
+ 	if (dp->hpd_gpiod) {
+@@ -1732,8 +1729,7 @@ analogix_dp_probe(struct device *dev, struct analogix_dp_plat_data *plat_data)
+ 
+ 	if (dp->irq == -ENXIO) {
+ 		dev_err(&pdev->dev, "failed to get irq\n");
+-		ret = -ENODEV;
+-		goto err_disable_clk;
++		return ERR_PTR(-ENODEV);
+ 	}
+ 
+ 	ret = devm_request_threaded_irq(&pdev->dev, dp->irq,
+@@ -1742,15 +1738,11 @@ analogix_dp_probe(struct device *dev, struct analogix_dp_plat_data *plat_data)
+ 					irq_flags, "analogix-dp", dp);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to request irq\n");
+-		goto err_disable_clk;
++		return ERR_PTR(ret);
+ 	}
+ 	disable_irq(dp->irq);
+ 
+ 	return dp;
+-
+-err_disable_clk:
+-	clk_disable_unprepare(dp->clock);
+-	return ERR_PTR(ret);
+ }
+ EXPORT_SYMBOL_GPL(analogix_dp_probe);
+ 
+-- 
+2.27.0
+
