@@ -1,4 +1,4 @@
-From 8067b949a6a3fe114e27f348922ab0c69edc0e64 Mon Sep 17 00:00:00 2001
+From c81b32be5a8ce5945d0231d4247ddce647682574 Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Mon, 8 Jun 2020 00:40:45 +0800
 Subject: [PATCH 03/23] tcc: update license header

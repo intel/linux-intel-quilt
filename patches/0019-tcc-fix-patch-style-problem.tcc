@@ -1,4 +1,4 @@
-From e8c68bee50267b60e97739ac8e351c731cdea4cb Mon Sep 17 00:00:00 2001
+From 77ef155be20602dc72bb0dcc39ab609c162a1534 Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Thu, 10 Feb 2022 18:08:20 +0800
 Subject: [PATCH 19/23] tcc: fix patch style problem

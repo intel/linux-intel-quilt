@@ -1,4 +1,4 @@
-From 990b0875e3d16f07ff9be67b056056e86d02500c Mon Sep 17 00:00:00 2001
+From 6e199be7a34620cd62f2cd5eb05d69fca3817aa4 Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Fri, 4 Sep 2020 16:56:12 +0800
 Subject: [PATCH 07/23] tcc: update tcc range end_address.

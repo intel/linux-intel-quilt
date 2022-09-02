@@ -1,4 +1,4 @@
-From 4ddb154baa73c824bc5e9c8657a9ad45500b6b49 Mon Sep 17 00:00:00 2001
+From 3beaf553385ac699b9794959a5d29078fef7f744 Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Thu, 22 Jul 2021 18:48:46 +0800
 Subject: [PATCH 10/23] tcc: update RTCT table parser to support two versions

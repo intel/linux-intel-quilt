@@ -1,4 +1,4 @@
-From bd661a3044a4cbe92c04056dba14b77aec63df35 Mon Sep 17 00:00:00 2001
+From 03af0da95772efcc4c88e8a2f870dfde91966a7d Mon Sep 17 00:00:00 2001
 From: Qiang Rao <qiang.rao@intel.com>
 Date: Tue, 19 Apr 2022 12:36:32 +0800
 Subject: [PATCH 22/23] tcc: Update hardware prefetcher disable bits for ADL
