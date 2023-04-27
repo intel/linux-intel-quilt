@@ -1,0 +1,57 @@
+From f2a93b9892fb7d3d77cab55a624b6cd91428518c Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Thu, 27 Apr 2023 13:17:45 +0800
+Subject: [PATCH 01/68] Revert "drm/i915/active: Fix misuse of non-idle
+ barriers as fence trackers"
+
+This reverts commit 5e784a7d07af42057c0576fb647b482f4cb0dc2c.
+---
+ drivers/gpu/drm/i915/i915_active.c | 24 +++++++++++-------------
+ 1 file changed, 11 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index 0532a5069c04b..c4c2d24dc5094 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -432,7 +432,8 @@ replace_barrier(struct i915_active *ref, struct i915_active_fence *active)
+ 	 * we can use it to substitute for the pending idle-barrer
+ 	 * request that we want to emit on the kernel_context.
+ 	 */
+-	return __active_del_barrier(ref, node_from_active(active));
++	__active_del_barrier(ref, node_from_active(active));
++	return true;
+ }
+ 
+ int i915_active_ref(struct i915_active *ref, u64 idx, struct dma_fence *fence)
+@@ -445,19 +446,16 @@ int i915_active_ref(struct i915_active *ref, u64 idx, struct dma_fence *fence)
+ 	if (err)
+ 		return err;
+ 
+-	do {
+-		active = active_instance(ref, idx);
+-		if (!active) {
+-			err = -ENOMEM;
+-			goto out;
+-		}
+-
+-		if (replace_barrier(ref, active)) {
+-			RCU_INIT_POINTER(active->fence, NULL);
+-			atomic_dec(&ref->count);
+-		}
+-	} while (unlikely(is_barrier(active)));
++	active = active_instance(ref, idx);
++	if (!active) {
++		err = -ENOMEM;
++		goto out;
++	}
+ 
++	if (replace_barrier(ref, active)) {
++		RCU_INIT_POINTER(active->fence, NULL);
++		atomic_dec(&ref->count);
++	}
+ 	if (!__i915_active_fence_set(active, fence))
+ 		__i915_active_acquire(ref);
+ 
+-- 
+2.25.1
+

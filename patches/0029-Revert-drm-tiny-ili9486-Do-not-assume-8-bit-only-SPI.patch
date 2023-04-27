@@ -1,0 +1,56 @@
+From 57e2b99756d2175dbff364c5c94272857d1efa99 Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Thu, 27 Apr 2023 13:18:01 +0800
+Subject: [PATCH 29/68] Revert "drm/tiny: ili9486: Do not assume 8-bit only SPI
+ controllers"
+
+This reverts commit 819d8dba030dc99bdf6dfacac671db23cec28427.
+---
+ drivers/gpu/drm/tiny/ili9486.c | 13 ++++---------
+ 1 file changed, 4 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/tiny/ili9486.c b/drivers/gpu/drm/tiny/ili9486.c
+index 7ea26e5fbcb28..403af68fa4400 100644
+--- a/drivers/gpu/drm/tiny/ili9486.c
++++ b/drivers/gpu/drm/tiny/ili9486.c
+@@ -43,7 +43,6 @@ static int waveshare_command(struct mipi_dbi *mipi, u8 *cmd, u8 *par,
+ 			     size_t num)
+ {
+ 	struct spi_device *spi = mipi->spi;
+-	unsigned int bpw = 8;
+ 	void *data = par;
+ 	u32 speed_hz;
+ 	int i, ret;
+@@ -57,6 +56,8 @@ static int waveshare_command(struct mipi_dbi *mipi, u8 *cmd, u8 *par,
+ 	 * The displays are Raspberry Pi HATs and connected to the 8-bit only
+ 	 * SPI controller, so 16-bit command and parameters need byte swapping
+ 	 * before being transferred as 8-bit on the big endian SPI bus.
++	 * Pixel data bytes have already been swapped before this function is
++	 * called.
+ 	 */
+ 	buf[0] = cpu_to_be16(*cmd);
+ 	gpiod_set_value_cansleep(mipi->dc, 0);
+@@ -70,18 +71,12 @@ static int waveshare_command(struct mipi_dbi *mipi, u8 *cmd, u8 *par,
+ 		for (i = 0; i < num; i++)
+ 			buf[i] = cpu_to_be16(par[i]);
+ 		num *= 2;
++		speed_hz = mipi_dbi_spi_cmd_max_speed(spi, num);
+ 		data = buf;
+ 	}
+ 
+-	/*
+-	 * Check whether pixel data bytes needs to be swapped or not
+-	 */
+-	if (*cmd == MIPI_DCS_WRITE_MEMORY_START && !mipi->swap_bytes)
+-		bpw = 16;
+-
+ 	gpiod_set_value_cansleep(mipi->dc, 1);
+-	speed_hz = mipi_dbi_spi_cmd_max_speed(spi, num);
+-	ret = mipi_dbi_spi_transfer(spi, speed_hz, bpw, data, num);
++	ret = mipi_dbi_spi_transfer(spi, speed_hz, 8, data, num);
+  free:
+ 	kfree(buf);
+ 
+-- 
+2.25.1
+
