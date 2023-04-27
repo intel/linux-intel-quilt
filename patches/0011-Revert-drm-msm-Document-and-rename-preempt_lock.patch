@@ -1,0 +1,132 @@
+From bc23c50aaec8235e8419d0e6006093c6aa096379 Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Thu, 27 Apr 2023 13:17:50 +0800
+Subject: [PATCH 11/68] Revert "drm/msm: Document and rename preempt_lock"
+
+This reverts commit 8dde1d9d6f065ea4c03c1d77182ba9e122d516d3.
+---
+ drivers/gpu/drm/msm/adreno/a5xx_gpu.c     |  4 ++--
+ drivers/gpu/drm/msm/adreno/a5xx_preempt.c | 12 ++++++------
+ drivers/gpu/drm/msm/adreno/a6xx_gpu.c     |  4 ++--
+ drivers/gpu/drm/msm/msm_ringbuffer.c      |  2 +-
+ drivers/gpu/drm/msm/msm_ringbuffer.h      |  7 +------
+ 5 files changed, 12 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a5xx_gpu.c b/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+index 6f84db97e20e8..64da65ae6d67e 100644
+--- a/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a5xx_gpu.c
+@@ -36,7 +36,7 @@ void a5xx_flush(struct msm_gpu *gpu, struct msm_ringbuffer *ring,
+ 		OUT_RING(ring, upper_32_bits(shadowptr(a5xx_gpu, ring)));
+ 	}
+ 
+-	spin_lock_irqsave(&ring->preempt_lock, flags);
++	spin_lock_irqsave(&ring->lock, flags);
+ 
+ 	/* Copy the shadow to the actual register */
+ 	ring->cur = ring->next;
+@@ -44,7 +44,7 @@ void a5xx_flush(struct msm_gpu *gpu, struct msm_ringbuffer *ring,
+ 	/* Make sure to wrap wptr if we need to */
+ 	wptr = get_wptr(ring);
+ 
+-	spin_unlock_irqrestore(&ring->preempt_lock, flags);
++	spin_unlock_irqrestore(&ring->lock, flags);
+ 
+ 	/* Make sure everything is posted before making a decision */
+ 	mb();
+diff --git a/drivers/gpu/drm/msm/adreno/a5xx_preempt.c b/drivers/gpu/drm/msm/adreno/a5xx_preempt.c
+index 183de1139eeb6..7e04509c4e1f0 100644
+--- a/drivers/gpu/drm/msm/adreno/a5xx_preempt.c
++++ b/drivers/gpu/drm/msm/adreno/a5xx_preempt.c
+@@ -45,9 +45,9 @@ static inline void update_wptr(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
+ 	if (!ring)
+ 		return;
+ 
+-	spin_lock_irqsave(&ring->preempt_lock, flags);
++	spin_lock_irqsave(&ring->lock, flags);
+ 	wptr = get_wptr(ring);
+-	spin_unlock_irqrestore(&ring->preempt_lock, flags);
++	spin_unlock_irqrestore(&ring->lock, flags);
+ 
+ 	gpu_write(gpu, REG_A5XX_CP_RB_WPTR, wptr);
+ }
+@@ -62,9 +62,9 @@ static struct msm_ringbuffer *get_next_ring(struct msm_gpu *gpu)
+ 		bool empty;
+ 		struct msm_ringbuffer *ring = gpu->rb[i];
+ 
+-		spin_lock_irqsave(&ring->preempt_lock, flags);
++		spin_lock_irqsave(&ring->lock, flags);
+ 		empty = (get_wptr(ring) == ring->memptrs->rptr);
+-		spin_unlock_irqrestore(&ring->preempt_lock, flags);
++		spin_unlock_irqrestore(&ring->lock, flags);
+ 
+ 		if (!empty)
+ 			return ring;
+@@ -132,9 +132,9 @@ void a5xx_preempt_trigger(struct msm_gpu *gpu)
+ 	}
+ 
+ 	/* Make sure the wptr doesn't update while we're in motion */
+-	spin_lock_irqsave(&ring->preempt_lock, flags);
++	spin_lock_irqsave(&ring->lock, flags);
+ 	a5xx_gpu->preempt[ring->id]->wptr = get_wptr(ring);
+-	spin_unlock_irqrestore(&ring->preempt_lock, flags);
++	spin_unlock_irqrestore(&ring->lock, flags);
+ 
+ 	/* Set the address of the incoming preemption record */
+ 	gpu_write64(gpu, REG_A5XX_CP_CONTEXT_SWITCH_RESTORE_ADDR_LO,
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index 29b40acedb389..dffc133b8b1cc 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -65,7 +65,7 @@ static void a6xx_flush(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
+ 		OUT_RING(ring, upper_32_bits(shadowptr(a6xx_gpu, ring)));
+ 	}
+ 
+-	spin_lock_irqsave(&ring->preempt_lock, flags);
++	spin_lock_irqsave(&ring->lock, flags);
+ 
+ 	/* Copy the shadow to the actual register */
+ 	ring->cur = ring->next;
+@@ -73,7 +73,7 @@ static void a6xx_flush(struct msm_gpu *gpu, struct msm_ringbuffer *ring)
+ 	/* Make sure to wrap wptr if we need to */
+ 	wptr = get_wptr(ring);
+ 
+-	spin_unlock_irqrestore(&ring->preempt_lock, flags);
++	spin_unlock_irqrestore(&ring->lock, flags);
+ 
+ 	/* Make sure everything is posted before making a decision */
+ 	mb();
+diff --git a/drivers/gpu/drm/msm/msm_ringbuffer.c b/drivers/gpu/drm/msm/msm_ringbuffer.c
+index 1b6958e908dca..935bf9b1d9418 100644
+--- a/drivers/gpu/drm/msm/msm_ringbuffer.c
++++ b/drivers/gpu/drm/msm/msm_ringbuffer.c
+@@ -46,7 +46,7 @@ struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id,
+ 	ring->memptrs_iova = memptrs_iova;
+ 
+ 	INIT_LIST_HEAD(&ring->submits);
+-	spin_lock_init(&ring->preempt_lock);
++	spin_lock_init(&ring->lock);
+ 
+ 	snprintf(name, sizeof(name), "gpu-ring-%d", ring->id);
+ 
+diff --git a/drivers/gpu/drm/msm/msm_ringbuffer.h b/drivers/gpu/drm/msm/msm_ringbuffer.h
+index 4956d1bc5d0e1..0987d6bf848cf 100644
+--- a/drivers/gpu/drm/msm/msm_ringbuffer.h
++++ b/drivers/gpu/drm/msm/msm_ringbuffer.h
+@@ -46,12 +46,7 @@ struct msm_ringbuffer {
+ 	struct msm_rbmemptrs *memptrs;
+ 	uint64_t memptrs_iova;
+ 	struct msm_fence_context *fctx;
+-
+-	/*
+-	 * preempt_lock protects preemption and serializes wptr updates against
+-	 * preemption.  Can be aquired from irq context.
+-	 */
+-	spinlock_t preempt_lock;
++	spinlock_t lock;
+ };
+ 
+ struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id,
+-- 
+2.25.1
+
