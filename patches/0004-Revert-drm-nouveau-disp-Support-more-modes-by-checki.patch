@@ -1,0 +1,91 @@
+From d6b522cdc209b33538f545ea30c0807e4320ca8b Mon Sep 17 00:00:00 2001
+From: Ranjan Dutta <ranjan.dutta@intel.com>
+Date: Wed, 17 May 2023 10:32:10 +0800
+Subject: [PATCH 04/12] Revert "drm/nouveau/disp: Support more modes by
+ checking with lower bpc"
+
+This reverts commit c1bbe926a1c75a81df58cdb8b68fb213068ca6f1.
+---
+ drivers/gpu/drm/nouveau/dispnv50/disp.c | 32 -------------------------
+ drivers/gpu/drm/nouveau/nouveau_dp.c    |  8 +++----
+ 2 files changed, 3 insertions(+), 37 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/dispnv50/disp.c b/drivers/gpu/drm/nouveau/dispnv50/disp.c
+index 0ac120225b4d4..804ea035fa46b 100644
+--- a/drivers/gpu/drm/nouveau/dispnv50/disp.c
++++ b/drivers/gpu/drm/nouveau/dispnv50/disp.c
+@@ -396,35 +396,6 @@ nv50_outp_atomic_check_view(struct drm_encoder *encoder,
+ 	return 0;
+ }
+ 
+-static void
+-nv50_outp_atomic_fix_depth(struct drm_encoder *encoder, struct drm_crtc_state *crtc_state)
+-{
+-	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
+-	struct nouveau_encoder *nv_encoder = nouveau_encoder(encoder);
+-	struct drm_display_mode *mode = &asyh->state.adjusted_mode;
+-	unsigned int max_rate, mode_rate;
+-
+-	switch (nv_encoder->dcb->type) {
+-	case DCB_OUTPUT_DP:
+-		max_rate = nv_encoder->dp.link_nr * nv_encoder->dp.link_bw;
+-
+-		/* we don't support more than 10 anyway */
+-		asyh->or.bpc = min_t(u8, asyh->or.bpc, 10);
+-
+-		/* reduce the bpc until it works out */
+-		while (asyh->or.bpc > 6) {
+-			mode_rate = DIV_ROUND_UP(mode->clock * asyh->or.bpc * 3, 8);
+-			if (mode_rate <= max_rate)
+-				break;
+-
+-			asyh->or.bpc -= 2;
+-		}
+-		break;
+-	default:
+-		break;
+-	}
+-}
+-
+ static int
+ nv50_outp_atomic_check(struct drm_encoder *encoder,
+ 		       struct drm_crtc_state *crtc_state,
+@@ -443,9 +414,6 @@ nv50_outp_atomic_check(struct drm_encoder *encoder,
+ 	if (crtc_state->mode_changed || crtc_state->connectors_changed)
+ 		asyh->or.bpc = connector->display_info.bpc;
+ 
+-	/* We might have to reduce the bpc */
+-	nv50_outp_atomic_fix_depth(encoder, crtc_state);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/nouveau/nouveau_dp.c b/drivers/gpu/drm/nouveau/nouveau_dp.c
+index 447b7594b35ae..040ed88d362d7 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_dp.c
++++ b/drivers/gpu/drm/nouveau/nouveau_dp.c
+@@ -220,6 +220,8 @@ void nouveau_dp_irq(struct nouveau_drm *drm,
+ }
+ 
+ /* TODO:
++ * - Use the minimum possible BPC here, once we add support for the max bpc
++ *   property.
+  * - Validate against the DP caps advertised by the GPU (we don't check these
+  *   yet)
+  */
+@@ -231,11 +233,7 @@ nv50_dp_mode_valid(struct drm_connector *connector,
+ {
+ 	const unsigned int min_clock = 25000;
+ 	unsigned int max_rate, mode_rate, ds_max_dotclock, clock = mode->clock;
+-	/* Check with the minmum bpc always, so we can advertise better modes.
+-	 * In particlar not doing this causes modes to be dropped on HDR
+-	 * displays as we might check with a bpc of 16 even.
+-	 */
+-	const u8 bpp = 6 * 3;
++	const u8 bpp = connector->display_info.bpc * 3;
+ 
+ 	if (mode->flags & DRM_MODE_FLAG_INTERLACE && !outp->caps.dp_interlace)
+ 		return MODE_NO_INTERLACE;
+-- 
+2.25.1
+
