@@ -1,4 +1,4 @@
-From 24115e1364d2c73e2da781952a26207632fde12b Mon Sep 17 00:00:00 2001
+From 1625951f544b9ca3dd811342f3cdcd82692a8025 Mon Sep 17 00:00:00 2001
 From: Vivek Kasireddy <vivek.kasireddy@intel.com>
 Date: Thu, 4 Apr 2024 00:26:10 -0700
 Subject: [PATCH 3/8] mm/gup: Introduce memfd_pin_folios() for pinning memfd
@@ -64,10 +64,10 @@ index e7abf6fa4c52..3f2cf339ceaf 100644
  
  #endif /* __LINUX_MEMFD_H */
 diff --git a/include/linux/mm.h b/include/linux/mm.h
-index ac633bf2849b..20e2abe52fb6 100644
+index dc27316112b2..1905b169a5c2 100644
 --- a/include/linux/mm.h
 +++ b/include/linux/mm.h
-@@ -2547,6 +2547,9 @@ long get_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
+@@ -2552,6 +2552,9 @@ long get_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
  		    struct page **pages, unsigned int gup_flags);
  long pin_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
  		    struct page **pages, unsigned int gup_flags);
@@ -78,7 +78,7 @@ index ac633bf2849b..20e2abe52fb6 100644
  int get_user_pages_fast(unsigned long start, int nr_pages,
  			unsigned int gup_flags, struct page **pages);
 diff --git a/mm/gup.c b/mm/gup.c
-index 202953cfdc42..8af28ca5404d 100644
+index 1e586456793b..7f4dbfaa8844 100644
 --- a/mm/gup.c
 +++ b/mm/gup.c
 @@ -5,6 +5,7 @@
@@ -97,7 +97,7 @@ index 202953cfdc42..8af28ca5404d 100644
  #include <linux/sched/mm.h>
  #include <linux/shmem_fs.h>
  
-@@ -3757,3 +3759,136 @@ long pin_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
+@@ -3774,3 +3776,136 @@ long pin_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
  				     &locked, gup_flags);
  }
  EXPORT_SYMBOL(pin_user_pages_unlocked);
@@ -194,7 +194,7 @@ index 202953cfdc42..8af28ca5404d 100644
 +				    next_idx != folio_index(fbatch.folios[i]))
 +					continue;
 +
-+				folio = try_grab_folio(&fbatch.folios[i]->page,
++				folio = try_grab_folio_fast(&fbatch.folios[i]->page,
 +						       1, FOLL_PIN);
 +				if (!folio) {
 +					folio_batch_release(&fbatch);

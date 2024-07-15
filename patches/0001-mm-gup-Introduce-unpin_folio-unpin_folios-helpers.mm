@@ -1,4 +1,4 @@
-From 76f1e3aa9a57ae73ca6c1fb95735eaf14cd65d16 Mon Sep 17 00:00:00 2001
+From f378f53cf74422c6051b5da89d432edcda53ccce Mon Sep 17 00:00:00 2001
 From: Vivek Kasireddy <vivek.kasireddy@intel.com>
 Date: Thu, 4 Apr 2024 00:26:08 -0700
 Subject: [PATCH 1/8] mm/gup: Introduce unpin_folio/unpin_folios helpers
@@ -30,10 +30,10 @@ Reviewed-by: David Hildenbrand <david@redhat.com>
  2 files changed, 49 insertions(+)
 
 diff --git a/include/linux/mm.h b/include/linux/mm.h
-index 9849dfda44d4..ac633bf2849b 100644
+index eb7c96d24ac0..dc27316112b2 100644
 --- a/include/linux/mm.h
 +++ b/include/linux/mm.h
-@@ -1613,11 +1613,13 @@ static inline void put_page(struct page *page)
+@@ -1618,11 +1618,13 @@ static inline void put_page(struct page *page)
  #define GUP_PIN_COUNTING_BIAS (1U << 10)
  
  void unpin_user_page(struct page *page);
@@ -48,10 +48,10 @@ index 9849dfda44d4..ac633bf2849b 100644
  static inline bool is_cow_mapping(vm_flags_t flags)
  {
 diff --git a/mm/gup.c b/mm/gup.c
-index ca0f5cedce9b..b18ca6828f92 100644
+index f1d6bc06eb52..948c9b5009bf 100644
 --- a/mm/gup.c
 +++ b/mm/gup.c
-@@ -276,6 +276,19 @@ void unpin_user_page(struct page *page)
+@@ -188,6 +188,19 @@ void unpin_user_page(struct page *page)
  }
  EXPORT_SYMBOL(unpin_user_page);
  
@@ -71,7 +71,7 @@ index ca0f5cedce9b..b18ca6828f92 100644
  /**
   * folio_add_pin - Try to get an additional pin on a pinned folio
   * @folio: The folio to be pinned
-@@ -488,6 +501,40 @@ void unpin_user_pages(struct page **pages, unsigned long npages)
+@@ -400,6 +413,40 @@ void unpin_user_pages(struct page **pages, unsigned long npages)
  }
  EXPORT_SYMBOL(unpin_user_pages);
  

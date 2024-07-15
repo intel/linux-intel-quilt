@@ -1,4 +1,4 @@
-From d081969a68f93d3ccfa290754dba2d4613d8f85d Mon Sep 17 00:00:00 2001
+From 785db46c8aeb6ce80dc9270cce193d08447a578c Mon Sep 17 00:00:00 2001
 From: Vivek Kasireddy <vivek.kasireddy@intel.com>
 Date: Thu, 4 Apr 2024 00:26:09 -0700
 Subject: [PATCH 2/8] mm/gup: Introduce check_and_migrate_movable_folios()
@@ -27,10 +27,10 @@ Acked-by: David Hildenbrand <david@redhat.com>
  1 file changed, 81 insertions(+), 41 deletions(-)
 
 diff --git a/mm/gup.c b/mm/gup.c
-index b18ca6828f92..202953cfdc42 100644
+index 948c9b5009bf..1e586456793b 100644
 --- a/mm/gup.c
 +++ b/mm/gup.c
-@@ -2427,19 +2427,19 @@ struct page *get_dump_page(unsigned long addr)
+@@ -2441,19 +2441,19 @@ struct page *get_dump_page(unsigned long addr)
  
  #ifdef CONFIG_MIGRATION
  /*
@@ -57,7 +57,7 @@ index b18ca6828f92..202953cfdc42 100644
  
  		if (folio == prev_folio)
  			continue;
-@@ -2454,7 +2454,7 @@ static unsigned long collect_longterm_unpinnable_pages(
+@@ -2468,7 +2468,7 @@ static unsigned long collect_longterm_unpinnable_pages(
  			continue;
  
  		if (folio_test_hugetlb(folio)) {
@@ -66,7 +66,7 @@ index b18ca6828f92..202953cfdc42 100644
  			continue;
  		}
  
-@@ -2466,7 +2466,7 @@ static unsigned long collect_longterm_unpinnable_pages(
+@@ -2480,7 +2480,7 @@ static unsigned long collect_longterm_unpinnable_pages(
  		if (!folio_isolate_lru(folio))
  			continue;
  
@@ -75,7 +75,7 @@ index b18ca6828f92..202953cfdc42 100644
  		node_stat_mod_folio(folio,
  				    NR_ISOLATED_ANON + folio_is_file_lru(folio),
  				    folio_nr_pages(folio));
-@@ -2476,27 +2476,28 @@ static unsigned long collect_longterm_unpinnable_pages(
+@@ -2490,27 +2490,28 @@ static unsigned long collect_longterm_unpinnable_pages(
  }
  
  /*
@@ -116,7 +116,7 @@ index b18ca6828f92..202953cfdc42 100644
  			folio_get(folio);
  			gup_put_folio(folio, 1, FOLL_PIN);
  
-@@ -2509,24 +2510,24 @@ static int migrate_longterm_unpinnable_pages(
+@@ -2523,24 +2524,24 @@ static int migrate_longterm_unpinnable_pages(
  		}
  
  		/*
@@ -148,7 +148,7 @@ index b18ca6828f92..202953cfdc42 100644
  				  NULL, (unsigned long)&mtc, MIGRATE_SYNC,
  				  MR_LONGTERM_PIN, NULL)) {
  			ret = -ENOMEM;
-@@ -2534,19 +2535,48 @@ static int migrate_longterm_unpinnable_pages(
+@@ -2548,19 +2549,48 @@ static int migrate_longterm_unpinnable_pages(
  		}
  	}
  
@@ -202,7 +202,7 @@ index b18ca6828f92..202953cfdc42 100644
  /*
   * Check whether all pages are *allowed* to be pinned. Rather confusingly, all
   * pages in the range are required to be pinned via FOLL_PIN, before calling
-@@ -2566,16 +2596,20 @@ static int migrate_longterm_unpinnable_pages(
+@@ -2580,16 +2610,20 @@ static int migrate_longterm_unpinnable_pages(
  static long check_and_migrate_movable_pages(unsigned long nr_pages,
  					    struct page **pages)
  {
@@ -231,7 +231,7 @@ index b18ca6828f92..202953cfdc42 100644
  }
  #else
  static long check_and_migrate_movable_pages(unsigned long nr_pages,
-@@ -2583,6 +2617,12 @@ static long check_and_migrate_movable_pages(unsigned long nr_pages,
+@@ -2597,6 +2631,12 @@ static long check_and_migrate_movable_pages(unsigned long nr_pages,
  {
  	return 0;
  }
