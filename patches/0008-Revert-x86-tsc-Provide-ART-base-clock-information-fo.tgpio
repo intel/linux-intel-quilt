@@ -1,4 +1,4 @@
-From 002e798885d5ca50a02b2c6ea10a0d93036bd7c7 Mon Sep 17 00:00:00 2001
+From db2aafff7a89ad9dd519dd5df83f13e514f216c1 Mon Sep 17 00:00:00 2001
 From: Hao Li <hao3.li@intel.com>
 Date: Wed, 25 Sep 2024 12:39:04 +0800
 Subject: [PATCH 08/43] Revert "x86/tsc: Provide ART base clock information for
@@ -8,15 +8,15 @@ This reverts commit 3a52886c8f972c3a5b70bfec330c71817cd7fc63.
 
 Signed-off-by: Hao Li <hao3.li@intel.com>
 ---
- arch/x86/kernel/tsc.c           | 42 ++++++++++++++-------------------
+ arch/x86/kernel/tsc.c           | 43 +++++++++++++++------------------
  include/linux/clocksource_ids.h |  1 -
- 2 files changed, 18 insertions(+), 25 deletions(-)
+ 2 files changed, 19 insertions(+), 25 deletions(-)
 
 diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
-index dc64ef1a4d3d..d440826ff9c8 100644
+index 731c711b55a6..7f3eab1d0ce4 100644
 --- a/arch/x86/kernel/tsc.c
 +++ b/arch/x86/kernel/tsc.c
-@@ -51,9 +51,9 @@ int tsc_clocksource_reliable;
+@@ -53,9 +53,9 @@ int tsc_clocksource_reliable;
  
  static int __read_mostly tsc_force_recalibrate;
  
@@ -29,20 +29,27 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  static bool have_art;
  
  struct cyc2ns {
-@@ -1076,7 +1076,7 @@ core_initcall(cpufreq_register_tsc_scaling);
+@@ -1070,13 +1070,14 @@ core_initcall(cpufreq_register_tsc_scaling);
+ #endif /* CONFIG_CPU_FREQ */
+ 
+ #define ART_MIN_DENOMINATOR (1)
++#define ART_CPUID_LEAF (0x15)
+ 
+ /*
+  * If ART is present detect the numerator:denominator to convert to TSC
   */
  static void __init detect_art(void)
  {
 -	unsigned int unused;
 +	unsigned int unused[2];
  
- 	if (boot_cpu_data.cpuid_level < ART_CPUID_LEAF)
+ 	if (boot_cpu_data.cpuid_level < CPUID_LEAF_TSC)
  		return;
-@@ -1091,14 +1091,13 @@ static void __init detect_art(void)
+@@ -1091,14 +1092,13 @@ static void __init detect_art(void)
  	    tsc_async_resets)
  		return;
  
--	cpuid(ART_CPUID_LEAF, &art_base_clk.denominator,
+-	cpuid(CPUID_LEAF_TSC, &art_base_clk.denominator,
 -	      &art_base_clk.numerator, &art_base_clk.freq_khz, &unused);
 +	cpuid(ART_CPUID_LEAF, &art_to_tsc_denominator,
 +	      &art_to_tsc_numerator, unused, unused+1);
@@ -57,7 +64,7 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  
  	/* Make this sticky over multiple CPU init calls */
  	setup_force_cpu_cap(X86_FEATURE_ART);
-@@ -1303,13 +1302,13 @@ struct system_counterval_t convert_art_to_tsc(u64 art)
+@@ -1303,13 +1303,13 @@ struct system_counterval_t convert_art_to_tsc(u64 art)
  {
  	u64 tmp, res, rem;
  
@@ -76,7 +83,7 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  
  	return (struct system_counterval_t) {
  		.cs_id	= have_art ? CSID_X86_TSC : CSID_GENERIC,
-@@ -1356,6 +1355,7 @@ struct system_counterval_t convert_art_ns_to_tsc(u64 art_ns)
+@@ -1356,6 +1356,7 @@ struct system_counterval_t convert_art_ns_to_tsc(u64 art_ns)
  }
  EXPORT_SYMBOL(convert_art_ns_to_tsc);
  
@@ -84,7 +91,7 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  static void tsc_refine_calibration_work(struct work_struct *work);
  static DECLARE_DELAYED_WORK(tsc_irqwork, tsc_refine_calibration_work);
  /**
-@@ -1457,10 +1457,8 @@ static void tsc_refine_calibration_work(struct work_struct *work)
+@@ -1457,10 +1458,8 @@ static void tsc_refine_calibration_work(struct work_struct *work)
  	if (tsc_unstable)
  		goto unreg;
  
@@ -96,7 +103,7 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  	clocksource_register_khz(&clocksource_tsc, tsc_khz);
  unreg:
  	clocksource_unregister(&clocksource_tsc_early);
-@@ -1485,10 +1483,8 @@ static int __init init_tsc_clocksource(void)
+@@ -1485,10 +1484,8 @@ static int __init init_tsc_clocksource(void)
  	 * the refined calibration and directly register it as a clocksource.
  	 */
  	if (boot_cpu_has(X86_FEATURE_TSC_KNOWN_FREQ)) {
@@ -108,7 +115,7 @@ index dc64ef1a4d3d..d440826ff9c8 100644
  		clocksource_register_khz(&clocksource_tsc, tsc_khz);
  		clocksource_unregister(&clocksource_tsc_early);
  
-@@ -1512,12 +1508,10 @@ static bool __init determine_cpu_tsc_frequencies(bool early)
+@@ -1512,12 +1509,10 @@ static bool __init determine_cpu_tsc_frequencies(bool early)
  
  	if (early) {
  		cpu_khz = x86_platform.calibrate_cpu();
