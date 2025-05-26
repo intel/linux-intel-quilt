@@ -1,4 +1,4 @@
-From a05d19c8c67c54eafd2167d13fd155d9a82a569a Mon Sep 17 00:00:00 2001
+From e32664a4e93aebb265725fcaaf330b92ed1e366d Mon Sep 17 00:00:00 2001
 From: Matthew Auld <matthew.auld@intel.com>
 Date: Thu, 3 Apr 2025 11:24:45 +0100
 Subject: [PATCH 41/46] drm/xe: add XE_BO_FLAG_PINNED_LATE_RESTORE
@@ -35,10 +35,10 @@ Link: https://lore.kernel.org/r/20250403102440.266113-13-matthew.auld@intel.com
  drivers/gpu/drm/xe/xe_bo_evict.c     | 64 ++++++++++++++++++----------
  drivers/gpu/drm/xe/xe_bo_evict.h     |  4 +-
  drivers/gpu/drm/xe/xe_device_types.h | 22 +++++++---
- drivers/gpu/drm/xe/xe_lrc.c          | 10 +++--
+ drivers/gpu/drm/xe/xe_lrc.c          |  2 +
  drivers/gpu/drm/xe/xe_pm.c           |  8 ++--
  drivers/gpu/drm/xe/xe_pt.c           | 13 +++---
- 9 files changed, 93 insertions(+), 52 deletions(-)
+ 9 files changed, 88 insertions(+), 49 deletions(-)
 
 diff --git a/drivers/gpu/drm/xe/tests/xe_bo.c b/drivers/gpu/drm/xe/tests/xe_bo.c
 index 9fde67ca989f..230eb824550f 100644
@@ -284,10 +284,10 @@ index 0708d50ddfa8..d63eb3fc5cc9 100644
  void xe_bo_pci_dev_remove_all(struct xe_device *xe);
  
 diff --git a/drivers/gpu/drm/xe/xe_device_types.h b/drivers/gpu/drm/xe/xe_device_types.h
-index 8b8d2519d595..2b27180d9642 100644
+index 9c367bd34949..e3372bc2a6ba 100644
 --- a/drivers/gpu/drm/xe/xe_device_types.h
 +++ b/drivers/gpu/drm/xe/xe_device_types.h
-@@ -423,12 +423,22 @@ struct xe_device {
+@@ -425,12 +425,22 @@ struct xe_device {
  	struct {
  		/** @pinned.lock: protected pinned BO list state */
  		spinlock_t lock;
@@ -317,39 +317,18 @@ index 8b8d2519d595..2b27180d9642 100644
  
  	/** @ufence_wq: user fence wait queue */
 diff --git a/drivers/gpu/drm/xe/xe_lrc.c b/drivers/gpu/drm/xe/xe_lrc.c
-index 2639a3dfc9f7..855c8acaf3f1 100644
+index dfb74beb13c7..61a2e87990a9 100644
 --- a/drivers/gpu/drm/xe/xe_lrc.c
 +++ b/drivers/gpu/drm/xe/xe_lrc.c
-@@ -896,6 +896,7 @@ static int xe_lrc_init(struct xe_lrc *lrc, struct xe_hw_engine *hwe,
- 	void *init_data = NULL;
- 	u32 arb_enable;
- 	u32 lrc_size;
-+	u32 bo_flags;
- 	int err;
+@@ -1000,6 +1000,8 @@ static int xe_lrc_init(struct xe_lrc *lrc, struct xe_hw_engine *hwe,
  
- 	kref_init(&lrc->refcount);
-@@ -904,15 +905,18 @@ static int xe_lrc_init(struct xe_lrc *lrc, struct xe_hw_engine *hwe,
- 	if (xe_gt_has_indirect_ring_state(gt))
- 		lrc->flags |= XE_LRC_FLAG_INDIRECT_RING_STATE;
- 
-+	bo_flags = XE_BO_FLAG_VRAM_IF_DGFX(tile) | XE_BO_FLAG_GGTT |
-+		   XE_BO_FLAG_GGTT_INVALIDATE;
+ 	bo_flags = XE_BO_FLAG_VRAM_IF_DGFX(tile) | XE_BO_FLAG_GGTT |
+ 		   XE_BO_FLAG_GGTT_INVALIDATE;
 +	if (vm && vm->xef) /* userspace */
 +		bo_flags |= XE_BO_FLAG_PINNED_LATE_RESTORE;
-+
+ 
  	/*
  	 * FIXME: Perma-pinning LRC as we don't yet support moving GGTT address
- 	 * via VM bind calls.
- 	 */
- 	lrc->bo = xe_bo_create_pin_map(xe, tile, vm, lrc_size,
- 				       ttm_bo_type_kernel,
--				       XE_BO_FLAG_VRAM_IF_DGFX(tile) |
--				       XE_BO_FLAG_GGTT |
--				       XE_BO_FLAG_GGTT_INVALIDATE);
-+				       bo_flags);
- 	if (IS_ERR(lrc->bo))
- 		return PTR_ERR(lrc->bo);
- 
 diff --git a/drivers/gpu/drm/xe/xe_pm.c b/drivers/gpu/drm/xe/xe_pm.c
 index 36d0d79098b7..058a0dbf1604 100644
 --- a/drivers/gpu/drm/xe/xe_pm.c
@@ -391,7 +370,7 @@ index 36d0d79098b7..058a0dbf1604 100644
  			goto out;
  	}
 diff --git a/drivers/gpu/drm/xe/xe_pt.c b/drivers/gpu/drm/xe/xe_pt.c
-index 33839b25d708..49f2908f30d3 100644
+index 648fe789cffa..344b7036c081 100644
 --- a/drivers/gpu/drm/xe/xe_pt.c
 +++ b/drivers/gpu/drm/xe/xe_pt.c
 @@ -103,6 +103,7 @@ struct xe_pt *xe_pt_create(struct xe_vm *vm, struct xe_tile *tile,
