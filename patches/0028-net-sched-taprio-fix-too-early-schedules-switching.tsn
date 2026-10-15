@@ -1,7 +1,7 @@
-From 527a7fbe9480be7b382953c8e63dec80f98abc5b Mon Sep 17 00:00:00 2001
+From 07fb2cfd7de58eaf392a5b012f10bedbf055eedb Mon Sep 17 00:00:00 2001
 From: Faizal Rahim <faizal.abdul.rahim@linux.intel.com>
 Date: Tue, 19 Dec 2023 03:14:50 -0500
-Subject: [PATCH 28/31] net/sched: taprio: fix too early schedules switching
+Subject: [PATCH] net/sched: taprio: fix too early schedules switching
 
 Switching the schedule prematurely leads to a situation where the last
 entry from oper schedule is still running, during this period, calls
@@ -13,11 +13,11 @@ oper schedule.
 Fixes: a878fd46fe43 ("net/sched: keep the max_frm_len information inside struct sched_gate_list")
 Signed-off-by: Faizal Rahim <faizal.abdul.rahim@linux.intel.com>
 ---
- net/sched/sch_taprio.c | 12 ++++++++++--
- 1 file changed, 10 insertions(+), 2 deletions(-)
+ net/sched/sch_taprio.c | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
 
 diff --git a/net/sched/sch_taprio.c b/net/sched/sch_taprio.c
-index 063c28e6c163..ae9199f175fa 100644
+index 32eaf13b2b7cc..0c182d5f122e3 100644
 --- a/net/sched/sch_taprio.c
 +++ b/net/sched/sch_taprio.c
 @@ -41,6 +41,7 @@ static struct static_key_false taprio_have_working_mqprio;
@@ -25,10 +25,10 @@ index 063c28e6c163..ae9199f175fa 100644
  #define FULL_OFFLOAD_IS_ENABLED(flags) ((flags) & TCA_TAPRIO_ATTR_FLAG_FULL_OFFLOAD)
  #define TAPRIO_FLAGS_INVALID U32_MAX
 +#define CYCLE_TIME_CORRECTION_UNSPEC S64_MIN
- 
- struct sched_entry {
- 	/* Durations between this GCL entry and the GCL entry where the
-@@ -75,6 +76,7 @@ struct sched_gate_list {
+ /* Minimum value for picos_per_byte to ensure non-zero duration
+  * for minimum-sized Ethernet frames (ETH_ZLEN = 60).
+  * 60 * 17 > PSEC_PER_NSEC (1000)
+@@ -80,6 +81,7 @@ struct sched_gate_list {
  	ktime_t cycle_end_time;
  	s64 cycle_time;
  	s64 cycle_time_extension;
@@ -36,7 +36,7 @@ index 063c28e6c163..ae9199f175fa 100644
  	s64 base_time;
  };
  
-@@ -214,6 +216,11 @@ static void switch_schedules(struct taprio_sched *q,
+@@ -219,6 +221,11 @@ static void switch_schedules(struct taprio_sched *q,
  	*admin = NULL;
  }
  
@@ -48,7 +48,7 @@ index 063c28e6c163..ae9199f175fa 100644
  /* Get how much time has been already elapsed in the current cycle. */
  static s32 get_cycle_time_elapsed(struct sched_gate_list *sched, ktime_t time)
  {
-@@ -941,7 +948,7 @@ static enum hrtimer_restart advance_sched(struct hrtimer *timer)
+@@ -946,7 +953,7 @@ static enum hrtimer_restart advance_sched(struct hrtimer *timer)
  	admin = rcu_dereference_protected(q->admin_sched,
  					  lockdep_is_held(&q->current_entry_lock));
  
@@ -57,16 +57,24 @@ index 063c28e6c163..ae9199f175fa 100644
  		switch_schedules(q, &admin, &oper);
  
  	/* This can happen in two cases: 1. this is the very first run
-@@ -982,7 +989,7 @@ static enum hrtimer_restart advance_sched(struct hrtimer *timer)
- 		 * schedule runs.
- 		 */
- 		end_time = sched_base_time(admin);
+@@ -983,12 +990,11 @@ static enum hrtimer_restart advance_sched(struct hrtimer *timer)
+ 	}
+ 
+ 	if (should_change_schedules(admin, oper, end_time)) {
 -		switch_schedules(q, &admin, &oper);
+-		/* After changing schedules, the next entry is the first one
+-		 * in the new schedule, with a pre-calculated end_time.
++		/* Set things so the next time this runs, the new
++		 * schedule runs.
+ 		 */
+-		next = list_first_entry(&oper->entries, struct sched_entry, list);
+-		end_time = next->end_time;
++		end_time = sched_base_time(admin);
 +		oper->cycle_time_correction = 0;
  	}
  
  	next->end_time = end_time;
-@@ -1176,6 +1183,7 @@ static int parse_taprio_schedule(struct taprio_sched *q, struct nlattr **tb,
+@@ -1183,6 +1189,7 @@ static int parse_taprio_schedule(struct taprio_sched *q, struct nlattr **tb,
  	}
  
  	taprio_calculate_gate_durations(q, new);
@@ -75,5 +83,5 @@ index 063c28e6c163..ae9199f175fa 100644
  	return 0;
  }
 -- 
-2.25.1
+2.43.0
 

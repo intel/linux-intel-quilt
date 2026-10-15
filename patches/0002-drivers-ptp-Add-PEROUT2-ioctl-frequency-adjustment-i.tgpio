@@ -1,8 +1,7 @@
-From 7615dc45e678062e6ecf81aeb52842d0099f6289 Mon Sep 17 00:00:00 2001
+From bf110858295708cad79f5b33dabe9d21aae26c74 Mon Sep 17 00:00:00 2001
 From: Christopher Hall <christopher.s.hall@intel.com>
 Date: Sun, 24 Nov 2019 06:06:35 -0800
-Subject: [PATCH 02/34] drivers/ptp: Add PEROUT2 ioctl frequency adjustment
- interface
+Subject: [PATCH] drivers/ptp: Add PEROUT2 ioctl frequency adjustment interface
 
 The Intel PMC TGPIO controller logic is driven by ART which is not adjust-
 able. Rather than adjusting the clock frequency, an output frequency
@@ -31,18 +30,18 @@ Signed-off-by: Christopher Hall <christopher.s.hall@intel.com>
  3 files changed, 51 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/ptp/ptp_chardev.c b/drivers/ptp/ptp_chardev.c
-index bdbb08d..58bbf6e 100644
+index 5c7845b3205aa..13efdfedb4fb5 100644
 --- a/drivers/ptp/ptp_chardev.c
 +++ b/drivers/ptp/ptp_chardev.c
-@@ -134,6 +134,7 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
- 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+@@ -138,6 +138,7 @@ long ptp_ioctl(struct posix_clock_context *pccontext, unsigned int cmd,
+ 		container_of(pccontext->clk, struct ptp_clock, clock);
  	struct ptp_sys_offset_extended *extoff = NULL;
  	struct ptp_sys_offset_precise precise_offset;
 +	struct ptp_event_count_tstamp counttstamp;
  	struct system_device_crosststamp xtstamp;
  	struct ptp_clock_info *ops = ptp->info;
  	struct ptp_sys_offset *sysoff = NULL;
-@@ -259,6 +260,13 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
+@@ -274,6 +275,13 @@ long ptp_ioctl(struct posix_clock_context *pccontext, unsigned int cmd,
  			req.perout.flags &= PTP_PEROUT_V1_VALID_FLAGS;
  			zero_rsv_field(req.perout.rsv);
  		}
@@ -56,7 +55,7 @@ index bdbb08d..58bbf6e 100644
  		if (req.perout.index >= ops->n_per_out) {
  			err = -EINVAL;
  			break;
-@@ -271,6 +279,24 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
+@@ -286,6 +294,24 @@ long ptp_ioctl(struct posix_clock_context *pccontext, unsigned int cmd,
  		mutex_unlock(&ptp->pincfg_mux);
  		break;
  
@@ -80,9 +79,9 @@ index bdbb08d..58bbf6e 100644
 +
  	case PTP_ENABLE_PPS:
  	case PTP_ENABLE_PPS2:
- 		memset(&req, 0, sizeof(req));
+ 		if ((pccontext->fp->f_mode & FMODE_WRITE) == 0) {
 diff --git a/include/linux/ptp_clock_kernel.h b/include/linux/ptp_clock_kernel.h
-index 1ef4e0f..8803671 100644
+index 1ef4e0f9bd2a5..88036714fe9c3 100644
 --- a/include/linux/ptp_clock_kernel.h
 +++ b/include/linux/ptp_clock_kernel.h
 @@ -182,6 +182,8 @@ struct ptp_clock_info {
@@ -95,21 +94,21 @@ index 1ef4e0f..8803671 100644
  	int (*getcycles64)(struct ptp_clock_info *ptp, struct timespec64 *ts);
  	int (*getcyclesx64)(struct ptp_clock_info *ptp, struct timespec64 *ts,
 diff --git a/include/uapi/linux/ptp_clock.h b/include/uapi/linux/ptp_clock.h
-index 05cc35f..19eaa9a 100644
+index 05cc35fc94acf..19eaa9a45963d 100644
 --- a/include/uapi/linux/ptp_clock.h
 +++ b/include/uapi/linux/ptp_clock.h
-@@ -35,6 +35,11 @@
+@@ -34,6 +34,11 @@
+ #define PTP_STRICT_FLAGS   (1<<3)
  #define PTP_EXTTS_EDGES    (PTP_RISING_EDGE | PTP_FALLING_EDGE)
  
- /*
++/*
 + * Bits of the ptp_pin_desc.flags field:
 + */
 +#define PTP_PINDESC_EVTCNTVALID	(1<<0)
 +
-+/*
+ /*
   * flag fields valid for the new PTP_EXTTS_REQUEST2 ioctl.
   */
- #define PTP_EXTTS_VALID_FLAGS	(PTP_ENABLE_FEATURE |	\
 @@ -56,13 +61,15 @@
  #define PTP_PEROUT_ONE_SHOT		(1<<0)
  #define PTP_PEROUT_DUTY_CYCLE		(1<<1)
@@ -142,14 +141,15 @@ index 05cc35f..19eaa9a 100644
  #define PTP_MAX_SAMPLES 25 /* Maximum allowed offset measurement samples. */
  
  struct ptp_sys_offset {
-@@ -194,9 +209,13 @@ struct ptp_pin_desc {
+@@ -193,10 +208,14 @@ struct ptp_pin_desc {
+ 	 * PTP_EXTTS_REQUEST and PTP_PEROUT_REQUEST ioctls.
  	 */
  	unsigned int chan;
- 	/*
++	/*
 +	 * Per pin capability flag
 +	 */
 +	unsigned int flags;
-+	/*
+ 	/*
  	 * Reserved for future use.
  	 */
 -	unsigned int rsv[5];
@@ -167,5 +167,5 @@ index 05cc35f..19eaa9a 100644
  struct ptp_extts_event {
  	struct ptp_clock_time t; /* Time event occured. */
 -- 
-2.7.4
+2.43.0
 
