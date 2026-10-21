@@ -1,0 +1,285 @@
+From 4e18b4a56abfe869f71e0874f75c065b612059f0 Mon Sep 17 00:00:00 2001
+From: wesd6r <142616149+wesd6r@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 15:28:50 +0800
+Subject: [PATCH] drm/xe: Disable broken D3cold/runtime PM on MACHENIKE L16W
+
+Some DG2 laptops advertise D3cold (_PR3/PME) but cannot reliably power the
+discrete GPU back on.  After an idle runtime suspend to D3cold the GT becomes
+inaccessible: forcewake MMIO reads return 0xffffffff and the following system
+suspend fails with -ETIMEDOUT.  The sibling HDA function is reset as well.
+
+Keep the GPU in D0 while the system is running and enter D3hot instead of
+D3cold for system suspend on the affected platform:
+
+  - clear d3cold.capable and call pm_runtime_forbid() so the device never
+    runtime-suspends;
+  - in xe_pci_suspend() keep the PCI function enabled and enter D3hot, and
+    disable D3cold on the root port so the ACPI _PR3 power resource is not
+    turned off;
+  - skip the corresponding enable/master calls in xe_pci_resume();
+  - mark xe_pm_suspend()/xe_pm_resume() as PM callback tasks to avoid nested
+    runtime PM from the BO migration paths;
+  - release xe->pm_block when xe_pcode_ready() fails in xe_pm_resume().
+
+The quirk is selected by DMI (MACHENIKE L16W) and PCI ID 0x5691.  A module
+parameter (xe.disable_broken_d3cold) allows testing on other DG2 systems.
+
+Tested on MACHENIKE L16W (i7-12700H + Arc A730M, 8086:5691) with kernel
+7.2.11-200.fc44: runtime_status stays active, runtime_suspended_time remains
+0, system suspend/resume completes without forcewake errors, and the Arc
+device is still enumerated by OpenCL afterwards.
+
+Signed-off-by: wesd6r <142616149+wesd6r@users.noreply.github.com>
+---
+ drivers/gpu/drm/xe/xe_device_types.h |  9 ++++
+ drivers/gpu/drm/xe/xe_pci.c          | 36 ++++++++++----
+ drivers/gpu/drm/xe/xe_pm.c           | 72 +++++++++++++++++++++++++++-
+ 3 files changed, 108 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/xe/xe_device_types.h b/drivers/gpu/drm/xe/xe_device_types.h
+index aad1089..7344f60 100644
+--- a/drivers/gpu/drm/xe/xe_device_types.h
++++ b/drivers/gpu/drm/xe/xe_device_types.h
+@@ -415,6 +415,15 @@ struct xe_device {
+ 		/** @d3cold.allowed: Indicates if d3cold is a valid device state */
+ 		bool allowed;
+ 
++		/**
++		 * @d3cold.system_suspend_d3hot:
++		 *
++		 * Platform quirk: keep the device in D3hot instead of D3cold
++		 * during system suspend.  Used on laptops whose ACPI power
++		 * resources cannot reliably power the discrete GPU back on.
++		 */
++		bool system_suspend_d3hot;
++
+ 		/**
+ 		 * @d3cold.vram_threshold:
+ 		 *
+diff --git a/drivers/gpu/drm/xe/xe_pci.c b/drivers/gpu/drm/xe/xe_pci.c
+index 9cd8737..daac2c1 100644
+--- a/drivers/gpu/drm/xe/xe_pci.c
++++ b/drivers/gpu/drm/xe/xe_pci.c
+@@ -1234,6 +1234,22 @@ static int xe_pci_suspend(struct device *dev)
+ 	if (err)
+ 		return err;
+ 
++	pci_save_state(pdev);
++
++	/*
++	 * On platforms with broken GPU power resources, entering D3cold
++	 * prevents the device (and its sibling HDA function) from being
++	 * powered back on.  Stay in D3hot instead and keep the PCI function
++	 * enabled so the ACPI power resources are never turned off.
++	 */
++	if (xe->d3cold.system_suspend_d3hot) {
++		struct pci_dev *root_pdev = pcie_find_root_port(pdev);
++
++		if (root_pdev)
++			pci_d3cold_disable(root_pdev);
++		return pci_set_power_state(pdev, PCI_D3hot);
++	}
++
+ 	/*
+ 	 * Enabling D3Cold is needed for S2Idle/S0ix.
+ 	 * It is save to allow here since xe_pm_suspend has evicted
+@@ -1241,7 +1257,6 @@ static int xe_pci_suspend(struct device *dev)
+ 	 */
+ 	d3cold_toggle(pdev, D3COLD_ENABLE);
+ 
+-	pci_save_state(pdev);
+ 	pci_disable_device(pdev);
+ 	pci_set_power_state(pdev, PCI_D3cold);
+ 
+@@ -1251,10 +1266,13 @@ static int xe_pci_suspend(struct device *dev)
+ static int xe_pci_resume(struct device *dev)
+ {
+ 	struct pci_dev *pdev = to_pci_dev(dev);
++	struct xe_device *xe = pdev_to_xe_device(pdev);
+ 	int err;
+ 
+-	/* Give back the D3Cold decision to the runtime P M*/
+-	d3cold_toggle(pdev, D3COLD_DISABLE);
++	if (!xe->d3cold.system_suspend_d3hot) {
++		/* Give back the D3Cold decision to the runtime PM */
++		d3cold_toggle(pdev, D3COLD_DISABLE);
++	}
+ 
+ 	err = pci_set_power_state(pdev, PCI_D0);
+ 	if (err)
+@@ -1262,13 +1280,15 @@ static int xe_pci_resume(struct device *dev)
+ 
+ 	pci_restore_state(pdev);
+ 
+-	err = pci_enable_device(pdev);
+-	if (err)
+-		return err;
++	if (!xe->d3cold.system_suspend_d3hot) {
++		err = pci_enable_device(pdev);
++		if (err)
++			return err;
+ 
+-	pci_set_master(pdev);
++		pci_set_master(pdev);
++	}
+ 
+-	err = xe_pm_resume(pdev_to_xe_device(pdev));
++	err = xe_pm_resume(xe);
+ 	if (err)
+ 		return err;
+ 
+diff --git a/drivers/gpu/drm/xe/xe_pm.c b/drivers/gpu/drm/xe/xe_pm.c
+index 99562f6..3c6272a 100644
+--- a/drivers/gpu/drm/xe/xe_pm.c
++++ b/drivers/gpu/drm/xe/xe_pm.c
+@@ -6,8 +6,10 @@
+ #include "xe_pm.h"
+ 
+ #include <linux/fault-inject.h>
++#include <linux/moduleparam.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/suspend.h>
++#include <linux/string.h>
+ #include <linux/dmi.h>
+ 
+ #include <drm/drm_managed.h>
+@@ -32,6 +34,35 @@
+ #include "xe_vm.h"
+ #include "xe_wa.h"
+ 
++/*
++ * Some DG2 laptops expose D3cold (_PR3/PME) but cannot reliably power the
++ * discrete GPU back on.  Runtime suspend then leaves the GT inaccessible and
++ * the following system suspend fails with forcewake MMIO reads returning
++ * 0xffffffff.  Keep the GPU in D0 while the system is running and use D3hot
++ * for system sleep on these machines.
++ */
++static bool xe_pm_disable_broken_d3cold;
++module_param_named(disable_broken_d3cold, xe_pm_disable_broken_d3cold,
++		   bool, 0444);
++MODULE_PARM_DESC(disable_broken_d3cold,
++		 "Disable runtime PM and system-suspend D3cold on platforms with broken GPU power resources");
++
++static bool xe_pm_is_broken_d3cold_platform(struct xe_device *xe)
++{
++	const char *vendor = dmi_get_system_info(DMI_SYS_VENDOR);
++	const char *product = dmi_get_system_info(DMI_PRODUCT_NAME);
++
++	if (xe_pm_disable_broken_d3cold)
++		return true;
++
++	/* MACHENIKE L16W: Arc A730M (DG2/G10, 0x5691). */
++	return xe->info.devid == 0x5691 && vendor && product &&
++	       !strcmp(vendor, "MACHENIKE") && !strcmp(product, "L16W");
++}
++
++static void xe_pm_write_callback_task(struct xe_device *xe,
++				      struct task_struct *task);
++
+ /**
+  * DOC: Xe Power Management
+  *
+@@ -180,6 +211,13 @@ int xe_pm_suspend(struct xe_device *xe)
+ 	xe_pm_block_begin_signalling();
+ 	trace_xe_pm_suspend(xe, __builtin_return_address(0));
+ 
++	/*
++	 * Inner eviction paths take runtime PM references.  Mark this task as
++	 * the PM callback task so those references never trigger a nested
++	 * runtime suspend while we are already suspending the device.
++	 */
++	xe_pm_write_callback_task(xe, current);
++
+ 	err = xe_pxp_pm_suspend(xe->pxp);
+ 	if (err)
+ 		goto err;
+@@ -209,6 +247,7 @@ int xe_pm_suspend(struct xe_device *xe)
+ 	xe_i2c_pm_suspend(xe);
+ 
+ 	drm_dbg(&xe->drm, "Device suspended\n");
++	xe_pm_write_callback_task(xe, NULL);
+ 	xe_pm_block_end_signalling();
+ 
+ 	return 0;
+@@ -218,6 +257,7 @@ err_display:
+ 	xe_pxp_pm_resume(xe->pxp);
+ err:
+ 	drm_dbg(&xe->drm, "Device suspend failed %d\n", err);
++	xe_pm_write_callback_task(xe, NULL);
+ 	xe_pm_block_end_signalling();
+ 	return err;
+ }
+@@ -239,6 +279,8 @@ int xe_pm_resume(struct xe_device *xe)
+ 	drm_dbg(&xe->drm, "Resuming device\n");
+ 	trace_xe_pm_resume(xe, __builtin_return_address(0));
+ 
++	xe_pm_write_callback_task(xe, current);
++
+ 	for_each_gt(gt, xe, id)
+ 		xe_gt_idle_disable_c6(gt);
+ 
+@@ -247,7 +289,7 @@ int xe_pm_resume(struct xe_device *xe)
+ 
+ 	err = xe_pcode_ready(xe, true);
+ 	if (err)
+-		return err;
++		goto err;
+ 
+ 	xe_display_pm_resume_early(xe);
+ 
+@@ -291,10 +333,12 @@ int xe_pm_resume(struct xe_device *xe)
+ 	xe_late_bind_fw_load(&xe->late_bind);
+ 
+ 	drm_dbg(&xe->drm, "Device resumed\n");
++	xe_pm_write_callback_task(xe, NULL);
+ 	xe_pm_block_end_signalling();
+ 	return 0;
+ err:
+ 	drm_dbg(&xe->drm, "Device resume failed %d\n", err);
++	xe_pm_write_callback_task(xe, NULL);
+ 	xe_pm_block_end_signalling();
+ 	return err;
+ }
+@@ -348,6 +392,18 @@ static void xe_pm_runtime_init(struct xe_device *xe)
+ 	pm_runtime_allow(dev);
+ 	pm_runtime_mark_last_busy(dev);
+ 	pm_runtime_put(dev);
++
++	/*
++	 * Never runtime-suspend this GPU: a failed D3cold/D3hot transition
++	 * leaves the GT inaccessible and also breaks the sibling HDA function.
++	 * pm_runtime_forbid() keeps a permanent reference and resumes the
++	 * device if the PCI core had already suspended it.
++	 */
++	if (xe->d3cold.system_suspend_d3hot) {
++		pm_runtime_forbid(dev);
++		drm_warn(&xe->drm,
++			 "runtime PM disabled by platform quirk\n");
++	}
+ }
+ 
+ /**
+@@ -395,6 +451,20 @@ ALLOW_ERROR_INJECTION(xe_pm_init_early, ERRNO); /* See xe_pci_probe() */
+ int xe_pm_probe(struct xe_device *xe)
+ {
+ 	xe->d3cold.capable = xe_pm_pci_d3cold_capable(xe);
++
++	/*
++	 * The D3cold capability advertised by ACPI is not sufficient on some
++	 * laptops: the GPU cannot be powered back on and every later MMIO
++	 * access returns 0xffffffff.  Treat such platforms as non-D3cold and
++	 * keep the device in D0 while the system is running.
++	 */
++	if (xe_pm_is_broken_d3cold_platform(xe)) {
++		drm_warn(&xe->drm,
++			 "D3cold/runtime PM disabled by platform quirk\n");
++		xe->d3cold.capable = false;
++		xe->d3cold.system_suspend_d3hot = true;
++	}
++
+ 	xe_dbg(xe, "d3cold: capable=%s\n", str_yes_no(xe->d3cold.capable));
+ 
+ 	return 0;
+-- 
+2.56.0
+
